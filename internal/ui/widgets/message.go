@@ -163,12 +163,98 @@ func (a *AvatarWidget) MinSize() fyne.Size {
 	return fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
 }
 
-// fixedWidthLayout is a layout that gives a fixed width to its children
-type fixedWidthLayout struct {
+// CompactLabel is a label with no internal padding for tight text stacking
+type CompactLabel struct {
+	widget.BaseWidget
+	text *canvas.Text
+}
+
+// NewCompactLabel creates a label with zero internal padding
+func NewCompactLabel(text string, bold bool) *CompactLabel {
+	textObj := canvas.NewText(text, theme.Colors.MessageContentColor)
+	textObj.TextSize = theme.Fonts.MessageContentSize
+	if bold {
+		textObj.TextStyle = fyne.TextStyle{Bold: true}
+		textObj.Color = theme.Colors.MessageUsernameColor
+		textObj.TextSize = theme.Fonts.MessageUsernameSize
+	}
+
+	label := &CompactLabel{
+		text: textObj,
+	}
+	label.ExtendBaseWidget(label)
+	return label
+}
+
+// CreateRenderer returns the renderer for the compact label
+func (c *CompactLabel) CreateRenderer() fyne.WidgetRenderer {
+	return &compactLabelRenderer{
+		label: c,
+		text:  c.text,
+	}
+}
+
+type compactLabelRenderer struct {
+	label *CompactLabel
+	text  *canvas.Text
+}
+
+func (r *compactLabelRenderer) Layout(size fyne.Size) {
+	r.text.Move(fyne.NewPos(0, 0))
+	r.text.Resize(size)
+}
+
+func (r *compactLabelRenderer) MinSize() fyne.Size {
+	return r.text.MinSize()
+}
+
+func (r *compactLabelRenderer) Refresh() {
+	r.text.Refresh()
+}
+
+func (r *compactLabelRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.text}
+}
+
+func (r *compactLabelRenderer) Destroy() {}
+
+// wrappingTextLayout provides wrapping text with tight vertical spacing
+type wrappingTextLayout struct{}
+
+func (w *wrappingTextLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	width := float32(0)
+	height := float32(0)
+	for _, obj := range objects {
+		if obj.Visible() {
+			size := obj.MinSize()
+			if size.Width > width {
+				width = size.Width
+			}
+			height += size.Height
+		}
+	}
+	return fyne.NewSize(width, height)
+}
+
+func (w *wrappingTextLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	y := float32(0)
+	for _, obj := range objects {
+		if obj.Visible() {
+			// Get the object's minimum size
+			minSize := obj.MinSize()
+			obj.Resize(fyne.NewSize(size.Width, minSize.Height))
+			obj.Move(fyne.NewPos(0, y))
+			y += minSize.Height
+		}
+	}
+}
+
+// centeredAvatarLayout centers the avatar vertically within available space
+type centeredAvatarLayout struct {
 	width float32
 }
 
-func (f *fixedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (c *centeredAvatarLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	height := float32(0)
 	for _, obj := range objects {
 		if obj.Visible() {
@@ -178,14 +264,17 @@ func (f *fixedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 			}
 		}
 	}
-	return fyne.NewSize(f.width, height)
+	return fyne.NewSize(c.width, height)
 }
 
-func (f *fixedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+func (c *centeredAvatarLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	for _, obj := range objects {
 		if obj.Visible() {
-			obj.Resize(fyne.NewSize(f.width, size.Height))
-			obj.Move(fyne.NewPos(0, 0))
+			objSize := obj.MinSize()
+			// Center vertically
+			y := (size.Height - objSize.Height) / 2
+			obj.Resize(objSize)
+			obj.Move(fyne.NewPos(0, y))
 		}
 	}
 }
@@ -199,23 +288,11 @@ func NewMessageWidget(username, message, avatarID, avatarURL string, attachments
 	// Create clickable avatar widget
 	avatarWidget := NewAvatarWidget(avatarID, avatarURL, "", onAvatarTapped)
 
-	// Avatar column with fixed width - avatar aligned to top
+	// Avatar column with fixed width - avatar centered vertically
 	avatarColumnWidth := theme.Sizes.MessageAvatarColumnWidth
-	topPadding := theme.Sizes.MessageAvatarTopPadding
 
-	// Create avatar container with top padding, pinned to top of column
-	avatarWithPadding := container.NewVBox(
-		newHeightSpacer(topPadding),
-		avatarWidget,
-	)
-
-	// Use Border layout to pin avatar to top
-	avatarColumn := container.NewBorder(
-		avatarWithPadding, nil, nil, nil,
-		nil,
-	)
-	// Wrap in a fixed-width container
-	avatarColumnSized := container.New(&fixedWidthLayout{width: avatarColumnWidth}, avatarColumn)
+	// Use custom layout to center avatar vertically
+	avatarColumnSized := container.New(&centeredAvatarLayout{width: avatarColumnWidth}, avatarWidget)
 
 	// Message content area
 	messageContent := buildMessageContent(username, message, attachments, onImageTapped)
@@ -255,19 +332,14 @@ func NewMessageWidget(username, message, avatarID, avatarURL string, attachments
 
 // buildMessageContent creates the message content area with username, text, and attachments.
 func buildMessageContent(username, message string, attachments []MessageAttachment, onImageTapped func(attachment MessageAttachment)) fyne.CanvasObject {
-	// Username label with customizable font
-	usernameStyle := fyne.TextStyle{Bold: theme.Fonts.MessageUsernameBold}
-	usernameLabel := widget.NewLabelWithStyle(username, fyne.TextAlignLeading, usernameStyle)
+	// Create compact labels with zero padding
+	usernameLabel := NewCompactLabel(username, true)
+	messageLabel := NewCompactLabel(message, false)
 
-	// Message text with word wrapping
-	messageLabel := widget.NewLabel(message)
-	messageLabel.Wrapping = fyne.TextWrapWord
+	// Combine username and message with tight spacing using custom layout
+	textContent := container.New(&wrappingTextLayout{}, usernameLabel, messageLabel)
 
-	// Combine username and message with no extra spacing
-	// Use Border layout to stack them tightly
-	textContent := container.NewBorder(usernameLabel, nil, nil, nil, messageLabel)
-
-	// If no attachments, return just the text content
+	// If no attachments, return text content
 	if len(attachments) == 0 {
 		return textContent
 	}

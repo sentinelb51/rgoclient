@@ -26,6 +26,8 @@ var Colors = struct {
 	CategoryArrow          color.Color
 	CategoryIndicator      color.Color
 	TextPrimary            color.Color
+	MessageUsernameColor   color.Color
+	MessageContentColor    color.Color
 }{
 	ServerListBackground:   color.RGBA{R: 20, G: 20, B: 20, A: 255},
 	ChannelListBackground:  color.RGBA{R: 44, G: 44, B: 44, A: 255},

@@ -140,9 +140,9 @@ func (renderer *xButtonRenderer) Refresh() {}
 // Objects returns the objects in this renderer.
 func (renderer *xButtonRenderer) Objects() []fyne.CanvasObject {
 	size := renderer.button.MinSize()
-	padding := float32(6)
+	padding := float32(8)
 
-	// Draw X lines
+	// Draw X lines centered in the button area
 	lineColor := color.RGBA{R: 150, G: 150, B: 150, A: 255}
 	if renderer.button.hovered {
 		lineColor = color.RGBA{R: 255, G: 100, B: 100, A: 255}
@@ -205,9 +205,10 @@ func (card *SessionCard) CreateRenderer() fyne.WidgetRenderer {
 	usernameLabel.TextStyle.Bold = true
 
 	removeButton := NewXButton(card.onRemove)
+	centeredRemoveButton := container.NewCenter(removeButton)
 
-	// Layout: [avatar] [username stretches] [x button]
-	content := container.NewBorder(nil, nil, card.avatarContainer, removeButton, usernameLabel)
+	// Layout: [avatar] [username stretches] [x button centered]
+	content := container.NewBorder(nil, nil, card.avatarContainer, centeredRemoveButton, usernameLabel)
 	tappable := NewTappableContainer(content, card.onTap)
 
 	return widget.NewSimpleRenderer(container.NewStack(card.background, container.NewPadded(tappable)))

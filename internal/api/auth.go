@@ -1,4 +1,4 @@
-package main
+package api
 
 import (
 	"encoding/json"
@@ -18,11 +18,11 @@ type SavedSession struct {
 
 // getSessionsPath returns the path to the sessions file in the user's home directory.
 func getSessionsPath() (string, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(homeDir, sessionsFileName), nil
+	return filepath.Join(homeDirectory, sessionsFileName), nil
 }
 
 // LoadSessions loads all saved sessions from disk.
@@ -73,9 +73,9 @@ func AddOrUpdateSession(session SavedSession) error {
 
 	// Find and update existing session, or append new one
 	found := false
-	for i, s := range sessions {
-		if s.UserID == session.UserID {
-			sessions[i] = session
+	for index, existingSession := range sessions {
+		if existingSession.UserID == session.UserID {
+			sessions[index] = session
 			found = true
 			break
 		}
@@ -95,14 +95,14 @@ func RemoveSession(userID string) error {
 		return err
 	}
 
-	newSessions := make([]SavedSession, 0, len(sessions))
-	for _, s := range sessions {
-		if s.UserID != userID {
-			newSessions = append(newSessions, s)
+	filteredSessions := make([]SavedSession, 0, len(sessions))
+	for _, session := range sessions {
+		if session.UserID != userID {
+			filteredSessions = append(filteredSessions, session)
 		}
 	}
 
-	return SaveSessions(newSessions)
+	return SaveSessions(filteredSessions)
 }
 
 // DeleteAllSessions removes all saved sessions.
@@ -126,9 +126,9 @@ func GetSessionByUserID(userID string) (*SavedSession, error) {
 		return nil, err
 	}
 
-	for _, s := range sessions {
-		if s.UserID == userID {
-			return &s, nil
+	for _, session := range sessions {
+		if session.UserID == userID {
+			return &session, nil
 		}
 	}
 

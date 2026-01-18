@@ -92,8 +92,7 @@ func (c *ClickableImage) Tapped(*fyne.PointEvent) {
 
 // MouseIn handles mouse entering the widget.
 func (c *ClickableImage) MouseIn(*desktop.MouseEvent) {
-	c.background.FillColor = color.RGBA{R: 255, G: 255, B: 255, A: 20}
-	c.background.Refresh()
+	// No hover effect
 }
 
 // MouseMoved handles mouse movement within the widget.
@@ -101,8 +100,7 @@ func (c *ClickableImage) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
 func (c *ClickableImage) MouseOut() {
-	c.background.FillColor = color.Transparent
-	c.background.Refresh()
+	// No hover effect
 }
 
 // MinSize returns the minimum size of the clickable image.
@@ -161,92 +159,6 @@ func (a *AvatarWidget) MouseOut() {
 // MinSize returns the minimum size of the avatar widget.
 func (a *AvatarWidget) MinSize() fyne.Size {
 	return fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
-}
-
-// CompactLabel is a label with no internal padding for tight text stacking
-type CompactLabel struct {
-	widget.BaseWidget
-	text *canvas.Text
-}
-
-// NewCompactLabel creates a label with zero internal padding
-func NewCompactLabel(text string, bold bool) *CompactLabel {
-	textObj := canvas.NewText(text, theme.Colors.MessageContentColor)
-	textObj.TextSize = theme.Fonts.MessageContentSize
-	if bold {
-		textObj.TextStyle = fyne.TextStyle{Bold: true}
-		textObj.Color = theme.Colors.MessageUsernameColor
-		textObj.TextSize = theme.Fonts.MessageUsernameSize
-	}
-
-	label := &CompactLabel{
-		text: textObj,
-	}
-	label.ExtendBaseWidget(label)
-	return label
-}
-
-// CreateRenderer returns the renderer for the compact label
-func (c *CompactLabel) CreateRenderer() fyne.WidgetRenderer {
-	return &compactLabelRenderer{
-		label: c,
-		text:  c.text,
-	}
-}
-
-type compactLabelRenderer struct {
-	label *CompactLabel
-	text  *canvas.Text
-}
-
-func (r *compactLabelRenderer) Layout(size fyne.Size) {
-	r.text.Move(fyne.NewPos(0, 0))
-	r.text.Resize(size)
-}
-
-func (r *compactLabelRenderer) MinSize() fyne.Size {
-	return r.text.MinSize()
-}
-
-func (r *compactLabelRenderer) Refresh() {
-	r.text.Refresh()
-}
-
-func (r *compactLabelRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.text}
-}
-
-func (r *compactLabelRenderer) Destroy() {}
-
-// wrappingTextLayout provides wrapping text with tight vertical spacing
-type wrappingTextLayout struct{}
-
-func (w *wrappingTextLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	width := float32(0)
-	height := float32(0)
-	for _, obj := range objects {
-		if obj.Visible() {
-			size := obj.MinSize()
-			if size.Width > width {
-				width = size.Width
-			}
-			height += size.Height
-		}
-	}
-	return fyne.NewSize(width, height)
-}
-
-func (w *wrappingTextLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	y := float32(0)
-	for _, obj := range objects {
-		if obj.Visible() {
-			// Get the object's minimum size
-			minSize := obj.MinSize()
-			obj.Resize(fyne.NewSize(size.Width, minSize.Height))
-			obj.Move(fyne.NewPos(0, y))
-			y += minSize.Height
-		}
-	}
 }
 
 // centeredAvatarLayout centers the avatar vertically within available space
@@ -330,14 +242,158 @@ func NewMessageWidget(username, message, avatarID, avatarURL string, attachments
 	return messageWidget
 }
 
+// createFormattedMessage creates a RichText widget with bold username followed by formatted message content.
+// Supports markdown-like formatting: **bold**, *italic*, > quote
+func createFormattedMessage(username, message string) *widget.RichText {
+	var segments []widget.RichTextSegment
+
+	// Add bold username segment
+	segments = append(segments, &widget.TextSegment{
+		Text: username,
+		Style: widget.RichTextStyle{
+			Inline:    true,
+			TextStyle: fyne.TextStyle{Bold: true},
+		},
+	})
+
+	// Add newline after username
+	segments = append(segments, &widget.TextSegment{
+		Text: "\n",
+		Style: widget.RichTextStyle{
+			Inline: true,
+		},
+	})
+
+	// Parse message content for formatting
+	segments = append(segments, parseMessageFormatting(message)...)
+
+	richText := widget.NewRichText(segments...)
+	richText.Wrapping = fyne.TextWrapWord
+	return richText
+}
+
+// parseMessageFormatting parses a message string and returns RichText segments with formatting applied.
+// Supports: **bold**, *italic*, > quote lines
+func parseMessageFormatting(message string) []widget.RichTextSegment {
+	var segments []widget.RichTextSegment
+
+	i := 0
+	iterations := 0
+	maxIterations := len(message) * 2 // Safety limit
+
+	for i < len(message) {
+		iterations++
+		if iterations > maxIterations {
+			// Add remaining text and break
+			if i < len(message) {
+				segments = append(segments, &widget.TextSegment{
+					Text:  message[i:],
+					Style: widget.RichTextStyle{Inline: true},
+				})
+			}
+			break
+		}
+
+		// Check for bold (**text**)
+		if i+1 < len(message) && message[i:i+2] == "**" {
+			end := findClosing(message, i+2, "**")
+			if end != -1 {
+				text := message[i+2 : end]
+				segments = append(segments, &widget.TextSegment{
+					Text: text,
+					Style: widget.RichTextStyle{
+						Inline:    true,
+						TextStyle: fyne.TextStyle{Bold: true},
+					},
+				})
+				i = end + 2
+				continue
+			}
+		}
+
+		// Check for italic (*text*)
+		if message[i] == '*' {
+			end := findClosing(message, i+1, "*")
+			if end != -1 {
+				text := message[i+1 : end]
+				segments = append(segments, &widget.TextSegment{
+					Text: text,
+					Style: widget.RichTextStyle{
+						Inline:    true,
+						TextStyle: fyne.TextStyle{Italic: true},
+					},
+				})
+				i = end + 1
+				continue
+			}
+		}
+
+		// Check for quote (> at start of line)
+		if message[i] == '>' && (i == 0 || message[i-1] == '\n') {
+			// Find end of line
+			end := i + 1
+			for end < len(message) && message[end] != '\n' {
+				end++
+			}
+			text := message[i:end]
+			segments = append(segments, &widget.TextSegment{
+				Text: text,
+				Style: widget.RichTextStyle{
+					Inline:    true,
+					TextStyle: fyne.TextStyle{Italic: true},
+				},
+			})
+			i = end
+			if i < len(message) && message[i] == '\n' {
+				segments = append(segments, &widget.TextSegment{
+					Text:  "\n",
+					Style: widget.RichTextStyle{Inline: true},
+				})
+				i++
+			}
+			continue
+		}
+
+		// Regular text - collect until next formatting marker
+		start := i
+		for i < len(message) {
+			if message[i] == '*' || (message[i] == '>' && (i == 0 || message[i-1] == '\n')) {
+				break
+			}
+			i++
+		}
+
+		if i > start {
+			text := message[start:i]
+			segments = append(segments, &widget.TextSegment{
+				Text: text,
+				Style: widget.RichTextStyle{
+					Inline: true,
+				},
+			})
+		} else if i == start {
+			// No progress made - advance to prevent infinite loop
+			i++
+		}
+	}
+
+	return segments
+}
+
+// findClosing finds the closing marker in a string, skipping escaped markers
+func findClosing(text string, start int, marker string) int {
+	for i := start; i < len(text); i++ {
+		if i+len(marker) <= len(text) && text[i:i+len(marker)] == marker {
+			return i
+		}
+	}
+	return -1
+}
+
 // buildMessageContent creates the message content area with username, text, and attachments.
 func buildMessageContent(username, message string, attachments []MessageAttachment, onImageTapped func(attachment MessageAttachment)) fyne.CanvasObject {
-	// Create compact labels with zero padding
-	usernameLabel := NewCompactLabel(username, true)
-	messageLabel := NewCompactLabel(message, false)
-
-	// Combine username and message with tight spacing using custom layout
-	textContent := container.New(&wrappingTextLayout{}, usernameLabel, messageLabel)
+	// Create single RichText with username (bold) and formatted message content
+	textContent := createFormattedMessage(username, message)
 
 	// If no attachments, return text content
 	if len(attachments) == 0 {
@@ -377,8 +433,9 @@ func buildMessageContent(username, message string, attachments []MessageAttachme
 		imagesContainer.Add(paddedImage)
 	}
 
-	// Combine text and images vertically with tight spacing
-	return container.NewBorder(textContent, nil, nil, nil, imagesContainer)
+	// Combine text and images vertically
+	result := container.NewVBox(textContent, imagesContainer)
+	return result
 }
 
 // newWidthSpacer creates a transparent rectangle with the given width.

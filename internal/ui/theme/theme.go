@@ -103,7 +103,7 @@ var Sizes = struct {
 
 	// Message area sizes
 	MessageAvatarSize:             40,
-	MessageAvatarColumnWidth:      48, // Avatar size + minimal padding for the fixed left column
+	MessageAvatarColumnWidth:      46, // Avatar size + minimal padding for the fixed left column
 	MessageAvatarTopPadding:       4,  // Top padding to align avatar with first line of text
 	MessageContentPadding:         0,  // Padding between avatar column and message content
 	MessageImageMaxWidth:          400,

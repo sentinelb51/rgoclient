@@ -10,7 +10,7 @@ import (
 // Messages are kept in memory for fast access.
 type MessageCache struct {
 	mutex    sync.RWMutex
-	messages map[string][]*revoltgo.Message // channelID -> messages (sorted oldest to newest)
+	messages map[string][]*revoltgo.Message // channelID → messages (sorted oldest to newest)
 	limit    int                            // max messages per channel
 }
 

@@ -11,166 +11,154 @@ import (
 	"RGOClient/internal/ui/widgets"
 )
 
-// StartRevoltSessionWithToken initializes the Revolt session using an existing token.
-func (application *ChatApp) StartRevoltSessionWithToken(token string) error {
+// StartRevoltSessionWithToken initializes the session using an existing token.
+func (app *ChatApp) StartRevoltSessionWithToken(token string) error {
 	session := revoltgo.New(token)
 	session.HTTP.Debug = true
 
-	application.Session = api.NewSession(session)
-	application.registerEventHandlers(session)
+	app.Session = api.NewSession(session)
+	app.registerEventHandlers(session)
 
-	if err := application.Session.Open(); err != nil {
+	if err := app.Session.Open(); err != nil {
 		return fmt.Errorf("failed to open session: %w", err)
 	}
-
 	return nil
 }
 
-// StartRevoltSessionWithLogin initializes the Revolt session using email and password.
-// Returns the session token on success for storage.
-func (application *ChatApp) StartRevoltSessionWithLogin(email, password string) (string, error) {
+// StartRevoltSessionWithLogin initializes the session using credentials.
+// Returns the session token on success.
+func (app *ChatApp) StartRevoltSessionWithLogin(email, password string) (string, error) {
 	loginData := revoltgo.LoginData{
 		Email:    email,
 		Password: password,
 	}
 
-	session, loginResponse, err := revoltgo.NewWithLogin(loginData)
+	session, resp, err := revoltgo.NewWithLogin(loginData)
 	if err != nil {
 		return "", fmt.Errorf("failed to create session: %w", err)
 	}
 
 	session.HTTP.Debug = true
 
-	application.Session = api.NewSession(session)
-	application.registerEventHandlers(session)
+	app.Session = api.NewSession(session)
+	app.registerEventHandlers(session)
 
-	if err := application.Session.Open(); err != nil {
+	if err := app.Session.Open(); err != nil {
 		return "", fmt.Errorf("failed to open session: %w", err)
 	}
 
-	return loginResponse.Token, nil
+	return resp.Token, nil
 }
 
-// registerEventHandlers sets up all event handlers for the Revolt session.
-func (application *ChatApp) registerEventHandlers(session *revoltgo.Session) {
-	revoltgo.AddHandler(session, application.onReady)
-	revoltgo.AddHandler(session, application.onMessage)
-	revoltgo.AddHandler(session, application.onError)
+// registerEventHandlers sets up event handlers for the session.
+func (app *ChatApp) registerEventHandlers(session *revoltgo.Session) {
+	revoltgo.AddHandler(session, app.onReady)
+	revoltgo.AddHandler(session, app.onMessage)
+	revoltgo.AddHandler(session, app.onError)
 }
 
-func (application *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
-	log.Printf("Received error event: %s\n", event.Error)
+// onError handles error events from the websocket.
+func (app *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
+	log.Printf("Error event: %s\n", event.Error)
 
-	// Handle authentication errors by invalidating token and showing login
 	if event.Error == revoltgo.EventErrorTypeInvalidSession ||
 		event.Error == revoltgo.EventErrorTypeInternalError {
 
-		// Remove the invalid session if we have user info
-		if application.Session != nil && application.Session.State != nil {
-			self := application.Session.State.Self()
-			if self != nil {
+		// Remove invalid session
+		if app.Session != nil && app.Session.State != nil {
+			if self := app.Session.State.Self(); self != nil {
 				if err := api.RemoveSession(self.ID); err != nil {
 					log.Printf("Failed to remove session: %v\n", err)
 				}
 			}
 		}
 
-		// Close the current session if open
-		if application.Session != nil {
-			_ = application.Session.Close()
-			application.Session = nil
+		// Close session and show login
+		if app.Session != nil {
+			_ = app.Session.Close()
+			app.Session = nil
 		}
 
-		// Show login screen on the UI thread
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-			application.ShowLoginWindow()
+			app.ShowLoginWindow()
 		}, true)
 	}
 }
 
-// onReady handles the EventReady event when the client is connected.
-func (application *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
-	fmt.Printf("Ready: %d user(s) across %d server(s)\n", len(event.Users), len(event.Servers))
+// onReady handles the Ready event when connected.
+func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
+	fmt.Printf("Ready: %d user(s), %d server(s)\n", len(event.Users), len(event.Servers))
 
-	// Save session if we have a pending token from login
-	if application.GetPendingSessionToken() != "" {
-		self := application.Session.State.Self()
-		if self != nil {
-			savedSession := api.SavedSession{
-				Token:    application.GetPendingSessionToken(),
+	// Save pending session token
+	if token := app.GetPendingSessionToken(); token != "" {
+		if self := app.Session.State.Self(); self != nil {
+			saved := api.SavedSession{
+				Token:    token,
 				UserID:   self.ID,
 				Username: self.Username,
 			}
 			if self.Avatar != nil {
-				savedSession.AvatarID = self.Avatar.ID
+				saved.AvatarID = self.Avatar.ID
 			}
 
-			if err := api.AddOrUpdateSession(savedSession); err != nil {
+			if err := api.AddOrUpdateSession(saved); err != nil {
 				fmt.Printf("Warning: failed to save session: %v\n", err)
-			} else {
-				fmt.Println("Session saved successfully")
 			}
 		}
-		application.ClearPendingSessionToken()
+		app.ClearPendingSessionToken()
 	}
 
 	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-		// Store server IDs - actual data is accessed via Session.State
-		application.ServerIDs = make([]string, 0, len(event.Servers))
+		// Store server IDs
+		app.ServerIDs = make([]string, 0, len(event.Servers))
 		for _, server := range event.Servers {
-			application.ServerIDs = append(application.ServerIDs, server.ID)
+			app.ServerIDs = append(app.ServerIDs, server.ID)
 		}
 
-		// Refresh server list first
-		application.RefreshServerList()
+		app.RefreshServerList()
 
-		// Select first server and channel if available
-		if len(application.ServerIDs) > 0 {
-			application.CurrentServerID = application.ServerIDs[0]
-			application.updateServerSelectionUI(application.CurrentServerID)
+		// Select first server and channel
+		if len(app.ServerIDs) > 0 {
+			app.CurrentServerID = app.ServerIDs[0]
+			app.updateServerSelectionUI(app.CurrentServerID)
 
-			if server := application.CurrentServer(); server != nil {
-				application.updateServerHeader(server.Name)
-				application.RefreshChannelList()
+			if server := app.CurrentServer(); server != nil {
+				app.updateServerHeader(server.Name)
+				app.RefreshChannelList()
 
-				// Select first channel (this will show loading state and fetch messages)
 				if len(server.Channels) > 0 {
-					application.SelectChannel(server.Channels[0])
+					app.SelectChannel(server.Channels[0])
 				}
 			}
 		}
 	}, true)
 }
 
-// onMessage handles incoming messages from the Revolt websocket.
-func (application *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
-	// Create a Message from the event for caching
-	message := &revoltgo.Message{
+// onMessage handles incoming messages from the websocket.
+func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
+	msg := &revoltgo.Message{
 		ID:      event.ID,
 		Channel: event.Channel,
 		Author:  event.Author,
 		Content: event.Content,
 	}
 
-	// Cache the message
-	application.Messages.Append(event.Channel, message)
+	app.Messages.Append(event.Channel, msg)
 
-	// Only process if this is the current channel
-	if application.CurrentChannelID == "" || event.Channel != application.CurrentChannelID {
+	if app.CurrentChannelID == "" || event.Channel != app.CurrentChannelID {
 		return
 	}
 
-	// Resolve user info via Session wrapper (handles cache + API fallback)
 	username := event.Author
 	avatarID := ""
 	avatarURL := ""
 
-	if author := application.Session.User(event.Author); author != nil {
+	if author := app.Session.User(event.Author); author != nil {
 		username = author.Username
 		avatarID, avatarURL = widgets.GetAvatarInfo(author)
 	}
 
 	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-		application.AddMessageWithAvatar(username, event.Content, avatarID, avatarURL)
+		app.AddMessageWithAvatar(username, event.Content, avatarID, avatarURL)
 	}, true)
 }

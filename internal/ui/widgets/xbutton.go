@@ -1,15 +1,15 @@
 package widgets
 
 import (
-	"image/color"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
+
+	"RGOClient/internal/ui/theme"
 )
 
-// Ensure XButton implements necessary interfaces.
+// Compile-time interface assertions.
 var (
 	_ fyne.Widget       = (*XButton)(nil)
 	_ fyne.Tappable     = (*XButton)(nil)
@@ -25,53 +25,52 @@ type XButton struct {
 
 // NewXButton creates a new X button with the given tap handler.
 func NewXButton(onTap func()) *XButton {
-	button := &XButton{onTap: onTap}
-	button.ExtendBaseWidget(button)
-	return button
+	b := &XButton{onTap: onTap}
+	b.ExtendBaseWidget(b)
+	return b
 }
 
 // CreateRenderer returns the renderer for this widget.
-func (button *XButton) CreateRenderer() fyne.WidgetRenderer {
-	lineColor := color.RGBA{R: 150, G: 150, B: 150, A: 255}
-
-	line1 := canvas.NewLine(lineColor)
+func (b *XButton) CreateRenderer() fyne.WidgetRenderer {
+	line1 := canvas.NewLine(theme.Colors.XButtonNormal)
 	line1.StrokeWidth = 2
 
-	line2 := canvas.NewLine(lineColor)
+	line2 := canvas.NewLine(theme.Colors.XButtonNormal)
 	line2.StrokeWidth = 2
 
 	return &xButtonRenderer{
-		button: button,
+		button: b,
 		line1:  line1,
 		line2:  line2,
 	}
 }
 
 // Tapped handles tap events on the widget.
-func (button *XButton) Tapped(*fyne.PointEvent) {
-	if button.onTap != nil {
-		button.onTap()
+func (b *XButton) Tapped(*fyne.PointEvent) {
+	if b.onTap != nil {
+		b.onTap()
 	}
 }
 
 // MouseIn handles mouse entering the widget.
-func (button *XButton) MouseIn(*desktop.MouseEvent) {
-	button.hovered = true
-	button.Refresh()
+func (b *XButton) MouseIn(*desktop.MouseEvent) {
+	b.hovered = true
+	b.Refresh()
 }
 
 // MouseMoved handles mouse movement within the widget.
-func (button *XButton) MouseMoved(*desktop.MouseEvent) {}
+func (b *XButton) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
-func (button *XButton) MouseOut() {
-	button.hovered = false
-	button.Refresh()
+func (b *XButton) MouseOut() {
+	b.hovered = false
+	b.Refresh()
 }
 
 // MinSize returns the minimum size for this widget.
-func (button *XButton) MinSize() fyne.Size {
-	return fyne.NewSize(24, 24)
+func (b *XButton) MinSize() fyne.Size {
+	size := theme.Sizes.XButtonSize
+	return fyne.NewSize(size, size)
 }
 
 type xButtonRenderer struct {
@@ -81,44 +80,40 @@ type xButtonRenderer struct {
 }
 
 // Layout positions objects within this renderer.
-func (renderer *xButtonRenderer) Layout(size fyne.Size) {
+func (r *xButtonRenderer) Layout(size fyne.Size) {
 	padding := float32(6)
-
-	// Calculate exact center and line endpoints for symmetry
 	centerX := size.Width / 2
 	centerY := size.Height / 2
 	halfLine := (size.Width - 2*padding) / 2
 
-	// Position lines from center
-	renderer.line1.Position1 = fyne.NewPos(centerX-halfLine, centerY-halfLine)
-	renderer.line1.Position2 = fyne.NewPos(centerX+halfLine, centerY+halfLine)
+	r.line1.Position1 = fyne.NewPos(centerX-halfLine, centerY-halfLine)
+	r.line1.Position2 = fyne.NewPos(centerX+halfLine, centerY+halfLine)
 
-	renderer.line2.Position1 = fyne.NewPos(centerX+halfLine, centerY-halfLine)
-	renderer.line2.Position2 = fyne.NewPos(centerX-halfLine, centerY+halfLine)
+	r.line2.Position1 = fyne.NewPos(centerX+halfLine, centerY-halfLine)
+	r.line2.Position2 = fyne.NewPos(centerX-halfLine, centerY+halfLine)
 }
 
 // MinSize returns the minimum size for this renderer.
-func (renderer *xButtonRenderer) MinSize() fyne.Size {
-	return renderer.button.MinSize()
+func (r *xButtonRenderer) MinSize() fyne.Size {
+	return r.button.MinSize()
 }
 
 // Refresh refreshes this renderer.
-func (renderer *xButtonRenderer) Refresh() {
-	// Update line colors based on hover state
-	lineColor := color.RGBA{R: 150, G: 150, B: 150, A: 255}
-	if renderer.button.hovered {
-		lineColor = color.RGBA{R: 255, G: 100, B: 100, A: 255}
+func (r *xButtonRenderer) Refresh() {
+	col := theme.Colors.XButtonNormal
+	if r.button.hovered {
+		col = theme.Colors.XButtonHover
 	}
-	renderer.line1.StrokeColor = lineColor
-	renderer.line2.StrokeColor = lineColor
-	canvas.Refresh(renderer.line1)
-	canvas.Refresh(renderer.line2)
+	r.line1.StrokeColor = col
+	r.line2.StrokeColor = col
+	canvas.Refresh(r.line1)
+	canvas.Refresh(r.line2)
 }
 
 // Objects returns the objects in this renderer.
-func (renderer *xButtonRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{renderer.line1, renderer.line2}
+func (r *xButtonRenderer) Objects() []fyne.CanvasObject {
+	return []fyne.CanvasObject{r.line1, r.line2}
 }
 
 // Destroy cleans up this renderer.
-func (renderer *xButtonRenderer) Destroy() {}
+func (r *xButtonRenderer) Destroy() {}

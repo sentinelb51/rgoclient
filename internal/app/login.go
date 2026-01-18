@@ -9,28 +9,22 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/api"
-	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
 )
 
-// ShowLoginWindow displays the login form for user authentication.
-func (application *ChatApp) ShowLoginWindow() {
-	application.window.Resize(fyne.NewSize(300, 280))
+// ShowLoginWindow displays the login form.
+func (app *ChatApp) ShowLoginWindow() {
+	app.window.Resize(fyne.NewSize(300, 280))
 
-	// Load saved sessions
 	sessions, err := api.LoadSessions()
 	if err != nil {
 		fmt.Printf("Error loading sessions: %v\n", err)
 		sessions = []api.SavedSession{}
 	}
 
-	// Build saved sessions section
-	sessionsSection := application.buildSavedSessionsSection(sessions)
+	sessionsSection := app.buildSavedSessionsSection(sessions)
+	loginSection := app.buildLoginFormSection()
 
-	// Build login form section
-	loginSection := application.buildLoginFormSection()
-
-	// Main layout
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
@@ -39,70 +33,63 @@ func (application *ChatApp) ShowLoginWindow() {
 		loginSection,
 	)
 
-	application.window.SetContent(container.NewPadded(content))
+	app.window.SetContent(container.NewPadded(content))
 }
 
-// buildSavedSessionsSection creates the UI section showing saved sessions.
-func (application *ChatApp) buildSavedSessionsSection(sessions []api.SavedSession) fyne.CanvasObject {
+// buildSavedSessionsSection creates the UI for saved sessions.
+func (app *ChatApp) buildSavedSessionsSection(sessions []api.SavedSession) fyne.CanvasObject {
 	if len(sessions) == 0 {
 		return widget.NewLabel("No recent sessions")
 	}
 
-	// Create a vertical list of session cards
-	sessionList := container.NewVBox()
-	for _, session := range sessions {
-		sessionList.Add(application.buildSessionCard(session))
+	list := container.NewVBox()
+	for _, s := range sessions {
+		list.Add(app.buildSessionCard(s))
 	}
 
 	return container.NewVBox(
 		widget.NewLabel("Recent Sessions"),
-		sessionList,
+		list,
 	)
 }
 
 // buildSessionCard creates a clickable card for a saved session.
-func (application *ChatApp) buildSessionCard(session api.SavedSession) fyne.CanvasObject {
+func (app *ChatApp) buildSessionCard(session api.SavedSession) fyne.CanvasObject {
 	return widgets.NewSessionCard(
 		session.Username,
 		session.AvatarID,
-		func() {
-			application.loginWithSavedSession(session)
-		},
+		func() { app.loginWithSavedSession(session) },
 		func() {
 			_ = api.RemoveSession(session.UserID)
-			application.ShowLoginWindow()
+			app.ShowLoginWindow()
 		},
 	)
 }
 
-// loginWithSavedSession attempts to login using a saved session token.
-func (application *ChatApp) loginWithSavedSession(session api.SavedSession) {
-	fmt.Printf("Attempting login with saved session for: %s\n", session.Username)
+// loginWithSavedSession attempts to login using a saved token.
+func (app *ChatApp) loginWithSavedSession(session api.SavedSession) {
+	fmt.Printf("Logging in as: %s\n", session.Username)
 
-	// Show loading state
-	application.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
+	app.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
 
 	go func() {
-		err := application.StartRevoltSessionWithToken(session.Token)
+		err := app.StartRevoltSessionWithToken(session.Token)
 
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
 			if err != nil {
-				fmt.Printf("Failed to login with saved session: %v\n", err)
-				// Remove invalid session
+				fmt.Printf("Login failed: %v\n", err)
 				_ = api.RemoveSession(session.UserID)
-				dialog.ShowError(fmt.Errorf("session expired, please login again"), application.window)
-				application.ShowLoginWindow()
+				dialog.ShowError(fmt.Errorf("session expired, please login again"), app.window)
+				app.ShowLoginWindow()
 				return
 			}
-
-			// Update session info and switch to main UI
-			application.SwitchToMainUI()
+			app.SwitchToMainUI()
 		}, true)
 	}()
 }
 
 // buildLoginFormSection creates the email/password login form.
-func (application *ChatApp) buildLoginFormSection() fyne.CanvasObject {
+func (app *ChatApp) buildLoginFormSection() fyne.CanvasObject {
 	emailEntry := widget.NewEntry()
 	emailEntry.SetPlaceHolder("Email")
 
@@ -115,56 +102,38 @@ func (application *ChatApp) buildLoginFormSection() fyne.CanvasObject {
 		password := passwordEntry.Text
 
 		if email == "" || password == "" {
-			dialog.ShowError(fmt.Errorf("please enter both email and password"), application.window)
+			dialog.ShowError(fmt.Errorf("please enter both email and password"), app.window)
 			return
 		}
 
-		// Disable button while logging in
 		loginButton.Disable()
 		loginButton.SetText("Logging in...")
 
 		go func() {
-			token, err := application.StartRevoltSessionWithLogin(email, password)
+			token, err := app.StartRevoltSessionWithLogin(email, password)
 
 			fyne.CurrentApp().Driver().DoFromGoroutine(func() {
 				if err != nil {
 					loginButton.Enable()
 					loginButton.SetText("Login")
-					dialog.ShowError(fmt.Errorf("login failed: %v", err), application.window)
+					dialog.ShowError(fmt.Errorf("login failed: %v", err), app.window)
 					return
 				}
 
-				// Set pending token - session will be saved when Ready event fires
-				application.SetPendingSessionToken(token)
-
-				// Switch to main UI
-				application.SwitchToMainUI()
+				app.SetPendingSessionToken(token)
+				app.SwitchToMainUI()
 			}, true)
 		}()
 	})
 
-	// Submit on Enter key in password field
 	passwordEntry.OnSubmitted = func(_ string) {
 		loginButton.OnTapped()
 	}
 
-	// Form with full-width button
-	form := container.NewVBox(
+	return container.NewVBox(
 		widget.NewLabel("Enter credentials"),
 		emailEntry,
 		passwordEntry,
 		loginButton,
 	)
-
-	return form
-}
-
-// LoginWindowSize returns the size for the login window.
-func LoginWindowSize() fyne.Size {
-	return fyne.NewSize(300, 280)
-}
-
-// MainWindowSize returns the default size for the main window.
-func MainWindowSize() fyne.Size {
-	return fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight)
 }

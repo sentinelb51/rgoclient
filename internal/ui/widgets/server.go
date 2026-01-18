@@ -12,7 +12,7 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// Ensure ServerWidget implements necessary interfaces at compile time.
+// Compile-time interface assertions.
 var (
 	_ fyne.Widget       = (*ServerWidget)(nil)
 	_ fyne.Tappable     = (*ServerWidget)(nil)
@@ -38,101 +38,93 @@ func NewServerWidget(server *revoltgo.Server, onTap func()) *ServerWidget {
 	baseSize := theme.Sizes.ServerIconSize
 	grownSize := baseSize * 1.1 // 10% larger on hover/select
 
-	serverWidget := &ServerWidget{
+	w := &ServerWidget{
 		Server:     server,
 		onTap:      onTap,
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
 		baseSize:   baseSize,
 		grownSize:  grownSize,
 	}
-	serverWidget.ExtendBaseWidget(serverWidget)
-	return serverWidget
+	w.ExtendBaseWidget(w)
+	return w
 }
 
 // SetSelected updates the selection state and refreshes appearance.
-func (serverWidget *ServerWidget) SetSelected(selected bool) {
-	serverWidget.selected = selected
-	serverWidget.updateAppearance()
+func (w *ServerWidget) SetSelected(selected bool) {
+	w.selected = selected
+	w.updateAppearance()
 }
 
-func (serverWidget *ServerWidget) updateAppearance() {
-	// Update background colour
-	if serverWidget.selected {
-		serverWidget.background.FillColor = theme.Colors.ServerSelectedBg
+func (w *ServerWidget) updateAppearance() {
+	if w.selected {
+		w.background.FillColor = theme.Colors.ServerSelectedBg
 	} else {
-		serverWidget.background.FillColor = theme.Colors.ServerDefaultBg
+		w.background.FillColor = theme.Colors.ServerDefaultBg
 	}
-	serverWidget.background.Refresh()
-
-	// Update size based on hover/selected state
-	serverWidget.updateSize()
+	w.background.Refresh()
+	w.updateSize()
 }
 
-func (serverWidget *ServerWidget) updateSize() {
-	if serverWidget.iconWrapper == nil {
+func (w *ServerWidget) updateSize() {
+	if w.iconWrapper == nil {
 		return
 	}
 
 	var newSize float32
-	if serverWidget.selected || serverWidget.hovered {
-		newSize = serverWidget.grownSize
+	if w.selected || w.hovered {
+		newSize = w.grownSize
 	} else {
-		newSize = serverWidget.baseSize
+		newSize = w.baseSize
 	}
 
 	size := fyne.NewSize(newSize, newSize)
-	serverWidget.iconWrapper.Layout = container.NewGridWrap(size).Layout
-	serverWidget.iconWrapper.Refresh()
+	w.iconWrapper.Layout = container.NewGridWrap(size).Layout
+	w.iconWrapper.Refresh()
 }
 
 // CreateRenderer returns the renderer for this widget.
-func (serverWidget *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
-	iconSize := fyne.NewSize(serverWidget.baseSize, serverWidget.baseSize)
+func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
+	iconSize := fyne.NewSize(w.baseSize, w.baseSize)
 
-	// Server initial as fallback placeholder
 	initial := ""
-	if len(serverWidget.Server.Name) > 0 {
-		initial = string(serverWidget.Server.Name[0])
+	if len(w.Server.Name) > 0 {
+		initial = string(w.Server.Name[0])
 	}
 	initialLabel := canvas.NewText(initial, theme.Colors.TextPrimary)
 	initialLabel.TextStyle = fyne.TextStyle{Bold: true}
 	initialLabel.Alignment = fyne.TextAlignCenter
 
-	// Create icon content container - background is always present for hover effects
-	serverWidget.iconContainer = container.NewStack(serverWidget.background, container.NewCenter(initialLabel))
+	w.iconContainer = container.NewStack(w.background, container.NewCenter(initialLabel))
 
-	// Load server icon asynchronously if available
-	iconID, iconURL := GetServerIconInfo(serverWidget.Server)
+	iconID, iconURL := GetServerIconInfo(w.Server)
 	if iconURL != "" {
-		cache.GetImageCache().LoadImageToContainer(iconID, iconURL, iconSize, serverWidget.iconContainer, true, serverWidget.background)
+		cache.GetImageCache().LoadImageToContainer(iconID, iconURL, iconSize, w.iconContainer, true, w.background)
 	}
 
-	serverWidget.iconWrapper = container.NewGridWrap(iconSize, serverWidget.iconContainer)
-
-	// Centre the icon wrapper for consistent positioning
-	centered := container.NewCenter(serverWidget.iconWrapper)
+	w.iconWrapper = container.NewGridWrap(iconSize, w.iconContainer)
+	centered := container.NewCenter(w.iconWrapper)
 
 	return widget.NewSimpleRenderer(centered)
 }
 
 // Tapped handles tap events on the widget.
-func (serverWidget *ServerWidget) Tapped(*fyne.PointEvent) {
-	if serverWidget.onTap != nil {
-		serverWidget.onTap()
+func (w *ServerWidget) Tapped(*fyne.PointEvent) {
+	if w.onTap != nil {
+		w.onTap()
 	}
 }
 
 // MouseIn handles mouse entering the widget.
-func (serverWidget *ServerWidget) MouseIn(*desktop.MouseEvent) {
-	serverWidget.hovered = true
-	serverWidget.updateAppearance()
+func (w *ServerWidget) MouseIn(*desktop.MouseEvent) {
+	w.hovered = true
+	w.updateAppearance()
 }
 
 // MouseMoved handles mouse movement within the widget.
-func (serverWidget *ServerWidget) MouseMoved(*desktop.MouseEvent) {}
+func (w *ServerWidget) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
-func (serverWidget *ServerWidget) MouseOut() {
-	serverWidget.hovered = false
-	serverWidget.updateAppearance()
+func (w *ServerWidget) MouseOut() {
+	w.hovered = false
+	w.updateAppearance()
 }

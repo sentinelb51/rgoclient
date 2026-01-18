@@ -13,7 +13,7 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// Ensure ChannelWidget implements necessary interfaces at compile time.
+// Compile-time interface assertions.
 var (
 	_ fyne.Widget       = (*ChannelWidget)(nil)
 	_ fyne.Tappable     = (*ChannelWidget)(nil)
@@ -31,96 +31,92 @@ type ChannelWidget struct {
 
 // NewChannelWidget creates a new channel widget.
 func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
-	channelWidget := &ChannelWidget{
+	w := &ChannelWidget{
 		Channel:    channel,
 		onTap:      onTap,
 		background: canvas.NewRectangle(color.Transparent),
 	}
-	channelWidget.ExtendBaseWidget(channelWidget)
-	return channelWidget
+	w.ExtendBaseWidget(w)
+	return w
 }
 
 // SetSelected updates the selection state and refreshes appearance.
-func (channelWidget *ChannelWidget) SetSelected(selected bool) {
-	channelWidget.selected = selected
-	channelWidget.updateBackground()
+func (w *ChannelWidget) SetSelected(selected bool) {
+	w.selected = selected
+	w.updateBackground()
 }
 
-func (channelWidget *ChannelWidget) updateBackground() {
-	if channelWidget.selected {
-		channelWidget.background.FillColor = theme.Colors.ChannelSelectedBg
+func (w *ChannelWidget) updateBackground() {
+	if w.selected {
+		w.background.FillColor = theme.Colors.ChannelSelectedBg
 	} else {
-		channelWidget.background.FillColor = color.Transparent
+		w.background.FillColor = color.Transparent
 	}
-	channelWidget.background.Refresh()
+	w.background.Refresh()
 }
 
 // CreateRenderer returns the renderer for this widget.
-func (channelWidget *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
-	// Add left spacer to push hashtag icon more to the right (customizable)
+func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	leftSpacer := canvas.NewRectangle(color.Transparent)
 	leftSpacer.SetMinSize(fyne.NewSize(theme.Sizes.ChannelLeftPadding, 0))
+
 	icon := GetHashtagIcon()
-	label := widget.NewLabel(channelWidget.Channel.Name)
+	label := widget.NewLabel(w.Channel.Name)
 	content := container.NewHBox(leftSpacer, icon, label)
-	return widget.NewSimpleRenderer(container.NewStack(channelWidget.background, content))
+
+	return widget.NewSimpleRenderer(container.NewStack(w.background, content))
 }
 
 // Tapped handles tap events on the widget.
-func (channelWidget *ChannelWidget) Tapped(*fyne.PointEvent) {
-	if channelWidget.onTap != nil {
-		channelWidget.onTap()
+func (w *ChannelWidget) Tapped(*fyne.PointEvent) {
+	if w.onTap != nil {
+		w.onTap()
 	}
 }
 
 // MouseIn handles mouse entering the widget.
-func (channelWidget *ChannelWidget) MouseIn(*desktop.MouseEvent) {
-	if !channelWidget.selected {
-		channelWidget.background.FillColor = theme.Colors.ChannelHoverBackground
-		channelWidget.background.Refresh()
+func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
+	if !w.selected {
+		w.background.FillColor = theme.Colors.ChannelHoverBackground
+		w.background.Refresh()
 	}
 }
 
 // MouseMoved handles mouse movement within the widget.
-func (channelWidget *ChannelWidget) MouseMoved(*desktop.MouseEvent) {}
+func (w *ChannelWidget) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
-func (channelWidget *ChannelWidget) MouseOut() {
-	channelWidget.updateBackground()
+func (w *ChannelWidget) MouseOut() {
+	w.updateBackground()
 }
 
-// GetHashtagIcon returns a new hashtag (#) icon for channel display.
+// GetHashtagIcon returns a hashtag (#) icon for channel display.
 func GetHashtagIcon() fyne.CanvasObject {
-	iconColor := theme.Colors.HashtagIcon
+	col := theme.Colors.HashtagIcon
 	size := theme.Sizes.HashtagIconSize
-
-	// Scale factor based on icon size (designed for size 20)
 	scale := size / 20
 
-	// Draw hashtag centered within bounds
-	// Vertical lines
-	verticalLine1 := canvas.NewLine(iconColor)
-	verticalLine1.Position1 = fyne.NewPos(7*scale, 2*scale)
-	verticalLine1.Position2 = fyne.NewPos(7*scale, 18*scale)
-	verticalLine1.StrokeWidth = 2 * scale
+	v1 := canvas.NewLine(col)
+	v1.Position1 = fyne.NewPos(7*scale, 2*scale)
+	v1.Position2 = fyne.NewPos(7*scale, 18*scale)
+	v1.StrokeWidth = 2 * scale
 
-	verticalLine2 := canvas.NewLine(iconColor)
-	verticalLine2.Position1 = fyne.NewPos(13*scale, 2*scale)
-	verticalLine2.Position2 = fyne.NewPos(13*scale, 18*scale)
-	verticalLine2.StrokeWidth = 2 * scale
+	v2 := canvas.NewLine(col)
+	v2.Position1 = fyne.NewPos(13*scale, 2*scale)
+	v2.Position2 = fyne.NewPos(13*scale, 18*scale)
+	v2.StrokeWidth = 2 * scale
 
-	// Horizontal lines
-	horizontalLine1 := canvas.NewLine(iconColor)
-	horizontalLine1.Position1 = fyne.NewPos(2*scale, 7*scale)
-	horizontalLine1.Position2 = fyne.NewPos(18*scale, 7*scale)
-	horizontalLine1.StrokeWidth = 2 * scale
+	h1 := canvas.NewLine(col)
+	h1.Position1 = fyne.NewPos(2*scale, 7*scale)
+	h1.Position2 = fyne.NewPos(18*scale, 7*scale)
+	h1.StrokeWidth = 2 * scale
 
-	horizontalLine2 := canvas.NewLine(iconColor)
-	horizontalLine2.Position1 = fyne.NewPos(2*scale, 13*scale)
-	horizontalLine2.Position2 = fyne.NewPos(18*scale, 13*scale)
-	horizontalLine2.StrokeWidth = 2 * scale
+	h2 := canvas.NewLine(col)
+	h2.Position1 = fyne.NewPos(2*scale, 13*scale)
+	h2.Position2 = fyne.NewPos(18*scale, 13*scale)
+	h2.StrokeWidth = 2 * scale
 
-	icon := container.NewWithoutLayout(verticalLine1, verticalLine2, horizontalLine1, horizontalLine2)
+	icon := container.NewWithoutLayout(v1, v2, h1, h2)
 	wrapper := container.NewGridWrap(fyne.NewSize(size, size), icon)
 	return container.NewCenter(wrapper)
 }

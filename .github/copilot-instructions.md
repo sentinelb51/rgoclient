@@ -10,3 +10,89 @@ Output format:
 If unable to shorten, split into multiple bullets.
 Before responding, compress each sentence to its minimal semantic form.
 Delete any word not required to identify the action.
+
+---
+
+# RGOClient Architecture
+
+## Overview
+
+Fyne-based Revolt chat client (Discord-like). Uses `github.com/sentinelb51/revoltgo` for API/websocket.
+
+## Project Structure
+
+```
+cmd/rgoclient/main.go     - Entry point, initializes Fyne app
+internal/
+  api/
+    auth.go               - Session persistence (JSON file storage)
+    session.go            - API session wrapper with state caching
+  app/
+    app.go                - ChatApp struct, initialization, lifecycle
+    events.go             - WebSocket event handlers (Ready, Message, Error)
+    login.go              - Login UI and saved session management
+    messages.go           - Message selection, loading, display logic
+    ui.go                 - UI building (server/channel/message areas)
+  cache/
+    images.go             - Image cache (memory + disk persistence)
+    messages.go           - In-memory message cache per channel
+  ui/
+    theme/
+      theme.go            - Colors, Sizes, NoScrollTheme
+    widgets/
+      avatar.go           - SessionCard widget
+      category.go         - Collapsible category header
+      channel.go          - Channel list item
+      clickable.go        - ClickableImage, ClickableAvatar
+      helpers.go          - GetAvatarInfo, GetServerIconInfo
+      message.go          - MessageWidget with attachments
+      message_input.go    - Multi-line input with shift-enter
+      server.go           - Server icon widget
+      tappable.go         - TappableContainer wrapper
+      xbutton.go          - X button for removing items
+```
+
+## Key Components
+
+### ChatApp (internal/app/app.go)
+- Main application state holder
+- Manages Session, ServerIDs, CurrentServerID, CurrentChannelID
+- Contains UI containers (serverListContainer, channelListContainer, messageListContainer)
+
+### Session (internal/api/session.go)
+- Wraps revoltgo.Session
+- Provides Server(), Channel(), User() with state cache fallback
+- SendMessage(), ChannelMessages() for API calls
+
+### Theme (internal/ui/theme/theme.go)
+- `Colors` struct: all UI colors (customizable)
+- `Sizes` struct: all UI dimensions (customizable)
+- `NoScrollTheme`: hides scrollbars
+
+### Widgets
+All widgets implement fyne.Widget + fyne.Tappable + desktop.Hoverable where applicable.
+
+## Data Flow
+
+1. Login → StartRevoltSessionWithToken/Login → registerEventHandlers
+2. onReady → populate ServerIDs → RefreshServerList → SelectServer
+3. SelectServer → RefreshChannelList → SelectChannel
+4. SelectChannel → check cache → loadChannelMessages if needed
+5. onMessage → cache message → AddMessageWithAvatar if current channel
+
+## Conventions
+
+- Use `w` for widget receiver (e.g., `func (w *CategoryWidget)`)
+- Use `app` for ChatApp receiver
+- Interface assertions at top of file: `var _ fyne.Widget = (*WidgetName)(nil)`
+- Colors/Sizes in theme.go, not hardcoded
+- Background goroutines use `fyne.CurrentApp().Driver().DoFromGoroutine()` for UI updates
+
+## Update Requirements
+
+**Agents must update this file when:**
+- Adding new files/packages
+- Changing data flow
+- Adding new widgets
+- Modifying ChatApp struct fields
+- Changing event handling

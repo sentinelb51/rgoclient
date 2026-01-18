@@ -10,6 +10,7 @@ import (
 // Colors defines the color palette for the application.
 // Centralizing colors makes it easy to maintain consistency and support theming.
 var Colors = struct {
+	// Backgrounds
 	ServerListBackground   color.Color
 	ChannelListBackground  color.Color
 	MessageAreaBackground  color.Color
@@ -19,16 +20,20 @@ var Colors = struct {
 	ServerDefaultBg        color.Color
 	ServerHoverBg          color.Color
 	ServerSelectedBg       color.Color
-	ServerNameBg           color.Color
-	AvatarPlaceholder      color.Color
-	HashtagIcon            color.Color
-	CategoryText           color.Color
-	CategoryArrow          color.Color
-	CategoryIndicator      color.Color
-	TextPrimary            color.Color
-	MessageUsernameColor   color.Color
-	MessageContentColor    color.Color
+	TappableHoverBg        color.Color
+
+	// Elements
+	AvatarPlaceholder color.Color
+	HashtagIcon       color.Color
+	CategoryText      color.Color
+	CategoryArrow     color.Color
+	CategoryIndicator color.Color
+	TextPrimary       color.Color
+	XButtonNormal     color.Color
+	XButtonHover      color.Color
+	SessionCardBg     color.Color
 }{
+	// Backgrounds
 	ServerListBackground:   color.RGBA{R: 20, G: 20, B: 20, A: 255},
 	ChannelListBackground:  color.RGBA{R: 44, G: 44, B: 44, A: 255},
 	MessageAreaBackground:  color.RGBA{R: 28, G: 28, B: 28, A: 255},
@@ -38,24 +43,29 @@ var Colors = struct {
 	ServerDefaultBg:        color.RGBA{R: 60, G: 60, B: 60, A: 255},
 	ServerHoverBg:          color.RGBA{R: 80, G: 80, B: 80, A: 255},
 	ServerSelectedBg:       color.RGBA{R: 114, G: 137, B: 218, A: 255}, // "Blurple"
-	ServerNameBg:           color.RGBA{R: 30, G: 30, B: 30, A: 240},    // Dark semi-transparent
-	AvatarPlaceholder:      color.RGBA{R: 100, G: 100, B: 200, A: 255},
-	HashtagIcon:            color.RGBA{R: 180, G: 180, B: 180, A: 255},
-	CategoryText:           color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	CategoryArrow:          color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	CategoryIndicator:      color.RGBA{R: 140, G: 140, B: 140, A: 255}, // Grey for +/- icons
-	TextPrimary:            color.White,
+	TappableHoverBg:        color.RGBA{R: 70, G: 70, B: 70, A: 255},
+
+	// Elements
+	AvatarPlaceholder: color.RGBA{R: 100, G: 100, B: 200, A: 255},
+	HashtagIcon:       color.RGBA{R: 180, G: 180, B: 180, A: 255},
+	CategoryText:      color.RGBA{R: 150, G: 150, B: 150, A: 255},
+	CategoryArrow:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
+	CategoryIndicator: color.RGBA{R: 140, G: 140, B: 140, A: 255},
+	TextPrimary:       color.White,
+	XButtonNormal:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
+	XButtonHover:      color.RGBA{R: 255, G: 100, B: 100, A: 255},
+	SessionCardBg:     color.RGBA{R: 50, G: 50, B: 50, A: 255},
 }
 
 // Sizes defines standard sizes used throughout the application.
 var Sizes = struct {
-	// Sidebar sizes
+	// Sidebar
 	ServerSidebarWidth    float32
 	ChannelSidebarWidth   float32
 	ChannelSidebarPadding float32
 	ChannelLeftPadding    float32
 
-	// Server/Channel widget sizes
+	// Server/Channel widgets
 	ServerIconSize          float32
 	ServerItemHeight        float32
 	HashtagIconSize         float32
@@ -64,35 +74,38 @@ var Sizes = struct {
 	CategoryIndicatorSize   float32
 	CategoryIndicatorStroke float32
 
-	// Message area sizes
-	MessageAvatarSize             float32
-	MessageAvatarColumnWidth      float32
-	MessageAvatarTopPadding       float32
-	MessageContentPadding         float32
-	MessageImageMaxWidth          float32
-	MessageImageMaxHeight         float32
-	MessageVerticalPadding        float32
-	MessageHorizontalPadding      float32
-	MessageAttachmentSpacing      float32
-	MessageTextLeftPadding        float32 // Left padding for text/attachments to align with label internal padding
-	MessageUsernameContentSpacing float32
-	MessageUsernameTopPadding     float32
+	// Message area
+	MessageAvatarSize        float32
+	MessageAvatarColumnWidth float32
+	MessageContentPadding    float32
+	MessageImageMaxWidth     float32
+	MessageImageMaxHeight    float32
+	MessageVerticalPadding   float32
+	MessageHorizontalPadding float32
+	MessageAttachmentSpacing float32
+	MessageTextLeftPadding   float32
 
-	// Session/Login sizes
+	// Session/Login
 	SessionCardAvatarSize float32
-	AvatarSize            float32 // General avatar size (used elsewhere)
+	XButtonSize           float32
 
-	// Window sizes
+	// Window
 	WindowDefaultWidth  float32
 	WindowDefaultHeight float32
+
+	// Image viewer
+	ImageViewerMaxWidth  float32
+	ImageViewerMaxHeight float32
+	ImageViewerMinWidth  float32
+	ImageViewerMinHeight float32
 }{
-	// Sidebar sizes
+	// Sidebar
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
 	ChannelSidebarPadding: 6,
 	ChannelLeftPadding:    8,
 
-	// Server/Channel widget sizes
+	// Server/Channel widgets
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
 	HashtagIconSize:         20,
@@ -101,40 +114,30 @@ var Sizes = struct {
 	CategoryIndicatorSize:   14,
 	CategoryIndicatorStroke: 2,
 
-	// Message area sizes
-	MessageAvatarSize:             40,
-	MessageAvatarColumnWidth:      46, // Avatar size + minimal padding for the fixed left column
-	MessageAvatarTopPadding:       4,  // Top padding to align avatar with first line of text
-	MessageContentPadding:         0,  // Padding between avatar column and message content
-	MessageImageMaxWidth:          400,
-	MessageImageMaxHeight:         300,
-	MessageVerticalPadding:        4,  // Vertical padding inside message widget
-	MessageHorizontalPadding:      8,  // Horizontal padding inside message widget
-	MessageAttachmentSpacing:      4,  // Spacing between attachments
-	MessageTextLeftPadding:        4,  // Left padding for username/attachments to align with label
-	MessageUsernameContentSpacing: -8, // Negative to overlap label's internal top padding
-	MessageUsernameTopPadding:     2,  // Small top padding for username
+	// Message area
+	MessageAvatarSize:        40,
+	MessageAvatarColumnWidth: 46,
+	MessageContentPadding:    0,
+	MessageImageMaxWidth:     400,
+	MessageImageMaxHeight:    300,
+	MessageVerticalPadding:   4,
+	MessageHorizontalPadding: 8,
+	MessageAttachmentSpacing: 4,
+	MessageTextLeftPadding:   4,
 
-	// Session/Login sizes
+	// Session/Login
 	SessionCardAvatarSize: 32,
-	AvatarSize:            40,
+	XButtonSize:           24,
 
-	// Window sizes
+	// Window
 	WindowDefaultWidth:  1000,
 	WindowDefaultHeight: 600,
-}
 
-// Fonts defines font styles used throughout the application.
-var Fonts = struct {
-	// Message fonts
-	MessageUsernameBold bool
-	MessageUsernameSize float32
-	MessageContentSize  float32
-}{
-	// Message fonts
-	MessageUsernameBold: true,
-	MessageUsernameSize: 14,
-	MessageContentSize:  14,
+	// Image viewer
+	ImageViewerMaxWidth:  1200,
+	ImageViewerMaxHeight: 800,
+	ImageViewerMinWidth:  400,
+	ImageViewerMinHeight: 300,
 }
 
 // NoScrollTheme hides scrollbars for a cleaner look.

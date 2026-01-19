@@ -294,18 +294,23 @@ func calculateImageSize(width, height int) fyne.Size {
 func formatSystemMessage(session *api.Session, message *revoltgo.MessageSystem) string {
 	switch message.Type {
 	case revoltgo.MessageSystemUserAdded:
-		return "User added to group"
+		user := session.User(message.ID)
+		return fmt.Sprintf("%s added to group", user.Username)
 	case revoltgo.MessageSystemUserRemove:
-		return "User removed from group"
+		user := session.User(message.ID)
+		return fmt.Sprintf("%s removed from group", user.Username)
 	case revoltgo.MessageSystemUserJoined:
 		user := session.User(message.ID)
-		return fmt.Sprintf("%s joined server", user.Username)
+		return fmt.Sprintf("%s joined", user.Username)
 	case revoltgo.MessageSystemUserLeft:
-		return "User left server"
+		user := session.User(message.ID)
+		return fmt.Sprintf("%s left", user.Username)
 	case revoltgo.MessageSystemUserKicked:
-		return "User kicked"
+		user := session.User(message.ID)
+		return fmt.Sprintf("%s was kicked", user.Username)
 	case revoltgo.MessageSystemUserBanned:
-		return "User banned"
+		user := session.User(message.ID)
+		return fmt.Sprintf("%s banned", user.Username)
 	case revoltgo.MessageSystemChannelRenamed:
 		return "Channel renamed"
 	case revoltgo.MessageSystemChannelDescriptionChanged:

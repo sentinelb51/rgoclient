@@ -4,11 +4,13 @@ import (
 	"RGOClient/internal/api"
 	"fmt"
 	"image/color"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
@@ -62,7 +64,12 @@ func NewMessageWidget(
 	avatar := NewClickableAvatar(avatarID, avatarURL, "", onAvatarTapped)
 	avatarColumn := container.New(&centeredAvatarLayout{width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
 
-	contentWidget := buildMessageContent(username, content, attachments, onImageTapped)
+	var timestamp string
+	if t, err := session.Timestamp(message.ID); err == nil {
+		timestamp = formatMessageTimestamp(t)
+	}
+
+	contentWidget := buildMessageContent(username, timestamp, content, attachments, onImageTapped)
 	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
 	main := container.NewBorder(nil, nil, avatarColumn, nil, paddedContent)
@@ -184,14 +191,24 @@ func (l *centeredAvatarLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 
 // buildMessageContent creates the message content with username, text, and attachments.
 func buildMessageContent(
-	username, message string,
+	username, timestamp, message string,
 	attachments []MessageAttachment,
 	onImageTapped func(attachment MessageAttachment),
 ) fyne.CanvasObject {
 	text := createFormattedMessage(username, message)
 
+	tsText := canvas.NewText(timestamp, theme.Colors.TimestampText)
+	tsText.TextSize = theme.Sizes.MessageTimestampSize
+
+	// Overlay timestamp in top-right
+	timestampOverlay := container.NewVBox(
+		container.NewHBox(layout.NewSpacer(), tsText),
+	)
+
+	textWithTimestamp := container.NewStack(text, timestampOverlay)
+
 	if len(attachments) == 0 {
-		return text
+		return textWithTimestamp
 	}
 
 	images := container.NewVBox()
@@ -219,7 +236,7 @@ func buildMessageContent(
 		images.Add(paddedImg)
 	}
 
-	return container.NewVBox(text, images)
+	return container.NewVBox(textWithTimestamp, images)
 }
 
 // createFormattedMessage creates a RichText widget with bold username and formatted content.
@@ -228,6 +245,40 @@ func createFormattedMessage(username, message string) *widget.RichText {
 	rt := widget.NewRichTextFromMarkdown(content)
 	rt.Wrapping = fyne.TextWrapWord
 	return rt
+}
+
+// formatMessageTimestamp formats time relative to now.
+func formatMessageTimestamp(t time.Time) string {
+	t = t.Local()
+	now := time.Now()
+
+	// Normalize to start of day for accurate day calculation
+	tDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	days := int(nowDate.Sub(tDate).Hours() / 24)
+
+	// Same day (Today)
+	if days == 0 {
+		return fmt.Sprintf("Today, %s", t.Format("3:04 PM"))
+	}
+
+	// Previous day (Yesterday)
+	if days == 1 {
+		return fmt.Sprintf("Yesterday, %s", t.Format("3:04 PM"))
+	}
+
+	if days < 30 {
+		return fmt.Sprintf("%d days ago, %s", days, t.Format("3:04 PM"))
+	}
+
+	if days < 365 {
+		months := days / 30
+		return fmt.Sprintf("%d month(s) ago", months)
+	}
+
+	years := days / 365
+	return fmt.Sprintf("%d year(s) ago", years)
 }
 
 // newWidthSpacer creates a transparent spacer with the given width.

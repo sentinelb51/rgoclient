@@ -1,8 +1,6 @@
 package app
 
 import (
-	"time"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
@@ -12,7 +10,7 @@ import (
 )
 
 // Message rendering batch size for responsive UI.
-const messageBatchSize = 10
+const messageBatchSize = 100
 
 // SelectServer handles server selection and updates the UI.
 func (app *ChatApp) SelectServer(serverID string) {
@@ -68,7 +66,7 @@ func (app *ChatApp) showLoadingMessages() {
 	app.messageListContainer.Objects = nil
 
 	label := widget.NewLabelWithStyle("Loading messages...", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	label.Importance = widget.HighImportance
+	label.Importance = widget.MediumImportance
 
 	app.messageListContainer.Add(container.NewCenter(label))
 	app.messageListContainer.Refresh()
@@ -81,7 +79,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 			return
 		}
 
-		msgs, err := app.Session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
+		messages, err := app.Session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 			IncludeUsers: true,
 			Limit:        100,
 		})
@@ -95,24 +93,14 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 			return
 		}
 
-		// Reverse to oldest-first order
-		reverseMessages(msgs.Messages)
-
-		app.Messages.Set(channelID, msgs.Messages)
+		app.Messages.Set(channelID, messages.Messages)
 
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
 			if app.CurrentChannelID == channelID {
-				app.displayMessages(msgs.Messages)
+				app.displayMessages(messages.Messages)
 			}
 		}, true)
 	}()
-}
-
-// reverseMessages reverses the slice in place.
-func reverseMessages(msgs []*revoltgo.Message) {
-	for i, j := 0, len(msgs)-1; i < j; i, j = i+1, j-1 {
-		msgs[i], msgs[j] = msgs[j], msgs[i]
-	}
 }
 
 // showErrorMessage displays an error in the message area.
@@ -132,19 +120,20 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 	channelID := app.CurrentChannelID
 
 	go func() {
-		for i := 0; i < len(messages); i += messageBatchSize {
-			end := i + messageBatchSize
-			if end > len(messages) {
-				end = len(messages)
+		for i := len(messages); i > 0; i -= messageBatchSize {
+			start := i - messageBatchSize
+			if start < 0 {
+				start = 0
 			}
-			batch := messages[i:end]
+			batch := messages[start:i]
 
 			fyne.CurrentApp().Driver().DoFromGoroutine(func() {
 				if app.CurrentChannelID != channelID {
 					return
 				}
 
-				for _, msg := range batch {
+				for j := len(batch) - 1; j >= 0; j-- {
+					msg := batch[j]
 					w := widgets.NewMessageWidget(msg, app.Session,
 						nil,
 						func(att widgets.MessageAttachment) {
@@ -155,8 +144,6 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 				}
 				app.messageListContainer.Refresh()
 			}, true)
-
-			time.Sleep(5 * time.Millisecond)
 		}
 
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() {

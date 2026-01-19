@@ -30,7 +30,7 @@ func (cache *MessageCache) Get(channelID string) []*revoltgo.Message {
 }
 
 // Set stores messages for a channel (replaces existing).
-func (cache *MessageCache) Set(channelID string, messages []*revoltgo.Message) {
+func (cache *MessageCache) Set(cID string, messages []*revoltgo.Message) {
 	cache.mutex.Lock()
 	defer cache.mutex.Unlock()
 
@@ -38,7 +38,7 @@ func (cache *MessageCache) Set(channelID string, messages []*revoltgo.Message) {
 	if len(messages) > cache.limit {
 		messages = messages[len(messages)-cache.limit:]
 	}
-	cache.messages[channelID] = messages
+	cache.messages[cID] = messages
 }
 
 // Append adds a new message to a channel's cache.

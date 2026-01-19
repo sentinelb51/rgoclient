@@ -86,6 +86,7 @@ var Sizes = struct {
 	MessageHorizontalPadding float32
 	MessageAttachmentSpacing float32
 	MessageTextLeftPadding   float32
+	MessageTimestampSize     float32
 
 	// Session/Login
 	SessionCardAvatarSize float32
@@ -126,6 +127,7 @@ var Sizes = struct {
 	MessageHorizontalPadding: 8,
 	MessageAttachmentSpacing: 4,
 	MessageTextLeftPadding:   4,
+	MessageTimestampSize:     12,
 
 	// Session/Login
 	SessionCardAvatarSize: 32,

@@ -321,8 +321,8 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 		return
 	}
 
-	w := widgets.NewMessageWidget(msg, app.Session, nil, func(att widgets.MessageAttachment) {
-		app.showImageViewer(att)
+	w := widgets.NewMessageWidget(msg, app.Session, nil, func(attachment widgets.MessageAttachment) {
+		app.showImageViewer(attachment)
 	})
 	app.messageListContainer.Add(w)
 	app.messageListContainer.Refresh()

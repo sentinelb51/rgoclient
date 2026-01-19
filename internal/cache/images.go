@@ -256,6 +256,7 @@ func (cache *ImageCache) LoadImageToContainer(imageID, url string, size fyne.Siz
 		} else {
 			target.Objects = []fyne.CanvasObject{img}
 		}
+
 		target.Refresh()
 	})
 }

@@ -245,15 +245,15 @@ func (app *ChatApp) updateChannelHeader(name string) {
 	}
 }
 
-// showImageViewer displays an image attachment in a popup window.
-func (app *ChatApp) showImageViewer(att widgets.MessageAttachment) {
+// showImageViewerAttachment displays an image attachment in a popup window.
+func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
 	window := app.fyneApp.NewWindow("Image Viewer")
 
 	// Calculate constrained window size using theme sizes
 	maxW := theme.Sizes.ImageViewerMaxWidth
 	maxH := theme.Sizes.ImageViewerMaxHeight
-	w := float32(att.Width)
-	h := float32(att.Height)
+	w := float32(att.Metadata.Width)
+	h := float32(att.Metadata.Height)
 
 	if w > maxW {
 		h = h * (maxW / w)
@@ -276,8 +276,9 @@ func (app *ChatApp) showImageViewer(att widgets.MessageAttachment) {
 	placeholder.SetMinSize(size)
 	imgContainer := container.NewGridWrap(size, placeholder)
 
-	if att.URL != "" && att.ID != "" {
-		cache.GetImageCache().LoadImageToContainer(att.ID, att.URL, size, imgContainer, false, nil)
+	url := att.URL("")
+	if url != "" && att.ID != "" {
+		cache.GetImageCache().LoadImageToContainer(att.ID, url, size, imgContainer, false, nil)
 	}
 
 	content := container.NewCenter(imgContainer)
@@ -321,8 +322,8 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 		return
 	}
 
-	w := widgets.NewMessageWidget(msg, app.Session, nil, func(attachment widgets.MessageAttachment) {
-		app.showImageViewer(attachment)
+	w := widgets.NewMessageWidget(msg, app.Session, nil, func(attachment *revoltgo.Attachment) {
+		app.showImageViewerAttachment(attachment)
 	})
 	app.messageListContainer.Add(w)
 	app.messageListContainer.Refresh()

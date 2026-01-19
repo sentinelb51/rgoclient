@@ -66,7 +66,6 @@ func (app *ChatApp) showLoadingMessages() {
 	app.messageListContainer.Objects = nil
 
 	label := widget.NewLabelWithStyle("Loading messages...", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	label.Importance = widget.MediumImportance
 
 	app.messageListContainer.Add(container.NewCenter(label))
 	app.messageListContainer.Refresh()
@@ -85,7 +84,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 		})
 
 		if err != nil {
-			fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+			app.GoDo(func() {
 				if app.CurrentChannelID == channelID {
 					app.showErrorMessage("Failed to load messages")
 				}
@@ -95,7 +94,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 
 		app.Messages.Set(channelID, messages.Messages)
 
-		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+		app.GoDo(func() {
 			if app.CurrentChannelID == channelID {
 				app.displayMessages(messages.Messages)
 			}
@@ -127,7 +126,7 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 			}
 			batch := messages[start:i]
 
-			fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+			app.GoDo(func() {
 				if app.CurrentChannelID != channelID {
 					return
 				}
@@ -136,8 +135,8 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 					msg := batch[j]
 					w := widgets.NewMessageWidget(msg, app.Session,
 						nil,
-						func(att widgets.MessageAttachment) {
-							app.showImageViewer(att)
+						func(att *revoltgo.Attachment) {
+							app.showImageViewerAttachment(att)
 						},
 					)
 					app.messageListContainer.Add(w)
@@ -146,7 +145,7 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 			}, true)
 		}
 
-		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+		app.GoDo(func() {
 			if app.CurrentChannelID == channelID {
 				app.scrollToBottom()
 			}

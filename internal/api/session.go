@@ -62,10 +62,15 @@ func (session *Session) User(id string) *revoltgo.User {
 		return nil
 	}
 
-	user := session.State.User(id)
+	var (
+		user = session.State.User(id)
+		err  error
+	)
+
 	if user == nil {
-		if fetched, err := session.Session.User(id); err == nil {
-			user = fetched
+		user, err = session.Session.User(id)
+		if err != nil {
+			fmt.Printf("Fetching invalid user %s: %v\n", id, err)
 		}
 	}
 

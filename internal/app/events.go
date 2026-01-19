@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"log"
 
-	"fyne.io/fyne/v2"
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/api"
@@ -78,7 +77,7 @@ func (app *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
 			app.Session = nil
 		}
 
-		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+		app.GoDo(func() {
 			app.ShowLoginWindow()
 		}, true)
 	}
@@ -107,7 +106,7 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 		app.ClearPendingSessionToken()
 	}
 
-	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+	app.GoDo(func() {
 		// Store server IDs
 		app.ServerIDs = make([]string, 0, len(event.Servers))
 		for _, server := range event.Servers {
@@ -148,7 +147,7 @@ func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage)
 		return
 	}
 
-	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+	app.GoDo(func() {
 		app.AddMessage(msg)
 	}, true)
 }

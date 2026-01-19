@@ -75,7 +75,7 @@ func (app *ChatApp) loginWithSavedSession(session api.SavedSession) {
 	go func() {
 		err := app.StartRevoltSessionWithToken(session.Token)
 
-		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+		app.GoDo(func() {
 			if err != nil {
 				fmt.Printf("Login failed: %v\n", err)
 				_ = api.RemoveSession(session.UserID)
@@ -112,7 +112,7 @@ func (app *ChatApp) buildLoginFormSection() fyne.CanvasObject {
 		go func() {
 			token, err := app.StartRevoltSessionWithLogin(email, password)
 
-			fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+			app.GoDo(func() {
 				if err != nil {
 					loginButton.Enable()
 					loginButton.SetText("Login")

@@ -86,7 +86,7 @@ All widgets implement fyne.Widget + fyne.Tappable + desktop.Hoverable where appl
 - Use `app` for ChatApp receiver
 - Interface assertions at top of file: `var _ fyne.Widget = (*WidgetName)(nil)`
 - Colors/Sizes in theme.go, not hardcoded
-- Background goroutines use `fyne.CurrentApp().Driver().DoFromGoroutine()` for UI updates
+- Background goroutines use `app.GoDo()` for UI updates
 
 ## Update Requirements
 

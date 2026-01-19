@@ -68,6 +68,10 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 	}
 }
 
+func (app *ChatApp) GoDo(fn func(), waitForSync bool) {
+	fyne.CurrentApp().Driver().DoFromGoroutine(fn, waitForSync)
+}
+
 // Window returns the main application window.
 func (app *ChatApp) Window() fyne.Window {
 	return app.window

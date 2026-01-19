@@ -8,6 +8,7 @@ import (
 	"RGOClient/internal/api"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/ui/widgets"
 
 	"fyne.io/fyne/v2/widget"
 )
@@ -45,6 +46,7 @@ type ChatApp struct {
 	channelListContainer *fyne.Container
 	messageListContainer *fyne.Container
 	messageScroll        *container.Scroll
+	messageInput         *widgets.MessageInput
 
 	// UI labels
 	channelHeaderLabel *widget.Label
@@ -56,7 +58,7 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 	window := fyneApp.NewWindow(name)
 	window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 
-	return &ChatApp{
+	app := &ChatApp{
 		fyneApp:              fyneApp,
 		window:               window,
 		messageListContainer: container.NewVBox(),
@@ -66,6 +68,19 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 		Messages:             cache.NewMessageCache(defaultMessageCacheSize),
 		collapsedCategories:  make(map[string]bool),
 	}
+
+	window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
+		if app.messageInput != nil {
+			for _, u := range uris {
+				// Most local files have file:// scheme
+				if u.Scheme() == "file" {
+					app.messageInput.AddAttachment(u.Path())
+				}
+			}
+		}
+	})
+
+	return app
 }
 
 func (app *ChatApp) GoDo(fn func(), waitForSync bool) {
@@ -125,4 +140,53 @@ func (app *ChatApp) GetPendingSessionToken() string {
 // ClearPendingSessionToken clears the pending session token.
 func (app *ChatApp) ClearPendingSessionToken() {
 	app.pendingSessionToken = ""
+}
+
+// SelectServer handles server selection and updates the UI.
+func (app *ChatApp) SelectServer(serverID string) {
+	app.CurrentServerID = serverID
+	server := app.CurrentServer()
+	if server == nil {
+		return
+	}
+
+	app.updateServerSelectionUI(serverID)
+	app.updateServerHeader(server.Name)
+
+	if len(server.Channels) > 0 {
+		app.SelectChannel(server.Channels[0])
+	} else {
+		app.clearChannelSelection()
+	}
+
+	app.RefreshChannelList()
+}
+
+// SelectChannel handles channel selection and updates the UI.
+func (app *ChatApp) SelectChannel(channelID string) {
+	if app.CurrentChannelID == channelID {
+		return
+	}
+
+	app.CurrentChannelID = channelID
+	if ch := app.CurrentChannel(); ch != nil {
+		app.updateChannelHeader(ch.Name)
+	}
+	app.updateChannelSelectionUI(channelID)
+
+	// Display cached messages immediately if available
+	if cached := app.Messages.Get(channelID); len(cached) > 0 {
+		app.displayMessages(cached)
+		return
+	}
+
+	app.showLoadingMessages()
+	app.loadChannelMessages(channelID)
+}
+
+// clearChannelSelection clears the current channel and updates the UI.
+func (app *ChatApp) clearChannelSelection() {
+	app.CurrentChannelID = ""
+	app.refreshMessageList()
+	app.updateChannelHeader("")
 }

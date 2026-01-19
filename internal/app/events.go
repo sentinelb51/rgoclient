@@ -134,20 +134,13 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 
 // onMessage handles incoming messages from the websocket.
 func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
-	msg := &revoltgo.Message{
-		ID:      event.ID,
-		Channel: event.Channel,
-		Author:  event.Author,
-		Content: event.Content,
-	}
+	app.Messages.Append(event.Channel, &event.Message)
 
-	app.Messages.Append(event.Channel, msg)
-
-	if app.CurrentChannelID == "" || event.Channel != app.CurrentChannelID {
+	if event.Channel != app.CurrentChannelID {
 		return
 	}
 
 	app.GoDo(func() {
-		app.AddMessage(msg)
+		app.AddMessage(&event.Message)
 	}, true)
 }

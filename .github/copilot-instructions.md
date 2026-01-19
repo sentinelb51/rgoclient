@@ -19,6 +19,10 @@ Delete any word not required to identify the action.
 
 Fyne-based Revolt chat client (Discord-like). Uses `github.com/sentinelb51/revoltgo` for API/websocket.
 
+## Quirks
+Always use `app.GoDo()` for background UI updates if ChatApp is in scope
+Always use fmt.Sprintf() over "+" for string concatenation
+
 ## Project Structure
 
 ```
@@ -28,11 +32,11 @@ internal/
     auth.go               - Session persistence (JSON file storage)
     session.go            - API session wrapper with state caching
   app/
-    app.go                - ChatApp struct, initialization, lifecycle
+    app.go                - ChatApp struct, state logic (SelectServer/Channel)
     events.go             - WebSocket event handlers (Ready, Message, Error)
     login.go              - Login UI and saved session management
-    messages.go           - Message selection, loading, display logic
-    ui.go                 - UI building (server/channel/message areas)
+    messages.go           - Message loading, display, submission logic
+    ui.go                 - UI layout building (server/channel lists)
   cache/
     images.go             - Image cache (memory + disk persistence)
     messages.go           - In-memory message cache per channel

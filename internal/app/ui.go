@@ -1,16 +1,13 @@
 package app
 
 import (
-	"fmt"
 	"image/color"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
 )
@@ -183,11 +180,12 @@ func (app *ChatApp) buildMessageBox() fyne.CanvasObject {
 	app.refreshMessageList()
 
 	input := widgets.NewMessageInput()
+	app.messageInput = input
 	input.SetPlaceHolder("Send a message...")
 	input.OnSubmit = func(text string) {
 		app.handleMessageSubmit(text, input)
 	}
-	inputContainer := container.NewPadded(input)
+	inputContainer := container.NewPadded(container.NewVBox(input.AttachmentContainer, input))
 
 	channelName := "channel"
 	if ch := app.CurrentChannel(); ch != nil {
@@ -243,89 +241,4 @@ func (app *ChatApp) updateChannelHeader(name string) {
 	if app.channelHeaderLabel != nil {
 		app.channelHeaderLabel.SetText(name)
 	}
-}
-
-// showImageViewerAttachment displays an image attachment in a popup window.
-func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
-	window := app.fyneApp.NewWindow("Image Viewer")
-
-	// Calculate constrained window size using theme sizes
-	maxW := theme.Sizes.ImageViewerMaxWidth
-	maxH := theme.Sizes.ImageViewerMaxHeight
-	w := float32(att.Metadata.Width)
-	h := float32(att.Metadata.Height)
-
-	if w > maxW {
-		h = h * (maxW / w)
-		w = maxW
-	}
-	if h > maxH {
-		w = w * (maxH / h)
-		h = maxH
-	}
-	if w < theme.Sizes.ImageViewerMinWidth {
-		w = theme.Sizes.ImageViewerMinWidth
-	}
-	if h < theme.Sizes.ImageViewerMinHeight {
-		h = theme.Sizes.ImageViewerMinHeight
-	}
-
-	size := fyne.NewSize(w, h)
-
-	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-	placeholder.SetMinSize(size)
-	imgContainer := container.NewGridWrap(size, placeholder)
-
-	url := att.URL("")
-	if url != "" && att.ID != "" {
-		cache.GetImageCache().LoadImageToContainer(att.ID, url, size, imgContainer, false, nil)
-	}
-
-	content := container.NewCenter(imgContainer)
-	window.SetContent(content)
-	window.Resize(fyne.NewSize(w+40, h+40))
-	window.CenterOnScreen()
-	window.Show()
-}
-
-// handleMessageSubmit processes a submitted message from the input field.
-func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput) {
-	if text == "" || app.CurrentChannelID == "" || app.Session == nil {
-		return
-	}
-
-	if _, err := app.Session.SendMessage(app.CurrentChannelID, text); err != nil {
-		fmt.Printf("Failed to send message: %v\n", err)
-		return
-	}
-
-	input.SetText("")
-}
-
-// refreshMessageList rebuilds the message list UI.
-func (app *ChatApp) refreshMessageList() {
-	app.messageListContainer.Objects = nil
-	app.messageListContainer.Refresh()
-	app.scrollToBottom()
-}
-
-// scrollToBottom scrolls the message area to the bottom.
-func (app *ChatApp) scrollToBottom() {
-	if app.messageScroll != nil {
-		app.messageScroll.ScrollToBottom()
-	}
-}
-
-// AddMessage adds a new message to the current channel.
-func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
-	if app.CurrentChannelID == "" {
-		return
-	}
-
-	w := widgets.NewMessageWidget(msg, app.Session, nil, func(attachment *revoltgo.Attachment) {
-		app.showImageViewerAttachment(attachment)
-	})
-	app.messageListContainer.Add(w)
-	app.messageListContainer.Refresh()
-	app.scrollToBottom()
 }

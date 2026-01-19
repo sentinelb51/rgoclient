@@ -90,7 +90,7 @@ var Sizes = struct {
 
 	// Session/Login
 	SessionCardAvatarSize float32
-	XButtonSize           float32
+	XButtonSize           float32 // todo: remove?
 
 	// Window
 	WindowDefaultWidth  float32

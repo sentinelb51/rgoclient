@@ -8,7 +8,6 @@ import (
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/api"
-	"RGOClient/internal/ui/widgets"
 )
 
 // StartRevoltSessionWithToken initializes the session using an existing token.
@@ -149,16 +148,7 @@ func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage)
 		return
 	}
 
-	username := event.Author
-	avatarID := ""
-	avatarURL := ""
-
-	if author := app.Session.User(event.Author); author != nil {
-		username = author.Username
-		avatarID, avatarURL = widgets.GetAvatarInfo(author)
-	}
-
 	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-		app.AddMessageWithAvatar(username, event.Content, avatarID, avatarURL)
+		app.AddMessage(msg)
 	}, true)
 }

@@ -2,7 +2,9 @@ package api
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/sentinelb51/revoltgo"
 )
 
@@ -15,6 +17,16 @@ type Session struct {
 // NewSession creates a new Session wrapper around a revoltgo.Session.
 func NewSession(session *revoltgo.Session) *Session {
 	return &Session{Session: session}
+}
+
+func (session *Session) Timestamp(id string) (time.Time, error) {
+	value, err := ulid.Parse(id)
+
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return value.Timestamp(), nil
 }
 
 // Server returns a server by ID, checking state cache first, then API.

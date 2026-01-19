@@ -8,6 +8,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
@@ -315,17 +316,14 @@ func (app *ChatApp) scrollToBottom() {
 }
 
 // AddMessage adds a new message to the current channel.
-func (app *ChatApp) AddMessage(username, text string) {
-	app.AddMessageWithAvatar(username, text, "", "")
-}
-
-// AddMessageWithAvatar adds a new message with avatar to the current channel.
-func (app *ChatApp) AddMessageWithAvatar(username, text, avatarID, avatarURL string) {
+func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 	if app.CurrentChannelID == "" {
 		return
 	}
 
-	w := widgets.NewMessageWidget(username, text, avatarID, avatarURL, nil, nil, nil)
+	w := widgets.NewMessageWidget(msg, app.Session, nil, func(att widgets.MessageAttachment) {
+		app.showImageViewer(att)
+	})
 	app.messageListContainer.Add(w)
 	app.messageListContainer.Refresh()
 	app.scrollToBottom()

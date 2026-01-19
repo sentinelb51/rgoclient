@@ -29,6 +29,7 @@ var Colors = struct {
 	CategoryArrow     color.Color
 	CategoryIndicator color.Color
 	TextPrimary       color.Color
+	TimestampText     color.Color
 	XButtonNormal     color.Color
 	XButtonHover      color.Color
 	SessionCardBg     color.Color
@@ -52,6 +53,7 @@ var Colors = struct {
 	CategoryArrow:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
 	CategoryIndicator: color.RGBA{R: 140, G: 140, B: 140, A: 255},
 	TextPrimary:       color.White,
+	TimestampText:     color.RGBA{R: 120, G: 120, B: 120, A: 255},
 	XButtonNormal:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
 	XButtonHover:      color.RGBA{R: 255, G: 100, B: 100, A: 255},
 	SessionCardBg:     color.RGBA{R: 50, G: 50, B: 50, A: 255},

@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"RGOClient/internal/api"
 	"fmt"
 	"image/color"
 
@@ -9,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
@@ -36,18 +38,32 @@ type MessageAttachment struct {
 // NewMessageWidget creates a message widget with author, content, and optional attachments.
 // onAvatarTapped is called when the avatar is clicked.
 // onImageTapped is called when an attachment image is clicked.
-// todo: use revoltgo.Message
+// NewMessageWidget creates a message widget with author, content, and optional attachments.
+// onAvatarTapped is called when the avatar is clicked.
+// onImageTapped is called when an attachment image is clicked.
 func NewMessageWidget(
-	username, message, avatarID, avatarURL string,
-	attachments []MessageAttachment,
+	message *revoltgo.Message,
+	session *api.Session,
 	onAvatarTapped func(),
 	onImageTapped func(attachment MessageAttachment),
 ) *MessageWidget {
+	// Extract message author info
+	username, avatarID, avatarURL := extractAuthorInfo(message, session)
+
+	// Extract attachments
+	attachments := extractMessageAttachments(message)
+
+	// Determine content text
+	content := message.Content
+	if message.System != nil {
+		content = formatSystemMessage(message.System)
+	}
+
 	avatar := NewClickableAvatar(avatarID, avatarURL, "", onAvatarTapped)
 	avatarColumn := container.New(&centeredAvatarLayout{width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
 
-	content := buildMessageContent(username, message, attachments, onImageTapped)
-	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, content)
+	contentWidget := buildMessageContent(username, content, attachments, onImageTapped)
+	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
 	main := container.NewBorder(nil, nil, avatarColumn, nil, paddedContent)
 
@@ -65,6 +81,57 @@ func NewMessageWidget(
 	}
 	w.ExtendBaseWidget(w)
 	return w
+}
+
+// extractMessageAttachments extracts image attachments from message.
+func extractMessageAttachments(msg *revoltgo.Message) []MessageAttachment {
+	if msg.Attachments == nil {
+		return nil
+	}
+
+	var result []MessageAttachment
+	for _, att := range msg.Attachments {
+		if att == nil || att.Metadata == nil {
+			continue
+		}
+		if att.Metadata.Type == revoltgo.AttachmentMetadataTypeImage {
+			result = append(result, MessageAttachment{
+				ID:     att.ID,
+				URL:    att.URL(""),
+				Width:  att.Metadata.Width,
+				Height: att.Metadata.Height,
+			})
+		}
+	}
+	return result
+}
+
+// extractAuthorInfo extracts username and avatar info from message.
+func extractAuthorInfo(msg *revoltgo.Message, session *api.Session) (username, avatarID, avatarURL string) {
+	// Webhook message
+	if msg.Webhook != nil {
+		username = msg.Webhook.Name
+		if msg.Webhook.Avatar != nil {
+			avatarURL = *msg.Webhook.Avatar
+		}
+		return
+	}
+
+	// System message
+	if msg.System != nil {
+		username = "System"
+		return
+	}
+
+	// Regular user message
+	username = msg.Author
+	if session != nil {
+		if author := session.User(msg.Author); author != nil {
+			username = author.Username
+			avatarID, avatarURL = GetAvatarInfo(author)
+		}
+	}
+	return
 }
 
 // CreateRenderer returns the widget renderer.
@@ -199,4 +266,40 @@ func calculateImageSize(width, height int) fyne.Size {
 	}
 
 	return fyne.NewSize(w, h)
+}
+
+// formatSystemMessage converts system message to readable text.
+func formatSystemMessage(sys *revoltgo.MessageSystem) string {
+	switch sys.Type {
+	case revoltgo.MessageSystemUserAdded:
+		return "User added to group"
+	case revoltgo.MessageSystemUserRemove:
+		return "User removed from group"
+	case revoltgo.MessageSystemUserJoined:
+		return "User joined server"
+	case revoltgo.MessageSystemUserLeft:
+		return "User left server"
+	case revoltgo.MessageSystemUserKicked:
+		return "User kicked"
+	case revoltgo.MessageSystemUserBanned:
+		return "User banned"
+	case revoltgo.MessageSystemChannelRenamed:
+		return "Channel renamed"
+	case revoltgo.MessageSystemChannelDescriptionChanged:
+		return "Channel description changed"
+	case revoltgo.MessageSystemChannelIconChanged:
+		return "Channel icon changed"
+	case revoltgo.MessageSystemChannelOwnershipChanged:
+		return "Channel ownership changed"
+	case revoltgo.MessageSystemMessagePinned:
+		return "Message pinned"
+	case revoltgo.MessageSystemMessageUnpinned:
+		return "Message unpinned"
+	case revoltgo.MessageSystemCallStarted:
+		return "Call started"
+	case revoltgo.MessageSystemText:
+		return "System message"
+	default:
+		return "System event"
+	}
 }

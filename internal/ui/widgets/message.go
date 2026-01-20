@@ -47,29 +47,11 @@ func NewMessageWidget(
 		return nil
 	}
 
-	author := session.State.User(message.Author)
-	if author == nil {
-		author = &revoltgo.User{ID: message.Author, Username: message.Author}
-	}
-
-	var displayName, displayAvatarURL, displayAvatarID string
-
-	if author.Avatar != nil {
-		displayAvatarID = author.Avatar.ID
-		displayAvatarURL = author.Avatar.URL("64")
-	}
-
-	// Determine username and avatar
-	if message.Webhook != nil {
-		displayName = message.Webhook.Name
-		if message.Webhook.Avatar != nil {
-			displayName = *message.Webhook.Avatar
-		}
-	} else if message.System != nil {
-		displayName = "System"
-	} else {
-		displayName = author.Username
-	}
+	var (
+		displayName      = util.DisplayName(session, message)
+		displayAvatarURL = util.DisplayAvatarURL(session, message)
+		displayAvatarID  = util.IDFromAttachmentURL(displayAvatarURL)
+	)
 
 	// Determine content text
 	content := message.Content
@@ -84,9 +66,9 @@ func NewMessageWidget(
 	}
 
 	// Build avatar column
-	avatar := NewClickableAvatar(displayAvatarID, displayAvatarURL, author.ID, func() {
+	avatar := NewClickableAvatar(displayAvatarID, displayAvatarURL, message.Author, func() {
 		if actions != nil {
-			actions.OnAvatarTapped(author.ID)
+			actions.OnAvatarTapped(message.Author)
 		}
 	})
 	avatarColumn := container.New(&centeredAvatarLayout{width: theme.Sizes.MessageAvatarColumnWidth}, avatar)

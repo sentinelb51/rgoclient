@@ -9,7 +9,7 @@ Output format:
 - No articles, no pronouns, no conjunctions
 
 If unable to shorten, split into multiple bullets.
-Before responding, compress each sentence to its minimal semantic form.
+Before responding, compress each sentence to its minimal form.
 Delete any word not required to identify the action.
 
 ---
@@ -57,6 +57,8 @@ internal/
       server.go           - Server icon widget
       tappable.go         - TappableContainer wrapper
       xbutton.go          - X button for removing items
+    animations/
+      pulsing_text.go     - PulsingText and BigText helpers
   utils/
     timestamp.go          - Timestamp(); extract time from ULID
     

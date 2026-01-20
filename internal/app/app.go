@@ -65,7 +65,7 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 	app := &ChatApp{
 		fyneApp:              fyneApp,
 		window:               window,
-		messageListContainer: container.NewVBox(),
+		messageListContainer: widgets.NewVerticalNoSpacingContainer(),
 		serverListContainer:  container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelListContainer: container.NewVBox(),
 		ServerIDs:            make([]string, 0),
@@ -123,6 +123,21 @@ func (app *ChatApp) OnAvatarTapped(userID string) {
 // OnImageTapped handles image tap events to implement MessageActions.
 func (app *ChatApp) OnImageTapped(attachment *revoltgo.Attachment) {
 	app.showImageViewerAttachment(attachment)
+}
+
+// OnReply handles reply action.
+func (app *ChatApp) OnReply(messageID string) {
+	fmt.Printf("Reply to: %s\n", messageID)
+}
+
+// OnDelete handles delete action.
+func (app *ChatApp) OnDelete(messageID string) {
+	fmt.Printf("Delete message: %s\n", messageID)
+}
+
+// OnEdit handles edit action.
+func (app *ChatApp) OnEdit(messageID string) {
+	fmt.Printf("Edit message: %s\n", messageID)
 }
 
 // Run starts the application main loop.

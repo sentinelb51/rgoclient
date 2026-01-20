@@ -23,17 +23,20 @@ var Colors = struct {
 	TappableHoverBg        color.Color
 
 	// Elements
-	AvatarPlaceholder color.Color
-	HashtagIcon       color.Color
-	CategoryText      color.Color
-	CategoryArrow     color.Color
-	CategoryIndicator color.Color
-	TextPrimary       color.Color
-	TimestampText     color.Color
-	XButtonNormal     color.Color
-	XButtonHover      color.Color
-	SessionCardBg     color.Color
-	UnreadIndicator   color.Color
+	AvatarPlaceholder  color.Color
+	HashtagIcon        color.Color
+	CategoryText       color.Color
+	CategoryArrow      color.Color
+	CategoryIndicator  color.Color
+	TextPrimary        color.Color
+	TimestampText      color.Color
+	XButtonNormal      color.Color
+	XButtonHover       color.Color
+	SessionCardBg      color.Color
+	UnreadIndicator    color.Color
+	SwiftActionBg      color.Color
+	SwiftActionHoverBg color.Color
+	SwiftActionText    color.Color
 }{
 	// Backgrounds
 	ServerListBackground:   color.RGBA{R: 20, G: 20, B: 20, A: 255},
@@ -46,6 +49,9 @@ var Colors = struct {
 	ServerHoverBg:          color.RGBA{R: 80, G: 80, B: 80, A: 255},
 	ServerSelectedBg:       color.RGBA{R: 114, G: 137, B: 218, A: 255}, // "Blurple"
 	TappableHoverBg:        color.RGBA{R: 70, G: 70, B: 70, A: 255},
+	SwiftActionBg:          color.RGBA{R: 50, G: 50, B: 50, A: 255},
+	SwiftActionHoverBg:     color.RGBA{R: 80, G: 80, B: 80, A: 255},
+	SwiftActionText:        color.RGBA{R: 200, G: 200, B: 200, A: 255},
 
 	// Elements
 	AvatarPlaceholder: color.RGBA{R: 100, G: 100, B: 200, A: 255},
@@ -93,6 +99,9 @@ var Sizes = struct {
 	MessageTimestampSize      float32
 	MessageTimestampTopOffset float32
 
+	// Swift Actions
+	SwiftActionSize float32
+
 	// Session/Login
 	SessionCardAvatarSize float32
 	XButtonSize           float32 // todo: remove?
@@ -136,6 +145,9 @@ var Sizes = struct {
 	MessageTextLeftPadding:    4,
 	MessageTimestampSize:      12,
 	MessageTimestampTopOffset: 4,
+
+	// Swift Actions
+	SwiftActionSize: 32,
 
 	// Session/Login
 	SessionCardAvatarSize: 32,

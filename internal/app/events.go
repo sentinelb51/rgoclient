@@ -153,11 +153,6 @@ func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage)
 	msg := event.Message
 	app.Messages.Append(event.Channel, &msg)
 
-	// Debug message caching
-	if count := len(app.Messages.Get(event.Channel)); count > 0 {
-		fmt.Printf("DEBUG: Cached messages for channel %s: %d (Last: %s)\n", event.Channel, count, msg.Content)
-	}
-
 	app.GoDo(func() {
 		if event.Channel != app.CurrentChannelID {
 			app.UnreadChannels[event.Channel] = true

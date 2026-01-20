@@ -1,11 +1,11 @@
 package app
 
 import (
+	"fmt"
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/api"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
@@ -25,7 +25,7 @@ type ChatApp struct {
 	window  fyne.Window
 
 	// Session is the active API session.
-	Session *api.Session
+	Session *revoltgo.Session
 
 	// Server/Channel state
 	ServerIDs        []string
@@ -37,6 +37,9 @@ type ChatApp struct {
 
 	// Category collapsed state: "serverID:categoryID" → collapsed
 	collapsedCategories map[string]bool
+
+	// Unread state: channelID → true if unread
+	UnreadChannels map[string]bool
 
 	// Pending token to save after Ready event
 	pendingSessionToken string
@@ -67,6 +70,7 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 		ServerIDs:            make([]string, 0),
 		Messages:             cache.NewMessageCache(defaultMessageCacheSize),
 		collapsedCategories:  make(map[string]bool),
+		UnreadChannels:       make(map[string]bool),
 	}
 
 	window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
@@ -97,16 +101,27 @@ func (app *ChatApp) CurrentServer() *revoltgo.Server {
 	if app.Session == nil || app.CurrentServerID == "" {
 		return nil
 	}
-	return app.Session.Server(app.CurrentServerID)
+	return app.Session.State.Server(app.CurrentServerID)
 }
 
 // CurrentChannel returns the current channel, or nil if not set.
 func (app *ChatApp) CurrentChannel() *revoltgo.Channel {
-	// todo: what if we return a dummy channel with fake messages: "You're in a loading screen
+	// todo: what if we return a dummy channel with fake messages: "You're in a loading screen"
 	if app.Session == nil || app.CurrentChannelID == "" {
 		return nil
 	}
-	return app.Session.Channel(app.CurrentChannelID)
+	return app.Session.State.Channel(app.CurrentChannelID)
+}
+
+// OnAvatarTapped handles avatar tap events to implement MessageActions.
+func (app *ChatApp) OnAvatarTapped(userID string) {
+	fmt.Printf("Avatar tapped: %s\n", userID)
+	// TODO: open user profile
+}
+
+// OnImageTapped handles image tap events to implement MessageActions.
+func (app *ChatApp) OnImageTapped(attachment *revoltgo.Attachment) {
+	app.showImageViewerAttachment(attachment)
 }
 
 // Run starts the application main loop.
@@ -164,15 +179,28 @@ func (app *ChatApp) SelectServer(serverID string) {
 
 // SelectChannel handles channel selection and updates the UI.
 func (app *ChatApp) SelectChannel(channelID string) {
+
 	if app.CurrentChannelID == channelID {
 		return
 	}
 
+	_, unread := app.UnreadChannels[channelID]
+
 	app.CurrentChannelID = channelID
 	if ch := app.CurrentChannel(); ch != nil {
 		app.updateChannelHeader(ch.Name)
+
+		// Acknowledge last message to clear unreads
+		if unread && ch.LastMessageID != nil {
+			delete(app.UnreadChannels, channelID)
+			go func() {
+				_ = app.Session.MessageAck(channelID, *ch.LastMessageID)
+			}()
+		}
 	}
-	app.updateChannelSelectionUI(channelID)
+
+	// Update list visual state (selection + unread)
+	app.syncChannelListUI()
 
 	// Display cached messages immediately if available
 	if cached := app.Messages.Get(channelID); len(cached) > 0 {
@@ -189,4 +217,5 @@ func (app *ChatApp) clearChannelSelection() {
 	app.CurrentChannelID = ""
 	app.refreshMessageList()
 	app.updateChannelHeader("")
+	app.syncChannelListUI()
 }

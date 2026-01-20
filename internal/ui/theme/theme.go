@@ -33,6 +33,7 @@ var Colors = struct {
 	XButtonNormal     color.Color
 	XButtonHover      color.Color
 	SessionCardBg     color.Color
+	UnreadIndicator   color.Color
 }{
 	// Backgrounds
 	ServerListBackground:   color.RGBA{R: 20, G: 20, B: 20, A: 255},
@@ -48,7 +49,8 @@ var Colors = struct {
 
 	// Elements
 	AvatarPlaceholder: color.RGBA{R: 100, G: 100, B: 200, A: 255},
-	HashtagIcon:       color.RGBA{R: 180, G: 180, B: 180, A: 255},
+	UnreadIndicator:   color.White,
+	HashtagIcon:       color.RGBA{R: 150, G: 150, B: 150, A: 255},
 	CategoryText:      color.RGBA{R: 150, G: 150, B: 150, A: 255},
 	CategoryArrow:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
 	CategoryIndicator: color.RGBA{R: 140, G: 140, B: 140, A: 255},
@@ -66,27 +68,30 @@ var Sizes = struct {
 	ChannelSidebarWidth   float32
 	ChannelSidebarPadding float32
 	ChannelLeftPadding    float32
+	UnreadIndicatorWidth  float32
 
 	// Server/Channel widgets
 	ServerIconSize          float32
 	ServerItemHeight        float32
 	HashtagIconSize         float32
 	CategoryHeight          float32
+	ChannelItemHeight       float32
 	CategorySpacing         float32
 	CategoryIndicatorSize   float32
 	CategoryIndicatorStroke float32
 
 	// Message area
-	MessageAvatarSize        float32
-	MessageAvatarColumnWidth float32
-	MessageContentPadding    float32
-	MessageImageMaxWidth     float32
-	MessageImageMaxHeight    float32
-	MessageVerticalPadding   float32
-	MessageHorizontalPadding float32
-	MessageAttachmentSpacing float32
-	MessageTextLeftPadding   float32
-	MessageTimestampSize     float32
+	MessageAvatarSize         float32
+	MessageAvatarColumnWidth  float32
+	MessageContentPadding     float32
+	MessageImageMaxWidth      float32
+	MessageImageMaxHeight     float32
+	MessageVerticalPadding    float32
+	MessageHorizontalPadding  float32
+	MessageAttachmentSpacing  float32
+	MessageTextLeftPadding    float32
+	MessageTimestampSize      float32
+	MessageTimestampTopOffset float32
 
 	// Session/Login
 	SessionCardAvatarSize float32
@@ -107,27 +112,30 @@ var Sizes = struct {
 	ChannelSidebarWidth:   240,
 	ChannelSidebarPadding: 6,
 	ChannelLeftPadding:    8,
+	UnreadIndicatorWidth:  1,
 
 	// Server/Channel widgets
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
 	HashtagIconSize:         20,
 	CategoryHeight:          32,
+	ChannelItemHeight:       32,
 	CategorySpacing:         10,
 	CategoryIndicatorSize:   14,
 	CategoryIndicatorStroke: 2,
 
 	// Message area
-	MessageAvatarSize:        40,
-	MessageAvatarColumnWidth: 46,
-	MessageContentPadding:    0,
-	MessageImageMaxWidth:     400,
-	MessageImageMaxHeight:    300,
-	MessageVerticalPadding:   4,
-	MessageHorizontalPadding: 8,
-	MessageAttachmentSpacing: 4,
-	MessageTextLeftPadding:   4,
-	MessageTimestampSize:     12,
+	MessageAvatarSize:         40,
+	MessageAvatarColumnWidth:  46,
+	MessageContentPadding:     0,
+	MessageImageMaxWidth:      400,
+	MessageImageMaxHeight:     300,
+	MessageVerticalPadding:    4,
+	MessageHorizontalPadding:  8,
+	MessageAttachmentSpacing:  4,
+	MessageTextLeftPadding:    4,
+	MessageTimestampSize:      12,
+	MessageTimestampTopOffset: 4,
 
 	// Session/Login
 	SessionCardAvatarSize: 32,

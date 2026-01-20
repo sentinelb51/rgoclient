@@ -4,7 +4,9 @@ go 1.25
 
 require (
 	fyne.io/fyne/v2 v2.7.2
-	github.com/sentinelb51/revoltgo v0.0.0-20260116011656-d8f67ab6fe3e
+	github.com/oklog/ulid/v2 v2.1.1
+	github.com/sentinelb51/revoltgo v0.0.0-20260120175453-d7c662bee2ee
+	golang.design/x/clipboard v0.7.1
 	golang.org/x/image v0.35.0
 )
 
@@ -29,12 +31,11 @@ require (
 	github.com/hack-pad/safejs v0.1.1 // indirect
 	github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade // indirect
 	github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 // indirect
-	github.com/klauspost/compress v1.18.2 // indirect
+	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lxzan/gws v1.8.9 // indirect
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646 // indirect
 	github.com/nicksnyder/go-i18n/v2 v2.6.1 // indirect
-	github.com/oklog/ulid/v2 v2.1.1 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/rymdport/portal v0.4.2 // indirect
@@ -43,9 +44,8 @@ require (
 	github.com/stretchr/testify v1.11.1 // indirect
 	github.com/tinylib/msgp v1.6.3 // indirect
 	github.com/yuin/goldmark v1.7.16 // indirect
-	golang.design/x/clipboard v0.7.1 // indirect
-	golang.org/x/exp/shiny v0.0.0-20250606033433-dcc06ee1d476 // indirect
-	golang.org/x/mobile v0.0.0-20250606033058-a2a15c67f36f // indirect
+	golang.org/x/exp/shiny v0.0.0-20260112195511-716be5621a96 // indirect
+	golang.org/x/mobile v0.0.0-20260120165949-40bd9ace6ce4 // indirect
 	golang.org/x/net v0.49.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect

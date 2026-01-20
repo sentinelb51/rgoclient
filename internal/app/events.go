@@ -14,7 +14,7 @@ func (app *ChatApp) StartRevoltSessionWithToken(token string) error {
 	session := revoltgo.New(token)
 	session.HTTP.Debug = true
 
-	app.Session = api.NewSession(session)
+	app.Session = session
 	app.registerEventHandlers(session)
 
 	if err := app.Session.Open(); err != nil {
@@ -38,7 +38,7 @@ func (app *ChatApp) StartRevoltSessionWithLogin(email, password string) (string,
 
 	session.HTTP.Debug = true
 
-	app.Session = api.NewSession(session)
+	app.Session = session
 	app.registerEventHandlers(session)
 
 	if err := app.Session.Open(); err != nil {
@@ -57,10 +57,10 @@ func (app *ChatApp) registerEventHandlers(session *revoltgo.Session) {
 
 // onError handles error events from the websocket.
 func (app *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
-	log.Printf("Error event: %s\n", event.Error)
+	log.Printf("Error event: %s\n", event.Data.Type)
 
-	if event.Error == revoltgo.EventErrorTypeInvalidSession ||
-		event.Error == revoltgo.EventErrorTypeInternalError {
+	if event.Data.Type == revoltgo.EventErrorInvalidSession ||
+		event.Data.Type == revoltgo.EventErrorInternalError {
 
 		// Remove invalid session
 		if app.Session != nil && app.Session.State != nil {
@@ -100,47 +100,71 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 			}
 
 			if err := api.AddOrUpdateSession(saved); err != nil {
-				fmt.Printf("Warning: failed to save session: %v\n", err)
+				log.Printf("Failed to save session: %v\n", err)
 			}
+			app.ClearPendingSessionToken()
 		}
-		app.ClearPendingSessionToken()
 	}
 
-	app.GoDo(func() {
-		// Store server IDs
-		app.ServerIDs = make([]string, 0, len(event.Servers))
-		for _, server := range event.Servers {
-			app.ServerIDs = append(app.ServerIDs, server.ID)
+	// Fetch unreads asynchronously
+	go func() {
+		unreads, err := app.Session.SyncUnreads()
+		if err != nil {
+			fmt.Printf("Failed to sync unreads: %v\n", err)
 		}
 
-		app.RefreshServerList()
+		app.GoDo(func() {
+			// Populate unread map
+			for _, u := range unreads {
+				app.UnreadChannels[u.ID.Channel] = true
+			}
 
-		// Select first server and channel
-		if len(app.ServerIDs) > 0 {
-			app.CurrentServerID = app.ServerIDs[0]
-			app.updateServerSelectionUI(app.CurrentServerID)
+			app.SwitchToMainUI()
 
-			if server := app.CurrentServer(); server != nil {
-				app.updateServerHeader(server.Name)
-				app.RefreshChannelList()
+			// Store server IDs
+			app.ServerIDs = make([]string, 0, len(event.Servers))
+			for _, server := range event.Servers {
+				app.ServerIDs = append(app.ServerIDs, server.ID)
+			}
 
-				if len(server.Channels) > 0 {
-					app.SelectChannel(server.Channels[0])
+			app.RefreshServerList()
+
+			// Select first server and channel
+			if len(app.ServerIDs) > 0 {
+				app.CurrentServerID = app.ServerIDs[0]
+				app.updateServerSelectionUI(app.CurrentServerID)
+
+				if server := app.CurrentServer(); server != nil {
+					app.updateServerHeader(server.Name)
+					app.RefreshChannelList()
+
+					if len(server.Channels) > 0 {
+						app.SelectChannel(server.Channels[0])
+					}
 				}
 			}
-		}
-	}, true)
+		}, true)
+	}()
 }
 
 // onMessage handles incoming messages from the websocket.
 func (app *ChatApp) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
-	app.Messages.Append(event.Channel, &event.Message)
+	// Clone message to prevent pointer reuse issues if the event is pooled
+	msg := event.Message
+	app.Messages.Append(event.Channel, &msg)
 
-	if event.Channel != app.CurrentChannelID {
-		return
+	// Debug message caching
+	if count := len(app.Messages.Get(event.Channel)); count > 0 {
+		fmt.Printf("DEBUG: Cached messages for channel %s: %d (Last: %s)\n", event.Channel, count, msg.Content)
 	}
 
 	app.GoDo(func() {
-		app.AddMessage(&event.Message)
-	}, true)
+		if event.Channel != app.CurrentChannelID {
+			app.UnreadChannels[event.Channel] = true
+			app.syncChannelListUI()
+			return
+		}
+
+		app.AddMessage(&msg)
+	}, false)
 }

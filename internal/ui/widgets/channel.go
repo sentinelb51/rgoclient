@@ -23,48 +23,103 @@ var (
 // ChannelWidget displays a channel in the sidebar with selection state.
 type ChannelWidget struct {
 	widget.BaseWidget
-	Channel    *revoltgo.Channel
-	onTap      func()
-	background *canvas.Rectangle
-	selected   bool
+	Channel *revoltgo.Channel
+	onTap   func()
+
+	// UI components
+	background         *canvas.Rectangle
+	selectionIndicator *canvas.Rectangle
+	unreadIndicator    *canvas.Rectangle
+	label              *canvas.Text
+
+	// State
+	selected bool
+	unread   bool
 }
 
 // NewChannelWidget creates a new channel widget.
 func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
 	w := &ChannelWidget{
-		Channel:    channel,
-		onTap:      onTap,
-		background: canvas.NewRectangle(color.Transparent),
+		Channel:            channel,
+		onTap:              onTap,
+		background:         canvas.NewRectangle(color.Transparent),
+		selectionIndicator: canvas.NewRectangle(color.Transparent),
+		unreadIndicator:    canvas.NewRectangle(color.Transparent),
+		label:              canvas.NewText(channel.Name, theme.Colors.CategoryText),
 	}
+	w.label.TextSize = theme.Sizes.MessageTimestampSize + 2 // Slightly larger than timestamp
 	w.ExtendBaseWidget(w)
 	return w
 }
 
-// SetSelected updates the selection state and refreshes appearance.
-func (w *ChannelWidget) SetSelected(selected bool) {
+// SetState updates the selection and unread state together.
+func (w *ChannelWidget) SetState(selected, unread bool) {
 	w.selected = selected
-	w.updateBackground()
+	w.unread = unread
+	w.updateAppearance()
+	w.Refresh()
 }
 
-func (w *ChannelWidget) updateBackground() {
+func (w *ChannelWidget) updateAppearance() {
+	// Background
 	if w.selected {
 		w.background.FillColor = theme.Colors.ChannelSelectedBg
+		w.selectionIndicator.FillColor = theme.Colors.TextPrimary // White selection bar
 	} else {
 		w.background.FillColor = color.Transparent
+		w.selectionIndicator.FillColor = color.Transparent
 	}
 	w.background.Refresh()
+	w.selectionIndicator.Refresh()
+
+	// Unread Indicator
+	if w.unread {
+		w.unreadIndicator.FillColor = theme.Colors.UnreadIndicator
+	} else {
+		w.unreadIndicator.FillColor = color.Transparent
+	}
+	w.unreadIndicator.Refresh()
+
+	// Text Color: White if Selected OR Unread, otherwise Grey
+	if w.selected || w.unread {
+		w.label.Color = theme.Colors.TextPrimary
+	} else {
+		w.label.Color = theme.Colors.CategoryText
+	}
+	w.label.TextStyle.Bold = false
+	w.label.Refresh()
 }
 
 // CreateRenderer returns the renderer for this widget.
 func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
-	leftSpacer := canvas.NewRectangle(color.Transparent)
-	leftSpacer.SetMinSize(fyne.NewSize(theme.Sizes.ChannelLeftPadding, 0))
+	// Left spacer provides left padding
+	spacerBg := canvas.NewRectangle(color.Transparent)
+	spacerBg.SetMinSize(fyne.NewSize(theme.Sizes.ChannelLeftPadding, 0))
+
+	// Indicators
+	w.selectionIndicator.SetMinSize(fyne.NewSize(3, 0))
+	w.unreadIndicator.SetMinSize(fyne.NewSize(theme.Sizes.UnreadIndicatorWidth, 0))
+
+	// Stack indicators to occupy same 3px width space
+	// Wrap unreadIndicator in HBox to prevent stretching (keeps it 1px width, left aligned)
+	unreadWrapper := container.NewHBox(w.unreadIndicator)
+	indicatorStack := container.NewStack(w.selectionIndicator, unreadWrapper)
 
 	icon := GetHashtagIcon()
-	label := widget.NewLabel(w.Channel.Name)
-	content := container.NewHBox(leftSpacer, icon, label)
+	w.label.Alignment = fyne.TextAlignLeading
 
-	return widget.NewSimpleRenderer(container.NewStack(w.background, content))
+	// Content layout
+	content := container.NewHBox(indicatorStack, spacerBg, icon, w.label)
+
+	// Enforce minimum height for spacing
+	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
+
+	wrapper := container.NewStack(w.background, content)
+
+	// Apply initial state
+	w.updateAppearance()
+
+	return widget.NewSimpleRenderer(wrapper)
 }
 
 // Tapped handles tap events on the widget.
@@ -87,7 +142,7 @@ func (w *ChannelWidget) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
 func (w *ChannelWidget) MouseOut() {
-	w.updateBackground()
+	w.updateAppearance()
 }
 
 // GetHashtagIcon returns a hashtag (#) icon for channel display.

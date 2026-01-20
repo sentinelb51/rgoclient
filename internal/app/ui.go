@@ -38,7 +38,7 @@ func (app *ChatApp) RefreshServerList() {
 	app.serverListContainer.Objects = nil
 
 	for _, serverID := range app.ServerIDs {
-		server := app.Session.Server(serverID)
+		server := app.Session.State.Server(serverID)
 		if server == nil {
 			continue
 		}
@@ -156,7 +156,7 @@ func (app *ChatApp) addChannelWidget(channelID string) {
 
 // createChannelWidget creates a channel widget for the given ID.
 func (app *ChatApp) createChannelWidget(channelID string) *widgets.ChannelWidget {
-	channel := app.Session.Channel(channelID)
+	channel := app.Session.State.Channel(channelID)
 	if channel == nil {
 		return nil
 	}
@@ -166,9 +166,8 @@ func (app *ChatApp) createChannelWidget(channelID string) *widgets.ChannelWidget
 		app.SelectChannel(capturedID)
 	})
 
-	if capturedID == app.CurrentChannelID {
-		w.SetSelected(true)
-	}
+	w.SetState(capturedID == app.CurrentChannelID, app.UnreadChannels[capturedID])
+
 	return w
 }
 
@@ -220,12 +219,21 @@ func (app *ChatApp) updateServerSelectionUI(selectedID string) {
 	}
 }
 
-// updateChannelSelectionUI updates the visual selection state of channel widgets.
-func (app *ChatApp) updateChannelSelectionUI(selectedID string) {
-	for _, obj := range app.channelListContainer.Objects {
+// syncChannelListUI updates visual state of all channel widgets.
+func (app *ChatApp) syncChannelListUI() {
+	updateWidget := func(obj fyne.CanvasObject) {
 		if w, ok := obj.(*widgets.ChannelWidget); ok {
-			w.SetSelected(w.Channel.ID == selectedID)
+			id := w.Channel.ID
+			w.SetState(id == app.CurrentChannelID, app.UnreadChannels[id])
 		}
+	}
+
+	for _, obj := range app.channelListContainer.Objects {
+		updateWidget(obj)
+		// Check for CategoryWidgets which might hold channels
+		// Note: Current implementation adds channels directly to channelListContainer
+		// but if we nest them in future, we'd need recursion here.
+		// CategoryWidget logic uses SetChannelWidgets which just hides/shows them in parent container.
 	}
 }
 

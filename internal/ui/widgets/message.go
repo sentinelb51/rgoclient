@@ -1,7 +1,7 @@
 package widgets
 
 import (
-	"RGOClient/internal/api"
+	"RGOClient/internal/util"
 	"fmt"
 	"image/color"
 	"time"
@@ -18,6 +18,12 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
+// MessageActions defines interactions for message elements.
+type MessageActions interface {
+	OnAvatarTapped(userID string)
+	OnImageTapped(attachment *revoltgo.Attachment)
+}
+
 // Compile-time interface assertions.
 var _ fyne.Widget = (*MessageWidget)(nil)
 var _ desktop.Hoverable = (*MessageWidget)(nil)
@@ -30,34 +36,39 @@ type MessageWidget struct {
 }
 
 // NewMessageWidget creates a message widget with author, content, and optional attachments.
-// onAvatarTapped is called when the avatar is clicked.
-// onImageTapped is called when an attachment image is clicked (receives *revoltgo.Attachment).
+// actions handles user interactions (avatar/image taps).
 func NewMessageWidget(
 	message *revoltgo.Message,
-	session *api.Session,
-	onAvatarTapped func(),
-	onImageTapped func(attachment *revoltgo.Attachment),
+	session *revoltgo.Session,
+	actions MessageActions,
 ) *MessageWidget {
 
 	if session == nil {
 		return nil
 	}
 
+	author := session.State.User(message.Author)
+	if author == nil {
+		author = &revoltgo.User{ID: message.Author, Username: message.Author}
+	}
+
+	var displayName, displayAvatarURL, displayAvatarID string
+
+	if author.Avatar != nil {
+		displayAvatarID = author.Avatar.ID
+		displayAvatarURL = author.Avatar.URL("64")
+	}
+
 	// Determine username and avatar
-	var username, avatarID, avatarURL string
 	if message.Webhook != nil {
-		username = message.Webhook.Name
+		displayName = message.Webhook.Name
 		if message.Webhook.Avatar != nil {
-			avatarURL = *message.Webhook.Avatar
+			displayName = *message.Webhook.Avatar
 		}
 	} else if message.System != nil {
-		username = "System"
+		displayName = "System"
 	} else {
-		username = session.User(message.Author).Username
-		if author := session.User(message.Author); author != nil {
-			username = author.Username
-			avatarID, avatarURL = GetAvatarInfo(author)
-		}
+		displayName = author.Username
 	}
 
 	// Determine content text
@@ -68,16 +79,20 @@ func NewMessageWidget(
 
 	// Build timestamp
 	var timestamp string
-	if t, err := session.Timestamp(message.ID); err == nil {
+	if t, err := util.Timestamp(message.ID); err == nil {
 		timestamp = formatMessageTimestamp(t)
 	}
 
 	// Build avatar column
-	avatar := NewClickableAvatar(avatarID, avatarURL, "", onAvatarTapped)
+	avatar := NewClickableAvatar(displayAvatarID, displayAvatarURL, author.ID, func() {
+		if actions != nil {
+			actions.OnAvatarTapped(author.ID)
+		}
+	})
 	avatarColumn := container.New(&centeredAvatarLayout{width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
 
 	// Build content widget
-	contentWidget := buildMessageContent(message, username, timestamp, content, onImageTapped)
+	contentWidget := buildMessageContent(message, displayName, timestamp, content, actions)
 	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
 	main := container.NewBorder(nil, nil, avatarColumn, nil, paddedContent)
@@ -150,7 +165,7 @@ func (l *centeredAvatarLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 func buildMessageContent(
 	message *revoltgo.Message,
 	username, timestamp, messageText string,
-	onImageTapped func(attachment *revoltgo.Attachment),
+	actions MessageActions,
 ) fyne.CanvasObject {
 	text := createFormattedMessage(username, messageText)
 
@@ -159,6 +174,7 @@ func buildMessageContent(
 
 	// Overlay timestamp in top-right
 	timestampOverlay := container.NewVBox(
+		newHeightSpacer(theme.Sizes.MessageTimestampTopOffset),
 		container.NewHBox(layout.NewSpacer(), tsText),
 	)
 
@@ -171,25 +187,25 @@ func buildMessageContent(
 
 	images := container.NewVBox()
 	firstImage := true
-	for _, att := range message.Attachments {
-		if att == nil || att.Metadata == nil || att.Metadata.Type != revoltgo.AttachmentMetadataTypeImage {
+	for _, attachment := range message.Attachments {
+		if attachment.Metadata.Type != revoltgo.AttachmentMetadataTypeImage {
 			continue
 		}
 
-		size := calculateImageSize(att.Metadata.Width, att.Metadata.Height)
+		size := calculateImageSize(attachment.Metadata.Width, attachment.Metadata.Height)
 		placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 		placeholder.SetMinSize(size)
 		imgContainer := container.NewGridWrap(size, placeholder)
 
-		url := att.URL("")
-		if url != "" && att.ID != "" {
-			cache.GetImageCache().LoadImageToContainer(att.ID, url, size, imgContainer, false, nil)
+		url := attachment.URL("")
+		if url != "" && attachment.ID != "" {
+			cache.GetImageCache().LoadImageToContainer(attachment.ID, url, size, imgContainer, false, nil)
 		}
 
-		captured := att
+		captured := attachment
 		clickable := NewClickableImage(imgContainer, size, func() {
-			if onImageTapped != nil {
-				onImageTapped(captured)
+			if actions != nil {
+				actions.OnImageTapped(captured)
 			}
 		})
 
@@ -223,7 +239,7 @@ func formatMessageTimestamp(t time.Time) string {
 	t = t.Local()
 	now := time.Now()
 
-	// Normalize to start of day for accurate day calculation
+	// Normalise to start of day for accurate day calculation
 	tDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
 	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
@@ -291,25 +307,25 @@ func calculateImageSize(width, height int) fyne.Size {
 }
 
 // formatSystemMessage converts system message to readable text.
-func formatSystemMessage(session *api.Session, message *revoltgo.MessageSystem) string {
+func formatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
 	switch message.Type {
 	case revoltgo.MessageSystemUserAdded:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s added to group", user.Username)
 	case revoltgo.MessageSystemUserRemove:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s removed from group", user.Username)
 	case revoltgo.MessageSystemUserJoined:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s joined", user.Username)
 	case revoltgo.MessageSystemUserLeft:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s left", user.Username)
 	case revoltgo.MessageSystemUserKicked:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s was kicked", user.Username)
 	case revoltgo.MessageSystemUserBanned:
-		user := session.User(message.ID)
+		user := session.State.User(message.ID)
 		return fmt.Sprintf("%s banned", user.Username)
 	case revoltgo.MessageSystemChannelRenamed:
 		return "Channel renamed"

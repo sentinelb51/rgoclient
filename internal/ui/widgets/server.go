@@ -96,9 +96,8 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 
 	w.iconContainer = container.NewStack(w.background, container.NewCenter(initialLabel))
 
-	iconID, iconURL := GetServerIconInfo(w.Server)
-	if iconURL != "" {
-		cache.GetImageCache().LoadImageToContainer(iconID, iconURL, iconSize, w.iconContainer, true, w.background)
+	if w.Server.Icon != nil {
+		cache.GetImageCache().LoadImageToContainer(w.Server.Icon.ID, w.Server.Icon.URL("64"), iconSize, w.iconContainer, true, w.background)
 	}
 
 	w.iconWrapper = container.NewGridWrap(iconSize, w.iconContainer)

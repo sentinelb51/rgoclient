@@ -2,6 +2,8 @@ package app
 
 import (
 	"fmt"
+	"image"
+	"net/url"
 	"os"
 
 	"fyne.io/fyne/v2"
@@ -35,6 +37,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 			return
 		}
 
+		// API returns newest → oldest (first element = latest message)
 		messages, err := app.Session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 			IncludeUsers: true,
 			Limit:        100,
@@ -49,6 +52,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 			return
 		}
 
+		// Store directly - cache maintains newest→oldest order
 		app.Messages.Set(channelID, messages.Messages)
 
 		app.GoDo(func() {
@@ -71,31 +75,29 @@ func (app *ChatApp) showErrorMessage(msg string) {
 }
 
 // displayMessages renders messages using batched rendering.
+// Messages are stored oldest→newest, iterate forward.
 func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 	app.messageListContainer.Objects = nil
 	channelID := app.CurrentChannelID
 
 	go func() {
-		for i := len(messages); i > 0; i -= messageBatchSize {
-			start := i - messageBatchSize
-			if start < 0 {
-				start = 0
+		// Iterate forward: oldest→newest (chronological order)
+		for i := 0; i < len(messages); i += messageBatchSize {
+			end := i + messageBatchSize
+			if end > len(messages) {
+				end = len(messages)
 			}
-			batch := messages[start:i]
+
+			// Capture range for closure
+			batchStart, batchEnd := i, end
 
 			app.GoDo(func() {
 				if app.CurrentChannelID != channelID {
 					return
 				}
 
-				for j := len(batch) - 1; j >= 0; j-- {
-					msg := batch[j]
-					w := widgets.NewMessageWidget(msg, app.Session,
-						nil,
-						func(att *revoltgo.Attachment) {
-							app.showImageViewerAttachment(att)
-						},
-					)
+				for j := batchStart; j < batchEnd; j++ {
+					w := widgets.NewMessageWidget(messages[j], app.Session, app)
 					app.messageListContainer.Add(w)
 				}
 				app.messageListContainer.Refresh()
@@ -130,9 +132,7 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 		return
 	}
 
-	w := widgets.NewMessageWidget(msg, app.Session, nil, func(attachment *revoltgo.Attachment) {
-		app.showImageViewerAttachment(attachment)
-	})
+	w := widgets.NewMessageWidget(msg, app.Session, app) // Pass app as MessageActions
 	app.messageListContainer.Add(w)
 	app.messageListContainer.Refresh()
 	app.scrollToBottom()
@@ -140,7 +140,7 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 
 // showImageViewerAttachment displays an image attachment in a popup window.
 func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
-	window := app.fyneApp.NewWindow("Image Viewer")
+	window := app.fyneApp.NewWindow(att.Filename)
 
 	// Calculate constrained window size using theme sizes
 	maxW := theme.Sizes.ImageViewerMaxWidth
@@ -163,20 +163,37 @@ func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
 		h = theme.Sizes.ImageViewerMinHeight
 	}
 
-	size := fyne.NewSize(w, h)
-
+	// Image container with stacking to allow Proper resizing
 	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-	placeholder.SetMinSize(size)
-	imgContainer := container.NewGridWrap(size, placeholder)
+	imgContainer := container.NewStack(placeholder)
 
-	url := att.URL("")
-	if url != "" && att.ID != "" {
-		cache.GetImageCache().LoadImageToContainer(att.ID, url, size, imgContainer, false, nil)
+	attURL := att.URL("")
+	if attURL != "" && att.ID != "" {
+		cache.GetImageCache().LoadFromURLAsync(att.ID, attURL, false, func(i image.Image) {
+			cImg := canvas.NewImageFromImage(i)
+			cImg.FillMode = canvas.ImageFillContain
+			imgContainer.Objects = []fyne.CanvasObject{cImg}
+			imgContainer.Refresh()
+		})
 	}
 
-	content := container.NewCenter(imgContainer)
+	// Bottom toolbar
+	btnBrowser := widget.NewButton("Open in Browser", func() {
+		u, err := url.Parse(attURL)
+		if err == nil {
+			_ = app.fyneApp.OpenURL(u)
+		}
+	})
+
+	dimsLabel := widget.NewLabel(fmt.Sprintf("%dx%d", att.Metadata.Width, att.Metadata.Height))
+	bottomBar := container.NewHBox(
+		container.NewPadded(dimsLabel),
+		container.NewPadded(btnBrowser),
+	)
+
+	content := container.NewBorder(nil, container.NewCenter(bottomBar), nil, nil, imgContainer)
 	window.SetContent(content)
-	window.Resize(fyne.NewSize(w+40, h+40))
+	window.Resize(fyne.NewSize(w+40, h+80))
 	window.CenterOnScreen()
 	window.Show()
 }

@@ -2,7 +2,6 @@ package widgets
 
 import (
 	"fmt"
-	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +15,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"golang.design/x/clipboard"
+
+	appTheme "RGOClient/internal/ui/theme"
 )
 
 // MessageInput input constants.
@@ -74,24 +75,76 @@ func (m *MessageInput) RemoveAttachment(path string) {
 func (m *MessageInput) rebuildAttachmentUI() {
 	m.AttachmentContainer.Objects = nil
 	for _, a := range m.Attachments {
-		path := a.Path // Capture
+		path := a.Path
 		name := a.Name
-		label := widget.NewLabel(name)
 
+		// Get file size
+		info, err := os.Stat(path)
+		var size int
+		if err == nil {
+			size = int(info.Size())
+		}
+
+		// Is Image?
+		ext := strings.ToLower(filepath.Ext(path))
+		isImage := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp"
+
+		// Metadata Bar
+		barBg := canvas.NewRectangle(appTheme.Colors.SwiftActionBg)
+
+		nameLabel := canvas.NewText(name, appTheme.Colors.TextPrimary)
+		nameLabel.TextSize = 12
+		nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+		nameLabel.Alignment = fyne.TextAlignLeading
+
+		sizeLabel := canvas.NewText(formatFileSize(size), appTheme.Colors.TimestampText)
+		sizeLabel.TextSize = 12
+		sizeLabel.Alignment = fyne.TextAlignTrailing
+
+		// Bar Layout
+		barContent := container.NewBorder(nil, nil,
+			container.NewHBox(newWidthSpacer(8), nameLabel),
+			container.NewHBox(sizeLabel, newWidthSpacer(8)),
+		)
+
+		barHeight := float32(28)
+		barBg.SetMinSize(fyne.NewSize(0, barHeight))
+		barStack := container.NewStack(barBg, barContent)
+
+		var contentStack *fyne.Container
+
+		if isImage {
+			img := canvas.NewImageFromFile(path)
+			img.FillMode = canvas.ImageFillContain
+			img.ScaleMode = canvas.ImageScaleFastest
+
+			previewWidth := float32(200)
+			previewHeight := float32(150)
+			// Force size
+			imgContainer := container.NewGridWrap(fyne.NewSize(previewWidth, previewHeight), img)
+
+			// Use Border layout to join them with NO gap
+			contentStack = container.NewBorder(nil, barStack, nil, nil, imgContainer)
+		} else {
+			width := float32(200)
+			height := float32(64)
+
+			placeholder := canvas.NewRectangle(appTheme.Colors.ServerDefaultBg)
+			placeholder.SetMinSize(fyne.NewSize(width, height))
+
+			// Use Border layout to join them with NO gap
+			contentStack = container.NewBorder(nil, barStack, nil, nil, placeholder)
+		}
+
+		// X Button overlay
 		xBtn := NewXButton(func() {
 			m.RemoveAttachment(path)
 		})
 
-		content := container.NewHBox(label, xBtn)
-		padded := container.NewPadded(content)
+		topRight := container.New(&TopRightOffsetLayout{YOffset: -8, RightOffset: -8}, xBtn)
+		card := container.NewStack(contentStack, topRight)
 
-		// Create a grey outline rectangle
-		outline := canvas.NewRectangle(color.Transparent)
-		outline.StrokeColor = theme.DisabledButtonColor()
-		outline.StrokeWidth = 1
-
-		stack := container.NewStack(outline, padded)
-		m.AttachmentContainer.Add(stack)
+		m.AttachmentContainer.Add(container.NewPadded(card))
 	}
 	m.AttachmentContainer.Refresh()
 	m.Refresh() // Trigger layout update

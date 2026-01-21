@@ -1,7 +1,5 @@
 package util
 
-import "fmt"
-
 func IDFromAttachmentURL(url string) string {
 	// Extracts the ID from a string like: https://cdn.stoatusercontent.com/avatars/0d_oHg1EDTnfeBNDMJGa_1GAdvVxPEpoWQSnyj-Oe3?max_side=256
 	// should return just: "0d_oHg1EDTnfeBNDMJGa_1GAdvVxPEpoWQSnyj-Oe3"
@@ -23,7 +21,6 @@ func IDFromAttachmentURL(url string) string {
 
 	for i := start; i < len(url); i++ {
 		if url[i] == '?' {
-			fmt.Println("Returning:", url[start:i])
 			return url[start:i]
 		}
 	}

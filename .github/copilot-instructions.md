@@ -52,9 +52,11 @@ internal/
       channel.go          - Channel list item
       clickable.go        - ClickableImage, ClickableAvatar
       helpers.go          - GetAvatarInfo, GetServerIconInfo
-      message.go          - MessageWidget with Swift Actions
+      message.go          - MessageWidget container
+      message_content.go  - Content building, attachments, text preview
       message_input.go    - Multi-line input with shift-enter
       server.go           - Server icon widget
+      swift_action.go     - Swift action button widget
       tappable.go         - TappableContainer wrapper
       xbutton.go          - X button for removing items
     animations/

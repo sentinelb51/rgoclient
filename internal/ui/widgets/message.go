@@ -2,7 +2,6 @@ package widgets
 
 import (
 	"RGOClient/internal/util"
-	"fmt"
 	"image/color"
 	"time"
 
@@ -10,11 +9,9 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -77,7 +74,7 @@ func NewMessageWidget(
 	// Build timestamp
 	var timestamp string
 	if t, err := util.Timestamp(message.ID); err == nil {
-		timestamp = formatMessageTimestamp(t)
+		timestamp = util.NiceTime(t)
 	}
 
 	// Actions row (Hidden by default)
@@ -239,113 +236,6 @@ func (l *centeredAvatarLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 	}
 }
 
-// buildMessageContent creates the message content with username, text, and attachments.
-func buildMessageContent(
-	message *revoltgo.Message,
-	username, timestamp, messageText string,
-	actions MessageActions,
-) fyne.CanvasObject {
-	text := createFormattedMessage(username, messageText)
-
-	tsText := canvas.NewText(timestamp, theme.Colors.TimestampText)
-	tsText.TextSize = theme.Sizes.MessageTimestampSize
-
-	// Overlay timestamp in top-right
-	timestampOverlay := container.NewVBox(
-		newHeightSpacer(theme.Sizes.MessageTimestampTopOffset),
-		container.NewHBox(layout.NewSpacer(), tsText),
-	)
-
-	textWithTimestamp := container.NewStack(text, timestampOverlay)
-
-	// Check if message has image attachments
-	if message.Attachments == nil || len(message.Attachments) == 0 {
-		return textWithTimestamp
-	}
-
-	images := container.NewVBox()
-	firstImage := true
-	for _, attachment := range message.Attachments {
-		if attachment.Metadata.Type != revoltgo.AttachmentMetadataTypeImage {
-			continue
-		}
-
-		size := calculateImageSize(attachment.Metadata.Width, attachment.Metadata.Height)
-		placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-		placeholder.SetMinSize(size)
-		imgContainer := container.NewGridWrap(size, placeholder)
-
-		url := attachment.URL("")
-		if url != "" && attachment.ID != "" {
-			cache.GetImageCache().LoadImageToContainer(attachment.ID, url, size, imgContainer, false, nil)
-		}
-
-		captured := attachment
-		clickable := NewClickableImage(imgContainer, size, func() {
-			if actions != nil {
-				actions.OnImageTapped(captured)
-			}
-		})
-
-		if !firstImage {
-			images.Add(newHeightSpacer(theme.Sizes.MessageAttachmentSpacing))
-		}
-		firstImage = false
-
-		paddedImg := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageTextLeftPadding), nil, clickable)
-		images.Add(paddedImg)
-	}
-
-	// Only add images container if we actually added images
-	if firstImage {
-		return textWithTimestamp
-	}
-
-	return container.NewVBox(textWithTimestamp, images)
-}
-
-// createFormattedMessage creates a RichText widget with bold username and formatted content.
-func createFormattedMessage(username, message string) *widget.RichText {
-	content := fmt.Sprintf("**%s**\n\n%s", username, message)
-	rt := widget.NewRichTextFromMarkdown(content)
-	rt.Wrapping = fyne.TextWrapWord
-	return rt
-}
-
-// formatMessageTimestamp formats time relative to now.
-func formatMessageTimestamp(t time.Time) string {
-	t = t.Local()
-	now := time.Now()
-
-	// Normalise to start of day for accurate day calculation
-	tDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
-	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-
-	days := int(nowDate.Sub(tDate).Hours() / 24)
-
-	// Same day (Today)
-	if days == 0 {
-		return fmt.Sprintf("Today, %s", t.Format("3:04 PM"))
-	}
-
-	// Previous day (Yesterday)
-	if days == 1 {
-		return fmt.Sprintf("Yesterday, %s", t.Format("3:04 PM"))
-	}
-
-	if days < 30 {
-		return fmt.Sprintf("%d days ago, %s", days, t.Format("3:04 PM"))
-	}
-
-	if days < 365 {
-		months := days / 30
-		return fmt.Sprintf("%d month(s) ago", months)
-	}
-
-	years := days / 365
-	return fmt.Sprintf("%d year(s) ago", years)
-}
-
 // newWidthSpacer creates a transparent spacer with the given width.
 func newWidthSpacer(width float32) fyne.CanvasObject {
 	spacer := canvas.NewRectangle(color.Transparent)
@@ -358,129 +248,4 @@ func newHeightSpacer(height float32) fyne.CanvasObject {
 	spacer := canvas.NewRectangle(color.Transparent)
 	spacer.SetMinSize(fyne.NewSize(0, height))
 	return spacer
-}
-
-// calculateImageSize calculates display size respecting max dimensions.
-func calculateImageSize(width, height int) fyne.Size {
-	maxW := theme.Sizes.MessageImageMaxWidth
-	maxH := theme.Sizes.MessageImageMaxHeight
-
-	if width == 0 || height == 0 {
-		return fyne.NewSize(maxW, maxH/2)
-	}
-
-	w := float32(width)
-	h := float32(height)
-
-	if w > maxW {
-		h = h * (maxW / w)
-		w = maxW
-	}
-	if h > maxH {
-		w = w * (maxH / h)
-		h = maxH
-	}
-
-	return fyne.NewSize(w, h)
-}
-
-// formatSystemMessage converts system message to readable text.
-func formatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
-	switch message.Type {
-	case revoltgo.MessageSystemUserAdded:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s added to group", user.Username)
-	case revoltgo.MessageSystemUserRemove:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s removed from group", user.Username)
-	case revoltgo.MessageSystemUserJoined:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s joined", user.Username)
-	case revoltgo.MessageSystemUserLeft:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s left", user.Username)
-	case revoltgo.MessageSystemUserKicked:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s was kicked", user.Username)
-	case revoltgo.MessageSystemUserBanned:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s banned", user.Username)
-	case revoltgo.MessageSystemChannelRenamed:
-		return "Channel renamed"
-	case revoltgo.MessageSystemChannelDescriptionChanged:
-		return "Channel description changed"
-	case revoltgo.MessageSystemChannelIconChanged:
-		return "Channel icon changed"
-	case revoltgo.MessageSystemChannelOwnershipChanged:
-		return "Channel ownership changed"
-	case revoltgo.MessageSystemMessagePinned:
-		return "Message pinned"
-	case revoltgo.MessageSystemMessageUnpinned:
-		return "Message unpinned"
-	case revoltgo.MessageSystemCallStarted:
-		return "Call started"
-	case revoltgo.MessageSystemText:
-		return "System message"
-	default:
-		return "System event"
-	}
-}
-
-// swiftActionButton is a simple widget for swift actions (Reply, Delete, Edit).
-type swiftActionButton struct {
-	widget.BaseWidget
-	label   string
-	onTap   func()
-	onHover func(bool)
-	bg      *canvas.Rectangle
-	text    *canvas.Text
-}
-
-func newSwiftActionButton(label string, onTap func(), onHover func(bool)) *swiftActionButton {
-	bg := canvas.NewRectangle(color.Transparent)
-	// Make slightly thinner vertically (80% of width)
-	height := theme.Sizes.SwiftActionSize * 0.8
-	bg.SetMinSize(fyne.NewSize(theme.Sizes.SwiftActionSize, height))
-
-	text := canvas.NewText(label, theme.Colors.SwiftActionText)
-	text.Alignment = fyne.TextAlignCenter
-	text.TextSize = 14
-
-	b := &swiftActionButton{
-		label:   label,
-		onTap:   onTap,
-		onHover: onHover,
-		bg:      bg,
-		text:    text,
-	}
-	b.ExtendBaseWidget(b)
-	return b
-}
-
-func (b *swiftActionButton) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.text)))
-}
-
-func (b *swiftActionButton) Tapped(_ *fyne.PointEvent) {
-	if b.onTap != nil {
-		b.onTap()
-	}
-}
-
-func (b *swiftActionButton) MouseIn(_ *desktop.MouseEvent) {
-	b.bg.FillColor = theme.Colors.SwiftActionHoverBg
-	b.bg.Refresh()
-	if b.onHover != nil {
-		b.onHover(true)
-	}
-}
-
-func (b *swiftActionButton) MouseMoved(_ *desktop.MouseEvent) {}
-
-func (b *swiftActionButton) MouseOut() {
-	b.bg.FillColor = color.Transparent
-	b.bg.Refresh()
-	if b.onHover != nil {
-		b.onHover(false)
-	}
 }

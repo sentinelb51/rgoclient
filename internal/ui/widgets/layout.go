@@ -82,14 +82,14 @@ func NewHorizontalNoSpacingContainer(objects ...fyne.CanvasObject) *fyne.Contain
 	return fyne.NewContainerWithLayout(&HorizontalNoSpacingLayout{}, objects...)
 }
 
-// TopRightOffsetLayout positions the content at the top right with an offset.
+// SwiftActionsLayout positions the content at the top right with an offset.
 // It allows the content to bleed outside the bounds (e.g., negative Y).
-type TopRightOffsetLayout struct {
+type SwiftActionsLayout struct {
 	YOffset     float32
 	RightOffset float32
 }
 
-func (l *TopRightOffsetLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+func (l *SwiftActionsLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	for _, child := range objects {
 		if !child.Visible() {
 			continue
@@ -104,7 +104,7 @@ func (l *TopRightOffsetLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 	}
 }
 
-func (l *TopRightOffsetLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (l *SwiftActionsLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	// Returns zero size so it doesn't affect parent layout flow for "overlay" behavior
 	// But usually overlay needs to match stack.
 	// Actually for Stack, minSize is the max of children.

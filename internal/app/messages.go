@@ -210,9 +210,14 @@ func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput
 	attachments := make([]widgets.Attachment, len(input.Attachments))
 	copy(attachments, input.Attachments)
 
+	// Copy replies
+	replies := make([]widgets.Reply, len(input.Replies))
+	copy(replies, input.Replies)
+
 	// Clear UI immediately for responsiveness
 	input.SetText("")
 	input.ClearAttachments()
+	input.ClearReplies()
 
 	// Perform network operations in background
 	go func() {
@@ -241,9 +246,18 @@ func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput
 			attachmentIDs = append(attachmentIDs, uploaded.ID)
 		}
 
+		msgReplies := make([]*revoltgo.MessageReplies, len(replies))
+		for i, r := range replies {
+			msgReplies[i] = &revoltgo.MessageReplies{
+				ID:      r.ID,
+				Mention: r.Mention,
+			}
+		}
+
 		send := revoltgo.MessageSend{
 			Content:     text,
 			Attachments: attachmentIDs,
+			Replies:     msgReplies,
 		}
 
 		if _, err := app.Session.ChannelMessageSend(channelID, send); err != nil {

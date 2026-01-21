@@ -1,6 +1,7 @@
 package widgets
 
 import (
+	"RGOClient/internal/cache"
 	"RGOClient/internal/util"
 	"image/color"
 	"time"
@@ -19,9 +20,10 @@ import (
 type MessageActions interface {
 	OnAvatarTapped(userID string)
 	OnImageTapped(attachment *revoltgo.Attachment)
-	OnReply(messageID string)
+	OnReply(message *revoltgo.Message)
 	OnDelete(messageID string)
 	OnEdit(messageID string)
+	ResolveMessage(channelID, messageID string) *revoltgo.Message
 }
 
 // Compile-time interface assertions.
@@ -84,17 +86,19 @@ func NewMessageWidget(
 		w.updateHoverState()
 	}
 
-	replyBtn := newSwiftActionButton("<", func() {
+	replyBtn := newSwiftActionButton("assets/reply.svg", func() {
 		if actions != nil {
-			actions.OnReply(message.ID)
+			actions.OnReply(message)
 		}
 	}, onActionHover)
-	editBtn := newSwiftActionButton("E", func() {
+
+	editBtn := newSwiftActionButton("assets/edit.svg", func() {
 		if actions != nil {
 			actions.OnEdit(message.ID)
 		}
 	}, onActionHover)
-	deleteBtn := newSwiftActionButton("X", func() {
+
+	deleteBtn := newSwiftActionButton("assets/trash.svg", func() {
 		if actions != nil {
 			actions.OnDelete(message.ID)
 		}
@@ -123,6 +127,17 @@ func NewMessageWidget(
 	// Build content widget
 	contentWidget := buildMessageContent(message, displayName, timestamp, content, actions)
 
+	// Add replies if present
+	if len(message.Replies) > 0 {
+		repliesContainer := container.NewVBox()
+		for _, replyID := range message.Replies {
+			repliesContainer.Add(buildReplyPreview(replyID, message.Channel, session, actions))
+		}
+		// Add some padding to separate replies from main content
+		repliesContainer.Add(newHeightSpacer(2))
+		contentWidget = container.NewVBox(repliesContainer, contentWidget)
+	}
+
 	// Wrap content - 0 vertical padding here as requested "Remove any spacing"
 	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
@@ -139,15 +154,13 @@ func NewMessageWidget(
 	)
 
 	// Overlay actions top-right with negative offset
-	// Using TopRightOffsetLayout from layout.go
-	// YOffset: -16 (upwards)
-	// RightOffset: 16 (padding from right)
-	topRightActions := container.New(
-		&TopRightOffsetLayout{YOffset: -16, RightOffset: 16},
+	// Using SwiftActionsLayout from layout.go
+	swiftActions := container.New(
+		&SwiftActionsLayout{YOffset: -16, RightOffset: 6},
 		actionsGroup,
 	)
 
-	finalLayout := container.NewStack(innerContainer, topRightActions)
+	finalLayout := container.NewStack(innerContainer, swiftActions)
 
 	w.content = finalLayout
 	w.ExtendBaseWidget(w)
@@ -248,4 +261,80 @@ func newHeightSpacer(height float32) fyne.CanvasObject {
 	spacer := canvas.NewRectangle(color.Transparent)
 	spacer.SetMinSize(fyne.NewSize(0, height))
 	return spacer
+}
+
+func buildReplyPreview(replyID string, channelID string, session *revoltgo.Session, actions MessageActions) fyne.CanvasObject {
+	var authorName, content, avatarURL string
+
+	if actions != nil {
+		msg := actions.ResolveMessage(channelID, replyID)
+		if msg != nil {
+			authorName = util.DisplayName(session, msg)
+			content = msg.Content
+			avatarURL = util.DisplayAvatarURL(session, msg)
+		} else {
+			content = "Unknown message reference"
+		}
+	} else {
+		content = "Unknown message reference"
+	}
+
+	if len(content) > 60 {
+		content = content[:57] + "..."
+	}
+
+	// 1. Elbow Line (Up and Right)
+	// Visual: ┌ (Top-Left corner)
+	// Use TimestampText for better visibility
+	elbowColor := theme.Colors.TimestampText
+	vBar := canvas.NewRectangle(elbowColor)
+	vBarSize := fyne.NewSize(2, 12)
+	vBar.Resize(vBarSize)        // Must resize for WithoutLayout
+	vBar.Move(fyne.NewPos(6, 6)) // Adjusted position for visual balance
+
+	hBar := canvas.NewRectangle(elbowColor)
+	hBarSize := fyne.NewSize(15, 2)
+	hBar.Resize(hBarSize) // Must resize for WithoutLayout
+	hBar.Move(fyne.NewPos(6, 6))
+
+	elbow := container.NewWithoutLayout(vBar, hBar)
+
+	// Ensure elbow creates enough space and structure
+	sizer := canvas.NewRectangle(color.Transparent)
+	sizer.SetMinSize(fyne.NewSize(24, 20))
+	elbowContainer := container.NewStack(sizer, elbow)
+
+	// 2. Avatar
+	avatarSize := fyne.NewSize(16, 16)
+	avatarPlaceholder := canvas.NewCircle(theme.Colors.ServerDefaultBg)
+	avatarContainer := container.NewGridWrap(avatarSize, avatarPlaceholder)
+
+	if avatarURL != "" {
+		avatarID := util.IDFromAttachmentURL(avatarURL)
+		if avatarID == "" {
+			avatarID = avatarURL
+		}
+		cache.GetImageCache().LoadImageToContainer(avatarID, avatarURL, avatarSize, avatarContainer, true, nil)
+	}
+
+	// 3. Text
+	userLabel := canvas.NewText(authorName, theme.Colors.TextPrimary)
+	userLabel.TextStyle.Bold = true
+	userLabel.TextSize = 12
+
+	msgLabel := canvas.NewText(content, theme.Colors.TimestampText)
+	msgLabel.TextSize = 12
+
+	// Use Center layout for text to ensure it aligns with avatar/icon vertically
+	// regardless of slight height differences
+	row := NewHorizontalNoSpacingContainer(
+		elbowContainer,
+		container.NewCenter(avatarContainer),
+		newWidthSpacer(5),
+		container.NewCenter(userLabel),
+		newWidthSpacer(5),
+		container.NewCenter(msgLabel),
+	)
+
+	return row
 }

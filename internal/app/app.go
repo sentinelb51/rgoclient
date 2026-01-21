@@ -10,6 +10,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
+	"RGOClient/internal/util"
 
 	"fyne.io/fyne/v2/widget"
 )
@@ -126,8 +127,27 @@ func (app *ChatApp) OnImageTapped(attachment *revoltgo.Attachment) {
 }
 
 // OnReply handles reply action.
-func (app *ChatApp) OnReply(messageID string) {
-	fmt.Printf("Reply to: %s\n", messageID)
+func (app *ChatApp) OnReply(message *revoltgo.Message) {
+	if app.CurrentChannelID == "" || app.messageInput == nil || message == nil {
+		return
+	}
+
+	displayName := util.DisplayName(app.Session, message)
+	avatarURL := util.DisplayAvatarURL(app.Session, message)
+	app.messageInput.AddReply(message, displayName, avatarURL)
+	app.window.Canvas().Focus(app.messageInput)
+}
+
+// ResolveMessage resolves a message from cache.
+func (app *ChatApp) ResolveMessage(channelID, messageID string) *revoltgo.Message {
+	// Check cache
+	messages := app.Messages.Get(channelID)
+	for _, m := range messages {
+		if m.ID == messageID {
+			return m
+		}
+	}
+	return nil
 }
 
 // OnDelete handles delete action.

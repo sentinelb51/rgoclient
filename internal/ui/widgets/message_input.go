@@ -13,15 +13,28 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-
+	"github.com/sentinelb51/revoltgo"
 	"golang.design/x/clipboard"
 
+	"RGOClient/internal/cache"
 	appTheme "RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
-// MessageInput input constants.
+// Constants for message input configuration and layout.
 const (
-	messageInputMaxLines = 8
+	maxMessageInputLines  = 8
+	maxReplyCount         = 5
+	maxReplyPreviewLength = 60
+	truncateIndicator     = "..."
+
+	attBarHeight         = float32(28)
+	attNameTextSize      = float32(12)
+	attSizeTextSize      = float32(12)
+	attPreviewWidth      = float32(200)
+	attPreviewImgHeight  = float32(150)
+	attPreviewFileHeight = float32(64)
+	attSpacerSize        = float32(8)
 )
 
 // Compile-time interface assertion.
@@ -33,6 +46,15 @@ type Attachment struct {
 	Name string
 }
 
+// Reply represents a message being replied to.
+type Reply struct {
+	ID      string
+	Author  string
+	Content string
+	Avatar  string
+	Mention bool
+}
+
 // MessageInput is a custom Entry widget that supports shift-enter for newlines.
 type MessageInput struct {
 	widget.Entry
@@ -40,6 +62,9 @@ type MessageInput struct {
 	shiftPressed        bool
 	Attachments         []Attachment
 	AttachmentContainer *fyne.Container
+
+	Replies        []Reply
+	ReplyContainer *fyne.Container
 }
 
 // NewMessageInput creates a new MessageInput widget.
@@ -49,6 +74,8 @@ func NewMessageInput() *MessageInput {
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
 	m.AttachmentContainer = container.NewHBox()
+	m.ReplyContainer = container.NewVBox()
+	m.Replies = []Reply{}
 	return m
 }
 
@@ -72,82 +99,264 @@ func (m *MessageInput) RemoveAttachment(path string) {
 	}
 }
 
-func (m *MessageInput) rebuildAttachmentUI() {
-	m.AttachmentContainer.Objects = nil
-	for _, a := range m.Attachments {
-		path := a.Path
-		name := a.Name
-
-		// Get file size
-		info, err := os.Stat(path)
-		var size int
-		if err == nil {
-			size = int(info.Size())
-		}
-
-		// Is Image?
-		ext := strings.ToLower(filepath.Ext(path))
-		isImage := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp"
-
-		// Metadata Bar
-		barBg := canvas.NewRectangle(appTheme.Colors.SwiftActionBg)
-
-		nameLabel := canvas.NewText(name, appTheme.Colors.TextPrimary)
-		nameLabel.TextSize = 12
-		nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-		nameLabel.Alignment = fyne.TextAlignLeading
-
-		sizeLabel := canvas.NewText(formatFileSize(size), appTheme.Colors.TimestampText)
-		sizeLabel.TextSize = 12
-		sizeLabel.Alignment = fyne.TextAlignTrailing
-
-		// Bar Layout
-		barContent := container.NewBorder(nil, nil,
-			container.NewHBox(newWidthSpacer(8), nameLabel),
-			container.NewHBox(sizeLabel, newWidthSpacer(8)),
-		)
-
-		barHeight := float32(28)
-		barBg.SetMinSize(fyne.NewSize(0, barHeight))
-		barStack := container.NewStack(barBg, barContent)
-
-		var contentStack *fyne.Container
-
-		if isImage {
-			img := canvas.NewImageFromFile(path)
-			img.FillMode = canvas.ImageFillContain
-			img.ScaleMode = canvas.ImageScaleFastest
-
-			previewWidth := float32(200)
-			previewHeight := float32(150)
-			// Force size
-			imgContainer := container.NewGridWrap(fyne.NewSize(previewWidth, previewHeight), img)
-
-			// Use Border layout to join them with NO gap
-			contentStack = container.NewBorder(nil, barStack, nil, nil, imgContainer)
-		} else {
-			width := float32(200)
-			height := float32(64)
-
-			placeholder := canvas.NewRectangle(appTheme.Colors.ServerDefaultBg)
-			placeholder.SetMinSize(fyne.NewSize(width, height))
-
-			// Use Border layout to join them with NO gap
-			contentStack = container.NewBorder(nil, barStack, nil, nil, placeholder)
-		}
-
-		// X Button overlay
-		xBtn := NewXButton(func() {
-			m.RemoveAttachment(path)
-		})
-
-		topRight := container.New(&TopRightOffsetLayout{YOffset: -8, RightOffset: -8}, xBtn)
-		card := container.NewStack(contentStack, topRight)
-
-		m.AttachmentContainer.Add(container.NewPadded(card))
+// AddReply adds a message to the reply list.
+func (m *MessageInput) AddReply(msg *revoltgo.Message, authorName string, avatarURL string) {
+	if len(m.Replies) >= maxReplyCount {
+		return
 	}
-	m.AttachmentContainer.Refresh()
+
+	// Check if already replying to this message
+	for _, r := range m.Replies {
+		if r.ID == msg.ID {
+			return
+		}
+	}
+
+	reply := Reply{
+		ID:      msg.ID,
+		Author:  authorName,
+		Content: msg.Content,
+		Avatar:  avatarURL,
+		Mention: false, // Default false
+	}
+
+	m.Replies = append(m.Replies, reply)
+	m.rebuildReplyUI()
+}
+
+// RemoveReply removes a reply by message ID.
+func (m *MessageInput) RemoveReply(messageID string) {
+	for i, r := range m.Replies {
+		if r.ID == messageID {
+			m.Replies = append(m.Replies[:i], m.Replies[i+1:]...)
+			m.rebuildReplyUI()
+			return
+		}
+	}
+}
+
+// ClearReplies clears all replies.
+func (m *MessageInput) ClearReplies() {
+	m.Replies = []Reply{}
+	m.rebuildReplyUI()
+}
+
+// rebuildReplyUI rebuilds the reply container.
+func (m *MessageInput) rebuildReplyUI() {
+	m.ReplyContainer.Objects = nil
+	for i := range m.Replies {
+		replyInfo := &m.Replies[i]
+		card := m.buildReplyCard(replyInfo)
+		m.ReplyContainer.Add(card)
+	}
+	m.ReplyContainer.Refresh()
 	m.Refresh() // Trigger layout update
+}
+
+// mentionToggleButton previews toggled state on hover.
+// Rendered state = active XOR hovered.
+// Hover when off  => highlight
+// Hover when on   => unhighlight.
+//
+// Note: Positioning uses layout offsets; Move() gets overridden by container layouts.
+type mentionToggleButton struct {
+	widget.BaseWidget
+	active  bool
+	hovered bool
+	onTap   func()
+
+	bg   *canvas.Rectangle
+	text *canvas.Text
+
+	content *fyne.Container
+}
+
+var _ fyne.Widget = (*mentionToggleButton)(nil)
+var _ fyne.Tappable = (*mentionToggleButton)(nil)
+var _ desktop.Hoverable = (*mentionToggleButton)(nil)
+
+func newMentionToggleButton(active bool, onTap func()) *mentionToggleButton {
+	btnSize := fyne.NewSize(20, 20)
+
+	bg := canvas.NewRectangle(appTheme.Colors.SwiftActionBg)
+	bg.SetMinSize(btnSize)
+
+	text := canvas.NewText("@", appTheme.Colors.TimestampText)
+	text.TextSize = 20
+	text.TextStyle = fyne.TextStyle{Bold: true}
+
+	// Offset glyph; Move() gets overridden by layouts.
+	textOffset := container.New(&SwiftActionsLayout{YOffset: -15, RightOffset: 0}, text)
+	centeredText := container.NewCenter(textOffset)
+
+	content := container.NewStack(bg, centeredText)
+	content.Resize(btnSize)
+
+	b := &mentionToggleButton{
+		active:  active,
+		onTap:   onTap,
+		bg:      bg,
+		text:    text,
+		content: content,
+	}
+	b.ExtendBaseWidget(b)
+	b.applyState()
+	return b
+}
+
+func (b *mentionToggleButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+func (b *mentionToggleButton) Tapped(*fyne.PointEvent) {
+	if b.onTap != nil {
+		b.onTap()
+	}
+}
+
+func (b *mentionToggleButton) MouseIn(*desktop.MouseEvent) {
+	b.hovered = true
+	b.applyState()
+}
+
+func (b *mentionToggleButton) MouseOut() {
+	b.hovered = false
+	b.applyState()
+}
+
+func (b *mentionToggleButton) MouseMoved(*desktop.MouseEvent) {}
+
+func (b *mentionToggleButton) SetActive(active bool) {
+	b.active = active
+	b.applyState()
+}
+
+func (b *mentionToggleButton) applyState() {
+	if b.active != b.hovered {
+		b.text.Color = appTheme.Colors.TextPrimary
+	} else {
+		b.text.Color = appTheme.Colors.TimestampText
+	}
+	b.text.Refresh()
+}
+
+// buildReplyCard creates the UI for a single reply.
+func (m *MessageInput) buildReplyCard(r *Reply) fyne.CanvasObject {
+	bg := canvas.NewRectangle(appTheme.Colors.SwiftActionBg)
+	bg.CornerRadius = 8
+
+	avatarSize := fyne.NewSize(22, 22)
+	placeholder := canvas.NewCircle(appTheme.Colors.ServerDefaultBg)
+	avatarContainer := container.NewGridWrap(avatarSize, placeholder)
+
+	if r.Avatar != "" {
+		avatarID := util.IDFromAttachmentURL(r.Avatar)
+		if avatarID == "" {
+			avatarID = r.Avatar
+		}
+		cache.GetImageCache().LoadImageToContainer(avatarID, r.Avatar, avatarSize, avatarContainer, true, nil)
+	}
+
+	centeredAvatar := container.NewCenter(avatarContainer)
+
+	content := r.Content
+	if len(content) > maxReplyPreviewLength {
+		content = content[:maxReplyPreviewLength-len(truncateIndicator)] + truncateIndicator
+	}
+
+	usernameLabel := canvas.NewText(r.Author, appTheme.Colors.TextPrimary)
+	usernameLabel.TextSize = 14
+	usernameLabel.TextStyle = fyne.TextStyle{Bold: true}
+
+	contentLabel := canvas.NewText(content, appTheme.Colors.TimestampText)
+	contentLabel.TextSize = 14
+
+	textContainer := NewHorizontalNoSpacingContainer(
+		usernameLabel,
+		newWidthSpacer(10),
+		contentLabel,
+	)
+
+	var mentionBtn *mentionToggleButton
+	mentionBtn = newMentionToggleButton(r.Mention, func() {
+		r.Mention = !r.Mention
+		mentionBtn.SetActive(r.Mention)
+		m.ReplyContainer.Refresh()
+	})
+
+	closeBtn := NewXButton(func() {
+		m.RemoveReply(r.ID)
+	})
+
+	rightControls := container.NewHBox(mentionBtn, closeBtn)
+
+	leftContent := NewHorizontalNoSpacingContainer(
+		newWidthSpacer(12),
+		centeredAvatar,
+		newWidthSpacer(4),
+		textContainer,
+	)
+
+	layoutContent := container.NewBorder(
+		nil, nil,
+		leftContent,
+		rightControls,
+	)
+
+	layoutContentPadded := container.NewBorder(
+		newHeightSpacer(2), newHeightSpacer(2),
+		newWidthSpacer(4), newWidthSpacer(4),
+		layoutContent,
+	)
+	return container.NewStack(bg, layoutContentPadded)
+}
+
+func (m *MessageInput) createAttachmentMetadataBar(name string, size int, onRemove func()) fyne.CanvasObject {
+	barBg := canvas.NewRectangle(appTheme.Colors.SwiftActionBg)
+	barBg.SetMinSize(fyne.NewSize(0, attBarHeight))
+
+	nameLabel := canvas.NewText(name, appTheme.Colors.TextPrimary)
+	nameLabel.TextSize = attNameTextSize
+	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+	nameLabel.Alignment = fyne.TextAlignLeading
+
+	sizeLabel := canvas.NewText(formatFileSize(size), appTheme.Colors.TimestampText)
+	sizeLabel.TextSize = attSizeTextSize
+	sizeLabel.Alignment = fyne.TextAlignTrailing
+
+	closeBtn := NewXButton(onRemove)
+
+	barContent := container.NewBorder(nil, nil,
+		container.NewHBox(newWidthSpacer(attSpacerSize), nameLabel),
+		container.NewHBox(sizeLabel, container.NewPadded(closeBtn), newWidthSpacer(attSpacerSize)),
+	)
+
+	return container.NewStack(barBg, barContent)
+}
+
+func (m *MessageInput) createAttachmentPreview(path string) fyne.CanvasObject {
+
+	if util.Filetype(path) == util.FileTypeImage {
+		return m.createImagePreview(path)
+	}
+
+	return m.createGenericPreview()
+}
+
+func (m *MessageInput) createImagePreview(path string) fyne.CanvasObject {
+	img := canvas.NewImageFromFile(path)
+	img.FillMode = canvas.ImageFillContain
+	img.ScaleMode = canvas.ImageScaleFastest
+
+	img.SetMinSize(fyne.NewSize(attPreviewWidth, attPreviewImgHeight))
+	return img
+}
+
+func (m *MessageInput) createGenericPreview() fyne.CanvasObject {
+	placeholder := canvas.NewRectangle(appTheme.Colors.ServerDefaultBg)
+	placeholder.SetMinSize(fyne.NewSize(attPreviewWidth, attPreviewFileHeight))
+
+	return placeholder
 }
 
 // ClearAttachments clears all attachments.
@@ -176,8 +385,9 @@ func (m *MessageInput) MinSize() fyne.Size {
 	if lines < 1 {
 		lines = 1
 	}
-	if lines > messageInputMaxLines {
-		lines = messageInputMaxLines
+
+	if lines > maxMessageInputLines {
+		lines = maxMessageInputLines
 	}
 
 	lh := m.lineHeight()
@@ -271,5 +481,36 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 	}
 
 	m.Entry.TypedShortcut(s)
+	m.Refresh()
+}
+
+// rebuildAttachmentUI rebuilds the attachment UI.
+func (m *MessageInput) rebuildAttachmentUI() {
+	m.AttachmentContainer.Objects = nil
+	for _, att := range m.Attachments {
+
+		// File size
+		size := 0
+		if info, err := os.Stat(att.Path); err == nil {
+			size = int(info.Size())
+		}
+
+		capturedPath := att.Path
+		onRemove := func() {
+			m.RemoveAttachment(capturedPath)
+		}
+
+		preview := m.createAttachmentPreview(att.Path)
+		bar := m.createAttachmentMetadataBar(att.Name, size, onRemove)
+
+		main := container.NewBorder(nil, bar, nil, nil, preview)
+
+		bg := canvas.NewRectangle(appTheme.Colors.ServerDefaultBg)
+		bg.CornerRadius = 8
+		card := container.NewStack(bg, container.NewPadded(main))
+
+		m.AttachmentContainer.Add(container.NewPadded(card))
+	}
+	m.AttachmentContainer.Refresh()
 	m.Refresh()
 }

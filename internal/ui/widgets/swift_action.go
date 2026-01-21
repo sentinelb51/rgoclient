@@ -15,40 +15,46 @@ import (
 // swiftActionButton is a simple widget for swift actions (Reply, Delete, Edit).
 type swiftActionButton struct {
 	widget.BaseWidget
-	label   string
-	onTap   func()
-	onHover func(bool)
-	bg      *canvas.Rectangle
-	text    *canvas.Text
+	iconPath string
+	onTap    func()
+	onHover  func(bool)
+	bg       *canvas.Rectangle
+	icon     *canvas.Image
 }
 
 // assertions
 var _ fyne.Tappable = (*swiftActionButton)(nil)
 var _ desktop.Hoverable = (*swiftActionButton)(nil)
 
-func newSwiftActionButton(label string, onTap func(), onHover func(bool)) *swiftActionButton {
-	bg := canvas.NewRectangle(color.Transparent)
-	// Make slightly thinner vertically (80% of width)
-	height := theme.Sizes.SwiftActionSize * 0.8
-	bg.SetMinSize(fyne.NewSize(theme.Sizes.SwiftActionSize, height))
+func newSwiftActionButton(iconPath string, onTap func(), onHover func(bool)) *swiftActionButton {
+	size := theme.Sizes.SwiftActionSize
 
-	text := canvas.NewText(label, theme.Colors.SwiftActionText)
-	text.Alignment = fyne.TextAlignCenter
-	text.TextSize = 14
+	// Background: Flatter aspect ratio (80% height)
+	bg := canvas.NewRectangle(color.Transparent)
+	bg.SetMinSize(fyne.NewSize(size, size*0.8))
+
+	icon := canvas.NewImageFromFile(iconPath)
+	icon.FillMode = canvas.ImageFillContain
+	icon.ScaleMode = canvas.ImageScaleSmooth
+
+	// Icon: 70% of button size to provide padding
+	// This scaling is consistent with manual padding approaches in fixed-size widgets
+	iconSize := size * 0.7
+	icon.SetMinSize(fyne.NewSize(iconSize, iconSize))
 
 	b := &swiftActionButton{
-		label:   label,
-		onTap:   onTap,
-		onHover: onHover,
-		bg:      bg,
-		text:    text,
+		iconPath: iconPath,
+		onTap:    onTap,
+		onHover:  onHover,
+		bg:       bg,
+		icon:     icon,
 	}
 	b.ExtendBaseWidget(b)
 	return b
 }
 
 func (b *swiftActionButton) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.text)))
+	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
 }
 
 func (b *swiftActionButton) Tapped(_ *fyne.PointEvent) {

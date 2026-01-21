@@ -5,7 +5,7 @@ go 1.25
 require (
 	fyne.io/fyne/v2 v2.7.2
 	github.com/oklog/ulid/v2 v2.1.1
-	github.com/sentinelb51/revoltgo v0.0.0-20260120213123-9938a6df96ce
+	github.com/sentinelb51/revoltgo v0.0.0-20260121214033-adc8030394e1
 	golang.design/x/clipboard v0.7.1
 	golang.org/x/image v0.35.0
 )

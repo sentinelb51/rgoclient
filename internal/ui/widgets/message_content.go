@@ -26,6 +26,17 @@ func buildMessageContent(
 	username, timestamp, messageText string,
 	actions MessageActions,
 ) fyne.CanvasObject {
+	header := buildMessageHeader(username, messageText, timestamp)
+
+	if message.Attachments == nil || len(message.Attachments) == 0 {
+		return header
+	}
+
+	attachmentsContainer := buildAttachmentsContainer(message.Attachments, actions)
+	return container.NewVBox(header, attachmentsContainer)
+}
+
+func buildMessageHeader(username, messageText, timestamp string) fyne.CanvasObject {
 	text := createFormattedMessage(username, messageText)
 
 	tsText := canvas.NewText(timestamp, theme.Colors.TimestampText)
@@ -37,178 +48,156 @@ func buildMessageContent(
 		container.NewHBox(layout.NewSpacer(), tsText),
 	)
 
-	textWithTimestamp := container.NewStack(text, timestampOverlay)
+	return container.NewStack(text, timestampOverlay)
+}
 
-	if message.Attachments == nil || len(message.Attachments) == 0 {
-		return textWithTimestamp
-	}
+func buildAttachmentsContainer(attachments []*revoltgo.Attachment, actions MessageActions) *fyne.Container {
+	containerBox := container.NewVBox()
+	first := true
 
-	attachmentsContainer := container.NewVBox()
-	firstAttachment := true
-
-	for _, attachment := range message.Attachments {
-		var contentStack *fyne.Container
-
-		isImage := attachment.Metadata.Type == revoltgo.AttachmentMetadataTypeImage
-		isText := strings.Contains(attachment.ContentType, "text/") ||
-			strings.HasSuffix(attachment.Filename, ".txt") ||
-			strings.HasSuffix(attachment.Filename, ".md") ||
-			strings.HasSuffix(attachment.Filename, ".go") ||
-			strings.HasSuffix(attachment.Filename, ".json") // Simple heuristic
-
-		// Metadata Bar
-		barBg := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-
-		nameLabel := canvas.NewText(attachment.Filename, theme.Colors.TextPrimary)
-		nameLabel.TextSize = 12
-		nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-		nameLabel.Alignment = fyne.TextAlignLeading
-
-		sizeLabel := canvas.NewText(formatFileSize(attachment.Size), theme.Colors.TimestampText)
-		sizeLabel.TextSize = 12
-		sizeLabel.Alignment = fyne.TextAlignTrailing
-
-		// Bar Layout
-		barContent := container.NewBorder(nil, nil,
-			container.NewHBox(newWidthSpacer(8), nameLabel),
-			container.NewHBox(sizeLabel, newWidthSpacer(8)),
-		)
-
-		barStack := container.NewStack(barBg, barContent)
-		barHeight := float32(28)
-		barBg.SetMinSize(fyne.NewSize(0, barHeight))
-
-		if isImage {
-			size := calculateImageSize(attachment.Metadata.Width, attachment.Metadata.Height)
-			placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-			placeholder.SetMinSize(size)
-			imgContainer := container.NewStack(placeholder)
-
-			attachmentURL := attachment.URL("")
-			if attachmentURL != "" && attachment.ID != "" {
-				cache.GetImageCache().LoadImageToContainer(attachment.ID, attachmentURL, size, imgContainer, false, nil)
-			}
-
-			// contentSize = fyne.NewSize(size.Width, size.Height+barHeight)
-			// Use Border layout to stack image (Center) and bar (Bottom) with NO gap
-			contentStack = container.NewBorder(nil, barStack, nil, nil, imgContainer)
-		} else if isText {
-			// Text Preview Logic
-			width := float32(300)
-			if theme.Sizes.MessageImageMaxWidth < width {
-				width = theme.Sizes.MessageImageMaxWidth
-			}
-			height := float32(150) // Estimate height for text preview
-
-			// Container for text content
-			textPreview := canvas.NewText("Loading preview...", theme.Colors.TextPrimary)
-			textPreview.TextSize = 10
-			textPreview.Alignment = fyne.TextAlignLeading
-
-			// Wrap in ascroll or just block if it's small?
-			// User asked for "wrapped inside of it".
-			// RichText is good for wrapping.
-			rt := widget.NewRichTextFromMarkdown("Loading preview...")
-			rt.Wrapping = fyne.TextWrapWord
-			// rt.Scroll = container.ScrollNone // RichText doesn't scroll by default inside standard containers unless wrapped
-
-			bg := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-			bg.SetMinSize(fyne.NewSize(width, height))
-
-			previewContainer := container.NewStack(
-				bg, // Background
-				container.NewPadded(rt),
-			)
-
-			contentStack = container.NewBorder(nil, barStack, nil, nil, previewContainer)
-			// contentSize = fyne.NewSize(width, height+barHeight)
-
-			// Async fetch
-			go func(url string, target *widget.RichText) {
-				client := http.Client{Timeout: 10 * time.Second}
-				resp, err := client.Get(url)
-				if err != nil {
-					// Handle error silently or show
-					return
-				}
-				defer resp.Body.Close()
-
-				// Read 256 chars
-				// Read a bit more to handle multibyte safely, then truncate string
-				buf := make([]byte, 512)
-				n, _ := io.ReadFull(resp.Body, buf)
-				if n > 0 {
-					content := string(buf[:n])
-					runes := []rune(content)
-					if len(runes) > 256 {
-						content = string(runes[:256]) + "..."
-					}
-
-					// Update UI
-					fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-						target.ParseMarkdown("```\n" + content + "\n```")
-						target.Refresh()
-					}, false)
-				}
-			}(attachment.URL(""), rt)
-
-		} else {
-			// Generic File (SVG icon)
-			width := theme.Sizes.MessageImageMaxWidth
-			if width > 300 {
-				width = 300
-			}
-
-			height := float32(64)
-			// contentSize = fyne.NewSize(width, height+barHeight)
-
-			placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-			placeholder.SetMinSize(fyne.NewSize(width, height))
-
-			// Render file.svg in the middle
-			// Note: In Fyne, resources are usually bundled or paths.
-			// Assuming "assets/file.svg" works from CWD.
-
-			icon := canvas.NewImageFromFile("assets/file.svg")
-			icon.FillMode = canvas.ImageFillContain
-			icon.SetMinSize(fyne.NewSize(32, 32)) // Icon size
-
-			// Center the icon
-			iconContainer := container.NewCenter(icon)
-
-			// Stack background and icon
-			mainArea := container.NewStack(placeholder, iconContainer)
-
-			contentStack = container.NewBorder(nil, barStack, nil, nil, mainArea)
+	for _, attachment := range attachments {
+		if !first {
+			containerBox.Add(newHeightSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
 
-		captured := attachment
-		// Use HoverableStack for hover effect and tap handling
-		hoverable := NewHoverableStack(contentStack, func() {
-			if isImage {
-				if actions != nil {
-					actions.OnImageTapped(captured)
-				}
-			} else {
-				// For non-images, tap could open usage menu or just do nothing (download button handles that)
-				fmt.Println("File tapped:", captured.Filename)
-			}
-		}, nil)
+		attachmentWidget := buildSingleAttachment(attachment, actions)
+		padded := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(attachmentWidget))
+		containerBox.Add(padded)
+		first = false
+	}
+	return containerBox
+}
 
-		if !firstAttachment {
-			attachmentsContainer.Add(newHeightSpacer(theme.Sizes.MessageAttachmentSpacing))
+func buildSingleAttachment(attachment *revoltgo.Attachment, actions MessageActions) fyne.CanvasObject {
+	isImage := attachment.Metadata.Type == revoltgo.AttachmentMetadataTypeImage
+	isText := isTextAttachment(attachment)
+
+	barStack := createAttachmentBar(attachment)
+	var contentStack *fyne.Container
+
+	if isImage {
+		contentStack = buildImageAttachment(attachment, barStack)
+	} else if isText {
+		contentStack = buildTextAttachment(attachment, barStack)
+	} else {
+		contentStack = buildGenericAttachment(attachment, barStack)
+	}
+
+	return NewHoverableStack(contentStack, func() {
+		if isImage && actions != nil {
+			actions.OnImageTapped(attachment)
+		} else if !isImage {
+			fmt.Println("File tapped:", attachment.Filename)
 		}
-		firstAttachment = false
+	}, nil)
+}
 
-		paddedImg := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(hoverable))
-		attachmentsContainer.Add(paddedImg)
+func isTextAttachment(attachment *revoltgo.Attachment) bool {
+	return strings.Contains(attachment.ContentType, "text/") ||
+		strings.HasSuffix(attachment.Filename, ".txt") ||
+		strings.HasSuffix(attachment.Filename, ".md") ||
+		strings.HasSuffix(attachment.Filename, ".go") ||
+		strings.HasSuffix(attachment.Filename, ".json") ||
+		strings.HasSuffix(attachment.Filename, ".xml") ||
+		strings.HasSuffix(attachment.Filename, ".yml")
+}
+
+func createAttachmentBar(attachment *revoltgo.Attachment) fyne.CanvasObject {
+	barBg := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	barHeight := float32(28)
+	barBg.SetMinSize(fyne.NewSize(0, barHeight))
+
+	nameLabel := canvas.NewText(attachment.Filename, theme.Colors.TextPrimary)
+	nameLabel.TextSize = 12
+	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+	nameLabel.Alignment = fyne.TextAlignLeading
+
+	sizeLabel := canvas.NewText(formatFileSize(attachment.Size), theme.Colors.TimestampText)
+	sizeLabel.TextSize = 12
+	sizeLabel.Alignment = fyne.TextAlignTrailing
+
+	barContent := container.NewBorder(nil, nil,
+		container.NewHBox(newWidthSpacer(8), nameLabel),
+		container.NewHBox(sizeLabel, newWidthSpacer(8)),
+	)
+
+	return container.NewStack(barBg, barContent)
+}
+
+// todo: if we're calling this, attachment probably has URL and is not nil?
+func buildImageAttachment(attachment *revoltgo.Attachment, barStack fyne.CanvasObject) *fyne.Container {
+	size := calculateImageSize(attachment.Metadata.Width, attachment.Metadata.Height)
+	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
+	placeholder.SetMinSize(size)
+	imgContainer := container.NewStack(placeholder)
+
+	attachmentURL := attachment.URL("")
+	if attachmentURL != "" && attachment.ID != "" {
+		cache.GetImageCache().LoadImageToContainer(attachment.ID, attachmentURL, size, imgContainer, false, nil)
 	}
 
-	if firstAttachment {
-		return textWithTimestamp
-	}
+	return container.NewBorder(nil, barStack, nil, nil, imgContainer)
+}
 
-	return container.NewVBox(textWithTimestamp, attachmentsContainer)
+func buildTextAttachment(attachment *revoltgo.Attachment, barStack fyne.CanvasObject) *fyne.Container {
+	width := float32(300)
+	if theme.Sizes.MessageImageMaxWidth < width {
+		width = theme.Sizes.MessageImageMaxWidth
+	}
+	height := float32(150)
+
+	rt := widget.NewRichTextFromMarkdown("Loading preview...")
+	rt.Wrapping = fyne.TextWrapWord
+
+	bg := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
+	bg.SetMinSize(fyne.NewSize(width, height))
+
+	contentStack := container.NewStack(bg, container.NewPadded(rt))
+
+	go fetchTextConfig(attachment.URL(""), rt)
+
+	return container.NewBorder(nil, barStack, nil, nil, contentStack)
+}
+
+func fetchTextConfig(url string, target *widget.RichText) {
+	client := http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	buf := make([]byte, 512)
+	n, _ := io.ReadFull(resp.Body, buf)
+	if n > 0 {
+		content := string(buf[:n])
+		runes := []rune(content)
+		if len(runes) > 256 {
+			content = string(runes[:256]) + "..."
+		}
+
+		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
+			target.ParseMarkdown("```\n" + content + "\n```")
+			target.Refresh()
+		}, false)
+	}
+}
+
+func buildGenericAttachment(_ *revoltgo.Attachment, barStack fyne.CanvasObject) *fyne.Container {
+	width := theme.Sizes.MessageImageMaxWidth
+	if width > 300 {
+		width = 300
+	}
+	height := float32(64)
+
+	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
+	placeholder.SetMinSize(fyne.NewSize(width, height))
+
+	icon := canvas.NewImageFromFile("assets/file.svg")
+	icon.FillMode = canvas.ImageFillContain
+	icon.SetMinSize(fyne.NewSize(32, 32))
+
+	return container.NewBorder(nil, barStack, nil, nil, container.NewStack(placeholder, container.NewCenter(icon)))
 }
 
 // createFormattedMessage creates a RichText widget with bold username and formatted content.

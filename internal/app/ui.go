@@ -184,7 +184,11 @@ func (app *ChatApp) buildMessageBox() fyne.CanvasObject {
 	input.OnSubmit = func(text string) {
 		app.handleMessageSubmit(text, input)
 	}
-	inputContainer := container.NewPadded(container.NewVBox(input.AttachmentContainer, input))
+	inputContainer := container.NewPadded(container.NewVBox(
+		input.ReplyContainer,
+		input.AttachmentContainer,
+		input,
+	))
 
 	channelName := "channel"
 	if ch := app.CurrentChannel(); ch != nil {

@@ -2,6 +2,7 @@ package widgets
 
 import (
 	"RGOClient/internal/cache"
+	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 	"image/color"
 	"time"
@@ -12,8 +13,6 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
-
-	"RGOClient/internal/ui/theme"
 )
 
 // MessageActions defines interactions for message elements.
@@ -70,7 +69,7 @@ func NewMessageWidget(
 	// Determine content text
 	content := message.Content
 	if message.System != nil {
-		content = formatSystemMessage(session, message.System)
+		content = util.FormatSystemMessage(session, message.System)
 	}
 
 	// Build timestamp
@@ -122,24 +121,13 @@ func NewMessageWidget(
 			actions.OnAvatarTapped(message.Author)
 		}
 	})
-	avatarColumn := container.New(&centeredAvatarLayout{width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
+	avatarColumn := container.New(&VerticalCenterFixedWidthLayout{Width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
 
 	// Build content widget
 	contentWidget := buildMessageContent(message, displayName, timestamp, content, actions)
 
-	// Add replies if present
-	if len(message.Replies) > 0 {
-		repliesContainer := container.NewVBox()
-		for _, replyID := range message.Replies {
-			repliesContainer.Add(buildReplyPreview(replyID, message.Channel, session, actions))
-		}
-		// Add some padding to separate replies from main content
-		repliesContainer.Add(newHeightSpacer(2))
-		contentWidget = container.NewVBox(repliesContainer, contentWidget)
-	}
-
 	// Wrap content - 0 vertical padding here as requested "Remove any spacing"
-	paddedContent := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
+	paddedContent := container.NewBorder(nil, nil, NewHSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
 	main := container.NewBorder(nil, nil, avatarColumn, nil, paddedContent)
 
@@ -148,8 +136,8 @@ func NewMessageWidget(
 	hPad := theme.Sizes.MessageHorizontalPadding
 
 	innerContainer := container.NewBorder(
-		newHeightSpacer(vPad), newHeightSpacer(vPad),
-		newWidthSpacer(hPad), newWidthSpacer(hPad),
+		NewVSpacer(vPad), NewVSpacer(vPad),
+		NewHSpacer(hPad), NewHSpacer(hPad),
 		main,
 	)
 
@@ -160,7 +148,20 @@ func NewMessageWidget(
 		actionsGroup,
 	)
 
-	finalLayout := container.NewStack(innerContainer, swiftActions)
+	messageRow := container.NewStack(innerContainer, swiftActions)
+
+	var finalLayout fyne.CanvasObject
+	if len(message.Replies) > 0 {
+		repliesContainer := container.NewVBox()
+		for _, replyID := range message.Replies {
+			repliesContainer.Add(buildReplyPreview(replyID, message.Channel, session, actions))
+			repliesContainer.Add(NewVSpacer(-15))
+		}
+		// No extra padding here to keep it close to the message
+		finalLayout = container.NewVBox(repliesContainer, messageRow)
+	} else {
+		finalLayout = messageRow
+	}
 
 	w.content = finalLayout
 	w.ExtendBaseWidget(w)
@@ -221,48 +222,6 @@ func (w *MessageWidget) MouseOut() {
 	w.updateHoverState()
 }
 
-// centeredAvatarLayout centers avatar vertically within available space.
-type centeredAvatarLayout struct {
-	width float32
-}
-
-func (l *centeredAvatarLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	var height float32
-	for _, obj := range objects {
-		if obj.Visible() {
-			if h := obj.MinSize().Height; h > height {
-				height = h
-			}
-		}
-	}
-	return fyne.NewSize(l.width, height)
-}
-
-func (l *centeredAvatarLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	for _, obj := range objects {
-		if obj.Visible() {
-			objSize := obj.MinSize()
-			y := (size.Height - objSize.Height) / 2
-			obj.Resize(objSize)
-			obj.Move(fyne.NewPos(0, y))
-		}
-	}
-}
-
-// newWidthSpacer creates a transparent spacer with the given width.
-func newWidthSpacer(width float32) fyne.CanvasObject {
-	spacer := canvas.NewRectangle(color.Transparent)
-	spacer.SetMinSize(fyne.NewSize(width, 0))
-	return spacer
-}
-
-// newHeightSpacer creates a transparent spacer with the given height.
-func newHeightSpacer(height float32) fyne.CanvasObject {
-	spacer := canvas.NewRectangle(color.Transparent)
-	spacer.SetMinSize(fyne.NewSize(0, height))
-	return spacer
-}
-
 func buildReplyPreview(replyID string, channelID string, session *revoltgo.Session, actions MessageActions) fyne.CanvasObject {
 	var authorName, content, avatarURL string
 
@@ -279,30 +238,9 @@ func buildReplyPreview(replyID string, channelID string, session *revoltgo.Sessi
 		content = "Unknown message reference"
 	}
 
-	if len(content) > 60 {
-		content = content[:57] + "..."
+	if len(content) > maxReplyPreviewLength {
+		content = content[:maxReplyPreviewLength-3] + "..."
 	}
-
-	// 1. Elbow Line (Up and Right)
-	// Visual: ┌ (Top-Left corner)
-	// Use TimestampText for better visibility
-	elbowColor := theme.Colors.TimestampText
-	vBar := canvas.NewRectangle(elbowColor)
-	vBarSize := fyne.NewSize(2, 12)
-	vBar.Resize(vBarSize)        // Must resize for WithoutLayout
-	vBar.Move(fyne.NewPos(6, 6)) // Adjusted position for visual balance
-
-	hBar := canvas.NewRectangle(elbowColor)
-	hBarSize := fyne.NewSize(15, 2)
-	hBar.Resize(hBarSize) // Must resize for WithoutLayout
-	hBar.Move(fyne.NewPos(6, 6))
-
-	elbow := container.NewWithoutLayout(vBar, hBar)
-
-	// Ensure elbow creates enough space and structure
-	sizer := canvas.NewRectangle(color.Transparent)
-	sizer.SetMinSize(fyne.NewSize(24, 20))
-	elbowContainer := container.NewStack(sizer, elbow)
 
 	// 2. Avatar
 	avatarSize := fyne.NewSize(16, 16)
@@ -326,15 +264,19 @@ func buildReplyPreview(replyID string, channelID string, session *revoltgo.Sessi
 	msgLabel.TextSize = 12
 
 	// Use Center layout for text to ensure it aligns with avatar/icon vertically
-	// regardless of slight height differences
-	row := NewHorizontalNoSpacingContainer(
-		elbowContainer,
+	replyRow := NewHorizontalNoSpacingContainer(
 		container.NewCenter(avatarContainer),
-		newWidthSpacer(5),
+		NewHSpacer(8),
 		container.NewCenter(userLabel),
-		newWidthSpacer(5),
+		NewHSpacer(5),
 		container.NewCenter(msgLabel),
 	)
 
-	return row
+	paddedRow := container.NewBorder(NewVSpacer(3), NewVSpacer(3), NewHSpacer(3), NewHSpacer(3), replyRow)
+
+	tappableReply := NewTappableContainer(paddedRow, func() {
+		// TODO: Navigate to message
+	})
+
+	return container.NewHBox(NewHSpacer(40), tappableReply)
 }

@@ -59,10 +59,15 @@ internal/
       swift_action.go     - Swift action button widget
       tappable.go         - TappableContainer wrapper
       xbutton.go          - X button for removing items
+      layout.go           - Layout helpers (VerticalCenterFixedWidth, NoSpacing)
+      spacers.go          - Spacer helpers (NewHSpacer, NewVSpacer)
+      hoverable.go        - HoverableStack widget
     animations/
       pulsing_text.go     - PulsingText and BigText helpers
-  utils/
+  util/
     timestamp.go          - Timestamp(); extract time from ULID
+    filetype.go           - File extension detection
+    message.go            - Message helpers (DisplayName, FormatSystemMessage)
     
 ```
 

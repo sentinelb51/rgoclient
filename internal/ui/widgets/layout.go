@@ -55,8 +55,8 @@ func (l *HorizontalNoSpacingLayout) Layout(objects []fyne.CanvasObject, size fyn
 		}
 
 		minSize := child.MinSize()
+		child.Resize(fyne.NewSize(minSize.Width, size.Height))
 		child.Move(fyne.NewPos(x, 0))
-		child.Resize(fyne.NewSize(minSize.Width, size.Height)) // Stretch height to fill
 		x += minSize.Width
 	}
 }
@@ -110,4 +110,34 @@ func (l *SwiftActionsLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	// Actually for Stack, minSize is the max of children.
 	// If we return 0, the stack will be sized by the OTHER children (main content), which is exactly what we want.
 	return fyne.NewSize(0, 0)
+}
+
+// VerticalCenterFixedWidthLayout centers objects vertically within a fixed width column.
+type VerticalCenterFixedWidthLayout struct {
+	Width float32
+}
+
+// MinSize calculates the minimum size required.
+func (l *VerticalCenterFixedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var height float32
+	for _, obj := range objects {
+		if obj.Visible() {
+			if h := obj.MinSize().Height; h > height {
+				height = h
+			}
+		}
+	}
+	return fyne.NewSize(l.Width, height)
+}
+
+// Layout arranges objects centered vertically.
+func (l *VerticalCenterFixedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, obj := range objects {
+		if obj.Visible() {
+			objSize := obj.MinSize()
+			y := (size.Height - objSize.Height) / 2
+			obj.Resize(objSize)
+			obj.Move(fyne.NewPos(0, y))
+		}
+	}
 }

@@ -92,9 +92,8 @@ func (w *ChannelWidget) updateAppearance() {
 
 // CreateRenderer returns the renderer for this widget.
 func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
-	// Left spacer provides left padding
-	spacerBg := canvas.NewRectangle(color.Transparent)
-	spacerBg.SetMinSize(fyne.NewSize(theme.Sizes.ChannelLeftPadding, 0))
+	// Left vSpacer provides left padding
+	spacerBg := NewHSpacer(theme.Sizes.ChannelLeftPadding)
 
 	// Indicators
 	w.selectionIndicator.SetMinSize(fyne.NewSize(3, 0))

@@ -273,7 +273,7 @@ func (m *MessageInput) buildReplyCard(r *Reply) fyne.CanvasObject {
 
 	textContainer := NewHorizontalNoSpacingContainer(
 		usernameLabel,
-		newWidthSpacer(10),
+		NewHSpacer(10),
 		contentLabel,
 	)
 
@@ -291,9 +291,9 @@ func (m *MessageInput) buildReplyCard(r *Reply) fyne.CanvasObject {
 	rightControls := container.NewHBox(mentionBtn, closeBtn)
 
 	leftContent := NewHorizontalNoSpacingContainer(
-		newWidthSpacer(12),
+		NewHSpacer(12),
 		centeredAvatar,
-		newWidthSpacer(4),
+		NewHSpacer(4),
 		textContainer,
 	)
 
@@ -304,8 +304,8 @@ func (m *MessageInput) buildReplyCard(r *Reply) fyne.CanvasObject {
 	)
 
 	layoutContentPadded := container.NewBorder(
-		newHeightSpacer(2), newHeightSpacer(2),
-		newWidthSpacer(4), newWidthSpacer(4),
+		NewVSpacer(2), NewVSpacer(2),
+		NewHSpacer(4), NewHSpacer(4),
 		layoutContent,
 	)
 	return container.NewStack(bg, layoutContentPadded)
@@ -327,8 +327,8 @@ func (m *MessageInput) createAttachmentMetadataBar(name string, size int, onRemo
 	closeBtn := NewXButton(onRemove)
 
 	barContent := container.NewBorder(nil, nil,
-		container.NewHBox(newWidthSpacer(attSpacerSize), nameLabel),
-		container.NewHBox(sizeLabel, container.NewPadded(closeBtn), newWidthSpacer(attSpacerSize)),
+		container.NewHBox(NewHSpacer(attSpacerSize), nameLabel),
+		container.NewHBox(sizeLabel, container.NewPadded(closeBtn), NewHSpacer(attSpacerSize)),
 	)
 
 	return container.NewStack(barBg, barContent)

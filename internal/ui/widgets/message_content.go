@@ -2,22 +2,20 @@ package widgets
 
 import (
 	"fmt"
-	"image/color"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 // buildMessageContent creates the message content with username, text, and attachments.
@@ -44,7 +42,7 @@ func buildMessageHeader(username, messageText, timestamp string) fyne.CanvasObje
 
 	// Overlay timestamp in top-right
 	timestampOverlay := container.NewVBox(
-		newHeightSpacer(theme.Sizes.MessageTimestampTopOffset),
+		NewVSpacer(theme.Sizes.MessageTimestampTopOffset),
 		container.NewHBox(layout.NewSpacer(), tsText),
 	)
 
@@ -57,11 +55,11 @@ func buildAttachmentsContainer(attachments []*revoltgo.Attachment, actions Messa
 
 	for _, attachment := range attachments {
 		if !first {
-			containerBox.Add(newHeightSpacer(theme.Sizes.MessageAttachmentSpacing))
+			containerBox.Add(NewVSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
 
 		attachmentWidget := buildSingleAttachment(attachment, actions)
-		padded := container.NewBorder(nil, nil, newWidthSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(attachmentWidget))
+		padded := container.NewBorder(nil, nil, NewHSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(attachmentWidget))
 		containerBox.Add(padded)
 		first = false
 	}
@@ -70,7 +68,7 @@ func buildAttachmentsContainer(attachments []*revoltgo.Attachment, actions Messa
 
 func buildSingleAttachment(attachment *revoltgo.Attachment, actions MessageActions) fyne.CanvasObject {
 	isImage := attachment.Metadata.Type == revoltgo.AttachmentMetadataTypeImage
-	isText := isTextAttachment(attachment)
+	isText := util.Filetype(attachment.Filename) == util.FileTypeText
 
 	barStack := createAttachmentBar(attachment)
 	var contentStack *fyne.Container
@@ -92,16 +90,6 @@ func buildSingleAttachment(attachment *revoltgo.Attachment, actions MessageActio
 	}, nil)
 }
 
-func isTextAttachment(attachment *revoltgo.Attachment) bool {
-	return strings.Contains(attachment.ContentType, "text/") ||
-		strings.HasSuffix(attachment.Filename, ".txt") ||
-		strings.HasSuffix(attachment.Filename, ".md") ||
-		strings.HasSuffix(attachment.Filename, ".go") ||
-		strings.HasSuffix(attachment.Filename, ".json") ||
-		strings.HasSuffix(attachment.Filename, ".xml") ||
-		strings.HasSuffix(attachment.Filename, ".yml")
-}
-
 func createAttachmentBar(attachment *revoltgo.Attachment) fyne.CanvasObject {
 	barBg := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 	barHeight := float32(28)
@@ -117,8 +105,8 @@ func createAttachmentBar(attachment *revoltgo.Attachment) fyne.CanvasObject {
 	sizeLabel.Alignment = fyne.TextAlignTrailing
 
 	barContent := container.NewBorder(nil, nil,
-		container.NewHBox(newWidthSpacer(8), nameLabel),
-		container.NewHBox(sizeLabel, newWidthSpacer(8)),
+		container.NewHBox(NewHSpacer(8), nameLabel),
+		container.NewHBox(sizeLabel, NewHSpacer(8)),
 	)
 
 	return container.NewStack(barBg, barContent)
@@ -230,106 +218,6 @@ func calculateImageSize(width, height int) fyne.Size {
 	}
 
 	return fyne.NewSize(w, h)
-}
-
-// formatSystemMessage converts system message to readable text.
-func formatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
-	switch message.Type {
-	case revoltgo.MessageSystemUserAdded:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s added to group", user.Username)
-	case revoltgo.MessageSystemUserRemove:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s removed from group", user.Username)
-	case revoltgo.MessageSystemUserJoined:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s joined", user.Username)
-	case revoltgo.MessageSystemUserLeft:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s left", user.Username)
-	case revoltgo.MessageSystemUserKicked:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s was kicked", user.Username)
-	case revoltgo.MessageSystemUserBanned:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s banned", user.Username)
-	case revoltgo.MessageSystemChannelRenamed:
-		return "Channel renamed"
-	case revoltgo.MessageSystemChannelDescriptionChanged:
-		return "Channel description changed"
-	case revoltgo.MessageSystemChannelIconChanged:
-		return "Channel icon changed"
-	case revoltgo.MessageSystemChannelOwnershipChanged:
-		return "Channel ownership changed"
-	case revoltgo.MessageSystemMessagePinned:
-		return "Message pinned"
-	case revoltgo.MessageSystemMessageUnpinned:
-		return "Message unpinned"
-	case revoltgo.MessageSystemCallStarted:
-		return "Call started"
-	case revoltgo.MessageSystemText:
-		return "System message"
-	default:
-		return "System event"
-	}
-}
-
-// HoverableStack is a minimal custom widget to handle hover events for attachments.
-type HoverableStack struct {
-	widget.BaseWidget
-	content *fyne.Container
-	bg      *canvas.Rectangle
-	onHover func(bool)
-	onTap   func()
-}
-
-var _ fyne.Widget = (*HoverableStack)(nil)
-var _ desktop.Hoverable = (*HoverableStack)(nil)
-var _ fyne.Tappable = (*HoverableStack)(nil)
-
-func NewHoverableStack(content *fyne.Container, onTap func(), onHover func(bool)) *HoverableStack {
-	bg := canvas.NewRectangle(color.Transparent)
-	bg.StrokeColor = theme.Colors.ServerListBackground // Default border color (subtle or transparent)
-	bg.StrokeWidth = 0
-
-	h := &HoverableStack{
-		content: content,
-		bg:      bg,
-		onHover: onHover,
-		onTap:   onTap,
-	}
-	h.ExtendBaseWidget(h)
-	return h
-}
-
-func (h *HoverableStack) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(h.content, h.bg))
-}
-
-func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
-	if h.onHover != nil {
-		h.onHover(true)
-	}
-	h.bg.StrokeColor = color.Black
-	h.bg.StrokeWidth = 1
-	h.bg.Refresh()
-}
-
-func (h *HoverableStack) MouseOut() {
-	if h.onHover != nil {
-		h.onHover(false)
-	}
-	h.bg.StrokeColor = color.Transparent
-	h.bg.StrokeWidth = 0
-	h.bg.Refresh()
-}
-
-func (h *HoverableStack) MouseMoved(*desktop.MouseEvent) {}
-
-func (h *HoverableStack) Tapped(*fyne.PointEvent) {
-	if h.onTap != nil {
-		h.onTap()
-	}
 }
 
 // formatFileSize formats bytes to human readable string.

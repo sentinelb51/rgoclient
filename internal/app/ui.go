@@ -175,7 +175,15 @@ func (app *ChatApp) createChannelWidget(channelID string) *widgets.ChannelWidget
 func (app *ChatApp) buildMessageBox() fyne.CanvasObject {
 	bg := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
-	app.messageScroll = container.NewVScroll(container.NewPadded(app.messageListContainer))
+	app.messageScroll = widgets.NewObservableVScroll(container.NewPadded(app.messageListContainer))
+
+	// Infinite scroll handler
+	app.messageScroll.OnScroll = func(pos fyne.Position) {
+		if pos.Y <= 0 && !app.isLoadingHistory {
+			app.loadMoreHistory()
+		}
+	}
+
 	app.refreshMessageList()
 
 	input := widgets.NewMessageInput()

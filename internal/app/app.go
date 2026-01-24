@@ -17,8 +17,9 @@ import (
 
 // Default message cache size per channel.
 const (
-	name                    = "Revoltgo Client"
-	defaultMessageCacheSize = 100
+	name                     = "Revoltgo Client"
+	defaultMessageCacheSize  = 500
+	defaultChannelCacheLimit = 5
 )
 
 // ChatApp encapsulates the state and UI components of the application.
@@ -50,8 +51,11 @@ type ChatApp struct {
 	serverListContainer  *fyne.Container
 	channelListContainer *fyne.Container
 	messageListContainer *fyne.Container
-	messageScroll        *container.Scroll
+	messageScroll        *widgets.ObservableScroll
 	messageInput         *widgets.MessageInput
+
+	// Flags
+	isLoadingHistory bool
 
 	// UI labels
 	channelHeaderLabel *widget.Label
@@ -70,7 +74,7 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 		serverListContainer:  container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelListContainer: container.NewVBox(),
 		ServerIDs:            make([]string, 0),
-		Messages:             cache.NewMessageCache(defaultMessageCacheSize),
+		Messages:             cache.NewMessageCache(defaultMessageCacheSize, defaultChannelCacheLimit),
 		collapsedCategories:  make(map[string]bool),
 		UnreadChannels:       make(map[string]bool),
 	}

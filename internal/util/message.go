@@ -37,9 +37,8 @@ func DisplayAvatarURL(session *revoltgo.Session, message *revoltgo.Message) stri
 	}
 
 	if message.Author != "" {
-		user := session.State.User(message.Author)
-		if user != nil && user.Avatar != nil {
-			return user.Avatar.URL("256")
+		if user := session.State.User(message.Author); user != nil {
+			return user.AvatarURL("256")
 		}
 	}
 

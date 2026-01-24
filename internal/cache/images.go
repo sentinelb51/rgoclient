@@ -292,7 +292,7 @@ func (cache *ImageCache) GetCacheSize() (int64, error) {
 	return totalSize, err
 }
 
-// CheckAndPurgeCache checks if the cache exceeds the size limit and purges it if necessary.
+// CheckAndPurgeCache checks if the cache exceeds the size maxMessages and purges it if necessary.
 func (cache *ImageCache) CheckAndPurgeCache() {
 	cacheSize, err := cache.GetCacheSize()
 	if err != nil {
@@ -305,7 +305,7 @@ func (cache *ImageCache) CheckAndPurgeCache() {
 	cache.mutex.RUnlock()
 
 	if cacheSize > maxSize {
-		println("Image cache exceeds size limit, purging...")
+		println("Image cache exceeds size maxMessages, purging...")
 		cache.PurgeCache()
 	}
 }

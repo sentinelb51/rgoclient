@@ -133,9 +133,45 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 	}
 
 	w := widgets.NewMessageWidget(msg, app.Session, app) // Pass app as MessageActions
+
+	// Smart scrolling logic
+	contentHeight := app.messageListContainer.MinSize().Height
+	viewHeight := app.messageScroll.Size().Height
+	offsetY := app.messageScroll.Offset.Y
+	// Tolerance for "at bottom"
+	isAtBottom := (contentHeight - viewHeight - offsetY) < 100
+
 	app.messageListContainer.Add(w)
+
+	// Prevent UI freeze by limiting rendered widgets
+	if len(app.messageListContainer.Objects) > 200 {
+		// If we are about to remove the top item, and we are NOT at the bottom (reading history),
+		// we need to adjust the scroll offset so the view doesn't jump.
+		removedHeight := float32(0)
+		if !isAtBottom && len(app.messageListContainer.Objects) > 0 {
+			removedHeight = app.messageListContainer.Objects[0].MinSize().Height
+		}
+
+		app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
+
+		if !isAtBottom && removedHeight > 0 {
+			app.messageScroll.Offset.Y -= removedHeight
+			if app.messageScroll.Offset.Y < 0 {
+				app.messageScroll.Offset.Y = 0
+			}
+		}
+	}
+
 	app.messageListContainer.Refresh()
-	app.scrollToBottom()
+
+	if isAtBottom {
+		// Build queue might delay layout, so we might need to defer this or rely on Fyne's layout loop.
+		// For now simple ScrollToBottom is usually adequate if called after Refresh.
+		app.scrollToBottom()
+	} else {
+		// If we adjusted offset manually
+		app.messageScroll.Refresh()
+	}
 }
 
 // showImageViewerAttachment displays an image attachment in a popup window.
@@ -265,4 +301,94 @@ func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput
 			return
 		}
 	}()
+}
+
+// loadMoreHistory fetches older messages when scrolling up.
+func (app *ChatApp) loadMoreHistory() {
+	if app.isLoadingHistory || app.CurrentChannelID == "" {
+		return
+	}
+
+	app.isLoadingHistory = true
+
+	// Add loading indicator
+	loader := container.NewCenter(widget.NewLabelWithStyle("Loading messages...", fyne.TextAlignCenter, fyne.TextStyle{Italic: true}))
+	app.messageListContainer.Objects = append([]fyne.CanvasObject{loader}, app.messageListContainer.Objects...)
+	app.messageListContainer.Refresh()
+
+	go func() {
+		// Clean up loader and flag on exit
+		defer func() {
+			app.GoDo(func() {
+				if len(app.messageListContainer.Objects) > 0 && app.messageListContainer.Objects[0] == loader {
+					app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
+					app.messageListContainer.Refresh()
+				}
+				app.isLoadingHistory = false
+			}, true)
+		}()
+
+		// Get oldest loaded message ID
+		msgs := app.Messages.Get(app.CurrentChannelID)
+		if len(msgs) == 0 {
+			return
+		}
+		oldestID := msgs[0].ID
+
+		// Fetch older messages
+		// API returns newest->oldest
+		history, err := app.Session.ChannelMessages(app.CurrentChannelID, revoltgo.ChannelMessagesParams{
+			Before:       oldestID,
+			Limit:        50,
+			IncludeUsers: true,
+		})
+
+		if err != nil || len(history.Messages) == 0 {
+			// fmt.Println("No more history or error:", err)
+			return
+		}
+
+		// Update cache
+		app.Messages.Prepend(app.CurrentChannelID, history.Messages)
+
+		// Update UI
+		app.GoDo(func() {
+			// Remove loader specifically so calculation in prependMessagesToUI is correct
+			if len(app.messageListContainer.Objects) > 0 && app.messageListContainer.Objects[0] == loader {
+				app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
+			}
+			app.prependMessagesToUI(history.Messages)
+		}, true)
+	}()
+}
+
+// prependMessagesToUI adds older messages to top of list and maintains scroll position.
+func (app *ChatApp) prependMessagesToUI(messages []*revoltgo.Message) {
+	if len(messages) == 0 {
+		return
+	}
+
+	// Capture current content height
+	oldHeight := app.messageListContainer.MinSize().Height
+
+	// Convert to widgets (Chronological: reverse API response)
+	var newWidgets []fyne.CanvasObject
+	for i := len(messages) - 1; i >= 0; i-- {
+		w := widgets.NewMessageWidget(messages[i], app.Session, app)
+		newWidgets = append(newWidgets, w)
+	}
+
+	// Prepend to objects
+	app.messageListContainer.Objects = append(newWidgets, app.messageListContainer.Objects...)
+	app.messageListContainer.Refresh()
+
+	// Adjust scroll triggers layout, so we might need to wait or force calculation
+	// MinSize should now reflect new content
+	newHeight := app.messageListContainer.MinSize().Height
+	diff := newHeight - oldHeight
+
+	if diff > 0 {
+		app.messageScroll.Offset.Y += diff
+		app.messageScroll.Refresh()
+	}
 }

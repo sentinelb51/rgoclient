@@ -8,7 +8,6 @@ import (
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"RGOClient/internal/api"
 	"RGOClient/internal/ui/widgets"
 )
 
@@ -16,10 +15,10 @@ import (
 func (app *ChatApp) ShowLoginWindow() {
 	app.window.Resize(fyne.NewSize(300, 280))
 
-	sessions, err := api.LoadSessions()
+	sessions, err := LoadSessions()
 	if err != nil {
 		fmt.Printf("Error loading sessions: %v\n", err)
-		sessions = []api.SavedSession{}
+		sessions = []SavedSession{}
 	}
 
 	sessionsSection := app.buildSavedSessionsSection(sessions)
@@ -37,7 +36,7 @@ func (app *ChatApp) ShowLoginWindow() {
 }
 
 // buildSavedSessionsSection creates the UI for saved sessions.
-func (app *ChatApp) buildSavedSessionsSection(sessions []api.SavedSession) fyne.CanvasObject {
+func (app *ChatApp) buildSavedSessionsSection(sessions []SavedSession) fyne.CanvasObject {
 	if len(sessions) == 0 {
 		return widget.NewLabel("No recent sessions")
 	}
@@ -54,20 +53,20 @@ func (app *ChatApp) buildSavedSessionsSection(sessions []api.SavedSession) fyne.
 }
 
 // buildSessionCard creates a clickable card for a saved session.
-func (app *ChatApp) buildSessionCard(session api.SavedSession) fyne.CanvasObject {
+func (app *ChatApp) buildSessionCard(session SavedSession) fyne.CanvasObject {
 	return widgets.NewSessionCard(
 		session.Username,
 		session.AvatarID,
 		func() { app.loginWithSavedSession(session) },
 		func() {
-			_ = api.RemoveSession(session.UserID)
+			_ = RemoveSession(session.UserID)
 			app.ShowLoginWindow()
 		},
 	)
 }
 
 // loginWithSavedSession attempts to login using a saved token.
-func (app *ChatApp) loginWithSavedSession(session api.SavedSession) {
+func (app *ChatApp) loginWithSavedSession(session SavedSession) {
 	fmt.Printf("Logging in as: %s\n", session.Username)
 
 	app.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
@@ -78,7 +77,7 @@ func (app *ChatApp) loginWithSavedSession(session api.SavedSession) {
 		app.GoDo(func() {
 			if err != nil {
 				fmt.Printf("Login failed: %v\n", err)
-				_ = api.RemoveSession(session.UserID)
+				_ = RemoveSession(session.UserID)
 				dialog.ShowError(fmt.Errorf("session expired, please login again"), app.window)
 				app.ShowLoginWindow()
 				return

@@ -5,8 +5,6 @@ import (
 	"log"
 
 	"github.com/sentinelb51/revoltgo"
-
-	"RGOClient/internal/api"
 )
 
 // StartRevoltSessionWithToken initializes the session using an existing token.
@@ -65,7 +63,7 @@ func (app *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
 		// Remove invalid session
 		if app.Session != nil && app.Session.State != nil {
 			if self := app.Session.State.Self(); self != nil {
-				if err := api.RemoveSession(self.ID); err != nil {
+				if err := RemoveSession(self.ID); err != nil {
 					log.Printf("Failed to remove session: %v\n", err)
 				}
 			}
@@ -90,7 +88,7 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 	// Save pending session token
 	if token := app.GetPendingSessionToken(); token != "" {
 		if self := app.Session.State.Self(); self != nil {
-			saved := api.SavedSession{
+			saved := SavedSession{
 				Token:    token,
 				UserID:   self.ID,
 				Username: self.Username,
@@ -99,7 +97,7 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 				saved.AvatarID = self.Avatar.ID
 			}
 
-			if err := api.AddOrUpdateSession(saved); err != nil {
+			if err := AddOrUpdateSession(saved); err != nil {
 				log.Printf("Failed to save session: %v\n", err)
 			}
 			app.ClearPendingSessionToken()
@@ -108,14 +106,9 @@ func (app *ChatApp) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 
 	// Fetch unreads asynchronously
 	go func() {
-		unreads, err := app.Session.SyncUnreads()
-		if err != nil {
-			fmt.Printf("Failed to sync unreads: %v\n", err)
-		}
-
 		app.GoDo(func() {
 			// Populate unread map
-			for _, u := range unreads {
+			for _, u := range event.ChannelUnreads {
 				app.UnreadChannels[u.ID.Channel] = true
 			}
 

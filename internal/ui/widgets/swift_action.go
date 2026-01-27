@@ -12,7 +12,9 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// swiftActionButton is a simple widget for swift actions (Reply, Delete, Edit).
+// swiftActionButton is an icon-based button for message quick actions (Reply, Delete, Edit).
+// These buttons appear on hover over messages and provide quick access to common actions.
+// The button has a flat aspect ratio and subtle hover effects.
 type swiftActionButton struct {
 	widget.BaseWidget
 	iconPath string
@@ -22,9 +24,12 @@ type swiftActionButton struct {
 	icon     *canvas.Image
 }
 
-// assertions
-var _ fyne.Tappable = (*swiftActionButton)(nil)
-var _ desktop.Hoverable = (*swiftActionButton)(nil)
+// Compile-time interface assertions.
+var (
+	_ fyne.Widget       = (*swiftActionButton)(nil)
+	_ fyne.Tappable     = (*swiftActionButton)(nil)
+	_ desktop.Hoverable = (*swiftActionButton)(nil)
+)
 
 func newSwiftActionButton(iconPath string, onTap func(), onHover func(bool)) *swiftActionButton {
 	size := theme.Sizes.SwiftActionSize

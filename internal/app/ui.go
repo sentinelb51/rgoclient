@@ -10,6 +10,7 @@ import (
 
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
+	"RGOClient/internal/ui/widgets/input"
 )
 
 // buildUI constructs the main application layout.
@@ -175,7 +176,7 @@ func (app *ChatApp) createChannelWidget(channelID string) *widgets.ChannelWidget
 func (app *ChatApp) buildMessageBox() fyne.CanvasObject {
 	bg := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
-	app.messageScroll = widgets.NewObservableVScroll(container.NewPadded(app.messageListContainer))
+	app.messageScroll = widgets.NewObservableVScroll(app.messageListContainer)
 
 	// Infinite scroll handler
 	app.messageScroll.OnScroll = func(pos fyne.Position) {
@@ -186,16 +187,19 @@ func (app *ChatApp) buildMessageBox() fyne.CanvasObject {
 
 	app.refreshMessageList()
 
-	input := widgets.NewMessageInput()
-	app.messageInput = input
-	input.SetPlaceHolder("Send a message...")
-	input.OnSubmit = func(text string) {
-		app.handleMessageSubmit(text, input)
+	msgInput := input.NewMessageInput()
+	app.messageInput = msgInput
+	msgInput.Actions = app // ChatApp implements the MessageActions interface
+	msgInput.SetPlaceHolder("Send a message...")
+	msgInput.OnSubmit = func(text string) {
+		app.handleMessageSubmit(text, msgInput)
 	}
+	msgInput.RegisterDropHandler(app.window)
+
 	inputContainer := container.NewPadded(container.NewVBox(
-		input.ReplyContainer,
-		input.AttachmentContainer,
-		input,
+		msgInput.ReplyContainer,
+		msgInput.AttachmentContainer,
+		msgInput,
 	))
 
 	channelName := "channel"

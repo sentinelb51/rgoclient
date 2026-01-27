@@ -3,10 +3,15 @@ package util
 import (
 	"fmt"
 
+	"RGOClient/internal/context"
 	"github.com/sentinelb51/revoltgo"
 )
 
-func DisplayName(session *revoltgo.Session, message *revoltgo.Message) string {
+func DisplayName(message *revoltgo.Message) string {
+	session := context.Session()
+	if session == nil {
+		return "Unknown user"
+	}
 
 	if message.System != nil {
 		return "System"
@@ -26,7 +31,12 @@ func DisplayName(session *revoltgo.Session, message *revoltgo.Message) string {
 	return "Unknown user"
 }
 
-func DisplayAvatarURL(session *revoltgo.Session, message *revoltgo.Message) string {
+func DisplayAvatarURL(message *revoltgo.Message) string {
+	session := context.Session()
+	if session == nil {
+		return ""
+	}
+
 	if message.System != nil {
 		// Maybe return a custom URL in the future?
 		return ""
@@ -46,7 +56,12 @@ func DisplayAvatarURL(session *revoltgo.Session, message *revoltgo.Message) stri
 }
 
 // FormatSystemMessage converts system message to readable text.
-func FormatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
+func FormatSystemMessage(message *revoltgo.MessageSystem) string {
+	session := context.Session()
+	if session == nil {
+		return "System message"
+	}
+
 	switch message.Type {
 	case revoltgo.MessageSystemUserAdded:
 		user := session.State.User(message.ID)

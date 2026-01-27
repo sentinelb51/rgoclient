@@ -11,34 +11,39 @@ import (
 
 // Compile-time interface assertions.
 var (
-	_ fyne.Widget       = (*XButton)(nil)
-	_ fyne.Tappable     = (*XButton)(nil)
-	_ desktop.Hoverable = (*XButton)(nil)
+	_ fyne.Widget       = (*CloseButton)(nil)
+	_ fyne.Tappable     = (*CloseButton)(nil)
+	_ desktop.Hoverable = (*CloseButton)(nil)
 )
 
-// XButton is a simple drawn X button for removing items.
-type XButton struct {
+// CloseButton is a simple drawn X button for removing/closing items.
+type CloseButton struct {
 	widget.BaseWidget
 	onTap   func()
 	hovered bool
 }
 
-// NewXButton creates a new X button with the given tap handler.
-func NewXButton(onTap func()) *XButton {
-	b := &XButton{onTap: onTap}
+// NewCloseButton creates a new close button with the given tap handler.
+func NewCloseButton(onTap func()) *CloseButton {
+	b := &CloseButton{onTap: onTap}
 	b.ExtendBaseWidget(b)
 	return b
 }
 
+// NewXButton is deprecated. Use NewCloseButton instead.
+func NewXButton(onTap func()) *CloseButton {
+	return NewCloseButton(onTap)
+}
+
 // CreateRenderer returns the renderer for this widget.
-func (b *XButton) CreateRenderer() fyne.WidgetRenderer {
+func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
 	line1 := canvas.NewLine(theme.Colors.XButtonNormal)
 	line1.StrokeWidth = 2
 
 	line2 := canvas.NewLine(theme.Colors.XButtonNormal)
 	line2.StrokeWidth = 2
 
-	return &xButtonRenderer{
+	return &closeButtonRenderer{
 		button: b,
 		line1:  line1,
 		line2:  line2,
@@ -46,41 +51,41 @@ func (b *XButton) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // Tapped handles tap events on the widget.
-func (b *XButton) Tapped(*fyne.PointEvent) {
+func (b *CloseButton) Tapped(*fyne.PointEvent) {
 	if b.onTap != nil {
 		b.onTap()
 	}
 }
 
 // MouseIn handles mouse entering the widget.
-func (b *XButton) MouseIn(*desktop.MouseEvent) {
+func (b *CloseButton) MouseIn(*desktop.MouseEvent) {
 	b.hovered = true
 	b.Refresh()
 }
 
 // MouseMoved handles mouse movement within the widget.
-func (b *XButton) MouseMoved(*desktop.MouseEvent) {}
+func (b *CloseButton) MouseMoved(*desktop.MouseEvent) {}
 
 // MouseOut handles mouse leaving the widget.
-func (b *XButton) MouseOut() {
+func (b *CloseButton) MouseOut() {
 	b.hovered = false
 	b.Refresh()
 }
 
 // MinSize returns the minimum size for this widget.
-func (b *XButton) MinSize() fyne.Size {
+func (b *CloseButton) MinSize() fyne.Size {
 	size := theme.Sizes.XButtonSize
 	return fyne.NewSize(size, size)
 }
 
-type xButtonRenderer struct {
-	button *XButton
+type closeButtonRenderer struct {
+	button *CloseButton
 	line1  *canvas.Line
 	line2  *canvas.Line
 }
 
 // Layout positions objects within this renderer.
-func (r *xButtonRenderer) Layout(size fyne.Size) {
+func (r *closeButtonRenderer) Layout(size fyne.Size) {
 	padding := float32(6)
 	centerX := size.Width / 2
 	centerY := size.Height / 2
@@ -94,12 +99,12 @@ func (r *xButtonRenderer) Layout(size fyne.Size) {
 }
 
 // MinSize returns the minimum size for this renderer.
-func (r *xButtonRenderer) MinSize() fyne.Size {
+func (r *closeButtonRenderer) MinSize() fyne.Size {
 	return r.button.MinSize()
 }
 
 // Refresh refreshes this renderer.
-func (r *xButtonRenderer) Refresh() {
+func (r *closeButtonRenderer) Refresh() {
 	col := theme.Colors.XButtonNormal
 	if r.button.hovered {
 		col = theme.Colors.XButtonHover
@@ -111,9 +116,9 @@ func (r *xButtonRenderer) Refresh() {
 }
 
 // Objects returns the objects in this renderer.
-func (r *xButtonRenderer) Objects() []fyne.CanvasObject {
+func (r *closeButtonRenderer) Objects() []fyne.CanvasObject {
 	return []fyne.CanvasObject{r.line1, r.line2}
 }
 
 // Destroy cleans up this renderer.
-func (r *xButtonRenderer) Destroy() {}
+func (r *closeButtonRenderer) Destroy() {}

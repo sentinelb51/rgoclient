@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"RGOClient/internal/context"
 	"github.com/sentinelb51/revoltgo"
 )
 
@@ -13,6 +14,7 @@ func (app *ChatApp) StartRevoltSessionWithToken(token string) error {
 	session.HTTP.Debug = true
 
 	app.Session = session
+	context.SetSession(session) // Set global session context
 	app.registerEventHandlers(session)
 
 	if err := app.Session.Open(); err != nil {
@@ -37,6 +39,7 @@ func (app *ChatApp) StartRevoltSessionWithLogin(email, password string) (string,
 	session.HTTP.Debug = true
 
 	app.Session = session
+	context.SetSession(session) // Set global session context
 	app.registerEventHandlers(session)
 
 	if err := app.Session.Open(); err != nil {
@@ -73,6 +76,7 @@ func (app *ChatApp) onError(_ *revoltgo.Session, event *revoltgo.EventError) {
 		if app.Session != nil {
 			_ = app.Session.Close()
 			app.Session = nil
+			context.ClearSession() // Clear global session context
 		}
 
 		app.GoDo(func() {

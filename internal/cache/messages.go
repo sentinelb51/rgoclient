@@ -12,6 +12,7 @@ import (
 type MessageCache struct {
 	mutex       sync.RWMutex
 	messages    map[string][]*revoltgo.Message // channelID → messages (sorted oldest to newest)
+	depleted    map[string]bool                // channelID -> history depleted
 	maxMessages int
 	maxChannels int
 }
@@ -20,6 +21,7 @@ type MessageCache struct {
 func NewMessageCache(limitPerChannel, maxChannels int) *MessageCache {
 	return &MessageCache{
 		messages:    make(map[string][]*revoltgo.Message),
+		depleted:    make(map[string]bool),
 		maxMessages: limitPerChannel,
 		maxChannels: maxChannels,
 	}
@@ -41,8 +43,23 @@ func (cache *MessageCache) enforceLimit(newChannelID string) {
 	// Evict one random entry (iteration order is random)
 	for key := range cache.messages {
 		delete(cache.messages, key)
+		delete(cache.depleted, key)
 		break
 	}
+}
+
+// IsDepleted returns true if the channel history is fully loaded.
+func (cache *MessageCache) IsDepleted(channelID string) bool {
+	cache.mutex.RLock()
+	defer cache.mutex.RUnlock()
+	return cache.depleted[channelID]
+}
+
+// SetDepleted marks the channel history as depleted or not.
+func (cache *MessageCache) SetDepleted(channelID string, depleted bool) {
+	cache.mutex.Lock()
+	defer cache.mutex.Unlock()
+	cache.depleted[channelID] = depleted
 }
 
 // Get returns messages for a channel from memory.

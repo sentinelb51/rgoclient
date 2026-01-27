@@ -2,6 +2,8 @@ package widgets
 
 import (
 	"RGOClient/internal/cache"
+	"RGOClient/internal/context"
+	"RGOClient/internal/interfaces"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 	"image/color"
@@ -15,15 +17,9 @@ import (
 	"github.com/sentinelb51/revoltgo"
 )
 
-// MessageActions defines interactions for message elements.
-type MessageActions interface {
-	OnAvatarTapped(userID string)
-	OnImageTapped(attachment *revoltgo.Attachment)
-	OnReply(message *revoltgo.Message)
-	OnDelete(messageID string)
-	OnEdit(messageID string)
-	ResolveMessage(channelID, messageID string) *revoltgo.Message
-}
+const (
+	maxReplyPreviewLength = 80
+)
 
 // Compile-time interface assertions.
 var _ fyne.Widget = (*MessageWidget)(nil)
@@ -48,10 +44,10 @@ type MessageWidget struct {
 // actions handles user interactions (avatar/image taps).
 func NewMessageWidget(
 	message *revoltgo.Message,
-	session *revoltgo.Session,
-	actions MessageActions,
+	actions interfaces.MessageActions,
 ) *MessageWidget {
 
+	session := context.Session()
 	if session == nil {
 		return nil
 	}
@@ -61,15 +57,15 @@ func NewMessageWidget(
 	}
 
 	var (
-		displayName      = util.DisplayName(session, message)
-		displayAvatarURL = util.DisplayAvatarURL(session, message)
+		displayName      = util.DisplayName(message)
+		displayAvatarURL = util.DisplayAvatarURL(message)
 		displayAvatarID  = util.IDFromAttachmentURL(displayAvatarURL)
 	)
 
 	// Determine content text
 	content := message.Content
 	if message.System != nil {
-		content = util.FormatSystemMessage(session, message.System)
+		content = util.FormatSystemMessage(message.System)
 	}
 
 	// Build timestamp
@@ -103,7 +99,7 @@ func NewMessageWidget(
 		}
 	}, onActionHover)
 
-	actionsContainer := NewHorizontalNoSpacingContainer(replyBtn, editBtn, deleteBtn)
+	actionsContainer := HBoxNoSpacing(replyBtn, editBtn, deleteBtn)
 
 	// Rounded background for the action group
 	actionsBg := canvas.NewRectangle(theme.Colors.SwiftActionBg)
@@ -127,7 +123,7 @@ func NewMessageWidget(
 	contentWidget := buildMessageContent(message, displayName, timestamp, content, actions)
 
 	// Wrap content - 0 vertical padding here as requested "Remove any spacing"
-	paddedContent := container.NewBorder(nil, nil, NewHSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
+	paddedContent := container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageContentPadding), nil, contentWidget)
 
 	main := container.NewBorder(nil, nil, avatarColumn, nil, paddedContent)
 
@@ -136,8 +132,8 @@ func NewMessageWidget(
 	hPad := theme.Sizes.MessageHorizontalPadding
 
 	innerContainer := container.NewBorder(
-		NewVSpacer(vPad), NewVSpacer(vPad),
-		NewHSpacer(hPad), NewHSpacer(hPad),
+		VerticalSpacer(vPad), VerticalSpacer(vPad),
+		HorizontalSpacer(hPad), HorizontalSpacer(hPad),
 		main,
 	)
 
@@ -154,7 +150,7 @@ func NewMessageWidget(
 	if len(message.Replies) > 0 {
 		repliesContainer := container.NewVBox()
 		for _, replyID := range message.Replies {
-			repliesContainer.Add(buildReplyPreview(replyID, message.Channel, session, actions))
+			repliesContainer.Add(buildReplyPreview(replyID, message.Channel, actions))
 			repliesContainer.Add(NewVSpacer(-15))
 		}
 		// No extra padding here to keep it close to the message
@@ -222,15 +218,16 @@ func (w *MessageWidget) MouseOut() {
 	w.updateHoverState()
 }
 
-func buildReplyPreview(replyID string, channelID string, session *revoltgo.Session, actions MessageActions) fyne.CanvasObject {
+func buildReplyPreview(replyID string, channelID string, actions interfaces.MessageActions) fyne.CanvasObject {
 	var authorName, content, avatarURL string
 
-	if actions != nil {
+	session := context.Session()
+	if session != nil && actions != nil {
 		msg := actions.ResolveMessage(channelID, replyID)
 		if msg != nil {
-			authorName = util.DisplayName(session, msg)
+			authorName = util.DisplayName(msg)
 			content = msg.Content
-			avatarURL = util.DisplayAvatarURL(session, msg)
+			avatarURL = util.DisplayAvatarURL(msg)
 		} else {
 			content = "Unknown message reference"
 		}
@@ -264,19 +261,19 @@ func buildReplyPreview(replyID string, channelID string, session *revoltgo.Sessi
 	msgLabel.TextSize = 12
 
 	// Use Center layout for text to ensure it aligns with avatar/icon vertically
-	replyRow := NewHorizontalNoSpacingContainer(
+	replyRow := HBoxNoSpacing(
 		container.NewCenter(avatarContainer),
-		NewHSpacer(8),
+		HorizontalSpacer(8),
 		container.NewCenter(userLabel),
-		NewHSpacer(5),
+		HorizontalSpacer(5),
 		container.NewCenter(msgLabel),
 	)
 
-	paddedRow := container.NewBorder(NewVSpacer(3), NewVSpacer(3), NewHSpacer(3), NewHSpacer(3), replyRow)
+	paddedRow := container.NewBorder(VerticalSpacer(3), VerticalSpacer(3), HorizontalSpacer(3), HorizontalSpacer(3), replyRow)
 
 	tappableReply := NewTappableContainer(paddedRow, func() {
 		// TODO: Navigate to message
 	})
 
-	return container.NewHBox(NewHSpacer(40), tappableReply)
+	return container.NewHBox(HorizontalSpacer(40), tappableReply)
 }

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"RGOClient/internal/ui/widgets/input"
 	"fmt"
 	"image"
 	"net/url"
@@ -20,18 +21,37 @@ import (
 // Message rendering batch size for responsive UI.
 const messageBatchSize = 100
 
-// showLoadingMessages displays a loading placeholder.
-func (app *ChatApp) showLoadingMessages() {
+// showCenteredStatus displays a centered status message in the message area.
+func (app *ChatApp) showCenteredStatus(text string) {
 	app.messageListContainer.Objects = nil
 
-	label := widget.NewLabelWithStyle("Loading messages...", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
-	app.messageListContainer.Add(container.NewCenter(label))
+	// Use scroll height to center vertically
+	height := float32(400) // Default fallback
+	if app.messageScroll != nil {
+		h := app.messageScroll.Size().Height
+		// Subtract a small buffer to ensure no scrolling due to rounding errors
+		h -= 5
+		if h > 100 {
+			height = h
+		}
+	}
+
+	app.messageListContainer.Add(widgets.NewMinHeightContainer(height, container.NewCenter(label)))
 	app.messageListContainer.Refresh()
+}
+
+// showLoadingMessages displays a loading placeholder.
+func (app *ChatApp) showLoadingMessages() {
+	app.showCenteredStatus("Loading messages...")
 }
 
 // loadChannelMessages fetches messages from API in background.
 func (app *ChatApp) loadChannelMessages(channelID string) {
+	// Reset depleted state on load attempt
+	app.Messages.SetDepleted(channelID, false)
+
 	go func() {
 		if app.Session == nil {
 			return
@@ -52,6 +72,16 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 			return
 		}
 
+		if len(messages.Messages) == 0 {
+			app.GoDo(func() {
+				if app.CurrentChannelID == channelID {
+					app.showCenteredStatus("No messages in this channel")
+					app.Messages.SetDepleted(channelID, true)
+				}
+			}, true)
+			return
+		}
+
 		// Store directly - cache maintains newest→oldest order
 		app.Messages.Set(channelID, messages.Messages)
 
@@ -65,13 +95,7 @@ func (app *ChatApp) loadChannelMessages(channelID string) {
 
 // showErrorMessage displays an error in the message area.
 func (app *ChatApp) showErrorMessage(msg string) {
-	app.messageListContainer.Objects = nil
-
-	label := widget.NewLabel(msg)
-	label.Alignment = fyne.TextAlignCenter
-
-	app.messageListContainer.Add(container.NewCenter(label))
-	app.messageListContainer.Refresh()
+	app.showCenteredStatus(msg)
 }
 
 // displayMessages renders messages using batched rendering.
@@ -97,7 +121,7 @@ func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
 				}
 
 				for j := batchStart; j < batchEnd; j++ {
-					w := widgets.NewMessageWidget(messages[j], app.Session, app)
+					w := widgets.NewMessageWidget(messages[j], app)
 					app.messageListContainer.Add(w)
 				}
 				app.messageListContainer.Refresh()
@@ -132,7 +156,7 @@ func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
 		return
 	}
 
-	w := widgets.NewMessageWidget(msg, app.Session, app) // Pass app as MessageActions
+	w := widgets.NewMessageWidget(msg, app) // Pass app as MessageActions
 
 	// Smart scrolling logic
 	contentHeight := app.messageListContainer.MinSize().Height
@@ -235,25 +259,25 @@ func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
 }
 
 // handleMessageSubmit processes a submitted message from the input field.
-func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput) {
-	if (text == "" && len(input.Attachments) == 0) || app.CurrentChannelID == "" || app.Session == nil {
+func (app *ChatApp) handleMessageSubmit(text string, msgInput *input.MessageInput) {
+	if (text == "" && len(msgInput.Attachments) == 0) || app.CurrentChannelID == "" || app.Session == nil {
 		return
 	}
 
 	// Capture necessary data to avoid race conditions with UI clearing
 	channelID := app.CurrentChannelID
 	// Create a copy of attachments as we'll clear the widget immediately
-	attachments := make([]widgets.Attachment, len(input.Attachments))
-	copy(attachments, input.Attachments)
+	attachments := make([]input.Attachment, len(msgInput.Attachments))
+	copy(attachments, msgInput.Attachments)
 
 	// Copy replies
-	replies := make([]widgets.Reply, len(input.Replies))
-	copy(replies, input.Replies)
+	replies := make([]input.Reply, len(msgInput.Replies))
+	copy(replies, msgInput.Replies)
 
 	// Clear UI immediately for responsiveness
-	input.SetText("")
-	input.ClearAttachments()
-	input.ClearReplies()
+	msgInput.SetText("")
+	msgInput.ClearAttachments()
+	msgInput.ClearReplies()
 
 	// Perform network operations in background
 	go func() {
@@ -305,25 +329,19 @@ func (app *ChatApp) handleMessageSubmit(text string, input *widgets.MessageInput
 
 // loadMoreHistory fetches older messages when scrolling up.
 func (app *ChatApp) loadMoreHistory() {
-	if app.isLoadingHistory || app.CurrentChannelID == "" {
+	if app.isLoadingHistory || app.CurrentChannelID == "" || app.Messages.IsDepleted(app.CurrentChannelID) {
 		return
 	}
 
 	app.isLoadingHistory = true
 
-	// Add loading indicator
-	loader := container.NewCenter(widget.NewLabelWithStyle("Loading messages...", fyne.TextAlignCenter, fyne.TextStyle{Italic: true}))
-	app.messageListContainer.Objects = append([]fyne.CanvasObject{loader}, app.messageListContainer.Objects...)
-	app.messageListContainer.Refresh()
+	// Implicit loading: No visual indicator to avoid flashing
+	// The user requested to avoid momentarily showing "Loading messages..."
 
 	go func() {
-		// Clean up loader and flag on exit
+		// Clean up flag on exit
 		defer func() {
 			app.GoDo(func() {
-				if len(app.messageListContainer.Objects) > 0 && app.messageListContainer.Objects[0] == loader {
-					app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
-					app.messageListContainer.Refresh()
-				}
 				app.isLoadingHistory = false
 			}, true)
 		}()
@@ -331,6 +349,8 @@ func (app *ChatApp) loadMoreHistory() {
 		// Get oldest loaded message ID
 		msgs := app.Messages.Get(app.CurrentChannelID)
 		if len(msgs) == 0 {
+			// Should not happen as this is loadMoreHistory.
+			// But if it does, it's just a no-op or error
 			return
 		}
 		oldestID := msgs[0].ID
@@ -344,6 +364,9 @@ func (app *ChatApp) loadMoreHistory() {
 		})
 
 		if err != nil || len(history.Messages) == 0 {
+			if len(history.Messages) == 0 {
+				app.Messages.SetDepleted(app.CurrentChannelID, true)
+			}
 			// fmt.Println("No more history or error:", err)
 			return
 		}
@@ -353,10 +376,7 @@ func (app *ChatApp) loadMoreHistory() {
 
 		// Update UI
 		app.GoDo(func() {
-			// Remove loader specifically so calculation in prependMessagesToUI is correct
-			if len(app.messageListContainer.Objects) > 0 && app.messageListContainer.Objects[0] == loader {
-				app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
-			}
+			// No loader to remove
 			app.prependMessagesToUI(history.Messages)
 		}, true)
 	}()
@@ -374,7 +394,7 @@ func (app *ChatApp) prependMessagesToUI(messages []*revoltgo.Message) {
 	// Convert to widgets (Chronological: reverse API response)
 	var newWidgets []fyne.CanvasObject
 	for i := len(messages) - 1; i >= 0; i-- {
-		w := widgets.NewMessageWidget(messages[i], app.Session, app)
+		w := widgets.NewMessageWidget(messages[i], app)
 		newWidgets = append(newWidgets, w)
 	}
 

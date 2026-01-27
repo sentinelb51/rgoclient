@@ -14,6 +14,7 @@ import (
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/interfaces"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -22,7 +23,7 @@ import (
 func buildMessageContent(
 	message *revoltgo.Message,
 	username, timestamp, messageText string,
-	actions MessageActions,
+	actions interfaces.MessageActions,
 ) fyne.CanvasObject {
 	header := buildMessageHeader(username, messageText, timestamp)
 
@@ -42,31 +43,31 @@ func buildMessageHeader(username, messageText, timestamp string) fyne.CanvasObje
 
 	// Overlay timestamp in top-right
 	timestampOverlay := container.NewVBox(
-		NewVSpacer(theme.Sizes.MessageTimestampTopOffset),
+		VerticalSpacer(theme.Sizes.MessageTimestampTopOffset),
 		container.NewHBox(layout.NewSpacer(), tsText),
 	)
 
 	return container.NewStack(text, timestampOverlay)
 }
 
-func buildAttachmentsContainer(attachments []*revoltgo.Attachment, actions MessageActions) *fyne.Container {
+func buildAttachmentsContainer(attachments []*revoltgo.Attachment, actions interfaces.MessageActions) *fyne.Container {
 	containerBox := container.NewVBox()
 	first := true
 
 	for _, attachment := range attachments {
 		if !first {
-			containerBox.Add(NewVSpacer(theme.Sizes.MessageAttachmentSpacing))
+			containerBox.Add(VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
 
 		attachmentWidget := buildSingleAttachment(attachment, actions)
-		padded := container.NewBorder(nil, nil, NewHSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(attachmentWidget))
+		padded := container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(attachmentWidget))
 		containerBox.Add(padded)
 		first = false
 	}
 	return containerBox
 }
 
-func buildSingleAttachment(attachment *revoltgo.Attachment, actions MessageActions) fyne.CanvasObject {
+func buildSingleAttachment(attachment *revoltgo.Attachment, actions interfaces.MessageActions) fyne.CanvasObject {
 	isImage := attachment.Metadata.Type == revoltgo.AttachmentMetadataTypeImage
 	isText := util.Filetype(attachment.Filename) == util.FileTypeText
 
@@ -100,13 +101,13 @@ func createAttachmentBar(attachment *revoltgo.Attachment) fyne.CanvasObject {
 	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
 	nameLabel.Alignment = fyne.TextAlignLeading
 
-	sizeLabel := canvas.NewText(formatFileSize(attachment.Size), theme.Colors.TimestampText)
+	sizeLabel := canvas.NewText(FormatFileSize(attachment.Size), theme.Colors.TimestampText)
 	sizeLabel.TextSize = 12
 	sizeLabel.Alignment = fyne.TextAlignTrailing
 
 	barContent := container.NewBorder(nil, nil,
-		container.NewHBox(NewHSpacer(8), nameLabel),
-		container.NewHBox(sizeLabel, NewHSpacer(8)),
+		container.NewHBox(HorizontalSpacer(8), nameLabel),
+		container.NewHBox(sizeLabel, HorizontalSpacer(8)),
 	)
 
 	return container.NewStack(barBg, barContent)
@@ -218,18 +219,4 @@ func calculateImageSize(width, height int) fyne.Size {
 	}
 
 	return fyne.NewSize(w, h)
-}
-
-// formatFileSize formats bytes to human readable string.
-func formatFileSize(size int) string {
-	const unit = 1000
-	if size < unit {
-		return fmt.Sprintf("%d B", size)
-	}
-	div, exp := int64(unit), 0
-	for n := size / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "kMGTPE"[exp])
 }

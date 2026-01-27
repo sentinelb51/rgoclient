@@ -1,7 +1,10 @@
 package app
 
 import (
+	"RGOClient/internal/ui/widgets/input"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -10,7 +13,6 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/ui/widgets"
-	"RGOClient/internal/util"
 
 	"fyne.io/fyne/v2/widget"
 )
@@ -18,6 +20,7 @@ import (
 // Default message cache size per channel.
 const (
 	name                     = "Revoltgo Client"
+	iconName                 = "rgo.png"
 	defaultMessageCacheSize  = 500
 	defaultChannelCacheLimit = 5
 )
@@ -52,7 +55,7 @@ type ChatApp struct {
 	channelListContainer *fyne.Container
 	messageListContainer *fyne.Container
 	messageScroll        *widgets.ObservableScroll
-	messageInput         *widgets.MessageInput
+	messageInput         *input.MessageInput
 
 	// Flags
 	isLoadingHistory bool
@@ -79,18 +82,21 @@ func NewChatApp(fyneApp fyne.App) *ChatApp {
 		UnreadChannels:       make(map[string]bool),
 	}
 
-	window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
-		if app.messageInput != nil {
-			for _, u := range uris {
-				// Most local files have file:// scheme
-				if u.Scheme() == "file" {
-					app.messageInput.AddAttachment(u.Path())
-				}
-			}
-		}
-	})
+	app.SetIcon()
 
 	return app
+}
+
+func (app *ChatApp) SetIcon() {
+	path := filepath.Join("assets", iconName)
+	bytes, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Printf("Failed to read icon file: %v\n", err)
+		return
+	}
+
+	resource := fyne.NewStaticResource("rgo.png", bytes)
+	app.Window().SetIcon(resource)
 }
 
 func (app *ChatApp) GoDo(fn func(), waitForSync bool) {
@@ -136,9 +142,7 @@ func (app *ChatApp) OnReply(message *revoltgo.Message) {
 		return
 	}
 
-	displayName := util.DisplayName(app.Session, message)
-	avatarURL := util.DisplayAvatarURL(app.Session, message)
-	app.messageInput.AddReply(message, displayName, avatarURL)
+	app.messageInput.AddReply(message)
 	app.window.Canvas().Focus(app.messageInput)
 }
 

@@ -1,6 +1,7 @@
 package util
 
 import (
+	"fmt"
 	"strings"
 )
 
@@ -72,4 +73,20 @@ func Filetype(filename string) FileType {
 	default:
 		return FileTypeUnknown
 	}
+}
+
+// NiceFileSize formats bytes to a pretty string.
+func NiceFileSize(size int) string {
+	const unit = 1000
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+
+	div, exp := int64(unit), 0
+	for n := size / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+
+	return fmt.Sprintf("%.1f %cB", float64(size)/float64(div), "kMGTPE"[exp])
 }

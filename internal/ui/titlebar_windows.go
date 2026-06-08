@@ -51,7 +51,7 @@ func StyleTitlebar(win fyne.Window) bool {
 		}
 
 		dark := uint32(1)
-		caption := colorRef(theme.Colors.MessageAreaBackground)
+		caption := colorRef(theme.Colors.ServerListBackground)
 		text := colorRef(theme.Colors.TextPrimary)
 		border := colorRef(theme.Colors.ServerListBackground)
 

@@ -122,6 +122,7 @@ func (a *App) setIcon() {
 
 // showMainUI swaps the window to the main layout and wires up shutdown.
 func (a *App) showMainUI() {
+	a.window.SetPadded(false) // sections sit flush against the window chrome
 	a.window.SetContent(a.buildUI())
 	a.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 	a.window.SetOnClosed(func() {

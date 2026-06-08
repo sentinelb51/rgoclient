@@ -11,9 +11,14 @@ import (
 )
 
 // buildUI assembles the three-column layout: servers | channels | messages.
+// FillLastRowLayout keeps the sections flush (no seams) for the flat metro look;
+// the message area fills whatever width the two fixed sidebars leave.
 func (a *App) buildUI() fyne.CanvasObject {
-	content := container.NewBorder(nil, nil, a.buildChannelList(), nil, a.buildMessageArea())
-	return container.NewBorder(nil, nil, a.buildServerList(), nil, content)
+	return container.New(&ui.FillLastRowLayout{},
+		a.buildServerList(),
+		a.buildChannelList(),
+		a.buildMessageArea(),
+	)
 }
 
 // buildServerList builds the server icon sidebar.

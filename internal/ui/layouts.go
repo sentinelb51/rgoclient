@@ -72,6 +72,48 @@ func (l *noSpacingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w, h)
 }
 
+// FillLastRowLayout lays children left to right with no gaps: every child except
+// the last takes its minimum width, and the last child fills the remaining
+// space. All children span the full height. Used for the flat server | channel |
+// message columns so the sections sit flush against each other.
+type FillLastRowLayout struct{}
+
+func (l *FillLastRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	last := -1
+	for i, child := range objects {
+		if child.Visible() {
+			last = i
+		}
+	}
+
+	var x float32
+	for i, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		w := child.MinSize().Width
+		if i == last {
+			w = max(size.Width-x, 0)
+		}
+		child.Resize(fyne.NewSize(w, size.Height))
+		child.Move(fyne.NewPos(x, 0))
+		x += w
+	}
+}
+
+func (l *FillLastRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var w, h float32
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		m := child.MinSize()
+		w += m.Width
+		h = max(h, m.Height)
+	}
+	return fyne.NewSize(w, h)
+}
+
 // FixedWidthColumnLayout stacks children in a fixed-width column, centering each
 // horizontally and the group vertically.
 type FixedWidthColumnLayout struct{ Width float32 }

@@ -1,17 +1,16 @@
 package main
 
 import (
-	fyneApp "fyne.io/fyne/v2/app"
+	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/theme"
 
 	"RGOClient/internal/app"
-	appTheme "RGOClient/internal/ui/theme"
+	apptheme "RGOClient/internal/ui/theme"
 )
 
 func main() {
-	application := fyneApp.New()
-	application.Settings().SetTheme(appTheme.NewNoScrollTheme(theme.DefaultTheme()))
+	fyneApp := fyneapp.New()
+	fyneApp.Settings().SetTheme(apptheme.NewNoScrollTheme(theme.DefaultTheme()))
 
-	chatApp := app.NewChatApp(application)
-	chatApp.Run()
+	app.New(fyneApp).Run()
 }

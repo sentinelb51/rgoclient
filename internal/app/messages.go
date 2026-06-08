@@ -1,9 +1,9 @@
 package app
 
 import (
-	"RGOClient/internal/ui/widgets/input"
 	"fmt"
 	"image"
+	"log"
 	"net/url"
 	"os"
 
@@ -13,402 +13,343 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/cache"
+	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/ui/widgets"
 )
 
-// Message rendering batch size for responsive UI.
-const messageBatchSize = 100
+const (
+	messageBatchSize  = 100 // messages rendered per UI-thread batch
+	renderedCap       = 200 // max message widgets kept mounted at once
+	historyPageSize   = 50  // older messages fetched per scroll-up
+	initialPageSize   = 100 // messages fetched when first opening a channel
+	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
+)
 
-// showCenteredStatus displays a centered status message in the message area.
-func (app *ChatApp) showCenteredStatus(text string) {
-	app.messageListContainer.Objects = nil
+// buildMessageArea builds the message list, header, and composer.
+func (a *App) buildMessageArea() fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
+	a.messageScroll = ui.NewObservableVScroll(a.messageList)
+	a.messageScroll.OnScroll = func(pos fyne.Position) {
+		if pos.Y <= 0 {
+			a.loadMoreHistory()
+		}
+	}
+	a.clearMessages()
+
+	a.input = ui.NewMessageInput(a.deps())
+	a.input.SetPlaceHolder("Send a message...")
+	a.input.OnSubmit = a.handleSubmit
+	a.input.RegisterDropHandler(a.window)
+
+	composer := container.NewPadded(container.NewVBox(
+		a.input.ReplyContainer,
+		a.input.AttachmentContainer,
+		a.input,
+	))
+
+	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	header := container.NewPadded(container.NewHBox(ui.HashtagIcon(), a.channelHeader))
+
+	layout := container.NewBorder(header, composer, nil, nil, a.messageScroll)
+	return container.NewStack(background, layout)
+}
+
+// showStatus replaces the message list with a single centered line.
+func (a *App) showStatus(text string) {
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
-	// Use scroll height to center vertically
-	height := float32(400) // Default fallback
-	if app.messageScroll != nil {
-		h := app.messageScroll.Size().Height
-		// Subtract a small buffer to ensure no scrolling due to rounding errors
-		h -= 5
-		if h > 100 {
+	height := float32(400)
+	if a.messageScroll != nil {
+		if h := a.messageScroll.Size().Height - 5; h > 100 {
 			height = h
 		}
 	}
 
-	app.messageListContainer.Add(widgets.NewMinHeightContainer(height, container.NewCenter(label)))
-	app.messageListContainer.Refresh()
+	a.messageList.Objects = []fyne.CanvasObject{ui.NewMinHeightContainer(height, container.NewCenter(label))}
+	a.messageList.Refresh()
 }
 
-// showLoadingMessages displays a loading placeholder.
-func (app *ChatApp) showLoadingMessages() {
-	app.showCenteredStatus("Loading messages...")
+// clearMessages empties the message list.
+func (a *App) clearMessages() {
+	a.messageList.Objects = nil
+	a.messageList.Refresh()
+	a.scrollToBottom()
 }
 
-// loadChannelMessages fetches messages from API in background.
-func (app *ChatApp) loadChannelMessages(channelID string) {
-	// Reset depleted state on load attempt
-	app.Messages.SetDepleted(channelID, false)
+// loadChannelMessages fetches the newest page of messages for a channel.
+func (a *App) loadChannelMessages(channelID string) {
+	a.messages.SetDepleted(channelID, false)
 
 	go func() {
-		if app.Session == nil {
+		if a.session == nil {
 			return
 		}
 
-		// API returns newest → oldest (first element = latest message)
-		messages, err := app.Session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
+		page, err := a.session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 			IncludeUsers: true,
-			Limit:        100,
+			Limit:        initialPageSize,
 		})
-
 		if err != nil {
-			app.GoDo(func() {
-				if app.CurrentChannelID == channelID {
-					app.showErrorMessage("Failed to load messages")
+			a.doOnUI(func() {
+				if a.currentChannelID == channelID {
+					a.showStatus("Failed to load messages")
 				}
 			}, true)
 			return
 		}
 
-		if len(messages.Messages) == 0 {
-			app.GoDo(func() {
-				if app.CurrentChannelID == channelID {
-					app.showCenteredStatus("No messages in this channel")
-					app.Messages.SetDepleted(channelID, true)
+		if len(page.Messages) == 0 {
+			a.doOnUI(func() {
+				if a.currentChannelID == channelID {
+					a.showStatus("No messages in this channel")
+					a.messages.SetDepleted(channelID, true)
 				}
 			}, true)
 			return
 		}
 
-		// Store directly - cache maintains newest→oldest order
-		app.Messages.Set(channelID, messages.Messages)
-
-		app.GoDo(func() {
-			if app.CurrentChannelID == channelID {
-				app.displayMessages(messages.Messages)
+		stored := a.messages.Set(channelID, page.Messages)
+		a.doOnUI(func() {
+			if a.currentChannelID == channelID {
+				a.displayMessages(stored)
 			}
 		}, true)
 	}()
 }
 
-// showErrorMessage displays an error in the message area.
-func (app *ChatApp) showErrorMessage(msg string) {
-	app.showCenteredStatus(msg)
-}
-
-// displayMessages renders messages using batched rendering.
-// Messages are stored oldest→newest, iterate forward.
-func (app *ChatApp) displayMessages(messages []*revoltgo.Message) {
-	app.messageListContainer.Objects = nil
-	channelID := app.CurrentChannelID
+// displayMessages renders messages (oldest first) in batches to keep the UI
+// responsive, scrolling to the bottom when done.
+func (a *App) displayMessages(messages []*revoltgo.Message) {
+	a.messageList.Objects = nil
+	channelID := a.currentChannelID
+	deps := a.deps()
 
 	go func() {
-		// Iterate forward: oldest→newest (chronological order)
-		for i := 0; i < len(messages); i += messageBatchSize {
-			end := i + messageBatchSize
-			if end > len(messages) {
-				end = len(messages)
-			}
+		for start := 0; start < len(messages); start += messageBatchSize {
+			end := min(start+messageBatchSize, len(messages))
+			batch := messages[start:end]
 
-			// Capture range for closure
-			batchStart, batchEnd := i, end
-
-			app.GoDo(func() {
-				if app.CurrentChannelID != channelID {
+			a.doOnUI(func() {
+				if a.currentChannelID != channelID {
 					return
 				}
-
-				for j := batchStart; j < batchEnd; j++ {
-					w := widgets.NewMessageWidget(messages[j], app)
-					app.messageListContainer.Add(w)
+				for _, message := range batch {
+					a.messageList.Add(ui.NewMessageWidget(deps, message))
 				}
-				app.messageListContainer.Refresh()
+				a.messageList.Refresh()
 			}, true)
 		}
 
-		app.GoDo(func() {
-			if app.CurrentChannelID == channelID {
-				app.scrollToBottom()
+		a.doOnUI(func() {
+			if a.currentChannelID == channelID {
+				a.scrollToBottom()
 			}
 		}, false)
 	}()
 }
 
-// refreshMessageList rebuilds the message list UI.
-func (app *ChatApp) refreshMessageList() {
-	app.messageListContainer.Objects = nil
-	app.messageListContainer.Refresh()
-	app.scrollToBottom()
-}
-
-// scrollToBottom scrolls the message area to the bottom.
-func (app *ChatApp) scrollToBottom() {
-	if app.messageScroll != nil {
-		app.messageScroll.ScrollToBottom()
-	}
-}
-
-// AddMessage adds a new message to the current channel.
-func (app *ChatApp) AddMessage(msg *revoltgo.Message) {
-	if app.CurrentChannelID == "" {
+// appendMessage adds a freshly received message, trimming the oldest widget when
+// over the render cap and keeping the scroll position stable.
+func (a *App) appendMessage(message *revoltgo.Message) {
+	if a.currentChannelID == "" {
 		return
 	}
 
-	w := widgets.NewMessageWidget(msg, app) // Pass app as MessageActions
+	contentHeight := a.messageList.MinSize().Height
+	viewHeight := a.messageScroll.Size().Height
+	atBottom := contentHeight-viewHeight-a.messageScroll.Offset.Y < atBottomTolerance
 
-	// Smart scrolling logic
-	contentHeight := app.messageListContainer.MinSize().Height
-	viewHeight := app.messageScroll.Size().Height
-	offsetY := app.messageScroll.Offset.Y
-	// Tolerance for "at bottom"
-	isAtBottom := (contentHeight - viewHeight - offsetY) < 100
+	a.messageList.Add(ui.NewMessageWidget(a.deps(), message))
 
-	app.messageListContainer.Add(w)
-
-	// Prevent UI freeze by limiting rendered widgets
-	if len(app.messageListContainer.Objects) > 200 {
-		// If we are about to remove the top item, and we are NOT at the bottom (reading history),
-		// we need to adjust the scroll offset so the view doesn't jump.
-		removedHeight := float32(0)
-		if !isAtBottom && len(app.messageListContainer.Objects) > 0 {
-			removedHeight = app.messageListContainer.Objects[0].MinSize().Height
+	if len(a.messageList.Objects) > renderedCap {
+		var removedHeight float32
+		if !atBottom {
+			removedHeight = a.messageList.Objects[0].MinSize().Height
 		}
-
-		app.messageListContainer.Objects = app.messageListContainer.Objects[1:]
-
-		if !isAtBottom && removedHeight > 0 {
-			app.messageScroll.Offset.Y -= removedHeight
-			if app.messageScroll.Offset.Y < 0 {
-				app.messageScroll.Offset.Y = 0
-			}
+		a.messageList.Objects = a.messageList.Objects[1:]
+		if !atBottom {
+			a.messageScroll.Offset.Y = max(a.messageScroll.Offset.Y-removedHeight, 0)
 		}
 	}
 
-	app.messageListContainer.Refresh()
-
-	if isAtBottom {
-		// Build queue might delay layout, so we might need to defer this or rely on Fyne's layout loop.
-		// For now simple ScrollToBottom is usually adequate if called after Refresh.
-		app.scrollToBottom()
+	a.messageList.Refresh()
+	if atBottom {
+		a.scrollToBottom()
 	} else {
-		// If we adjusted offset manually
-		app.messageScroll.Refresh()
+		a.messageScroll.Refresh()
 	}
 }
 
-// showImageViewerAttachment displays an image attachment in a popup window.
-func (app *ChatApp) showImageViewerAttachment(att *revoltgo.Attachment) {
-	window := app.fyneApp.NewWindow(att.Filename)
+// loadMoreHistory fetches an older page when the user scrolls to the top.
+func (a *App) loadMoreHistory() {
+	channelID := a.currentChannelID
+	if a.loadingHistory || channelID == "" || a.messages.IsDepleted(channelID) {
+		return
+	}
+	a.loadingHistory = true
 
-	// Calculate constrained window size using theme sizes
-	maxW := theme.Sizes.ImageViewerMaxWidth
-	maxH := theme.Sizes.ImageViewerMaxHeight
-	w := float32(att.Metadata.Width)
-	h := float32(att.Metadata.Height)
+	go func() {
+		defer a.doOnUI(func() { a.loadingHistory = false }, true)
 
-	if w > maxW {
-		h = h * (maxW / w)
-		w = maxW
+		current := a.messages.Get(channelID)
+		if len(current) == 0 {
+			return
+		}
+		oldestID := current[0].ID
+
+		page, err := a.session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
+			Before:       oldestID,
+			Limit:        historyPageSize,
+			IncludeUsers: true,
+		})
+		if err != nil || len(page.Messages) == 0 {
+			if err == nil {
+				a.messages.SetDepleted(channelID, true)
+			}
+			return
+		}
+
+		a.messages.Prepend(channelID, page.Messages)
+		a.doOnUI(func() {
+			if a.currentChannelID == channelID {
+				a.prependMessages(page.Messages)
+			}
+		}, true)
+	}()
+}
+
+// prependMessages mounts an older page (API order, newest first) above the
+// current view, preserving the user's scroll position.
+func (a *App) prependMessages(page []*revoltgo.Message) {
+	if len(page) == 0 {
+		return
 	}
-	if h > maxH {
-		w = w * (maxH / h)
-		h = maxH
-	}
-	if w < theme.Sizes.ImageViewerMinWidth {
-		w = theme.Sizes.ImageViewerMinWidth
-	}
-	if h < theme.Sizes.ImageViewerMinHeight {
-		h = theme.Sizes.ImageViewerMinHeight
+	deps := a.deps()
+	oldHeight := a.messageList.MinSize().Height
+
+	widgets := make([]fyne.CanvasObject, 0, len(page))
+	for i := len(page) - 1; i >= 0; i-- { // reverse to chronological order
+		widgets = append(widgets, ui.NewMessageWidget(deps, page[i]))
 	}
 
-	// Image container with stacking to allow Proper resizing
+	a.messageList.Objects = append(widgets, a.messageList.Objects...)
+	a.messageList.Refresh()
+
+	if diff := a.messageList.MinSize().Height - oldHeight; diff > 0 {
+		a.messageScroll.Offset.Y += diff
+		a.messageScroll.Refresh()
+	}
+}
+
+// scrollToBottom scrolls the message view to the newest message.
+func (a *App) scrollToBottom() {
+	if a.messageScroll != nil {
+		a.messageScroll.ScrollToBottom()
+	}
+}
+
+// handleSubmit sends the composed message, its attachments, and its replies.
+func (a *App) handleSubmit(text string) {
+	if (text == "" && len(a.input.Attachments) == 0) || a.currentChannelID == "" || a.session == nil {
+		return
+	}
+
+	channelID := a.currentChannelID
+	attachments := append([]ui.Attachment(nil), a.input.Attachments...)
+	replies := append([]ui.Reply(nil), a.input.Replies...)
+
+	a.input.SetText("")
+	a.input.ClearAttachments()
+	a.input.ClearReplies()
+
+	go func() {
+		send := revoltgo.MessageSend{
+			Content:     text,
+			Attachments: a.uploadAttachments(attachments),
+			Replies:     toMessageReplies(replies),
+		}
+		if _, err := a.session.ChannelMessageSend(channelID, send); err != nil {
+			log.Printf("send message: %v", err)
+		}
+	}()
+}
+
+// uploadAttachments uploads each local file and returns the resulting IDs.
+func (a *App) uploadAttachments(attachments []ui.Attachment) []string {
+	ids := make([]string, 0, len(attachments))
+	for _, attachment := range attachments {
+		file, err := os.Open(attachment.Path)
+		if err != nil {
+			log.Printf("open attachment %s: %v", attachment.Path, err)
+			continue
+		}
+
+		uploaded, err := a.session.AttachmentUpload(&revoltgo.File{Name: attachment.Name, Reader: file})
+		_ = file.Close()
+		if err != nil {
+			log.Printf("upload attachment %s: %v", attachment.Name, err)
+			continue
+		}
+		ids = append(ids, uploaded.ID)
+	}
+	return ids
+}
+
+// toMessageReplies converts composer replies to the API representation.
+func toMessageReplies(replies []ui.Reply) []*revoltgo.MessageReplies {
+	out := make([]*revoltgo.MessageReplies, len(replies))
+	for i, r := range replies {
+		out[i] = &revoltgo.MessageReplies{ID: r.ID, Mention: r.Mention}
+	}
+	return out
+}
+
+// showImageViewer opens an attachment in a resizable popup window.
+func (a *App) showImageViewer(attachment *revoltgo.Attachment) {
+	window := a.fyne.NewWindow(attachment.Filename)
+	w, h := viewerSize(attachment.Metadata.Width, attachment.Metadata.Height)
+
 	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-	imgContainer := container.NewStack(placeholder)
+	viewer := container.NewStack(placeholder)
 
-	attURL := att.URL("")
-	if attURL != "" && att.ID != "" {
-		cache.GetImageCache().LoadFromURLAsync(att.ID, attURL, false, func(i image.Image) {
-			cImg := canvas.NewImageFromImage(i)
-			cImg.FillMode = canvas.ImageFillContain
-			imgContainer.Objects = []fyne.CanvasObject{cImg}
-			imgContainer.Refresh()
+	attachmentURL := attachment.URL("")
+	if attachmentURL != "" && attachment.ID != "" {
+		a.images.LoadAsync(attachment.ID, attachmentURL, false, func(img image.Image) {
+			canvasImg := canvas.NewImageFromImage(img)
+			canvasImg.FillMode = canvas.ImageFillContain
+			viewer.Objects = []fyne.CanvasObject{canvasImg}
+			viewer.Refresh()
 		})
 	}
 
-	// Bottom toolbar
-	btnBrowser := widget.NewButton("Open in Browser", func() {
-		u, err := url.Parse(attURL)
-		if err == nil {
-			_ = app.fyneApp.OpenURL(u)
+	openBrowser := widget.NewButton("Open in Browser", func() {
+		if u, err := url.Parse(attachmentURL); err == nil {
+			_ = a.fyne.OpenURL(u)
 		}
 	})
+	dims := widget.NewLabel(fmt.Sprintf("%dx%d", attachment.Metadata.Width, attachment.Metadata.Height))
+	bottom := container.NewHBox(container.NewPadded(dims), container.NewPadded(openBrowser))
 
-	dimsLabel := widget.NewLabel(fmt.Sprintf("%dx%d", att.Metadata.Width, att.Metadata.Height))
-	bottomBar := container.NewHBox(
-		container.NewPadded(dimsLabel),
-		container.NewPadded(btnBrowser),
-	)
-
-	content := container.NewBorder(nil, container.NewCenter(bottomBar), nil, nil, imgContainer)
-	window.SetContent(content)
+	window.SetContent(container.NewBorder(nil, container.NewCenter(bottom), nil, nil, viewer))
 	window.Resize(fyne.NewSize(w+40, h+80))
 	window.CenterOnScreen()
 	window.Show()
 }
 
-// handleMessageSubmit processes a submitted message from the input field.
-func (app *ChatApp) handleMessageSubmit(text string, msgInput *input.MessageInput) {
-	if (text == "" && len(msgInput.Attachments) == 0) || app.CurrentChannelID == "" || app.Session == nil {
-		return
+// viewerSize fits an image within the configured viewer bounds, preserving
+// aspect ratio and enforcing a minimum size.
+func viewerSize(width, height int) (float32, float32) {
+	w, h := float32(width), float32(height)
+	maxW, maxH := theme.Sizes.ImageViewerMaxWidth, theme.Sizes.ImageViewerMaxHeight
+
+	if w > maxW {
+		h *= maxW / w
+		w = maxW
 	}
-
-	// Capture necessary data to avoid race conditions with UI clearing
-	channelID := app.CurrentChannelID
-	// Create a copy of attachments as we'll clear the widget immediately
-	attachments := make([]input.Attachment, len(msgInput.Attachments))
-	copy(attachments, msgInput.Attachments)
-
-	// Copy replies
-	replies := make([]input.Reply, len(msgInput.Replies))
-	copy(replies, msgInput.Replies)
-
-	// Clear UI immediately for responsiveness
-	msgInput.SetText("")
-	msgInput.ClearAttachments()
-	msgInput.ClearReplies()
-
-	// Perform network operations in background
-	go func() {
-		attachmentIDs := make([]string, 0, len(attachments))
-
-		for _, att := range attachments {
-			f, err := os.Open(att.Path)
-			if err != nil {
-				fmt.Printf("Failed to open attachment %s: %v\n", att.Path, err)
-				continue
-			}
-
-			payload := &revoltgo.File{
-				Name:   att.Name,
-				Reader: f,
-			}
-
-			uploaded, err := app.Session.AttachmentUpload(payload)
-			_ = f.Close()
-
-			if err != nil {
-				fmt.Printf("Failed to upload attachment %s: %v\n", att.Name, err)
-				continue
-			}
-
-			attachmentIDs = append(attachmentIDs, uploaded.ID)
-		}
-
-		msgReplies := make([]*revoltgo.MessageReplies, len(replies))
-		for i, r := range replies {
-			msgReplies[i] = &revoltgo.MessageReplies{
-				ID:      r.ID,
-				Mention: r.Mention,
-			}
-		}
-
-		send := revoltgo.MessageSend{
-			Content:     text,
-			Attachments: attachmentIDs,
-			Replies:     msgReplies,
-		}
-
-		if _, err := app.Session.ChannelMessageSend(channelID, send); err != nil {
-			fmt.Printf("Failed to send message: %v\n", err)
-			return
-		}
-	}()
-}
-
-// loadMoreHistory fetches older messages when scrolling up.
-func (app *ChatApp) loadMoreHistory() {
-	if app.isLoadingHistory || app.CurrentChannelID == "" || app.Messages.IsDepleted(app.CurrentChannelID) {
-		return
+	if h > maxH {
+		w *= maxH / h
+		h = maxH
 	}
-
-	app.isLoadingHistory = true
-
-	// Implicit loading: No visual indicator to avoid flashing
-	// The user requested to avoid momentarily showing "Loading messages..."
-
-	go func() {
-		// Clean up flag on exit
-		defer func() {
-			app.GoDo(func() {
-				app.isLoadingHistory = false
-			}, true)
-		}()
-
-		// Get oldest loaded message ID
-		msgs := app.Messages.Get(app.CurrentChannelID)
-		if len(msgs) == 0 {
-			// Should not happen as this is loadMoreHistory.
-			// But if it does, it's just a no-op or error
-			return
-		}
-		oldestID := msgs[0].ID
-
-		// Fetch older messages
-		// API returns newest->oldest
-		history, err := app.Session.ChannelMessages(app.CurrentChannelID, revoltgo.ChannelMessagesParams{
-			Before:       oldestID,
-			Limit:        50,
-			IncludeUsers: true,
-		})
-
-		if err != nil || len(history.Messages) == 0 {
-			if len(history.Messages) == 0 {
-				app.Messages.SetDepleted(app.CurrentChannelID, true)
-			}
-			// fmt.Println("No more history or error:", err)
-			return
-		}
-
-		// Update cache
-		app.Messages.Prepend(app.CurrentChannelID, history.Messages)
-
-		// Update UI
-		app.GoDo(func() {
-			// No loader to remove
-			app.prependMessagesToUI(history.Messages)
-		}, true)
-	}()
-}
-
-// prependMessagesToUI adds older messages to top of list and maintains scroll position.
-func (app *ChatApp) prependMessagesToUI(messages []*revoltgo.Message) {
-	if len(messages) == 0 {
-		return
-	}
-
-	// Capture current content height
-	oldHeight := app.messageListContainer.MinSize().Height
-
-	// Convert to widgets (Chronological: reverse API response)
-	var newWidgets []fyne.CanvasObject
-	for i := len(messages) - 1; i >= 0; i-- {
-		w := widgets.NewMessageWidget(messages[i], app)
-		newWidgets = append(newWidgets, w)
-	}
-
-	// Prepend to objects
-	app.messageListContainer.Objects = append(newWidgets, app.messageListContainer.Objects...)
-	app.messageListContainer.Refresh()
-
-	// Adjust scroll triggers layout, so we might need to wait or force calculation
-	// MinSize should now reflect new content
-	newHeight := app.messageListContainer.MinSize().Height
-	diff := newHeight - oldHeight
-
-	if diff > 0 {
-		app.messageScroll.Offset.Y += diff
-		app.messageScroll.Refresh()
-	}
+	return max(w, theme.Sizes.ImageViewerMinWidth), max(h, theme.Sizes.ImageViewerMinHeight)
 }

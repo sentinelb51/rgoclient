@@ -3,46 +3,34 @@ package util
 import (
 	"fmt"
 
-	"RGOClient/internal/context"
 	"github.com/sentinelb51/revoltgo"
 )
 
-func DisplayName(message *revoltgo.Message) string {
-	session := context.Session()
-	if session == nil {
+// DisplayName returns the name to show for a message's author.
+func DisplayName(session *revoltgo.Session, message *revoltgo.Message) string {
+	switch {
+	case session == nil:
 		return "Unknown user"
-	}
-
-	if message.System != nil {
+	case message.System != nil:
 		return "System"
-	}
-
-	if message.Webhook != nil {
+	case message.Webhook != nil:
 		return message.Webhook.Name
 	}
 
 	if message.Author != "" {
-		user := session.State.User(message.Author)
-		if user != nil {
+		if user := session.State.User(message.Author); user != nil {
 			return user.Username
 		}
 	}
-
 	return "Unknown user"
 }
 
-func DisplayAvatarURL(message *revoltgo.Message) string {
-	session := context.Session()
-	if session == nil {
+// DisplayAvatarURL returns the avatar URL for a message's author, or "" if none.
+func DisplayAvatarURL(session *revoltgo.Session, message *revoltgo.Message) string {
+	switch {
+	case session == nil, message.System != nil:
 		return ""
-	}
-
-	if message.System != nil {
-		// Maybe return a custom URL in the future?
-		return ""
-	}
-
-	if message.Webhook != nil {
+	case message.Webhook != nil:
 		return message.Webhook.AvatarURL("256")
 	}
 
@@ -51,36 +39,36 @@ func DisplayAvatarURL(message *revoltgo.Message) string {
 			return user.AvatarURL("256")
 		}
 	}
-
 	return ""
 }
 
-// FormatSystemMessage converts system message to readable text.
-func FormatSystemMessage(message *revoltgo.MessageSystem) string {
-	session := context.Session()
+// FormatSystemMessage renders a system message as human-readable text.
+func FormatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
 	if session == nil {
 		return "System message"
 	}
 
+	// username resolves the user referenced by the system event.
+	username := func() string {
+		if user := session.State.User(message.ID); user != nil {
+			return user.Username
+		}
+		return "Someone"
+	}
+
 	switch message.Type {
 	case revoltgo.MessageSystemUserAdded:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s added to group", user.Username)
+		return fmt.Sprintf("%s added to group", username())
 	case revoltgo.MessageSystemUserRemove:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s removed from group", user.Username)
+		return fmt.Sprintf("%s removed from group", username())
 	case revoltgo.MessageSystemUserJoined:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s joined", user.Username)
+		return fmt.Sprintf("%s joined", username())
 	case revoltgo.MessageSystemUserLeft:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s left", user.Username)
+		return fmt.Sprintf("%s left", username())
 	case revoltgo.MessageSystemUserKicked:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s was kicked", user.Username)
+		return fmt.Sprintf("%s was kicked", username())
 	case revoltgo.MessageSystemUserBanned:
-		user := session.State.User(message.ID)
-		return fmt.Sprintf("%s banned", user.Username)
+		return fmt.Sprintf("%s banned", username())
 	case revoltgo.MessageSystemChannelRenamed:
 		return "Channel renamed"
 	case revoltgo.MessageSystemChannelDescriptionChanged:
@@ -95,8 +83,6 @@ func FormatSystemMessage(message *revoltgo.MessageSystem) string {
 		return "Message unpinned"
 	case revoltgo.MessageSystemCallStarted:
 		return "Call started"
-	case revoltgo.MessageSystemText:
-		return "System message"
 	default:
 		return "System event"
 	}

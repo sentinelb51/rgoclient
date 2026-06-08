@@ -1,156 +1,138 @@
+// Package app wires the Revolt session, caches, and UI into a running client.
 package app
 
 import (
-	"RGOClient/internal/ui/widgets/input"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/ui/widgets"
-
-	"fyne.io/fyne/v2/widget"
 )
 
-// Default message cache size per channel.
 const (
-	name                     = "Revoltgo Client"
-	iconName                 = "rgo.png"
-	defaultMessageCacheSize  = 500
-	defaultChannelCacheLimit = 5
+	windowTitle = "Revoltgo Client"
+	iconPath    = "assets/rgo.png"
+
+	messagesPerChannel = 500 // cap of cached messages per channel
+	cachedChannels     = 5   // number of channels kept in the message cache
 )
 
-// ChatApp encapsulates the state and UI components of the application.
-type ChatApp struct {
-	fyneApp fyne.App
-	window  fyne.Window
+// App holds the session, caches, and all mutable UI state for the client. It
+// also implements ui.MessageActions so widgets can call back into it.
+type App struct {
+	fyne   fyne.App
+	window fyne.Window
 
-	// Session is the active API session.
-	Session *revoltgo.Session
+	session  *revoltgo.Session
+	images   *cache.ImageCache
+	messages *cache.MessageCache
 
-	// Server/Channel state
-	ServerIDs        []string
-	CurrentServerID  string
-	CurrentChannelID string
+	serverIDs        []string
+	currentServerID  string
+	currentChannelID string
 
-	// Message cache for fast channel switching
-	Messages *cache.MessageCache
+	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
+	unreadChannels      map[string]bool
 
-	// Category collapsed state: "serverID:categoryID" → collapsed
-	collapsedCategories map[string]bool
+	pendingToken string // saved once the Ready event arrives
 
-	// Unread state: channelID → true if unread
-	UnreadChannels map[string]bool
+	serverList    *fyne.Container
+	channelList   *fyne.Container
+	messageList   *fyne.Container
+	messageScroll *ui.ObservableScroll
+	input         *ui.MessageInput
+	serverHeader  *widget.Label
+	channelHeader *widget.Label
 
-	// Pending token to save after Ready event
-	pendingSessionToken string
-
-	// UI containers
-	serverListContainer  *fyne.Container
-	channelListContainer *fyne.Container
-	messageListContainer *fyne.Container
-	messageScroll        *widgets.ObservableScroll
-	messageInput         *input.MessageInput
-
-	// Flags
-	isLoadingHistory bool
-
-	// UI labels
-	channelHeaderLabel *widget.Label
-	serverHeaderLabel  *widget.Label
+	loadingHistory bool
 }
 
-// NewChatApp creates and initializes a new ChatApp instance.
-func NewChatApp(fyneApp fyne.App) *ChatApp {
-	window := fyneApp.NewWindow(name)
+var _ ui.MessageActions = (*App)(nil)
+
+// New creates the application and its main window.
+func New(fyneApp fyne.App) *App {
+	window := fyneApp.NewWindow(windowTitle)
 	window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 
-	app := &ChatApp{
-		fyneApp:              fyneApp,
-		window:               window,
-		messageListContainer: widgets.NewVerticalNoSpacingContainer(),
-		serverListContainer:  container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
-		channelListContainer: container.NewVBox(),
-		ServerIDs:            make([]string, 0),
-		Messages:             cache.NewMessageCache(defaultMessageCacheSize, defaultChannelCacheLimit),
-		collapsedCategories:  make(map[string]bool),
-		UnreadChannels:       make(map[string]bool),
+	a := &App{
+		fyne:                fyneApp,
+		window:              window,
+		images:              cache.NewImageCache(),
+		messages:            cache.NewMessageCache(messagesPerChannel, cachedChannels),
+		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
+		channelList:         container.NewVBox(),
+		messageList:         ui.VBoxNoSpacing(),
+		collapsedCategories: make(map[string]bool),
+		unreadChannels:      make(map[string]bool),
 	}
-
-	app.SetIcon()
-
-	return app
+	a.setIcon()
+	return a
 }
 
-func (app *ChatApp) SetIcon() {
-	path := filepath.Join("assets", iconName)
-	bytes, err := os.ReadFile(path)
+// Run shows the login window and starts the Fyne event loop.
+func (a *App) Run() {
+	a.showLogin()
+	a.window.ShowAndRun()
+}
+
+// deps returns the dependency bundle handed to widgets.
+func (a *App) deps() ui.Deps {
+	return ui.Deps{Session: a.session, Images: a.images, Actions: a}
+}
+
+// doOnUI runs fn on the UI thread. When wait is true it blocks until fn returns.
+func (a *App) doOnUI(fn func(), wait bool) {
+	fyne.CurrentApp().Driver().DoFromGoroutine(fn, wait)
+}
+
+func (a *App) setIcon() {
+	data, err := os.ReadFile(filepath.Join(iconPath))
 	if err != nil {
-		fmt.Printf("Failed to read icon file: %v\n", err)
+		log.Printf("read icon: %v", err)
 		return
 	}
-
-	resource := fyne.NewStaticResource("rgo.png", bytes)
-	app.Window().SetIcon(resource)
+	a.window.SetIcon(fyne.NewStaticResource(filepath.Base(iconPath), data))
 }
 
-func (app *ChatApp) GoDo(fn func(), waitForSync bool) {
-	fyne.CurrentApp().Driver().DoFromGoroutine(fn, waitForSync)
+// showMainUI swaps the window to the main layout and wires up shutdown.
+func (a *App) showMainUI() {
+	a.window.SetContent(a.buildUI())
+	a.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
+	a.window.SetOnClosed(func() {
+		a.images.Shutdown()
+		if a.session != nil {
+			_ = a.session.Close()
+		}
+	})
 }
 
-// Window returns the main application window.
-func (app *ChatApp) Window() fyne.Window {
-	return app.window
-}
-
-// CurrentServer returns the current server, or nil if not set.
-func (app *ChatApp) CurrentServer() *revoltgo.Server {
-	if app.Session == nil || app.CurrentServerID == "" {
+// currentServer returns the selected server, or nil.
+func (a *App) currentServer() *revoltgo.Server {
+	if a.session == nil || a.currentServerID == "" {
 		return nil
 	}
-	return app.Session.State.Server(app.CurrentServerID)
+	return a.session.State.Server(a.currentServerID)
 }
 
-// CurrentChannel returns the current channel, or nil if not set.
-func (app *ChatApp) CurrentChannel() *revoltgo.Channel {
-	// todo: what if we return a dummy channel with fake messages: "You're in a loading screen"
-	if app.Session == nil || app.CurrentChannelID == "" {
+// currentChannel returns the selected channel, or nil.
+func (a *App) currentChannel() *revoltgo.Channel {
+	if a.session == nil || a.currentChannelID == "" {
 		return nil
 	}
-	return app.Session.State.Channel(app.CurrentChannelID)
+	return a.session.State.Channel(a.currentChannelID)
 }
 
-// OnAvatarTapped handles avatar tap events to implement MessageActions.
-func (app *ChatApp) OnAvatarTapped(userID string) {
-	fmt.Printf("Avatar tapped: %s\n", userID)
-	// TODO: open user profile
-}
-
-// OnImageTapped handles image tap events to implement MessageActions.
-func (app *ChatApp) OnImageTapped(attachment *revoltgo.Attachment) {
-	app.showImageViewerAttachment(attachment)
-}
-
-// OnReply handles reply action.
-func (app *ChatApp) OnReply(message *revoltgo.Message) {
-	if app.CurrentChannelID == "" || app.messageInput == nil || message == nil {
-		return
-	}
-
-	app.messageInput.AddReply(message)
-	app.window.Canvas().Focus(app.messageInput)
-}
-
-// ResolveMessage resolves a message from cache.
-func (app *ChatApp) ResolveMessage(channelID, messageID string) *revoltgo.Message {
-	// Check cache
-	messages := app.Messages.Get(channelID)
-	for _, m := range messages {
+// ResolveMessage looks a message up in the local cache.
+func (a *App) ResolveMessage(channelID, messageID string) *revoltgo.Message {
+	for _, m := range a.messages.Get(channelID) {
 		if m.ID == messageID {
 			return m
 		}
@@ -158,108 +140,31 @@ func (app *ChatApp) ResolveMessage(channelID, messageID string) *revoltgo.Messag
 	return nil
 }
 
-// OnDelete handles delete action.
-func (app *ChatApp) OnDelete(messageID string) {
-	fmt.Printf("Delete message: %s\n", messageID)
-}
-
-// OnEdit handles edit action.
-func (app *ChatApp) OnEdit(messageID string) {
-	fmt.Printf("Edit message: %s\n", messageID)
-}
-
-// Run starts the application main loop.
-func (app *ChatApp) Run() {
-	app.ShowLoginWindow()
-	app.window.ShowAndRun()
-}
-
-// SwitchToMainUI transitions from login to the main application UI.
-func (app *ChatApp) SwitchToMainUI() {
-	app.window.SetContent(app.buildUI())
-	app.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
-	app.window.SetOnClosed(func() {
-		cache.GetImageCache().Shutdown()
-		if app.Session != nil {
-			_ = app.Session.Close()
-		}
-	})
-}
-
-// SetPendingSessionToken sets a token to be saved after the Ready event.
-func (app *ChatApp) SetPendingSessionToken(token string) {
-	app.pendingSessionToken = token
-}
-
-// GetPendingSessionToken returns the pending session token.
-func (app *ChatApp) GetPendingSessionToken() string {
-	return app.pendingSessionToken
-}
-
-// ClearPendingSessionToken clears the pending session token.
-func (app *ChatApp) ClearPendingSessionToken() {
-	app.pendingSessionToken = ""
-}
-
-// SelectServer handles server selection and updates the UI.
-func (app *ChatApp) SelectServer(serverID string) {
-	app.CurrentServerID = serverID
-	server := app.CurrentServer()
-	if server == nil {
+// OnReply focuses the composer with the given message queued as a reply.
+func (a *App) OnReply(message *revoltgo.Message) {
+	if a.currentChannelID == "" || a.input == nil || message == nil {
 		return
 	}
-
-	app.updateServerSelectionUI(serverID)
-	app.updateServerHeader(server.Name)
-
-	if len(server.Channels) > 0 {
-		app.SelectChannel(server.Channels[0])
-	} else {
-		app.clearChannelSelection()
-	}
-
-	app.RefreshChannelList()
+	a.input.AddReply(message)
+	a.window.Canvas().Focus(a.input)
 }
 
-// SelectChannel handles channel selection and updates the UI.
-func (app *ChatApp) SelectChannel(channelID string) {
-
-	if app.CurrentChannelID == channelID {
-		return
-	}
-
-	_, unread := app.UnreadChannels[channelID]
-
-	app.CurrentChannelID = channelID
-	if ch := app.CurrentChannel(); ch != nil {
-		app.updateChannelHeader(ch.Name)
-
-		// Acknowledge last message to clear unreads
-		if unread && ch.LastMessageID != nil {
-			delete(app.UnreadChannels, channelID)
-			go func() {
-				_ = app.Session.MessageAck(channelID, *ch.LastMessageID)
-			}()
-		}
-	}
-
-	// Update list visual state (selection + unread)
-	app.syncChannelListUI()
-
-	// Display cached messages immediately if available
-	if cached := app.Messages.Get(channelID); len(cached) > 0 {
-		app.displayMessages(cached)
-		return
-	}
-
-	app.showLoadingMessages()
-	app.loadChannelMessages(channelID)
+// OnImageTapped opens an attachment in the image viewer.
+func (a *App) OnImageTapped(attachment *revoltgo.Attachment) {
+	a.showImageViewer(attachment)
 }
 
-// clearChannelSelection clears the current channel and updates the UI.
-func (app *ChatApp) clearChannelSelection() {
-	app.CurrentChannelID = ""
-	app.refreshMessageList()
-	app.updateChannelHeader("")
-	app.syncChannelListUI()
+// OnAvatarTapped is a placeholder for opening a user profile.
+func (a *App) OnAvatarTapped(userID string) {
+	fmt.Printf("avatar tapped: %s\n", userID)
+}
+
+// OnDelete is a placeholder for message deletion.
+func (a *App) OnDelete(messageID string) {
+	fmt.Printf("delete message: %s\n", messageID)
+}
+
+// OnEdit is a placeholder for message editing.
+func (a *App) OnEdit(messageID string) {
+	fmt.Printf("edit message: %s\n", messageID)
 }

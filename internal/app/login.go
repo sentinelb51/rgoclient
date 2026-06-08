@@ -2,137 +2,117 @@ package app
 
 import (
 	"fmt"
+	"log"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
 
-	"RGOClient/internal/ui/widgets"
+	"RGOClient/internal/ui"
 )
 
-// ShowLoginWindow displays the login form.
-func (app *ChatApp) ShowLoginWindow() {
-	app.window.Resize(fyne.NewSize(300, 280))
+// loginWindowSize is the compact size used for the login screen.
+var loginWindowSize = fyne.NewSize(300, 280)
+
+// showLogin displays the saved sessions and the credential form.
+func (a *App) showLogin() {
+	a.window.Resize(loginWindowSize)
 
 	sessions, err := LoadSessions()
 	if err != nil {
-		fmt.Printf("Error loading sessions: %v\n", err)
-		sessions = []SavedSession{}
+		log.Printf("load sessions: %v", err)
 	}
-
-	sessionsSection := app.buildSavedSessionsSection(sessions)
-	loginSection := app.buildLoginFormSection()
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
-		sessionsSection,
+		a.buildSavedSessions(sessions),
 		widget.NewSeparator(),
-		loginSection,
+		a.buildLoginForm(),
 	)
-
-	app.window.SetContent(container.NewPadded(content))
+	a.window.SetContent(container.NewPadded(content))
 }
 
-// buildSavedSessionsSection creates the UI for saved sessions.
-func (app *ChatApp) buildSavedSessionsSection(sessions []SavedSession) fyne.CanvasObject {
+// buildSavedSessions lists the saved sessions as clickable cards.
+func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 	if len(sessions) == 0 {
 		return widget.NewLabel("No recent sessions")
 	}
 
-	list := container.NewVBox()
-	for _, s := range sessions {
-		list.Add(app.buildSessionCard(s))
+	cards := container.NewVBox()
+	for _, session := range sessions {
+		s := session
+		cards.Add(ui.NewSessionCard(a.images, s.Username, s.AvatarID,
+			func() { a.loginWithToken(s) },
+			func() {
+				_ = RemoveSession(s.UserID)
+				a.showLogin()
+			},
+		))
 	}
 
-	return container.NewVBox(
-		widget.NewLabel("Recent Sessions"),
-		list,
-	)
+	return container.NewVBox(widget.NewLabel("Recent Sessions"), cards)
 }
 
-// buildSessionCard creates a clickable card for a saved session.
-func (app *ChatApp) buildSessionCard(session SavedSession) fyne.CanvasObject {
-	return widgets.NewSessionCard(
-		session.Username,
-		session.AvatarID,
-		func() { app.loginWithSavedSession(session) },
-		func() {
-			_ = RemoveSession(session.UserID)
-			app.ShowLoginWindow()
-		},
-	)
-}
-
-// loginWithSavedSession attempts to login using a saved token.
-func (app *ChatApp) loginWithSavedSession(session SavedSession) {
-	fmt.Printf("Logging in as: %s\n", session.Username)
-
-	app.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
+// loginWithToken logs in using a saved session's token.
+func (a *App) loginWithToken(session SavedSession) {
+	a.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
 
 	go func() {
-		err := app.StartRevoltSessionWithToken(session.Token)
-
-		app.GoDo(func() {
+		err := a.startWithToken(session.Token)
+		a.doOnUI(func() {
 			if err != nil {
-				fmt.Printf("Login failed: %v\n", err)
+				log.Printf("token login: %v", err)
 				_ = RemoveSession(session.UserID)
-				dialog.ShowError(fmt.Errorf("session expired, please login again"), app.window)
-				app.ShowLoginWindow()
+				dialog.ShowError(fmt.Errorf("session expired, please login again"), a.window)
+				a.showLogin()
 				return
 			}
-			app.SwitchToMainUI()
+			a.showMainUI()
 		}, true)
 	}()
 }
 
-// buildLoginFormSection creates the email/password login form.
-func (app *ChatApp) buildLoginFormSection() fyne.CanvasObject {
-	emailEntry := widget.NewEntry()
-	emailEntry.SetPlaceHolder("Email")
+// buildLoginForm builds the email/password form.
+func (a *App) buildLoginForm() fyne.CanvasObject {
+	email := widget.NewEntry()
+	email.SetPlaceHolder("Email")
 
-	passwordEntry := widget.NewPasswordEntry()
-	passwordEntry.SetPlaceHolder("Password")
+	password := widget.NewPasswordEntry()
+	password.SetPlaceHolder("Password")
 
-	var loginButton *widget.Button
-	loginButton = widget.NewButton("Login", func() {
-		email := emailEntry.Text
-		password := passwordEntry.Text
-
-		if email == "" || password == "" {
-			dialog.ShowError(fmt.Errorf("please enter both email and password"), app.window)
+	var login *widget.Button
+	login = widget.NewButton("Login", func() {
+		if email.Text == "" || password.Text == "" {
+			dialog.ShowError(fmt.Errorf("please enter both email and password"), a.window)
 			return
 		}
 
-		loginButton.Disable()
-		loginButton.SetText("Logging in...")
+		login.Disable()
+		login.SetText("Logging in...")
 
 		go func() {
-			token, err := app.StartRevoltSessionWithLogin(email, password)
-
-			app.GoDo(func() {
+			token, err := a.startWithLogin(email.Text, password.Text)
+			a.doOnUI(func() {
 				if err != nil {
-					loginButton.Enable()
-					loginButton.SetText("Login")
-					dialog.ShowError(fmt.Errorf("login failed: %v", err), app.window)
+					login.Enable()
+					login.SetText("Login")
+					dialog.ShowError(fmt.Errorf("login failed: %v", err), a.window)
 					return
 				}
-
-				app.SetPendingSessionToken(token)
-				app.SwitchToMainUI()
+				a.pendingToken = token
+				a.showMainUI()
 			}, true)
 		}()
 	})
 
-	passwordEntry.OnSubmitted = func(_ string) {
-		loginButton.OnTapped()
-	}
+	password.OnSubmitted = func(string) { login.OnTapped() }
 
 	return container.NewVBox(
 		widget.NewLabel("Enter credentials"),
-		emailEntry,
-		passwordEntry,
-		loginButton,
+		email,
+		password,
+		login,
 	)
 }

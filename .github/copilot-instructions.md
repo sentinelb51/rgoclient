@@ -1,146 +1,89 @@
----
-
 # RevoltGo Client Architecture
 
 ## Overview
 
-Fyne-based Go 1.25.5 chat client (Discord-like). Uses `github.com/sentinelb51/revoltgo` for API/websocket.
+A Fyne v2 desktop chat client (Discord-like) for Revolt, written in Go 1.26.
+Uses `github.com/sentinelb51/revoltgo` for the REST API and gateway websocket.
 
-## Quirks
+## Core principle: explicit dependencies, no globals
 
-Use `app.GoDo()` for background UI updates if ChatApp is in scope
-Use fmt.Sprintf() over "+" for string concatenation
-Use generics for slices/maps when appropriate (slices.Reverse)
+There is no global session or cache. The `*app.App` controller owns the session
+and both caches and passes what widgets need through a `ui.Deps` value:
 
-## Global Session Access
+```go
+type Deps struct {
+    Session *revoltgo.Session   // resolve users, system messages
+    Images  *cache.ImageCache   // load avatars / icons / attachments
+    Actions MessageActions      // user-interaction callbacks (implemented by *app.App)
+}
+```
 
-Use `context.Session()` to access the current session from anywhere
-- Thread-safe with RWMutex
-- Returns nil if no session active
-- No need to pass session through function parameters
+Widget constructors take `Deps` (e.g. `ui.NewMessageWidget(deps, msg)`).
+`util` helpers take an explicit `*revoltgo.Session` argument.
 
-## Session (ex: Session.User("id"))
-Authoritative API access.
-Always performs network requests.
-Use when data must be fresh or cache misses.
+## revoltgo: Session vs State
 
-## State (ex: Session.State.User("id"))
-Local cache populated by gateway events and prior API calls.
-Fast, zero-network.
-May return nil if the object is unknown or not cached.
+- `Session.X(...)` — authoritative, always a network request. Use when data must
+  be fresh or on a cache miss.
+- `Session.State.X(...)` — local cache from gateway events / prior calls. Fast,
+  zero-network, may return nil.
 
-
-## Project Structure
+## Project structure
 
 ```
-cmd/rgoclient/main.go     - Entry point, initializes Fyne app
+cmd/rgoclient/main.go        Entry point: Fyne app, theme, app.New(...).Run()
+
 internal/
-  context/
-    session.go            - Global session context (thread-safe accessor)
-  interfaces/
-    actions.go            - MessageActions interface definition
-  app/
-    app.go                - ChatApp struct, state logic (SelectServer/Channel)
-    auth.go               - Session persistence (JSON file storage)
-    events.go             - WebSocket event handlers (Ready, Message, Error)
-    login.go              - Login UI and saved session management
-    messages.go           - Message loading, display, submission logic
-    ui.go                 - UI layout building (server/channel lists)
+  app/                       Controller; owns session + caches + window + UI refs
+    app.go                   App struct, New, Run, lifecycle, doOnUI, MessageActions impl
+    session.go               startWithToken / startWithLogin + handler registration
+    events.go                onReady / onMessage / onError
+    navigation.go            Server+channel sidebar: build, refresh, select
+    messages.go              Message area: build, load, display, send, history, viewer
+    login.go                 Login view + login flow
+    store.go                 Saved-session JSON persistence (~/.rgoclient_sessions.json)
   cache/
-    images.go             - Image cache (memory + disk persistence)
-    messages.go           - In-memory message cache per channel
+    image.go                 ImageCache — instance built by App; memory + disk + async load
+    message.go               MessageCache — per-channel, oldest→newest, LRU channel eviction
   ui/
-    theme/
-      theme.go            - Colors, Sizes, NoScrollTheme
-    widgets/
-      category.go         - Collapsible category header
-      channel.go          - Channel list item
-      clickable.go        - ClickableImage, ClickableAvatar
-      helpers.go          - GetAvatarInfo, GetServerIconInfo
-      hoverable.go        - HoverableStack widget
-      layout.go           - Layout helpers (VerticalCenterFixedWidth, NoSpacing)
-      message.go          - MessageWidget container
-      message_content.go  - Content building, attachments, text preview
-      observable_scroll.go- Custom scroll container with callbacks
-      server.go           - Server icon widget
-      sessioncard.go      - SessionCard widget
-      spacers.go          - Spacer helpers (NewHSpacer, NewVSpacer)
-      swift_action.go     - Swift action button widget
-      tappable.go         - TappableContainer wrapper
-      xbutton.go          - X button for removing items
-      input/
-        attachments.go    - Attachment handling for input
-        input.go          - Multi-line input with shift-enter
-        mention.go        - Mention toggle button
-        replies.go        - Reply preview cards
+    theme/theme.go           Colors, Sizes, NoScrollTheme
+    deps.go                  Deps struct + MessageActions interface
+    layouts.go               Custom layouts + spacer helpers
+    interactive.go           Shared tap/hover widgets (TappableContainer, HoverableStack,
+                             iconButton, CloseButton, Avatar) built on tapBase
+    scroll.go                ObservableScroll (wheel amplify + middle-button pan)
+    server.go                Server icon widget
+    channel.go               Channel row + collapsible category + drawn glyphs
+    message.go               Message widget + content/attachments/replies rendering
+    input.go                 Message input + attachments + replies + mention toggle
+    sessioncard.go           Saved-session card
   util/
-    files.go              - File utilities
-    message.go            - Message helpers (DisplayName, FormatSystemMessage)
-    timestamp.go          - Timestamp(); extract time from ULID
-    url.go                - URL utilities
-    
+    message.go               DisplayName / DisplayAvatarURL / FormatSystemMessage (session arg)
+    files.go                 Filetype + FormatFileSize
+    timestamp.go             ULID Timestamp + NiceTime
+    url.go                   IDFromAttachmentURL
 ```
 
-## Key Components
+## Data flow
 
-### ChatApp (internal/app/app.go)
-
-- Main application state holder
-- Manages Session, CurrentServer/Channel, UnreadChannels
-- Tracks loading state (`isLoadingHistory`)
-- Contains UI containers (serverListContainer, channelListContainer, messageListContainer)
-
-### Theme (internal/ui/theme/theme.go)
-
-- `Colors` struct: all UI colors (customizable)
-- `Sizes` struct: all UI dimensions (customizable)
-- `NoScrollTheme`: hides scrollbars
-
-### Widgets
-
-All widgets implement fyne.Widget + fyne.Tappable + desktop.Hoverable where applicable.
-
-### MessageActions Interface (internal/interfaces/actions.go)
-
-- Unified interface for message interactions
-- Implemented by ChatApp
-- Used by widgets to handle user actions (reply, delete, edit, etc.)
-- Provides message resolution from cache
-
-### Global Session Context (internal/context/session.go)
-
-- Thread-safe session accessor using RWMutex
-- `context.Session()` returns current session (or nil)
-- `context.SetSession(s)` updates global session
-- `context.ClearSession()` clears session on logout
-- Optimized for high-frequency reads (message rendering)
-
-## Data Flow
-
-1. Login → StartRevoltSessionWithToken/Login → context.SetSession() → registerEventHandlers
-2. onReady → serverIDs/unreads → RefreshServerList → SelectServer
-3. SelectServer → RefreshChannelList → SelectChannel
-4. SelectChannel → check cache → loadChannelMessages → clear unread
-5. onMessage → cache message → AddMessage (current) OR mark unread
-6. Widgets → context.Session() for user/message data (no parameter passing)
+1. Login (`login.go`) → `startWithToken` / `startWithLogin` → `openSession` registers
+   handlers and opens the gateway.
+2. `onReady` → save pending token, record unreads, `showMainUI`, `refreshServerList`,
+   `selectServer(first)`.
+3. `selectServer` → `refreshChannelList` → `selectChannel(first)`.
+4. `selectChannel` → show cached messages, else `loadChannelMessages`; ack unread.
+5. `onMessage` → cache append → append to open channel, else mark unread.
 
 ## Conventions
 
-- Use `context.Session()` to access session (never pass as parameter)
-- Use `util.DisplayName(message)` and `util.DisplayAvatarURL(message)` (no session param)
-- Use `interfaces.MessageActions` for message interaction callbacks
-- Use `w` for widget receiver (e.g., `func (w *CategoryWidget)`)
-- Use `app` for ChatApp receiver
-- Interface assertions at top of file: `var _ fyne.Widget = (*WidgetName)(nil)`
-- Colors/Sizes in theme.go, not hardcoded
-- Background goroutines use `app.GoDo()` for UI updates
+- Pass dependencies via `ui.Deps`; never reach for global state.
+- Background goroutines update the UI through `App.doOnUI(fn, wait)`.
+- Widget receiver is `w`; app receiver is `a`; cache receiver is `c`.
+- Interface assertions live near the type: `var _ fyne.Tappable = (*T)(nil)`.
+- Colors and sizes come from `ui/theme`, never hardcoded.
+- Use the `log` package for diagnostics.
 
-## Update Requirements
+## Update requirements
 
-**Agents must update this file when:**
-
-- Adding new files/packages
-- Changing data flow
-- Adding new widgets
-- Modifying ChatApp struct fields
-- Changing event handling
+Update this file when adding files/packages, changing data flow, adding widgets,
+modifying `App` fields, or changing event handling.

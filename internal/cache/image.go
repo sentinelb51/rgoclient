@@ -32,12 +32,21 @@ const flushInterval = 2 * time.Minute
 type ImageCache struct {
 	mu       sync.RWMutex
 	memory   map[string]image.Image
+	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
+	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
 	dir      string
 	client   *http.Client
 	ticker   *time.Ticker
 	stop     chan struct{}
 	maxBytes int64
+}
+
+// imageLoad tracks an in-flight load so concurrent callers requesting the same
+// id share one download instead of racing.
+type imageLoad struct {
+	done chan struct{}
+	img  image.Image
 }
 
 // NewImageCache creates a cache rooted at the user's cache directory, purges it
@@ -46,7 +55,9 @@ func NewImageCache() *ImageCache {
 	dir := cacheDir()
 	c := &ImageCache{
 		memory:   make(map[string]image.Image),
+		circular: make(map[string]image.Image),
 		pending:  make(map[string]image.Image),
+		inflight: make(map[string]*imageLoad),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
 		stop:     make(chan struct{}),
@@ -193,30 +204,86 @@ func (c *ImageCache) load(id, url string) image.Image {
 }
 
 // LoadAsync loads an image and delivers it to onLoaded on the UI thread. If
-// circular is set, the image is clipped to a circle first.
+// circular is set, the image is clipped to a circle (the clipped variant is
+// cached in memory so repeated avatars are not re-clipped).
 func (c *ImageCache) LoadAsync(id, url string, circular bool, onLoaded func(image.Image)) {
 	if url == "" {
 		return
 	}
 
-	if img := c.Get(id); img != nil {
-		if circular {
-			img = circleClip(img)
-		}
+	// Fast path: the right variant is already in memory, so deliver it on the
+	// calling thread without touching disk, the network, or circleClip.
+	if img := c.cachedVariant(id, circular); img != nil {
 		onLoaded(img)
 		return
 	}
 
 	go func() {
-		img := c.load(id, url)
+		img := c.loadShared(id, url)
 		if img == nil {
 			return
 		}
 		if circular {
-			img = circleClip(img)
+			img = c.circularVariant(id, img)
 		}
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() { onLoaded(img) }, true)
 	}()
+}
+
+// cachedVariant returns the in-memory image for id (the circular crop when
+// requested), or nil. It never reads disk, so it is safe on the UI thread.
+func (c *ImageCache) cachedVariant(id string, circular bool) image.Image {
+	if id == "" {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if circular {
+		return c.circular[id]
+	}
+	return c.memory[id]
+}
+
+// loadShared resolves an image by id, ensuring that concurrent callers for the
+// same id share a single underlying load instead of each downloading a copy.
+func (c *ImageCache) loadShared(id, url string) image.Image {
+	c.mu.Lock()
+	if call, ok := c.inflight[id]; ok {
+		c.mu.Unlock()
+		<-call.done
+		return call.img
+	}
+	call := &imageLoad{done: make(chan struct{})}
+	c.inflight[id] = call
+	c.mu.Unlock()
+
+	img := c.load(id, url)
+
+	c.mu.Lock()
+	delete(c.inflight, id)
+	c.mu.Unlock()
+
+	call.img = img
+	close(call.done)
+	return img
+}
+
+// circularVariant returns the circular crop of base for id, computing and
+// caching it on first use so the same avatar is clipped only once.
+func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
+	c.mu.RLock()
+	clipped, ok := c.circular[id]
+	c.mu.RUnlock()
+	if ok {
+		return clipped
+	}
+
+	clipped = circleClip(base)
+
+	c.mu.Lock()
+	c.circular[id] = clipped
+	c.mu.Unlock()
+	return clipped
 }
 
 // LoadIntoContainer loads an image and renders it into target, optionally behind
@@ -265,6 +332,7 @@ func (c *ImageCache) diskSize() (int64, error) {
 func (c *ImageCache) purge() {
 	c.mu.Lock()
 	c.memory = make(map[string]image.Image)
+	c.circular = make(map[string]image.Image)
 	c.pending = make(map[string]image.Image)
 	c.mu.Unlock()
 

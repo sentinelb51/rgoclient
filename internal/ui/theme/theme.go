@@ -38,33 +38,33 @@ var Colors = struct {
 	SwiftActionHoverBg color.Color
 	SwiftActionText    color.Color
 }{
-	// Backgrounds
-	ServerListBackground:   color.RGBA{R: 20, G: 20, B: 20, A: 255},
-	ChannelListBackground:  color.RGBA{R: 44, G: 44, B: 44, A: 255},
-	MessageAreaBackground:  color.RGBA{R: 28, G: 28, B: 28, A: 255},
-	MessageHoverBackground: color.RGBA{R: 45, G: 45, B: 45, A: 255},
-	ChannelHoverBackground: color.RGBA{R: 60, G: 60, B: 60, A: 255},
-	ChannelSelectedBg:      color.RGBA{R: 80, G: 80, B: 80, A: 255},
-	ServerDefaultBg:        color.RGBA{R: 60, G: 60, B: 60, A: 255},
-	ServerHoverBg:          color.RGBA{R: 80, G: 80, B: 80, A: 255},
-	ServerSelectedBg:       color.RGBA{R: 114, G: 137, B: 218, A: 255}, // "Blurple"
-	TappableHoverBg:        color.RGBA{R: 70, G: 70, B: 70, A: 255},
-	SwiftActionBg:          color.RGBA{R: 50, G: 50, B: 50, A: 255},
-	SwiftActionHoverBg:     color.RGBA{R: 80, G: 80, B: 80, A: 255},
-	SwiftActionText:        color.RGBA{R: 200, G: 200, B: 200, A: 255},
+	// Backgrounds — cool blue-slate ramp (darkest → lightest)
+	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
+	ChannelListBackground:  color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
+	MessageAreaBackground:  color.RGBA{R: 24, G: 27, B: 36, A: 255},    // #181B24
+	MessageHoverBackground: color.RGBA{R: 30, G: 34, B: 45, A: 255},    // #1E222D
+	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},    // #262B3A
+	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
+	ServerDefaultBg:        color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
+	ServerHoverBg:          color.RGBA{R: 53, G: 60, B: 80, A: 255},    // #353C50
+	ServerSelectedBg:       color.RGBA{R: 91, G: 124, B: 250, A: 255},  // #5B7CFA accent
+	TappableHoverBg:        color.RGBA{R: 38, G: 43, B: 58, A: 255},    // #262B3A
+	SwiftActionBg:          color.RGBA{R: 35, G: 40, B: 56, A: 255},    // #232838
+	SwiftActionHoverBg:     color.RGBA{R: 46, G: 53, B: 72, A: 255},    // #2E3548
+	SwiftActionText:        color.RGBA{R: 196, G: 201, B: 212, A: 255}, // #C4C9D4
 
 	// Elements
-	AvatarPlaceholder: color.RGBA{R: 100, G: 100, B: 200, A: 255},
-	UnreadIndicator:   color.White,
-	HashtagIcon:       color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	CategoryText:      color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	CategoryArrow:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	CategoryIndicator: color.RGBA{R: 140, G: 140, B: 140, A: 255},
-	TextPrimary:       color.White,
-	TimestampText:     color.RGBA{R: 120, G: 120, B: 120, A: 255},
-	XButtonNormal:     color.RGBA{R: 150, G: 150, B: 150, A: 255},
-	XButtonHover:      color.RGBA{R: 255, G: 100, B: 100, A: 255},
-	SessionCardBg:     color.RGBA{R: 50, G: 50, B: 50, A: 255},
+	AvatarPlaceholder: color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
+	UnreadIndicator:   color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	HashtagIcon:       color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	CategoryText:      color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CategoryArrow:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CategoryIndicator: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
+	TextPrimary:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	TimestampText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	XButtonNormal:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	XButtonHover:      color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
+	SessionCardBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
 }
 
 // Sizes defines standard sizes used throughout the application.
@@ -162,27 +162,68 @@ var Sizes = struct {
 	ImageViewerMinHeight: 300,
 }
 
-// NoScrollTheme hides scrollbars for a cleaner look.
-type NoScrollTheme struct {
+// selectionTint is the accent used for text selection, with alpha so the
+// glyphs underneath stay legible.
+var selectionTint = color.RGBA{R: 91, G: 124, B: 250, A: 90}
+
+// flatShadow is a softened shadow so scroll edges read as a subtle seam rather
+// than a heavy drop shadow — keeps the flat/metro feel.
+var flatShadow = color.RGBA{R: 0, G: 0, B: 0, A: 40}
+
+// AppTheme applies the Cool Slate palette to Fyne's built-in widgets (entries,
+// buttons, dialogs, the login form) so they match our custom widgets, and hides
+// scrollbars for a cleaner look.
+type AppTheme struct {
 	fyne.Theme
 }
 
-// NewNoScrollTheme creates a theme that hides scrollbars.
-func NewNoScrollTheme(base fyne.Theme) *NoScrollTheme {
-	return &NoScrollTheme{Theme: base}
+// NewAppTheme wraps a base theme with the application palette and overrides.
+func NewAppTheme(base fyne.Theme) *AppTheme {
+	return &AppTheme{Theme: base}
 }
 
-// Color returns the color for the given name and variant.
-func (t *NoScrollTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
-	if name == theme.ColorNameScrollBar {
+// Color maps Fyne's semantic color names onto the Cool Slate palette so
+// built-in widgets inherit the app's look.
+func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
+	switch name {
+	case theme.ColorNameScrollBar:
 		return color.Transparent
+	case theme.ColorNamePrimary, theme.ColorNameFocus:
+		return Colors.ServerSelectedBg // #5B7CFA accent
+	case theme.ColorNameBackground:
+		return Colors.MessageAreaBackground
+	case theme.ColorNameInputBackground:
+		return Colors.ChannelListBackground
+	case theme.ColorNameInputBorder:
+		return Colors.ChannelSelectedBg
+	case theme.ColorNameForeground:
+		return Colors.TextPrimary
+	case theme.ColorNamePlaceHolder, theme.ColorNameDisabled:
+		return Colors.TimestampText
+	case theme.ColorNameButton:
+		return Colors.SwiftActionBg
+	case theme.ColorNameHover:
+		return Colors.TappableHoverBg
+	case theme.ColorNamePressed:
+		return Colors.SwiftActionHoverBg
+	case theme.ColorNameSelection:
+		return selectionTint
+	case theme.ColorNameSeparator:
+		return Colors.ChannelSelectedBg
+	case theme.ColorNameMenuBackground, theme.ColorNameOverlayBackground:
+		return Colors.ChannelListBackground
+	case theme.ColorNameShadow:
+		return flatShadow
 	}
 	return t.Theme.Color(name, variant)
 }
 
-// Size returns the size for the given name.
-func (t *NoScrollTheme) Size(name fyne.ThemeSizeName) float32 {
-	if name == theme.SizeNameScrollBar {
+// Size hides scrollbars and flattens input corners for a metro look.
+func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
+	switch name {
+	case theme.SizeNameScrollBar:
+		return 0
+	case theme.SizeNameInputRadius:
 		return 0
 	}
 	return t.Theme.Size(name)

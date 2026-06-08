@@ -59,7 +59,7 @@ func (a *App) savePendingToken() {
 func (a *App) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 	// Copy the message, as the event may be pooled and reused.
 	message := event.Message
-	a.messages.Append(event.Channel, &message)
+	a.messageCache.Append(event.Channel, &message)
 
 	a.doOnUI(func() {
 		if event.Channel == a.currentChannelID {
@@ -67,7 +67,7 @@ func (a *App) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 			return
 		}
 		a.unreadChannels[event.Channel] = true
-		a.syncChannelList()
+		a.refreshChannelRow(event.Channel)
 	}, false)
 }
 

@@ -69,6 +69,10 @@ func NewMessageInput(deps Deps) *MessageInput {
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
+	// Empty reply/attachment rows would still reserve a gap above the input bar,
+	// so keep them hidden until they actually hold something.
+	m.ReplyContainer.Hide()
+	m.AttachmentContainer.Hide()
 	return m
 }
 
@@ -189,11 +193,13 @@ func (m *MessageInput) RemoveAttachment(path string) {
 func (m *MessageInput) ClearAttachments() {
 	m.Attachments = nil
 	m.AttachmentContainer.Objects = nil
+	m.AttachmentContainer.Hide()
 	m.AttachmentContainer.Refresh()
 }
 
 func (m *MessageInput) rebuildAttachments() {
 	m.AttachmentContainer.Objects = nil
+	m.AttachmentContainer.Hidden = len(m.Attachments) == 0
 	for _, attachment := range m.Attachments {
 		var size int
 		if info, err := os.Stat(attachment.Path); err == nil {
@@ -259,6 +265,7 @@ func (m *MessageInput) ClearReplies() {
 
 func (m *MessageInput) rebuildReplies() {
 	m.ReplyContainer.Objects = nil
+	m.ReplyContainer.Hidden = len(m.Replies) == 0
 	for i := range m.Replies {
 		m.ReplyContainer.Add(m.buildReplyCard(&m.Replies[i]))
 	}

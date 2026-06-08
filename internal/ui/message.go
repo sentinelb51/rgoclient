@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"fmt"
 	"image/color"
 	"io"
 	"net/http"
@@ -110,19 +109,17 @@ func (w *MessageWidget) buildActions(deps Deps, message *revoltgo.Message) *fyne
 	}, onHover)
 	edit := newIconButton("assets/edit.svg", func() {
 		if deps.Actions != nil {
-			deps.Actions.OnEdit(message.ID)
+			deps.Actions.OnEdit(message)
 		}
 	}, onHover)
 	del := newIconButton("assets/trash.svg", func() {
 		if deps.Actions != nil {
-			deps.Actions.OnDelete(message.ID)
+			deps.Actions.OnDelete(message)
 		}
 	}, onHover)
 
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-	background.CornerRadius = 8
-	background.StrokeColor = theme.Colors.ServerListBackground
-	background.StrokeWidth = 1
+	background.CornerRadius = 4
 
 	group := container.NewStack(background, HBoxNoSpacing(reply, edit, del))
 	group.Hide()
@@ -187,8 +184,7 @@ func buildMessageContent(deps Deps, message *revoltgo.Message, name, timestamp, 
 // buildMessageHeader renders the bold author line, message text, and a
 // top-right timestamp.
 func buildMessageHeader(name, text, timestamp string) fyne.CanvasObject {
-	body := widget.NewRichTextFromMarkdown(fmt.Sprintf("**%s**\n\n%s", name, text))
-	body.Wrapping = fyne.TextWrapWord
+	body := renderMessageContent(name, text)
 
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize

@@ -168,7 +168,7 @@ func (a *App) selectChannel(channelID string) {
 
 	a.syncChannelList()
 
-	if cached := a.messages.Get(channelID); len(cached) > 0 {
+	if cached := a.messageCache.Get(channelID); len(cached) > 0 {
 		a.displayMessages(cached)
 		return
 	}
@@ -202,6 +202,18 @@ func (a *App) syncChannelList() {
 	for _, obj := range a.channelList.Objects {
 		if w, ok := obj.(*ui.ChannelWidget); ok {
 			w.SetState(w.Channel.ID == a.currentChannelID, a.unreadChannels[w.Channel.ID])
+		}
+	}
+}
+
+// refreshChannelRow updates the state of a single channel row, repainting only
+// that widget. Used on the per-message hot path so an incoming message in a
+// background channel doesn't refresh the entire sidebar.
+func (a *App) refreshChannelRow(channelID string) {
+	for _, obj := range a.channelList.Objects {
+		if w, ok := obj.(*ui.ChannelWidget); ok && w.Channel.ID == channelID {
+			w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+			return
 		}
 	}
 }

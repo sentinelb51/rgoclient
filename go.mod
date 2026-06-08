@@ -1,13 +1,13 @@
 module RGOClient
 
-go 1.26.1
+go 1.26.4
 
 require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/sentinelb51/revoltgo v0.0.0-20260607031224-9f8e300a1863
 	golang.design/x/clipboard v0.8.0
-	golang.org/x/image v0.41.0
+	golang.org/x/image v0.42.0
 )
 
 require (
@@ -50,7 +50,7 @@ require (
 	golang.org/x/exp/shiny v0.0.0-20260603202125-055de637280b // indirect
 	golang.org/x/mobile v0.0.0-20260602190626-68735029466e // indirect
 	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sys v0.45.0 // indirect
-	golang.org/x/text v0.37.0 // indirect
+	golang.org/x/sys v0.46.0 // indirect
+	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

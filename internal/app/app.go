@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -31,9 +32,9 @@ type App struct {
 	fyne   fyne.App
 	window fyne.Window
 
-	session  *revoltgo.Session
-	images   *cache.ImageCache
-	messages *cache.MessageCache
+	session      *revoltgo.Session
+	images       *cache.ImageCache
+	messageCache *cache.MessageCache
 
 	serverIDs        []string
 	currentServerID  string
@@ -66,7 +67,7 @@ func New(fyneApp fyne.App) *App {
 		fyne:                fyneApp,
 		window:              window,
 		images:              cache.NewImageCache(),
-		messages:            cache.NewMessageCache(messagesPerChannel, cachedChannels),
+		messageCache:        cache.NewMessageCache(messagesPerChannel, cachedChannels),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelList:         container.NewVBox(),
 		messageList:         ui.VBoxNoSpacing(),
@@ -80,7 +81,24 @@ func New(fyneApp fyne.App) *App {
 // Run shows the login window and starts the Fyne event loop.
 func (a *App) Run() {
 	a.showLogin()
+	a.styleNativeChrome()
 	a.window.ShowAndRun()
+}
+
+// styleNativeChrome recolors the native window chrome (the Windows title bar) to
+// match the palette. The platform window handle isn't available until the event
+// loop has created it, so it retries briefly until the styling lands.
+func (a *App) styleNativeChrome() {
+	go func() {
+		for range 40 {
+			done := make(chan bool, 1)
+			a.doOnUI(func() { done <- ui.StyleTitlebar(a.window) }, false)
+			if <-done {
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
 }
 
 // deps returns the dependency bundle handed to widgets.
@@ -132,7 +150,7 @@ func (a *App) currentChannel() *revoltgo.Channel {
 
 // ResolveMessage looks a message up in the local cache.
 func (a *App) ResolveMessage(channelID, messageID string) *revoltgo.Message {
-	for _, m := range a.messages.Get(channelID) {
+	for _, m := range a.messageCache.Get(channelID) {
 		if m.ID == messageID {
 			return m
 		}
@@ -159,12 +177,17 @@ func (a *App) OnAvatarTapped(userID string) {
 	fmt.Printf("avatar tapped: %s\n", userID)
 }
 
-// OnDelete is a placeholder for message deletion.
-func (a *App) OnDelete(messageID string) {
-	fmt.Printf("delete message: %s\n", messageID)
+func (a *App) OnDelete(message *revoltgo.Message) {
+	// todo: permission checks to see if you can delete messages
+	// you can always delete your own messages
+
+	err := a.session.ChannelMessageDelete(message.Channel, message.ID)
+	if err != nil {
+		log.Printf("OnDelete() error: %s\n", err)
+	}
 }
 
 // OnEdit is a placeholder for message editing.
-func (a *App) OnEdit(messageID string) {
-	fmt.Printf("edit message: %s\n", messageID)
+func (a *App) OnEdit(message *revoltgo.Message) {
+	fmt.Printf("edit message: %s\n", message.ID)
 }

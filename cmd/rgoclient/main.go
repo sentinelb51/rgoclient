@@ -8,9 +8,14 @@ import (
 	apptheme "RGOClient/internal/ui/theme"
 )
 
+/*
+	TODO: Message delete should remove from message cache and update display
+	TODO: Notification toasts for warnings; slide from bottom right, 5 dots each counts every second, click to dismiss, auto-dismiss after 5s (5 dots)
+*/
+
 func main() {
 	fyneApp := fyneapp.New()
-	fyneApp.Settings().SetTheme(apptheme.NewNoScrollTheme(theme.DefaultTheme()))
+	fyneApp.Settings().SetTheme(apptheme.NewAppTheme(theme.DefaultTheme()))
 
 	app.New(fyneApp).Run()
 }

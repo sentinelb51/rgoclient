@@ -24,8 +24,8 @@ type MessageActions interface {
 	OnAvatarTapped(userID string)
 	OnImageTapped(attachment *revoltgo.Attachment)
 	OnReply(message *revoltgo.Message)
-	OnDelete(messageID string)
-	OnEdit(messageID string)
+	OnDelete(message *revoltgo.Message)
+	OnEdit(message *revoltgo.Message)
 
 	// ResolveMessage looks a message up in the local cache (no network).
 	ResolveMessage(channelID, messageID string) *revoltgo.Message

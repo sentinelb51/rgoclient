@@ -42,11 +42,16 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.OnSubmit = a.handleSubmit
 	a.input.RegisterDropHandler(a.window)
 
-	composer := container.NewPadded(container.NewVBox(
+	// Flat composer: the entry is a full-width bar flush with the window edges,
+	// divided from the message list by a hairline seam rather than a soft shadow.
+	seam := canvas.NewRectangle(theme.Colors.ChannelSelectedBg)
+	seam.SetMinSize(fyne.NewSize(0, 1))
+	composer := ui.VBoxNoSpacing(
+		seam,
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
 		a.input,
-	))
+	)
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	header := container.NewPadded(container.NewHBox(ui.HashtagIcon(), a.channelHeader))
@@ -68,6 +73,14 @@ func (a *App) showStatus(text string) {
 
 	a.messageList.Objects = []fyne.CanvasObject{ui.NewMinHeightContainer(height, container.NewCenter(label))}
 	a.messageList.Refresh()
+
+	// The inner list refresh alone doesn't repaint the scroll viewport until an
+	// event forces relayout, so the status would only appear after a scroll.
+	// Reset to the top and refresh the scroll explicitly.
+	if a.messageScroll != nil {
+		a.messageScroll.ScrollToTop()
+		a.messageScroll.Refresh()
+	}
 }
 
 // clearMessages empties the message list.
@@ -79,7 +92,7 @@ func (a *App) clearMessages() {
 
 // loadChannelMessages fetches the newest page of messages for a channel.
 func (a *App) loadChannelMessages(channelID string) {
-	a.messages.SetDepleted(channelID, false)
+	a.messageCache.SetDepleted(channelID, false)
 
 	go func() {
 		if a.session == nil {
@@ -103,13 +116,13 @@ func (a *App) loadChannelMessages(channelID string) {
 			a.doOnUI(func() {
 				if a.currentChannelID == channelID {
 					a.showStatus("No messages in this channel")
-					a.messages.SetDepleted(channelID, true)
+					a.messageCache.SetDepleted(channelID, true)
 				}
 			}, true)
 			return
 		}
 
-		stored := a.messages.Set(channelID, page.Messages)
+		stored := a.messageCache.Set(channelID, page.Messages)
 		a.doOnUI(func() {
 			if a.currentChannelID == channelID {
 				a.displayMessages(stored)
@@ -184,7 +197,7 @@ func (a *App) appendMessage(message *revoltgo.Message) {
 // loadMoreHistory fetches an older page when the user scrolls to the top.
 func (a *App) loadMoreHistory() {
 	channelID := a.currentChannelID
-	if a.loadingHistory || channelID == "" || a.messages.IsDepleted(channelID) {
+	if a.loadingHistory || channelID == "" || a.messageCache.IsDepleted(channelID) {
 		return
 	}
 	a.loadingHistory = true
@@ -192,7 +205,7 @@ func (a *App) loadMoreHistory() {
 	go func() {
 		defer a.doOnUI(func() { a.loadingHistory = false }, true)
 
-		current := a.messages.Get(channelID)
+		current := a.messageCache.Get(channelID)
 		if len(current) == 0 {
 			return
 		}
@@ -205,12 +218,12 @@ func (a *App) loadMoreHistory() {
 		})
 		if err != nil || len(page.Messages) == 0 {
 			if err == nil {
-				a.messages.SetDepleted(channelID, true)
+				a.messageCache.SetDepleted(channelID, true)
 			}
 			return
 		}
 
-		a.messages.Prepend(channelID, page.Messages)
+		a.messageCache.Prepend(channelID, page.Messages)
 		a.doOnUI(func() {
 			if a.currentChannelID == channelID {
 				a.prependMessages(page.Messages)

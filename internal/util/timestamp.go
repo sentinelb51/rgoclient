@@ -24,6 +24,12 @@ const (
 	daysInYear  = 365
 )
 
+// ShortTime formats just the local clock time (e.g. "3:04 PM"), used for the
+// gutter timestamp on grouped continuation messages.
+func ShortTime(t time.Time) string {
+	return t.Local().Format(timeLayout)
+}
+
 func NiceTime(t time.Time) string {
 	t = t.Local()
 	now := time.Now().Local()

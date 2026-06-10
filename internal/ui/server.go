@@ -5,6 +5,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
@@ -25,6 +26,11 @@ type ServerWidget struct {
 	onTap       func()
 	background  *canvas.Circle
 	iconWrapper *fyne.Container
+
+	// baseLayout and grownLayout size the icon at rest and when hovered or
+	// selected; built once so hovering doesn't allocate a layout per event.
+	baseLayout  fyne.Layout
+	grownLayout fyne.Layout
 
 	selected bool
 	hovered  bool
@@ -64,12 +70,14 @@ func (w *ServerWidget) refreshAppearance() {
 	if w.iconWrapper == nil {
 		return
 	}
-	size := theme.Sizes.ServerIconSize
+	wrap := w.baseLayout
 	if w.selected || w.hovered {
-		size *= serverHoverGrowth
+		wrap = w.grownLayout
 	}
-	w.iconWrapper.Layout = container.NewGridWrap(fyne.NewSize(size, size)).Layout
-	w.iconWrapper.Refresh()
+	if w.iconWrapper.Layout != wrap {
+		w.iconWrapper.Layout = wrap
+		w.iconWrapper.Refresh()
+	}
 }
 
 func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
@@ -88,7 +96,10 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 		w.images.LoadIntoContainer(w.Server.Icon.ID, w.Server.Icon.URL("64"), iconSize, icon, true, w.background)
 	}
 
-	w.iconWrapper = container.NewGridWrap(iconSize, icon)
+	grown := theme.Sizes.ServerIconSize * serverHoverGrowth
+	w.baseLayout = layout.NewGridWrapLayout(iconSize)
+	w.grownLayout = layout.NewGridWrapLayout(fyne.NewSize(grown, grown))
+	w.iconWrapper = container.New(w.baseLayout, icon)
 	return widget.NewSimpleRenderer(container.NewCenter(w.iconWrapper))
 }
 

@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"slices"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -15,15 +17,63 @@ import (
 
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 const (
 	messageBatchSize  = 100 // messages rendered per UI-thread batch
 	renderedCap       = 200 // max message widgets kept mounted at once
 	historyPageSize   = 50  // older messages fetched per scroll-up
-	initialPageSize   = 100 // messages fetched when first opening a channel
+	initialPageSize   = 30  // messages fetched when first opening a channel
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
+
+	messageGroupWindow = 7 * time.Minute // max gap for a message to group under the previous
 )
+
+// newMessageWidget builds a message widget, drawing curr as a grouped
+// continuation of prev when they belong together (see continuesGroup) and
+// tightening its bottom margin when next continues it.
+func (a *App) newMessageWidget(prev, curr, next *revoltgo.Message) *ui.MessageWidget {
+	return ui.NewMessageWidget(a.deps(), curr, continuesGroup(prev, curr), continuesGroup(curr, next))
+}
+
+// continuesGroup reports whether curr should render as a continuation of prev —
+// same author, neither a system/webhook/masqueraded message, and within
+// messageGroupWindow — so it's drawn without a repeated avatar/name header. A
+// reply always starts a fresh group.
+func continuesGroup(prev, curr *revoltgo.Message) bool {
+	if prev == nil || curr == nil || curr.Author == "" || prev.Author != curr.Author {
+		return false
+	}
+	if curr.System != nil || prev.System != nil ||
+		curr.Webhook != nil || prev.Webhook != nil ||
+		curr.Masquerade != nil || prev.Masquerade != nil {
+		return false
+	}
+	if len(curr.Replies) > 0 {
+		return false
+	}
+
+	pt, err1 := util.Timestamp(prev.ID)
+	ct, err2 := util.Timestamp(curr.ID)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	gap := ct.Sub(pt)
+	return gap >= 0 && gap <= messageGroupWindow
+}
+
+// mountedMessage returns the message rendered by the widget at index i in the
+// message list, or nil when i is out of range or not a message widget.
+func (a *App) mountedMessage(i int) *revoltgo.Message {
+	if i < 0 || i >= len(a.messageList.Objects) {
+		return nil
+	}
+	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+		return w.Message()
+	}
+	return nil
+}
 
 // buildMessageArea builds the message list, header, and composer.
 func (a *App) buildMessageArea() fyne.CanvasObject {
@@ -42,16 +92,21 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.OnSubmit = a.handleSubmit
 	a.input.RegisterDropHandler(a.window)
 
-	// Flat composer: the entry is a full-width bar flush with the window edges,
-	// divided from the message list by a hairline seam rather than a soft shadow.
-	seam := canvas.NewRectangle(theme.Colors.ChannelSelectedBg)
-	seam.SetMinSize(fyne.NewSize(0, 1))
-	composer := ui.VBoxNoSpacing(
-		seam,
+	// Floating composer dock: the entry, reply and attachment rows sit in a square
+	// card inset from the window edges so it floats just above the bottom. A grey
+	// left bar — the same indicator a selected channel carries — runs the dock's
+	// full height. The card fill matches the entry's own input background, so the
+	// entry's box blends seamlessly into the card.
+	dockBg := canvas.NewRectangle(theme.Colors.ChannelListBackground)
+	leftBar := canvas.NewRectangle(theme.Colors.TextPrimary)
+	leftBar.SetMinSize(fyne.NewSize(3, 0))
+	inner := ui.VBoxNoSpacing(
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
 		a.input,
 	)
+	dock := container.NewStack(dockBg, container.NewBorder(nil, nil, leftBar, nil, inner))
+	composer := container.NewPadded(dock)
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	header := container.NewPadded(container.NewHBox(ui.HashtagIcon(), a.channelHeader))
@@ -62,6 +117,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 
 // showStatus replaces the message list with a single centered line.
 func (a *App) showStatus(text string) {
+	a.renderGen++
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
 	height := float32(400)
@@ -85,6 +141,7 @@ func (a *App) showStatus(text string) {
 
 // clearMessages empties the message list.
 func (a *App) clearMessages() {
+	a.renderGen++
 	a.messageList.Objects = nil
 	a.messageList.Refresh()
 	a.scrollToBottom()
@@ -94,12 +151,13 @@ func (a *App) clearMessages() {
 func (a *App) loadChannelMessages(channelID string) {
 	a.messageCache.SetDepleted(channelID, false)
 
-	go func() {
-		if a.session == nil {
-			return
-		}
+	session := a.session
+	if session == nil {
+		return
+	}
 
-		page, err := a.session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
+	go func() {
+		page, err := session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 			IncludeUsers: true,
 			Limit:        initialPageSize,
 		})
@@ -132,30 +190,49 @@ func (a *App) loadChannelMessages(channelID string) {
 }
 
 // displayMessages renders messages (oldest first) in batches to keep the UI
-// responsive, scrolling to the bottom when done.
+// responsive, scrolling to the bottom when done. Only the newest renderedCap
+// messages are mounted; older cached ones are re-mounted on scrollback by
+// loadMoreHistory's cache tier. Each call bumps renderGen so the batches of a
+// superseded render abort, even when the user switches away and back to the
+// same channel before it finishes.
 func (a *App) displayMessages(messages []*revoltgo.Message) {
+	a.renderGen++
+	gen := a.renderGen
 	a.messageList.Objects = nil
-	channelID := a.currentChannelID
-	deps := a.deps()
+
+	if len(messages) > renderedCap {
+		messages = messages[len(messages)-renderedCap:]
+	}
 
 	go func() {
 		for start := 0; start < len(messages); start += messageBatchSize {
 			end := min(start+messageBatchSize, len(messages))
-			batch := messages[start:end]
 
+			stale := false
 			a.doOnUI(func() {
-				if a.currentChannelID != channelID {
+				if a.renderGen != gen {
+					stale = true
 					return
 				}
-				for _, message := range batch {
-					a.messageList.Add(ui.NewMessageWidget(deps, message))
+				for idx := start; idx < end; idx++ {
+					var prev, next *revoltgo.Message
+					if idx > 0 {
+						prev = messages[idx-1]
+					}
+					if idx+1 < len(messages) {
+						next = messages[idx+1]
+					}
+					a.messageList.Add(a.newMessageWidget(prev, messages[idx], next))
 				}
 				a.messageList.Refresh()
 			}, true)
+			if stale {
+				return
+			}
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID == channelID {
+			if a.renderGen == gen {
 				a.scrollToBottom()
 			}
 		}, false)
@@ -163,8 +240,9 @@ func (a *App) displayMessages(messages []*revoltgo.Message) {
 }
 
 // appendMessage adds a freshly received message, trimming the oldest widget when
-// over the render cap and keeping the scroll position stable.
-func (a *App) appendMessage(message *revoltgo.Message) {
+// over the render cap and keeping the scroll position stable. prev is the
+// message's predecessor in its channel, captured when the message was cached.
+func (a *App) appendMessage(message, prev *revoltgo.Message) {
 	if a.currentChannelID == "" {
 		return
 	}
@@ -173,7 +251,16 @@ func (a *App) appendMessage(message *revoltgo.Message) {
 	viewHeight := a.messageScroll.Size().Height
 	atBottom := contentHeight-viewHeight-a.messageScroll.Offset.Y < atBottomTolerance
 
-	a.messageList.Add(ui.NewMessageWidget(a.deps(), message))
+	// When this message continues the one above it, tighten that message's bottom
+	// margin so the group reads as a block.
+	if continuesGroup(prev, message) {
+		if n := len(a.messageList.Objects); n > 0 {
+			if last, ok := a.messageList.Objects[n-1].(*ui.MessageWidget); ok {
+				last.SetFollowedByGroup(true)
+			}
+		}
+	}
+	a.messageList.Add(a.newMessageWidget(prev, message, nil))
 
 	if len(a.messageList.Objects) > renderedCap {
 		var removedHeight float32
@@ -194,10 +281,29 @@ func (a *App) appendMessage(message *revoltgo.Message) {
 	}
 }
 
-// loadMoreHistory fetches an older page when the user scrolls to the top.
+// loadMoreHistory mounts older messages when the user scrolls to the top. It is
+// two-tier: messages already cached but not mounted (displayMessages mounts only
+// the newest renderedCap) prepend synchronously from the cache; past that, an
+// older page is fetched from the network. Both tiers anchor on the oldest
+// mounted message, so cache trimming can never cause a refetch loop.
 func (a *App) loadMoreHistory() {
 	channelID := a.currentChannelID
-	if a.loadingHistory || channelID == "" || a.messageCache.IsDepleted(channelID) {
+	if a.loadingHistory || channelID == "" {
+		return
+	}
+	top := a.mountedMessage(0)
+	if top == nil {
+		return
+	}
+
+	cached := a.messageCache.Get(channelID)
+	if i := slices.IndexFunc(cached, func(m *revoltgo.Message) bool { return m.ID == top.ID }); i > 0 {
+		a.prependMessages(cached[max(0, i-historyPageSize):i])
+		return
+	}
+
+	session := a.session
+	if session == nil || a.messageCache.IsDepleted(channelID) {
 		return
 	}
 	a.loadingHistory = true
@@ -205,14 +311,8 @@ func (a *App) loadMoreHistory() {
 	go func() {
 		defer a.doOnUI(func() { a.loadingHistory = false }, true)
 
-		current := a.messageCache.Get(channelID)
-		if len(current) == 0 {
-			return
-		}
-		oldestID := current[0].ID
-
-		page, err := a.session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
-			Before:       oldestID,
+		page, err := session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
+			Before:       top.ID,
 			Limit:        historyPageSize,
 			IncludeUsers: true,
 		})
@@ -223,27 +323,49 @@ func (a *App) loadMoreHistory() {
 			return
 		}
 
-		a.messageCache.Prepend(channelID, page.Messages)
+		older := a.messageCache.Prepend(channelID, page.Messages)
 		a.doOnUI(func() {
-			if a.currentChannelID == channelID {
-				a.prependMessages(page.Messages)
+			if a.currentChannelID == channelID && a.mountedMessage(0) == top {
+				a.prependMessages(older)
 			}
 		}, true)
 	}()
 }
 
-// prependMessages mounts an older page (API order, newest first) above the
-// current view, preserving the user's scroll position.
-func (a *App) prependMessages(page []*revoltgo.Message) {
-	if len(page) == 0 {
+// prependMessages mounts older messages (oldest first) above the current view,
+// preserving the user's scroll position. The mounted list intentionally grows
+// past renderedCap during scrollback — the cap bounds the initial render, while
+// appendMessage keeps trimming the top as new messages arrive.
+func (a *App) prependMessages(older []*revoltgo.Message) {
+	if len(older) == 0 {
 		return
 	}
-	deps := a.deps()
 	oldHeight := a.messageList.MinSize().Height
 
-	widgets := make([]fyne.CanvasObject, 0, len(page))
-	for i := len(page) - 1; i >= 0; i-- { // reverse to chronological order
-		widgets = append(widgets, ui.NewMessageWidget(deps, page[i]))
+	// The newest prepended message lands directly above the previously topmost
+	// message, so that existing row is each one's neighbour at the seam.
+	topMessage, topNext := a.mountedMessage(0), a.mountedMessage(1)
+
+	// The oldest message has no loaded predecessor, so it renders as a full
+	// message; every other one sees its true neighbours for grouping.
+	widgets := make([]fyne.CanvasObject, 0, len(older))
+	for i, msg := range older {
+		var prev, next *revoltgo.Message
+		if i > 0 {
+			prev = older[i-1]
+		}
+		if i+1 < len(older) {
+			next = older[i+1]
+		} else {
+			next = topMessage
+		}
+		widgets = append(widgets, a.newMessageWidget(prev, msg, next))
+	}
+
+	// The previously-topmost message now has a predecessor above it, so
+	// re-evaluate its grouping (its successor is unchanged).
+	if topMessage != nil {
+		a.messageList.Objects[0] = a.newMessageWidget(older[len(older)-1], topMessage, topNext)
 	}
 
 	a.messageList.Objects = append(widgets, a.messageList.Objects...)
@@ -268,6 +390,7 @@ func (a *App) handleSubmit(text string) {
 		return
 	}
 
+	session := a.session
 	channelID := a.currentChannelID
 	attachments := append([]ui.Attachment(nil), a.input.Attachments...)
 	replies := append([]ui.Reply(nil), a.input.Replies...)
@@ -279,17 +402,17 @@ func (a *App) handleSubmit(text string) {
 	go func() {
 		send := revoltgo.MessageSend{
 			Content:     text,
-			Attachments: a.uploadAttachments(attachments),
+			Attachments: uploadAttachments(session, attachments),
 			Replies:     toMessageReplies(replies),
 		}
-		if _, err := a.session.ChannelMessageSend(channelID, send); err != nil {
+		if _, err := session.ChannelMessageSend(channelID, send); err != nil {
 			log.Printf("send message: %v", err)
 		}
 	}()
 }
 
 // uploadAttachments uploads each local file and returns the resulting IDs.
-func (a *App) uploadAttachments(attachments []ui.Attachment) []string {
+func uploadAttachments(session *revoltgo.Session, attachments []ui.Attachment) []string {
 	ids := make([]string, 0, len(attachments))
 	for _, attachment := range attachments {
 		file, err := os.Open(attachment.Path)
@@ -298,7 +421,7 @@ func (a *App) uploadAttachments(attachments []ui.Attachment) []string {
 			continue
 		}
 
-		uploaded, err := a.session.AttachmentUpload(&revoltgo.File{Name: attachment.Name, Reader: file})
+		uploaded, err := session.AttachmentUpload(&revoltgo.File{Name: attachment.Name, Reader: file})
 		_ = file.Close()
 		if err != nil {
 			log.Printf("upload attachment %s: %v", attachment.Name, err)

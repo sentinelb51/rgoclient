@@ -7,6 +7,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/cache"
@@ -99,7 +100,7 @@ func (h *HoverableStack) CreateRenderer() fyne.WidgetRenderer {
 }
 
 func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
-	h.background.StrokeColor = color.Black
+	h.background.StrokeColor = theme.Colors.AttachmentHoverBorder
 	h.background.StrokeWidth = 1
 	h.background.Refresh()
 	if h.onHover != nil {
@@ -129,13 +130,13 @@ var (
 	_ desktop.Hoverable = (*iconButton)(nil)
 )
 
-func newIconButton(iconPath string, onTap func(), onHover func(bool)) *iconButton {
+func newIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *iconButton {
 	size := theme.Sizes.SwiftActionSize
 
 	background := canvas.NewRectangle(color.Transparent)
 	background.SetMinSize(fyne.NewSize(size, size*0.8))
 
-	icon := canvas.NewImageFromFile(iconPath)
+	icon := newIconImage(res)
 	icon.FillMode = canvas.ImageFillContain
 	icon.ScaleMode = canvas.ImageScaleSmooth
 	icon.SetMinSize(fyne.NewSize(size*0.7, size*0.7))
@@ -169,10 +170,12 @@ func (b *iconButton) MouseOut() {
 // closeButtonSize is the side length of a CloseButton.
 const closeButtonSize = 24
 
-// CloseButton is a drawn "×" button for removing items.
+// CloseButton is an icon-only "cancel" button for removing items, using the
+// Fyne theme cancel icon with a hover background.
 type CloseButton struct {
 	tapBase
-	hovered bool
+	background *canvas.Rectangle
+	icon       *canvas.Image
 }
 
 var (
@@ -182,7 +185,14 @@ var (
 
 // NewCloseButton creates a close button with the given tap handler.
 func NewCloseButton(onTap func()) *CloseButton {
-	b := &CloseButton{}
+	background := canvas.NewRectangle(color.Transparent)
+	background.CornerRadius = 4
+
+	icon := newIconImage(fynetheme.CancelIcon())
+	icon.FillMode = canvas.ImageFillContain
+	icon.ScaleMode = canvas.ImageScaleSmooth
+
+	b := &CloseButton{background: background, icon: icon}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	return b
@@ -193,57 +203,18 @@ func (b *CloseButton) MinSize() fyne.Size {
 }
 
 func (b *CloseButton) MouseIn(*desktop.MouseEvent) {
-	b.hovered = true
-	b.Refresh()
+	b.background.FillColor = theme.Colors.SwiftActionHoverBg
+	b.background.Refresh()
 }
 
 func (b *CloseButton) MouseOut() {
-	b.hovered = false
-	b.Refresh()
+	b.background.FillColor = color.Transparent
+	b.background.Refresh()
 }
 
 func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
-	line1 := canvas.NewLine(theme.Colors.XButtonNormal)
-	line1.StrokeWidth = 2
-	line2 := canvas.NewLine(theme.Colors.XButtonNormal)
-	line2.StrokeWidth = 2
-	return &closeButtonRenderer{button: b, line1: line1, line2: line2}
+	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewPadded(b.icon)))
 }
-
-type closeButtonRenderer struct {
-	button       *CloseButton
-	line1, line2 *canvas.Line
-}
-
-func (r *closeButtonRenderer) Layout(size fyne.Size) {
-	const padding = 6
-	cx, cy := size.Width/2, size.Height/2
-	half := (size.Width - 2*padding) / 2
-
-	r.line1.Position1 = fyne.NewPos(cx-half, cy-half)
-	r.line1.Position2 = fyne.NewPos(cx+half, cy+half)
-	r.line2.Position1 = fyne.NewPos(cx+half, cy-half)
-	r.line2.Position2 = fyne.NewPos(cx-half, cy+half)
-}
-
-func (r *closeButtonRenderer) MinSize() fyne.Size { return r.button.MinSize() }
-
-func (r *closeButtonRenderer) Refresh() {
-	col := theme.Colors.XButtonNormal
-	if r.button.hovered {
-		col = theme.Colors.XButtonHover
-	}
-	r.line1.StrokeColor = col
-	r.line2.StrokeColor = col
-	canvas.Refresh(r.line1)
-	canvas.Refresh(r.line2)
-}
-
-func (r *closeButtonRenderer) Objects() []fyne.CanvasObject {
-	return []fyne.CanvasObject{r.line1, r.line2}
-}
-
-func (r *closeButtonRenderer) Destroy() {}
 
 // Avatar is a circular, tappable avatar that loads its image asynchronously.
 type Avatar struct {
@@ -271,6 +242,16 @@ func NewAvatar(images *cache.ImageCache, avatarID, avatarURL string, onTap func(
 	a.onTap = onTap
 	a.ExtendBaseWidget(a)
 	return a
+}
+
+// SetSource reloads the avatar image in place, used when the source resolves
+// after the avatar was first mounted with only its placeholder.
+func (a *Avatar) SetSource(images *cache.ImageCache, avatarID, avatarURL string) {
+	if avatarURL == "" || avatarID == "" {
+		return
+	}
+	size := fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
+	images.LoadIntoContainer(avatarID, avatarURL, size, a.content, true, nil)
 }
 
 func (a *Avatar) CreateRenderer() fyne.WidgetRenderer {

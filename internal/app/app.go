@@ -2,7 +2,6 @@
 package app
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -42,11 +41,13 @@ type App struct {
 
 	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
 	unreadChannels      map[string]bool
+	fetchedAuthors      map[string]bool // "serverID:userID" -> author resolved once (lazy, UI-thread only)
 
 	pendingToken string // saved once the Ready event arrives
 
 	serverList    *fyne.Container
 	channelList   *fyne.Container
+	memberList    *fyne.Container
 	messageList   *fyne.Container
 	messageScroll *ui.ObservableScroll
 	input         *ui.MessageInput
@@ -54,6 +55,11 @@ type App struct {
 	channelHeader *widget.Label
 
 	loadingHistory bool
+
+	// renderGen identifies the current message-area render; bumping it aborts the
+	// batched widget mounting of any superseded displayMessages run (channel IDs
+	// alone can't tell A→B→A switches apart). UI-thread only.
+	renderGen int
 }
 
 var _ ui.MessageActions = (*App)(nil)
@@ -70,9 +76,11 @@ func New(fyneApp fyne.App) *App {
 		messageCache:        cache.NewMessageCache(messagesPerChannel, cachedChannels),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelList:         container.NewVBox(),
+		memberList:          ui.VBoxNoSpacing(),
 		messageList:         ui.VBoxNoSpacing(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
+		fetchedAuthors:      make(map[string]bool),
 	}
 	a.setIcon()
 	return a
@@ -91,9 +99,9 @@ func (a *App) Run() {
 func (a *App) styleNativeChrome() {
 	go func() {
 		for range 40 {
-			done := make(chan bool, 1)
-			a.doOnUI(func() { done <- ui.StyleTitlebar(a.window) }, false)
-			if <-done {
+			var done bool
+			a.doOnUI(func() { done = ui.StyleTitlebar(a.window) }, true)
+			if done {
 				return
 			}
 			time.Sleep(50 * time.Millisecond)
@@ -149,6 +157,17 @@ func (a *App) currentChannel() *revoltgo.Channel {
 	return a.session.State.Channel(a.currentChannelID)
 }
 
+// channelServerID returns the server a channel belongs to, or "" for DMs/groups.
+func (a *App) channelServerID(channelID string) string {
+	if a.session == nil {
+		return ""
+	}
+	if channel := a.session.State.Channel(channelID); channel != nil && channel.Server != nil {
+		return *channel.Server
+	}
+	return ""
+}
+
 // ResolveMessage looks a message up in the local cache.
 func (a *App) ResolveMessage(channelID, messageID string) *revoltgo.Message {
 	for _, m := range a.messageCache.Get(channelID) {
@@ -175,20 +194,25 @@ func (a *App) OnImageTapped(attachment *revoltgo.Attachment) {
 
 // OnAvatarTapped is a placeholder for opening a user profile.
 func (a *App) OnAvatarTapped(userID string) {
-	fmt.Printf("avatar tapped: %s\n", userID)
+	log.Printf("avatar tapped: %s", userID)
 }
 
 func (a *App) OnDelete(message *revoltgo.Message) {
 	// todo: permission checks to see if you can delete messages
 	// you can always delete your own messages
 
-	err := a.session.ChannelMessageDelete(message.Channel, message.ID)
-	if err != nil {
-		log.Printf("OnDelete() error: %s\n", err)
+	session := a.session
+	if session == nil {
+		return
 	}
+	go func() {
+		if err := session.ChannelMessageDelete(message.Channel, message.ID); err != nil {
+			log.Printf("delete message %s: %v", message.ID, err)
+		}
+	}()
 }
 
 // OnEdit is a placeholder for message editing.
 func (a *App) OnEdit(message *revoltgo.Message) {
-	fmt.Printf("edit message: %s\n", message.ID)
+	log.Printf("edit message: %s", message.ID)
 }

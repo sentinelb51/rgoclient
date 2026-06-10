@@ -10,7 +10,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
-	"fyne.io/fyne/v2/layout"
+	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
@@ -20,8 +20,9 @@ import (
 )
 
 const (
-	maxReplyPreviewLength = 80
-	hoverHideDelay        = 50 * time.Millisecond
+	maxReplyUsernameLength = 16
+	maxReplyPreviewLength  = 80
+	hoverHideDelay         = 50 * time.Millisecond
 )
 
 // MessageWidget renders a single chat message with a hover state that reveals
@@ -30,7 +31,30 @@ type MessageWidget struct {
 	widget.BaseWidget
 	content    fyne.CanvasObject
 	background *canvas.Rectangle
-	actions    *fyne.Container
+
+	// authorText and avatar are retained so a message whose author resolves after
+	// the widget is mounted (lazy per-author fetch) can be updated in place via
+	// RefreshAuthor, instead of rebuilding the whole channel. Both are nil for a
+	// grouped continuation message, which draws neither a name nor an avatar.
+	authorText *canvas.Text
+	avatar     *Avatar
+
+	// gutterTimestamp is the small left-gutter time shown on a grouped continuation
+	// message (in place of the avatar), revealed on hover. nil for a full message.
+	gutterTimestamp *canvas.Text
+
+	// bottomSpacer is the message's bottom margin, kept so SetFollowedByGroup can
+	// tighten it when a continuation is appended directly beneath this message.
+	bottomSpacer *canvas.Rectangle
+
+	// The hover quick-actions are built lazily on first reveal (ensureActions):
+	// the ~3 buttons and their icons aren't constructed for messages the pointer
+	// never touches. deps/message are retained to build them later;
+	// actionsOverlay holds them once built and is empty until then.
+	deps           Deps
+	message        *revoltgo.Message
+	actionsOverlay *fyne.Container
+	actions        *fyne.Container
 
 	// hover tracking debounces the transition between the message body and the
 	// floating action buttons so the buttons don't flicker.
@@ -44,45 +68,73 @@ var (
 	_ desktop.Hoverable = (*MessageWidget)(nil)
 )
 
-// NewMessageWidget builds a message widget for the given message.
-func NewMessageWidget(deps Deps, message *revoltgo.Message) *MessageWidget {
-	w := &MessageWidget{background: canvas.NewRectangle(color.Transparent)}
-
-	avatarURL := util.DisplayAvatarURL(deps.Session, message)
-	avatarID := util.IDFromAttachmentURL(avatarURL)
-	name := util.DisplayName(deps.Session, message)
+// NewMessageWidget builds a message widget. When grouped is set the message is a
+// continuation of the previous one from the same author (Discord/Stoat-style):
+// it omits the avatar and name header and instead shows a small, hover-revealed
+// timestamp in the avatar gutter. Vertical spacing is asymmetric: a head/standalone
+// carries the full gap above it while a continuation carries only a tight gap, and
+// followedByGroup tightens the bottom margin so a head sits flush against the
+// continuations beneath it without changing the gap between separate groups.
+func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByGroup bool) *MessageWidget {
+	w := &MessageWidget{
+		background: canvas.NewRectangle(color.Transparent),
+		deps:       deps,
+		message:    message,
+	}
 
 	text := message.Content
 	if message.System != nil {
 		text = util.FormatSystemMessage(deps.Session, message.System)
 	}
 
-	var timestamp string
+	var shortTime, fullTime string
 	if t, err := util.Timestamp(message.ID); err == nil {
-		timestamp = util.NiceTime(t)
+		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
-	w.actions = w.buildActions(deps, message)
+	var leftColumn, body fyne.CanvasObject
+	if grouped {
+		// Transparent until hover; toggling colour (not visibility) keeps the
+		// gutter's width fixed so the body never shifts when the time appears. The
+		// gutter reports zero height so it never makes the continuation row taller
+		// than its single line of text.
+		w.gutterTimestamp = canvas.NewText(shortTime, color.Transparent)
+		w.gutterTimestamp.TextSize = theme.Sizes.MessageTimestampSize
+		gutter := &GutterLayout{Width: theme.Sizes.MessageAvatarColumnWidth, TopOffset: theme.Sizes.MessageTimestampTopOffset}
+		leftColumn = container.New(gutter, w.gutterTimestamp)
+		body = buildGroupedContent(deps, message, text)
+	} else {
+		name, nameColor, avatarID, avatarURL := resolveAuthor(deps, message)
+		w.avatar = NewAvatar(deps.Images, avatarID, avatarURL, func() {
+			if deps.Actions != nil {
+				deps.Actions.OnAvatarTapped(message.Author)
+			}
+		})
+		column := &FixedWidthColumnLayout{Width: theme.Sizes.MessageAvatarColumnWidth, TopAlign: true}
+		leftColumn = container.New(column, w.avatar)
 
-	avatar := NewAvatar(deps.Images, avatarID, avatarURL, func() {
-		if deps.Actions != nil {
-			deps.Actions.OnAvatarTapped(message.Author)
-		}
-	})
-	avatarColumn := container.New(&FixedWidthColumnLayout{Width: theme.Sizes.MessageAvatarColumnWidth}, avatar)
+		w.authorText = canvas.NewText(name, nameColor)
+		w.authorText.TextStyle = fyne.TextStyle{Bold: true}
+		body = buildMessageContent(deps, message, w.authorText, fullTime, text)
+	}
 
-	body := buildMessageContent(deps, message, name, timestamp, text)
 	paddedBody := container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageContentPadding), nil, body)
-	row := container.NewBorder(nil, nil, avatarColumn, nil, paddedBody)
+	row := container.NewBorder(nil, nil, leftColumn, nil, paddedBody)
 
 	hPad := theme.Sizes.MessageHorizontalPadding
-	inner := container.NewBorder(nil, nil, HorizontalSpacer(hPad), HorizontalSpacer(hPad), row)
+	w.bottomSpacer = canvas.NewRectangle(color.Transparent)
+	w.bottomSpacer.SetMinSize(fyne.NewSize(0, verticalPad(followedByGroup)))
+	inner := container.NewBorder(
+		VerticalSpacer(verticalPad(grouped)), w.bottomSpacer,
+		HorizontalSpacer(hPad), HorizontalSpacer(hPad),
+		row,
+	)
 
-	floatingActions := container.New(&OverlayLayout{YOffset: -16, RightOffset: 6}, w.actions)
-	messageRow := container.NewStack(inner, floatingActions)
+	w.actionsOverlay = container.New(&OverlayLayout{YOffset: -16, RightOffset: 6})
+	messageRow := container.NewStack(inner, w.actionsOverlay)
 
 	w.content = messageRow
-	if len(message.Replies) > 0 {
+	if !grouped && len(message.Replies) > 0 {
 		replies := container.NewVBox()
 		for _, replyID := range message.Replies {
 			replies.Add(buildReplyPreview(deps, message.Channel, replyID))
@@ -96,25 +148,25 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message) *MessageWidget {
 }
 
 // buildActions creates the hidden, rounded group of reply/edit/delete buttons.
-func (w *MessageWidget) buildActions(deps Deps, message *revoltgo.Message) *fyne.Container {
+func (w *MessageWidget) buildActions(deps Deps) *fyne.Container {
 	onHover := func(hovering bool) {
 		w.overActions = hovering
 		w.updateHover()
 	}
 
-	reply := newIconButton("assets/reply.svg", func() {
+	reply := newIconButton(fynetheme.MailReplyIcon(), func() {
 		if deps.Actions != nil {
-			deps.Actions.OnReply(message)
+			deps.Actions.OnReply(w.message)
 		}
 	}, onHover)
-	edit := newIconButton("assets/edit.svg", func() {
+	edit := newIconButton(fynetheme.DocumentCreateIcon(), func() {
 		if deps.Actions != nil {
-			deps.Actions.OnEdit(message)
+			deps.Actions.OnEdit(w.message)
 		}
 	}, onHover)
-	del := newIconButton("assets/trash.svg", func() {
+	del := newIconButton(fynetheme.DeleteIcon(), func() {
 		if deps.Actions != nil {
-			deps.Actions.OnDelete(message)
+			deps.Actions.OnDelete(w.message)
 		}
 	}, onHover)
 
@@ -130,6 +182,32 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(w.background, w.content))
 }
 
+// ensureActions builds the hover quick-action buttons on first reveal, mounting
+// them into the (until now empty) overlay. Subsequent reveals reuse them.
+func (w *MessageWidget) ensureActions() {
+	if w.actions != nil {
+		return
+	}
+	w.actions = w.buildActions(w.deps)
+	w.actionsOverlay.Objects = []fyne.CanvasObject{w.actions}
+	w.actionsOverlay.Refresh()
+}
+
+// setGutterShown reveals or hides the grouped continuation's gutter timestamp by
+// toggling its colour (kept at a fixed width, so the body never shifts). A no-op
+// for full messages, which have no gutter timestamp.
+func (w *MessageWidget) setGutterShown(shown bool) {
+	if w.gutterTimestamp == nil {
+		return
+	}
+	if shown {
+		w.gutterTimestamp.Color = theme.Colors.TimestampText
+	} else {
+		w.gutterTimestamp.Color = color.Transparent
+	}
+	w.gutterTimestamp.Refresh()
+}
+
 // updateHover shows the action buttons while the pointer is over the message or
 // the buttons, hiding them after a short grace period otherwise.
 func (w *MessageWidget) updateHover() {
@@ -138,9 +216,11 @@ func (w *MessageWidget) updateHover() {
 			w.hideTimer.Stop()
 			w.hideTimer = nil
 		}
+		w.ensureActions()
 		w.background.FillColor = theme.Colors.MessageHoverBackground
 		w.background.Refresh()
 		w.actions.Show()
+		w.setGutterShown(true)
 		return
 	}
 
@@ -154,7 +234,10 @@ func (w *MessageWidget) updateHover() {
 			}
 			w.background.FillColor = color.Transparent
 			w.background.Refresh()
-			w.actions.Hide()
+			if w.actions != nil {
+				w.actions.Hide()
+			}
+			w.setGutterShown(false)
 			w.hideTimer = nil
 		}, false)
 	})
@@ -172,28 +255,93 @@ func (w *MessageWidget) MouseOut() {
 	w.updateHover()
 }
 
+// resolveAuthor resolves the display name, role colour, and avatar for a
+// message's author. Shared by widget construction and RefreshAuthor so a lazily
+// fetched author renders identically whether it was known up front or filled in
+// later.
+func resolveAuthor(deps Deps, message *revoltgo.Message) (name string, nameColor color.Color, avatarID, avatarURL string) {
+	name = util.DisplayName(deps.Session, message)
+	nameColor = theme.Colors.TextPrimary
+	if c, ok := util.MessageNameColor(deps.Session, message); ok {
+		nameColor = c
+	}
+	avatarURL = util.DisplayAvatarURL(deps.Session, message)
+	avatarID = util.IDFromAttachmentURL(avatarURL)
+	return
+}
+
+// verticalPad returns a message's top or bottom margin: tight when it abuts a
+// same-author continuation, the full gap otherwise (which separates groups).
+func verticalPad(tight bool) float32 {
+	if tight {
+		return theme.Sizes.MessageGroupedVerticalPadding
+	}
+	return theme.Sizes.MessageVerticalPadding
+}
+
+// Author returns the message author's user ID.
+func (w *MessageWidget) Author() string { return w.message.Author }
+
+// SetFollowedByGroup tightens (or restores) the bottom margin when a same-author
+// continuation is appended directly beneath this message after it was mounted.
+func (w *MessageWidget) SetFollowedByGroup(followed bool) {
+	w.bottomSpacer.SetMinSize(fyne.NewSize(0, verticalPad(followed)))
+	w.bottomSpacer.Refresh()
+	w.Refresh()
+}
+
+// Message returns the message this widget renders.
+func (w *MessageWidget) Message() *revoltgo.Message { return w.message }
+
+// RefreshAuthor re-resolves the author's name, role colour, and avatar and
+// applies them in place. Called when a previously-unknown author is fetched, or
+// a member updates, after the widget was mounted — avoiding a full re-render of
+// the channel. A grouped continuation shows neither name nor avatar, so there's
+// nothing to update.
+func (w *MessageWidget) RefreshAuthor() {
+	if w.authorText == nil {
+		return
+	}
+	name, nameColor, avatarID, avatarURL := resolveAuthor(w.deps, w.message)
+	if w.authorText.Text != name || w.authorText.Color != nameColor {
+		w.authorText.Text = name
+		w.authorText.Color = nameColor
+		w.authorText.Refresh()
+	}
+	w.avatar.SetSource(w.deps.Images, avatarID, avatarURL)
+}
+
 // buildMessageContent assembles the author/text header plus any attachments.
-func buildMessageContent(deps Deps, message *revoltgo.Message, name, timestamp, text string) fyne.CanvasObject {
-	header := buildMessageHeader(name, text, timestamp)
+func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp, text string) fyne.CanvasObject {
+	header := buildMessageHeader(author, text, timestamp)
 	if len(message.Attachments) == 0 {
 		return header
 	}
 	return container.NewVBox(header, buildAttachments(deps, message.Attachments))
 }
 
-// buildMessageHeader renders the bold author line, message text, and a
-// top-right timestamp.
-func buildMessageHeader(name, text, timestamp string) fyne.CanvasObject {
-	body := renderMessageContent(name, text)
+// buildGroupedContent renders a grouped continuation message: just the body text
+// (and any attachments), with no author/timestamp header.
+func buildGroupedContent(deps Deps, message *revoltgo.Message, text string) fyne.CanvasObject {
+	body := NewFlushContainer(renderMessageBody(text))
+	if len(message.Attachments) == 0 {
+		return body
+	}
+	return container.NewVBox(body, buildAttachments(deps, message.Attachments))
+}
 
+// buildMessageHeader renders the author line (the bold name in its role colour
+// followed by a baseline-aligned timestamp) above the message text. Keeping the
+// timestamp inline on the name line — rather than overlaid on the whole body —
+// aligns it with the username and stops long body text from running under it.
+func buildMessageHeader(author *canvas.Text, text, timestamp string) fyne.CanvasObject {
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize
-	tsOverlay := container.NewVBox(
-		VerticalSpacer(theme.Sizes.MessageTimestampTopOffset),
-		container.NewHBox(layout.NewSpacer(), ts),
-	)
+	// Drop the smaller timestamp so its baseline lines up with the bold name.
+	tsAligned := VBoxNoSpacing(VerticalSpacer(theme.Sizes.MessageTimestampTopOffset), ts)
 
-	return container.NewStack(body, tsOverlay)
+	nameLine := container.NewHBox(author, HorizontalSpacer(theme.Sizes.MessageContentPadding), tsAligned)
+	return VBoxNoSpacing(nameLine, NewFlushContainer(renderMessageBody(text)))
 }
 
 // buildAttachments stacks each attachment with a small gap between them.
@@ -204,7 +352,10 @@ func buildAttachments(deps Deps, attachments []*revoltgo.Attachment) *fyne.Conta
 			box.Add(VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
 		item := buildAttachment(deps, attachment)
-		box.Add(container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageTextLeftPadding), nil, container.NewHBox(item)))
+		// No left spacer: attachments share the body's content padding with the
+		// header text above, so the preview box lines up flush with the message
+		// text instead of drifting a few px to the right.
+		box.Add(container.NewHBox(item))
 	}
 	return box
 }
@@ -264,7 +415,7 @@ func buildGenericAttachment(bar fyne.CanvasObject) *fyne.Container {
 	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 	placeholder.SetMinSize(fyne.NewSize(width, 64))
 
-	icon := canvas.NewImageFromFile("assets/file.svg")
+	icon := newIconImage(fynetheme.FileIcon())
 	icon.FillMode = canvas.ImageFillContain
 	icon.SetMinSize(fyne.NewSize(32, 32))
 
@@ -345,7 +496,7 @@ func imageDisplaySize(width, height int) fyne.Size {
 // buildReplyPreview renders the small quoted line shown above a message that
 // replies to another.
 func buildReplyPreview(deps Deps, channelID, messageID string) fyne.CanvasObject {
-	author, content, avatarURL := resolveReply(deps, channelID, messageID, maxReplyPreviewLength)
+	author, content, avatarURL, _ := resolveReply(deps, channelID, messageID)
 
 	avatar := circularAvatar(deps.Images, avatarURL, fyne.NewSize(16, 16))
 
@@ -366,28 +517,33 @@ func buildReplyPreview(deps Deps, channelID, messageID string) fyne.CanvasObject
 	padded := container.NewBorder(VerticalSpacer(3), VerticalSpacer(3), HorizontalSpacer(3), HorizontalSpacer(3), row)
 
 	// TODO: navigate to the referenced message on tap.
+	// Indent to the message content column so the quoted line sits directly
+	// above the message body rather than under the avatar gutter.
+	indent := theme.Sizes.MessageHorizontalPadding + theme.Sizes.MessageAvatarColumnWidth + theme.Sizes.MessageContentPadding
 	tappable := NewTappableContainer(padded, func() {})
-	return container.NewHBox(HorizontalSpacer(40), tappable)
+	return container.NewHBox(HorizontalSpacer(indent), tappable)
 }
 
 // resolveReply looks up a referenced message and returns its author, truncated
-// content, and avatar URL. Missing references yield a placeholder.
-func resolveReply(deps Deps, channelID, messageID string, maxLen int) (author, content, avatarURL string) {
+// content, avatar URL, and the author's role colour (nil when none). Missing
+// references yield a placeholder.
+func resolveReply(deps Deps, channelID, messageID string) (author, content, avatarURL string, accent color.Color) {
 	if deps.Actions == nil {
-		return "", "Unknown message reference", ""
+		return "", "Unknown message reference", "", nil
 	}
 	msg := deps.Actions.ResolveMessage(channelID, messageID)
 	if msg == nil {
-		return "", "Unknown message reference", ""
+		return "", "Unknown message reference", "", nil
 	}
 
-	author = util.DisplayName(deps.Session, msg)
+	author = util.Truncate(util.DisplayName(deps.Session, msg), maxReplyUsernameLength)
+
 	avatarURL = util.DisplayAvatarURL(deps.Session, msg)
-	content = msg.Content
-	if len(content) > maxLen {
-		content = content[:maxLen-3] + "..."
+	if c, ok := util.MessageNameColor(deps.Session, msg); ok {
+		accent = c
 	}
-	return author, content, avatarURL
+	content = util.Truncate(msg.Content, maxReplyPreviewLength)
+	return author, content, avatarURL, accent
 }
 
 // circularAvatar builds a circular avatar of the given size, loading the image

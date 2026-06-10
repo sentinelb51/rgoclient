@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"image/color"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,13 @@ const (
 	attachPreviewW   = 200
 	attachPreviewImg = 150
 	attachPreviewGen = 64
+
+	// Reply composer card geometry.
+	replyCardHeight = 28
+	replyAvatarSize = 18
+	replyTextSize   = 13
+	replyButtonSize = 20
+	replyIconSize   = 18
 )
 
 var _ desktop.Keyable = (*MessageInput)(nil)
@@ -192,14 +200,16 @@ func (m *MessageInput) RemoveAttachment(path string) {
 // ClearAttachments removes all queued files.
 func (m *MessageInput) ClearAttachments() {
 	m.Attachments = nil
-	m.AttachmentContainer.Objects = nil
-	m.AttachmentContainer.Hide()
-	m.AttachmentContainer.Refresh()
+	m.rebuildAttachments()
 }
 
 func (m *MessageInput) rebuildAttachments() {
 	m.AttachmentContainer.Objects = nil
-	m.AttachmentContainer.Hidden = len(m.Attachments) == 0
+	if len(m.Attachments) == 0 {
+		m.AttachmentContainer.Hide()
+	} else {
+		m.AttachmentContainer.Show()
+	}
 	for _, attachment := range m.Attachments {
 		var size int
 		if info, err := os.Stat(attachment.Path); err == nil {
@@ -265,7 +275,11 @@ func (m *MessageInput) ClearReplies() {
 
 func (m *MessageInput) rebuildReplies() {
 	m.ReplyContainer.Objects = nil
-	m.ReplyContainer.Hidden = len(m.Replies) == 0
+	if len(m.Replies) == 0 {
+		m.ReplyContainer.Hide()
+	} else {
+		m.ReplyContainer.Show()
+	}
 	for i := range m.Replies {
 		m.ReplyContainer.Add(m.buildReplyCard(&m.Replies[i]))
 	}
@@ -273,108 +287,135 @@ func (m *MessageInput) rebuildReplies() {
 	m.Refresh()
 }
 
-// buildReplyCard renders a composer chip for one pending reply, with a mention
-// toggle and a remove button.
+// buildReplyCard renders a slim composer chip for one pending reply: avatar,
+// author, a truncated preview, a mention toggle, and a remove button. The card
+// is outlined in the replied author's role colour (falling back to the app
+// accent) and everything is vertically centred so the row reads as distinct
+// elements rather than a single blob.
 func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
-	author, content, avatarURL := resolveReply(m.deps, reply.ChannelID, reply.ID, replyPreviewLen)
+	author, content, avatarURL, accent := resolveReply(m.deps, reply.ChannelID, reply.ID)
 	if author == "" {
 		author = "Unknown"
 	}
+	if accent == nil {
+		accent = theme.Colors.ServerSelectedBg
+	}
 
-	avatar := container.NewCenter(circularAvatar(m.deps.Images, avatarURL, fyne.NewSize(22, 22)))
+	avatar := circularAvatar(m.deps.Images, avatarURL, fyne.NewSize(replyAvatarSize, replyAvatarSize))
 
 	authorLabel := canvas.NewText(author, theme.Colors.TextPrimary)
-	authorLabel.TextSize = 14
+	authorLabel.TextSize = replyTextSize
 	authorLabel.TextStyle = fyne.TextStyle{Bold: true}
 
 	contentLabel := canvas.NewText(content, theme.Colors.TimestampText)
-	contentLabel.TextSize = 14
+	contentLabel.TextSize = replyTextSize
 
+	// container.NewCenter vertically centres each element within the card's
+	// full height; HBoxNoSpacing keeps the horizontal gaps under explicit control.
 	left := HBoxNoSpacing(
-		HorizontalSpacer(12),
-		avatar,
-		HorizontalSpacer(4),
-		HBoxNoSpacing(authorLabel, HorizontalSpacer(10), contentLabel),
+		HorizontalSpacer(8),
+		container.NewCenter(avatar),
+		HorizontalSpacer(8),
+		container.NewCenter(authorLabel),
+		HorizontalSpacer(6),
+		container.NewCenter(contentLabel),
 	)
 
-	var mention *mentionToggle
-	mention = newMentionToggle(reply.Mention, func() {
-		reply.Mention = !reply.Mention
-		mention.SetActive(reply.Mention)
-		m.ReplyContainer.Refresh()
+	var mention *replyIconButton
+	mention = newReplyIconButton(iconResource("assets/mention.svg"), true, reply.Mention, func() {
+		mention.SetActive(!mention.active)
+		reply.Mention = mention.active
 	})
-	right := container.NewHBox(mention, NewCloseButton(func() { m.RemoveReply(reply.ID) }))
+	right := HBoxNoSpacing(
+		container.NewCenter(mention),
+		HorizontalSpacer(2),
+		container.NewCenter(newReplyIconButton(fynetheme.CancelIcon(), false, false, func() { m.RemoveReply(reply.ID) })),
+		HorizontalSpacer(6),
+	)
 
-	row := container.NewBorder(nil, nil, left, right)
-	padded := container.NewBorder(VerticalSpacer(2), VerticalSpacer(2), HorizontalSpacer(4), HorizontalSpacer(4), row)
+	row := NewMinHeightContainer(replyCardHeight, container.NewBorder(nil, nil, left, right))
 
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-	background.CornerRadius = 8
-	return container.NewStack(background, padded)
+	background.CornerRadius = 6
+	background.StrokeColor = accent
+	background.StrokeWidth = 1
+	return container.NewStack(background, row)
 }
 
-// mentionToggle is the "@" button on a reply chip. Its rendered highlight is
-// active XOR hovered, so hovering previews the opposite state.
-type mentionToggle struct {
+// replyIconButton is a small square SVG-icon button used on the reply card, so
+// the mention and close controls share one visual language. A momentary button
+// (toggle=false) just brightens on hover; a toggle (toggle=true) additionally
+// shows an accent background and stays bright while active, and dims when idle.
+// The icon is a centred canvas.Image, which avoids the vertical-alignment
+// guesswork of centring a text glyph.
+type replyIconButton struct {
 	tapBase
+	toggle  bool
 	active  bool
 	hovered bool
-	text    *canvas.Text
-	content *fyne.Container
+	icon    *canvas.Image
+	bg      *canvas.Rectangle
 }
 
 var (
-	_ fyne.Tappable     = (*mentionToggle)(nil)
-	_ desktop.Hoverable = (*mentionToggle)(nil)
+	_ fyne.Tappable     = (*replyIconButton)(nil)
+	_ desktop.Hoverable = (*replyIconButton)(nil)
 )
 
-func newMentionToggle(active bool, onTap func()) *mentionToggle {
-	size := fyne.NewSize(20, 20)
+func newReplyIconButton(res fyne.Resource, toggle, active bool, onTap func()) *replyIconButton {
+	bg := canvas.NewRectangle(color.Transparent)
+	bg.CornerRadius = 5
 
-	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-	background.SetMinSize(size)
+	icon := newIconImage(res)
+	icon.FillMode = canvas.ImageFillContain
+	icon.ScaleMode = canvas.ImageScaleSmooth
+	icon.SetMinSize(fyne.NewSize(replyIconSize, replyIconSize))
 
-	text := canvas.NewText("@", theme.Colors.TimestampText)
-	text.TextSize = 20
-	text.TextStyle = fyne.TextStyle{Bold: true}
-
-	// The glyph is nudged up via an overlay; Move() would be overridden by the
-	// surrounding layout.
-	glyph := container.NewCenter(container.New(&OverlayLayout{YOffset: -15}, text))
-	content := container.NewStack(background, glyph)
-	content.Resize(size)
-
-	b := &mentionToggle{active: active, text: text, content: content}
+	b := &replyIconButton{toggle: toggle, active: active, icon: icon, bg: bg}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	b.applyState()
 	return b
 }
 
-func (b *mentionToggle) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(b.content)
+func (b *replyIconButton) MinSize() fyne.Size {
+	return fyne.NewSize(replyButtonSize, replyButtonSize)
 }
 
-func (b *mentionToggle) SetActive(active bool) {
+func (b *replyIconButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(b.bg, container.NewCenter(b.icon)))
+}
+
+func (b *replyIconButton) SetActive(active bool) {
 	b.active = active
 	b.applyState()
 }
 
-func (b *mentionToggle) MouseIn(*desktop.MouseEvent) {
+func (b *replyIconButton) MouseIn(*desktop.MouseEvent) {
 	b.hovered = true
 	b.applyState()
 }
 
-func (b *mentionToggle) MouseOut() {
+func (b *replyIconButton) MouseOut() {
 	b.hovered = false
 	b.applyState()
 }
 
-func (b *mentionToggle) applyState() {
-	if b.active != b.hovered {
-		b.text.Color = theme.Colors.TextPrimary
-	} else {
-		b.text.Color = theme.Colors.TimestampText
+func (b *replyIconButton) applyState() {
+	switch {
+	case b.toggle && b.active:
+		b.bg.FillColor = theme.Colors.ReplyMentionActive
+		b.icon.Translucency = 0
+	case b.hovered:
+		b.bg.FillColor = theme.Colors.SwiftActionHoverBg
+		b.icon.Translucency = 0
+	case b.toggle:
+		b.bg.FillColor = color.Transparent
+		b.icon.Translucency = 0.5 // inactive toggle reads as "off"
+	default:
+		b.bg.FillColor = color.Transparent
+		b.icon.Translucency = 0.25
 	}
-	b.text.Refresh()
+	b.bg.Refresh()
+	canvas.Refresh(b.icon)
 }

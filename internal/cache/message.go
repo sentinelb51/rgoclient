@@ -73,21 +73,36 @@ func (c *MessageCache) Set(channelID string, page []*revoltgo.Message) []*revolt
 }
 
 // Prepend inserts an older API page (newest first) before a channel's existing
-// messages. History is never trimmed, so older messages stay browsable.
-func (c *MessageCache) Prepend(channelID string, page []*revoltgo.Message) {
+// messages, trimming to the per-channel cap by dropping the oldest overflow.
+// Scrollback past the cap is served by the network, anchored on the caller's
+// oldest mounted message, so trimming here cannot cause refetch loops. The
+// page is returned in chronological order for mounting.
+func (c *MessageCache) Prepend(channelID string, page []*revoltgo.Message) []*revoltgo.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	older := chronological(page)
-	c.byChannel[channelID] = append(older, c.byChannel[channelID]...)
+	messages := append(older, c.byChannel[channelID]...)
+	if len(messages) > c.maxMessages {
+		messages = messages[len(messages)-c.maxMessages:]
+	}
+	c.byChannel[channelID] = messages
 	c.touch(channelID)
+	return older
 }
 
 // Append adds a newly received message to the end of a channel, trimming the
-// oldest message if the channel is at capacity.
-func (c *MessageCache) Append(channelID string, message *revoltgo.Message) {
+// oldest message if the channel is at capacity. It returns the message that
+// preceded the new one (or nil), captured under the same lock so bursts of
+// messages still see their true predecessor for grouping.
+func (c *MessageCache) Append(channelID string, message *revoltgo.Message) *revoltgo.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	var prev *revoltgo.Message
+	if existing := c.byChannel[channelID]; len(existing) > 0 {
+		prev = existing[len(existing)-1]
+	}
 
 	messages := append(c.byChannel[channelID], message)
 	if len(messages) > c.maxMessages {
@@ -95,6 +110,7 @@ func (c *MessageCache) Append(channelID string, message *revoltgo.Message) {
 	}
 	c.byChannel[channelID] = messages
 	c.touch(channelID)
+	return prev
 }
 
 // IsDepleted reports whether a channel's full history has been loaded.

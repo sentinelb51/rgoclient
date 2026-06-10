@@ -12,9 +12,9 @@ import (
 
 // layoutMessage renders a message body at the given width and returns the laid
 // out canvas objects, so tests can assert on their positions and sizes.
-func layoutMessage(t *testing.T, name, body string, width float32) []fyne.CanvasObject {
+func layoutMessage(t *testing.T, body string, width float32) []fyne.CanvasObject {
 	t.Helper()
-	rt := renderMessageContent(name, body)
+	rt := renderMessageBody(body)
 	win := test.NewWindow(rt)
 	t.Cleanup(win.Close)
 	rt.Resize(fyne.NewSize(width, 400))
@@ -40,7 +40,7 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 func TestDecorationNotStretched(t *testing.T) {
 	const width = 300
 	for _, body := range []string{"~~struck~~", "||hidden||", "__underline__"} {
-		d := firstDecorated(layoutMessage(t, "Bob", body, width))
+		d := firstDecorated(layoutMessage(t, body, width))
 		if d == nil {
 			t.Fatalf("%q: no decorated segment rendered", body)
 		}
@@ -53,7 +53,7 @@ func TestDecorationNotStretched(t *testing.T) {
 // TestUnderlineRenders verifies underline produces a drawn line (Fyne ignores
 // TextStyle.Underline, so it must be a decoratedText with an underLine).
 func TestUnderlineRenders(t *testing.T) {
-	d := firstDecorated(layoutMessage(t, "Bob", "__underlined__", 300))
+	d := firstDecorated(layoutMessage(t, "__underlined__", 300))
 	if d == nil {
 		t.Fatal("no decorated segment rendered for underline")
 	}
@@ -65,7 +65,7 @@ func TestUnderlineRenders(t *testing.T) {
 // TestDecorationWraps verifies a long decorated span breaks across rows like
 // ordinary text instead of overflowing a single line.
 func TestDecorationWraps(t *testing.T) {
-	objs := layoutMessage(t, "Bob", "before ~~one two three four five six seven eight~~ after", 160)
+	objs := layoutMessage(t, "before ~~one two three four five six seven eight~~ after", 160)
 
 	rows := map[float32]int{}
 	for _, o := range objs {

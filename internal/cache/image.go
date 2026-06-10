@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -27,6 +28,10 @@ const DefaultMaxCacheSize int64 = 5 * 1024 * 1024 * 1024
 // flushInterval is how often pending images are written to disk.
 const flushInterval = 2 * time.Minute
 
+// maxMemoryImages caps how many decoded images stay in memory; the least
+// recently used are evicted (their disk copies remain, so Get reloads them).
+const maxMemoryImages = 200
+
 // ImageCache stores decoded images in memory and persists them to disk in the
 // background. It is safe for concurrent use.
 type ImageCache struct {
@@ -35,6 +40,7 @@ type ImageCache struct {
 	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
+	recency  []string               // decoded-image ids, least-recently-used first
 	dir      string
 	client   *http.Client
 	ticker   *time.Ticker
@@ -120,17 +126,45 @@ func (c *ImageCache) flush() {
 	}
 }
 
-// writeToDisk encodes a single image to the cache directory as PNG.
+// writeToDisk encodes a single image to the cache directory as PNG, writing to
+// a temp file and renaming into place so a failed encode can't leave a partial
+// file that would poison every later load of this id.
 func (c *ImageCache) writeToDisk(id string, img image.Image) {
 	path := filepath.Join(c.dir, id+".png")
-	file, err := os.Create(path)
+	tmp := path + ".tmp"
+	file, err := os.Create(tmp)
 	if err != nil {
 		return
 	}
-	defer file.Close()
 
-	if err := png.Encode(file, img); err != nil {
-		log.Printf("image cache: encode %s: %v", id, err)
+	err = png.Encode(file, img)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+	if err != nil {
+		log.Printf("image cache: write %s: %v", id, err)
+		_ = os.Remove(tmp)
+	}
+}
+
+// touchLocked marks id most recently used and evicts the least recently used
+// decoded images (both plain and circular variants) past maxMemoryImages.
+// Eviction never touches pending, so queued disk writes still happen, and Get
+// reloads evicted images from disk. Callers must hold the write lock.
+func (c *ImageCache) touchLocked(id string) {
+	if i := slices.Index(c.recency, id); i != -1 {
+		c.recency = append(c.recency[:i], c.recency[i+1:]...)
+	}
+	c.recency = append(c.recency, id)
+
+	for len(c.recency) > maxMemoryImages {
+		evicted := c.recency[0]
+		c.recency = c.recency[1:]
+		delete(c.memory, evicted)
+		delete(c.circular, evicted)
 	}
 }
 
@@ -141,14 +175,18 @@ func (c *ImageCache) Get(id string) image.Image {
 		return nil
 	}
 
-	c.mu.RLock()
+	c.mu.Lock()
 	img, ok := c.memory[id]
-	c.mu.RUnlock()
+	if ok {
+		c.touchLocked(id)
+	}
+	c.mu.Unlock()
 	if ok {
 		return img
 	}
 
-	file, err := os.Open(filepath.Join(c.dir, id+".png"))
+	path := filepath.Join(c.dir, id+".png")
+	file, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
@@ -156,11 +194,14 @@ func (c *ImageCache) Get(id string) image.Image {
 
 	img, _, err = image.Decode(file)
 	if err != nil {
+		// A corrupt file would otherwise fail every future load of this id.
+		_ = os.Remove(path)
 		return nil
 	}
 
 	c.mu.Lock()
 	c.memory[id] = img
+	c.touchLocked(id)
 	c.mu.Unlock()
 	return img
 }
@@ -173,6 +214,7 @@ func (c *ImageCache) Set(id string, img image.Image) {
 	c.mu.Lock()
 	c.memory[id] = img
 	c.pending[id] = img
+	c.touchLocked(id)
 	c.mu.Unlock()
 }
 
@@ -236,12 +278,16 @@ func (c *ImageCache) cachedVariant(id string, circular bool) image.Image {
 	if id == "" {
 		return nil
 	}
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	img := c.memory[id]
 	if circular {
-		return c.circular[id]
+		img = c.circular[id]
 	}
-	return c.memory[id]
+	if img != nil {
+		c.touchLocked(id)
+	}
+	return img
 }
 
 // loadShared resolves an image by id, ensuring that concurrent callers for the
@@ -282,6 +328,7 @@ func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
 
 	c.mu.Lock()
 	c.circular[id] = clipped
+	c.touchLocked(id)
 	c.mu.Unlock()
 	return clipped
 }
@@ -334,6 +381,7 @@ func (c *ImageCache) purge() {
 	c.memory = make(map[string]image.Image)
 	c.circular = make(map[string]image.Image)
 	c.pending = make(map[string]image.Image)
+	c.recency = nil
 	c.mu.Unlock()
 
 	entries, err := os.ReadDir(c.dir)

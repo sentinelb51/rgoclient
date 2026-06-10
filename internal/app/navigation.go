@@ -1,6 +1,8 @@
 package app
 
 import (
+	"log"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
@@ -10,14 +12,16 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// buildUI assembles the three-column layout: servers | channels | messages.
-// FillLastRowLayout keeps the sections flush (no seams) for the flat metro look;
-// the message area fills whatever width the two fixed sidebars leave.
+// buildUI assembles the four-column layout: servers | channels | messages |
+// members. RowLayout keeps the sections flush (no seams) for the flat metro
+// look; only the message area (FillIndex 2) stretches, the others stay at their
+// fixed widths.
 func (a *App) buildUI() fyne.CanvasObject {
-	return container.New(&ui.FillLastRowLayout{},
+	return container.New(&ui.RowLayout{FillIndex: 2},
 		a.buildServerList(),
 		a.buildChannelList(),
 		a.buildMessageArea(),
+		a.buildMemberList(),
 	)
 }
 
@@ -144,6 +148,7 @@ func (a *App) selectServer(serverID string) {
 	a.syncServerSelection(serverID)
 	a.setHeader(a.serverHeader, server.Name)
 	a.refreshChannelList()
+	a.refreshMemberList()
 
 	if len(server.Channels) > 0 {
 		a.selectChannel(server.Channels[0])
@@ -167,7 +172,12 @@ func (a *App) selectChannel(channelID string) {
 		if unread && channel.LastMessageID != nil {
 			delete(a.unreadChannels, channelID)
 			lastID := *channel.LastMessageID
-			go func() { _ = a.session.MessageAck(channelID, lastID) }()
+			session := a.session
+			go func() {
+				if err := session.MessageAck(channelID, lastID); err != nil {
+					log.Printf("ack channel %s: %v", channelID, err)
+				}
+			}()
 		}
 	}
 

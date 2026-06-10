@@ -6,6 +6,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	fynetheme "fyne.io/fyne/v2/theme"
 )
 
 // HorizontalSpacer returns a fixed-width transparent gap.
@@ -72,18 +73,20 @@ func (l *noSpacingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w, h)
 }
 
-// FillLastRowLayout lays children left to right with no gaps: every child except
-// the last takes its minimum width, and the last child fills the remaining
-// space. All children span the full height. Used for the flat server | channel |
-// message columns so the sections sit flush against each other.
-type FillLastRowLayout struct{}
+// RowLayout lays children left to right with no gaps: the child at FillIndex
+// expands to fill the leftover width while every other child keeps its minimum
+// width. All children span the full height. Used for the flat
+// server | channel | messages | members columns so the sections sit flush
+// against each other and only the message area stretches.
+type RowLayout struct{ FillIndex int }
 
-func (l *FillLastRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	last := -1
+func (l *RowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	var fixed float32
 	for i, child := range objects {
-		if child.Visible() {
-			last = i
+		if !child.Visible() || i == l.FillIndex {
+			continue
 		}
+		fixed += child.MinSize().Width
 	}
 
 	var x float32
@@ -92,8 +95,8 @@ func (l *FillLastRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) 
 			continue
 		}
 		w := child.MinSize().Width
-		if i == last {
-			w = max(size.Width-x, 0)
+		if i == l.FillIndex {
+			w = max(size.Width-fixed, 0)
 		}
 		child.Resize(fyne.NewSize(w, size.Height))
 		child.Move(fyne.NewPos(x, 0))
@@ -101,7 +104,7 @@ func (l *FillLastRowLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) 
 	}
 }
 
-func (l *FillLastRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (l *RowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	var w, h float32
 	for _, child := range objects {
 		if !child.Visible() {
@@ -115,8 +118,14 @@ func (l *FillLastRowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 }
 
 // FixedWidthColumnLayout stacks children in a fixed-width column, centering each
-// horizontally and the group vertically.
-type FixedWidthColumnLayout struct{ Width float32 }
+// horizontally. The group is vertically centered by default, or pinned to the
+// top when TopAlign is set (used for the message avatar gutter so the avatar
+// lines up with the author name rather than drifting to the middle of tall
+// messages).
+type FixedWidthColumnLayout struct {
+	Width    float32
+	TopAlign bool
+}
 
 func (l *FixedWidthColumnLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	var total float32
@@ -127,6 +136,9 @@ func (l *FixedWidthColumnLayout) Layout(objects []fyne.CanvasObject, size fyne.S
 	}
 
 	y := max((size.Height-total)/2, 0)
+	if l.TopAlign {
+		y = 0
+	}
 	for _, child := range objects {
 		if !child.Visible() {
 			continue
@@ -146,6 +158,31 @@ func (l *FixedWidthColumnLayout) MinSize(objects []fyne.CanvasObject) fyne.Size 
 		}
 	}
 	return fyne.NewSize(l.Width, h)
+}
+
+// GutterLayout positions a single child at the top of a fixed-width column,
+// centered horizontally, while reporting zero minimum height. Unlike
+// FixedWidthColumnLayout it never lets its child make the row taller than the
+// content beside it — used for the grouped message's hover timestamp so a
+// continuation row is exactly as tall as its one line of text.
+type GutterLayout struct {
+	Width     float32
+	TopOffset float32
+}
+
+func (l *GutterLayout) Layout(objects []fyne.CanvasObject, _ fyne.Size) {
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		m := child.MinSize()
+		child.Resize(m)
+		child.Move(fyne.NewPos(l.Width/2-m.Width/2, l.TopOffset))
+	}
+}
+
+func (l *GutterLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(l.Width, 0)
 }
 
 // OverlayLayout positions children relative to the top-right corner, allowing
@@ -169,6 +206,45 @@ func (l *OverlayLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 func (l *OverlayLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(0, 0)
+}
+
+// NewFlushContainer wraps a single widget that carries Fyne's built-in inner
+// padding (notably widget.RichText) so its content sits flush against the
+// container's top-left origin instead of being inset. This lets the message body
+// text line up with the author name — a plain canvas.Text that has no padding —
+// both horizontally and as tightly as a single newline vertically.
+func NewFlushContainer(obj fyne.CanvasObject) *fyne.Container {
+	return container.New(&stripPaddingLayout{inset: fynetheme.InnerPadding()}, obj)
+}
+
+// stripPaddingLayout neutralises a uniform inset on its single child by
+// over-sizing the child and offsetting it by the inset, so the child's content
+// (drawn inside that inset) aligns with the container origin. The over-hanging
+// region the child draws outside the container bounds is its transparent padding,
+// so nothing visible spills onto neighbouring widgets.
+type stripPaddingLayout struct{ inset float32 }
+
+func (l *stripPaddingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		child.Resize(fyne.NewSize(size.Width+2*l.inset, size.Height+2*l.inset))
+		child.Move(fyne.NewPos(-l.inset, -l.inset))
+	}
+}
+
+func (l *stripPaddingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var w, h float32
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		m := child.MinSize()
+		w = max(w, m.Width)
+		h = max(h, m.Height)
+	}
+	return fyne.NewSize(max(w-2*l.inset, 0), max(h-2*l.inset, 0))
 }
 
 // NewMinHeightContainer wraps objects in a container with a minimum height. Its

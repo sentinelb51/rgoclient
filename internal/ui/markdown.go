@@ -16,8 +16,9 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// renderMessageContent renders a message as a RichText: a bold author line
-// followed by the markdown-formatted body.
+// renderMessageBody renders a message's markdown-formatted body as a RichText.
+// The author name is drawn separately (see buildMessageHeader) so it can carry
+// an arbitrary role colour, which RichText segments can't express.
 //
 // Fyne's RichText wraps and flows native segments (text, bold/italic, links)
 // only when every content segment is marked Inline; a non-inline segment is
@@ -31,10 +32,8 @@ import (
 // per-word segments interleaved with normal spaces (RichText only breaks rows at
 // text spaces, never between two custom segments); each word's decoration bridges
 // the following space so the line/cover still reads as continuous.
-func renderMessageContent(name, text string) *widget.RichText {
+func renderMessageBody(text string) *widget.RichText {
 	b := &mdBuilder{}
-	b.text(name, emphasis{bold: true}, widget.RichTextStyle{}, nil)
-	b.lineBreak(widget.RichTextStyle{})
 	for _, block := range markdown.Parse(text).Blocks {
 		b.block(block)
 	}
@@ -434,7 +433,7 @@ func (r *decoratedRenderer) Layout(fyne.Size) {
 	if w.bridge {
 		// Bridge the break-point space to the next word, plus 1px of overlap so
 		// no sub-pixel seam shows between adjacent decorations.
-		extent += fyne.MeasureText(" ", size, w.textObj.TextStyle).Width + 1
+		extent += spaceWidth(size, w.textObj.TextStyle) + 1
 	}
 
 	if w.strikeLine != nil {
@@ -453,6 +452,26 @@ func (r *decoratedRenderer) Layout(fyne.Size) {
 		w.cover.Resize(fyne.NewSize(extent, min.Height))
 		w.cover.Move(fyne.NewPos(0, 0))
 	}
+}
+
+// spaceWidths memoises the measured width of a single space per size/style, so
+// Layout doesn't re-measure text for every bridged word on every pass. Layout
+// only runs on the UI thread, so the map is unsynchronised.
+var spaceWidths = map[spaceKey]float32{}
+
+type spaceKey struct {
+	size  float32
+	style fyne.TextStyle
+}
+
+func spaceWidth(size float32, style fyne.TextStyle) float32 {
+	key := spaceKey{size: size, style: style}
+	w, ok := spaceWidths[key]
+	if !ok {
+		w = fyne.MeasureText(" ", size, style).Width
+		spaceWidths[key] = w
+	}
+	return w
 }
 
 func (r *decoratedRenderer) MinSize() fyne.Size { return r.w.MinSize() }

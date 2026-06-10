@@ -5,6 +5,8 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/theme"
+
+	"RGOClient/assets"
 )
 
 // Colors defines the color palette for the application.
@@ -13,6 +15,7 @@ var Colors = struct {
 	// Backgrounds
 	ServerListBackground   color.Color
 	ChannelListBackground  color.Color
+	MemberListBackground   color.Color
 	MessageAreaBackground  color.Color
 	MessageHoverBackground color.Color
 	ChannelHoverBackground color.Color
@@ -23,24 +26,27 @@ var Colors = struct {
 	TappableHoverBg        color.Color
 
 	// Elements
-	AvatarPlaceholder  color.Color
-	HashtagIcon        color.Color
-	CategoryText       color.Color
-	CategoryArrow      color.Color
-	CategoryIndicator  color.Color
-	TextPrimary        color.Color
-	TimestampText      color.Color
-	XButtonNormal      color.Color
-	XButtonHover       color.Color
-	SessionCardBg      color.Color
-	UnreadIndicator    color.Color
-	SwiftActionBg      color.Color
-	SwiftActionHoverBg color.Color
-	SwiftActionText    color.Color
+	AttachmentHoverBorder color.Color
+	AvatarPlaceholder     color.Color
+	HashtagIcon           color.Color
+	CategoryText          color.Color
+	CategoryArrow         color.Color
+	CategoryIndicator     color.Color
+	TextPrimary           color.Color
+	TimestampText         color.Color
+	XButtonNormal         color.Color
+	XButtonHover          color.Color
+	SessionCardBg         color.Color
+	UnreadIndicator       color.Color
+	SwiftActionBg         color.Color
+	SwiftActionHoverBg    color.Color
+	SwiftActionText       color.Color
+	ReplyMentionActive    color.Color
 }{
 	// Backgrounds — cool blue-slate ramp (darkest → lightest)
 	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
 	ChannelListBackground:  color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
+	MemberListBackground:   color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
 	MessageAreaBackground:  color.RGBA{R: 24, G: 27, B: 36, A: 255},    // #181B24
 	MessageHoverBackground: color.RGBA{R: 30, G: 34, B: 45, A: 255},    // #1E222D
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},    // #262B3A
@@ -54,17 +60,19 @@ var Colors = struct {
 	SwiftActionText:        color.RGBA{R: 196, G: 201, B: 212, A: 255}, // #C4C9D4
 
 	// Elements
-	AvatarPlaceholder: color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
-	UnreadIndicator:   color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
-	HashtagIcon:       color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
-	CategoryText:      color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	CategoryArrow:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	CategoryIndicator: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
-	TextPrimary:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
-	TimestampText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	XButtonNormal:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	XButtonHover:      color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
-	SessionCardBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
+	AttachmentHoverBorder: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, darkest ramp
+	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
+	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	HashtagIcon:           color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	CategoryText:          color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CategoryArrow:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CategoryIndicator:     color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
+	TextPrimary:           color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	TimestampText:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	ReplyMentionActive:    color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint, on the card bg
+	XButtonNormal:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	XButtonHover:          color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
+	SessionCardBg:         color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
 }
 
 // Sizes defines standard sizes used throughout the application.
@@ -72,9 +80,14 @@ var Sizes = struct {
 	// Sidebar
 	ServerSidebarWidth    float32
 	ChannelSidebarWidth   float32
+	MemberSidebarWidth    float32
 	ChannelSidebarPadding float32
 	ChannelLeftPadding    float32
 	UnreadIndicatorWidth  float32
+
+	// Member list
+	MemberAvatarSize float32
+	MemberRowHeight  float32
 
 	// Server/Channel widgets
 	ServerIconSize          float32
@@ -87,17 +100,17 @@ var Sizes = struct {
 	CategoryIndicatorStroke float32
 
 	// Message area
-	MessageAvatarSize         float32
-	MessageAvatarColumnWidth  float32
-	MessageContentPadding     float32
-	MessageImageMaxWidth      float32
-	MessageImageMaxHeight     float32
-	MessageVerticalPadding    float32
-	MessageHorizontalPadding  float32
-	MessageAttachmentSpacing  float32
-	MessageTextLeftPadding    float32
-	MessageTimestampSize      float32
-	MessageTimestampTopOffset float32
+	MessageAvatarSize             float32
+	MessageAvatarColumnWidth      float32
+	MessageContentPadding         float32
+	MessageImageMaxWidth          float32
+	MessageImageMaxHeight         float32
+	MessageVerticalPadding        float32
+	MessageGroupedVerticalPadding float32
+	MessageHorizontalPadding      float32
+	MessageAttachmentSpacing      float32
+	MessageTimestampSize          float32
+	MessageTimestampTopOffset     float32
 
 	// Swift Actions
 	SwiftActionSize float32
@@ -118,9 +131,14 @@ var Sizes = struct {
 	// Sidebar
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
+	MemberSidebarWidth:    200,
 	ChannelSidebarPadding: 6,
 	ChannelLeftPadding:    8,
 	UnreadIndicatorWidth:  1,
+
+	// Member list
+	MemberAvatarSize: 28,
+	MemberRowHeight:  36,
 
 	// Server/Channel widgets
 	ServerIconSize:          40,
@@ -133,17 +151,17 @@ var Sizes = struct {
 	CategoryIndicatorStroke: 2,
 
 	// Message area
-	MessageAvatarSize:         40,
-	MessageAvatarColumnWidth:  46,
-	MessageContentPadding:     0,
-	MessageImageMaxWidth:      400,
-	MessageImageMaxHeight:     300,
-	MessageVerticalPadding:    4,
-	MessageHorizontalPadding:  8,
-	MessageAttachmentSpacing:  4,
-	MessageTextLeftPadding:    4,
-	MessageTimestampSize:      12,
-	MessageTimestampTopOffset: 4,
+	MessageAvatarSize:             40,
+	MessageAvatarColumnWidth:      46,
+	MessageContentPadding:         4,
+	MessageImageMaxWidth:          400,
+	MessageImageMaxHeight:         300,
+	MessageVerticalPadding:        10,
+	MessageGroupedVerticalPadding: 2,
+	MessageHorizontalPadding:      12,
+	MessageAttachmentSpacing:      4,
+	MessageTimestampSize:          12,
+	MessageTimestampTopOffset:     4,
 
 	// Swift Actions
 	SwiftActionSize: 32,
@@ -182,6 +200,24 @@ func NewAppTheme(base fyne.Theme) *AppTheme {
 	return &AppTheme{Theme: base}
 }
 
+// Font returns the Montserrat family for all text, leaving monospace (code
+// blocks, inline code) on Fyne's default so it stays fixed-width.
+func (t *AppTheme) Font(style fyne.TextStyle) fyne.Resource {
+	if style.Monospace || style.Symbol {
+		return t.Theme.Font(style)
+	}
+	switch {
+	case style.Bold && style.Italic:
+		return assets.MontserratBoldItalic
+	case style.Bold:
+		return assets.MontserratBold
+	case style.Italic:
+		return assets.MontserratItalic
+	default:
+		return assets.MontserratRegular
+	}
+}
+
 // Color maps Fyne's semantic color names onto the Cool Slate palette so
 // built-in widgets inherit the app's look.
 func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
@@ -218,12 +254,17 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 	return t.Theme.Color(name, variant)
 }
 
-// Size hides scrollbars and flattens input corners for a metro look.
+// Size hides scrollbars and flattens inputs for a metro look: no corner radius
+// and no border stroke, so the entry reads as a flat filled bar rather than an
+// outlined box (the outline — accent-blue when focused — is what makes the
+// default entry look bordered/textured).
 func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameScrollBar:
 		return 0
 	case theme.SizeNameInputRadius:
+		return 0
+	case theme.SizeNameInputBorder:
 		return 0
 	}
 	return t.Theme.Size(name)

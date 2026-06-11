@@ -82,10 +82,18 @@ func (a *App) onBulkMessageDelete(_ *revoltgo.Session, event *revoltgo.EventBulk
 	}, false)
 }
 
-// scheduleAck records messageID as the newest seen message of the open channel
-// and acknowledges it after ackDelay, coalescing bursts into a single request.
+// scheduleAck records messageID as the newest seen message of channelID and
+// acknowledges it after ackDelay, coalescing bursts into a single request. An
+// ack still pending for a *different* channel (the user switched channels
+// inside the window) is flushed immediately so it isn't lost to the overwrite.
 // Call on the UI thread.
 func (a *App) scheduleAck(channelID, messageID string) {
+	if a.ackTimer != nil && a.ackChannelID != channelID {
+		a.ackTimer.Stop()
+		a.ackTimer = nil
+		a.sendAck(a.ackChannelID, a.ackMessageID)
+	}
+
 	a.ackChannelID, a.ackMessageID = channelID, messageID
 	if a.ackTimer != nil {
 		return
@@ -93,16 +101,20 @@ func (a *App) scheduleAck(channelID, messageID string) {
 	a.ackTimer = time.AfterFunc(ackDelay, func() {
 		a.doOnUI(func() {
 			a.ackTimer = nil
-			session := a.session
-			if session == nil {
-				return
-			}
-			channelID, messageID := a.ackChannelID, a.ackMessageID
-			go func() {
-				if err := session.MessageAck(channelID, messageID); err != nil {
-					log.Printf("ack channel %s: %v", channelID, err)
-				}
-			}()
+			a.sendAck(a.ackChannelID, a.ackMessageID)
 		}, false)
 	})
+}
+
+// sendAck fires a MessageAck request in the background. Call on the UI thread.
+func (a *App) sendAck(channelID, messageID string) {
+	session := a.session
+	if session == nil {
+		return
+	}
+	go func() {
+		if err := session.MessageAck(channelID, messageID); err != nil {
+			log.Printf("ack channel %s: %v", channelID, err)
+		}
+	}()
 }

@@ -56,6 +56,10 @@ type App struct {
 
 	settingsWindow fyne.Window // WIP settings window; nil when closed
 
+	// editing is the mounted message widget currently in in-place edit mode, or
+	// nil. UI-thread only; cleared whenever the message area is rebuilt.
+	editing *ui.MessageWidget
+
 	loadingHistory bool
 
 	// renderGen identifies the current message-area render; bumping it aborts the
@@ -225,7 +229,82 @@ func (a *App) OnDelete(message *revoltgo.Message) {
 	}()
 }
 
-// OnEdit is a placeholder for message editing.
+// OnEdit opens the in-place editor on the message's mounted widget. Only one
+// edit is active at a time; starting another cancels the previous one.
 func (a *App) OnEdit(message *revoltgo.Message) {
-	log.Printf("edit message: %s", message.ID)
+	if message == nil || message.Channel != a.currentChannelID {
+		return
+	}
+	i := a.messageWidgetIndex(message.ID)
+	if i == -1 {
+		return
+	}
+	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+		a.startEditing(w)
+	}
+}
+
+// startEditing puts a mounted message widget into edit mode and focuses its
+// entry. Saving sends the edit request; the authoritative content update comes
+// back through the MessageUpdate gateway event, which refreshes the widget.
+func (a *App) startEditing(w *ui.MessageWidget) {
+	a.cancelActiveEdit()
+
+	session := a.session
+	if session == nil {
+		return
+	}
+	message := w.Message()
+
+	entry := w.StartEdit(
+		func(newContent string) {
+			a.editing = nil
+			a.focusInput()
+
+			// Apply the edit optimistically (cache entries are immutable, so onto a
+			// copy) and reconcile: the gateway MessageUpdate echo re-applies the
+			// authoritative version, and a failed request reverts to the original.
+			updated := *message
+			updated.Content = newContent
+			a.messageCache.Replace(message.Channel, &updated)
+			a.refreshMessage(message.Channel, message.ID)
+
+			go func() {
+				params := revoltgo.MessageEditParams{Content: newContent}
+				if _, err := session.ChannelMessageEdit(message.Channel, message.ID, params); err != nil {
+					log.Printf("edit message %s: %v", message.ID, err)
+					a.doOnUI(func() {
+						a.messageCache.Replace(message.Channel, message)
+						a.refreshMessage(message.Channel, message.ID)
+					}, false)
+				}
+			}()
+		},
+		func() {
+			a.editing = nil
+			a.focusInput()
+		},
+	)
+	if entry == nil {
+		return
+	}
+	a.editing = w
+	a.window.Canvas().Focus(entry)
+}
+
+// cancelActiveEdit closes any in-place editor without saving. Safe to call
+// when none is active.
+func (a *App) cancelActiveEdit() {
+	if a.editing != nil {
+		w := a.editing
+		a.editing = nil
+		w.CancelEdit()
+	}
+}
+
+// focusInput returns keyboard focus to the composer.
+func (a *App) focusInput() {
+	if a.input != nil {
+		a.window.Canvas().Focus(a.input)
+	}
 }

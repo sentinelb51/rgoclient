@@ -14,7 +14,10 @@ import (
 // out canvas objects, so tests can assert on their positions and sizes.
 func layoutMessage(t *testing.T, body string, width float32) []fyne.CanvasObject {
 	t.Helper()
-	rt := renderMessageBody(body)
+	rt, ok := renderMessageBody(body).(fyne.Widget)
+	if !ok {
+		t.Fatalf("%q: rendered body is not a widget", body)
+	}
 	win := test.NewWindow(rt)
 	t.Cleanup(win.Close)
 	rt.Resize(fyne.NewSize(width, 400))
@@ -32,6 +35,40 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 		}
 	}
 	return nil
+}
+
+// TestUniformBodySelectable verifies that bodies whose whole content shares
+// one style — plain, all-bold, a lone code block, a heading — render as a
+// selectable Label carrying that style, while mixed-style bodies keep the
+// RichText renderer and an empty body stays a zero-height RichText.
+func TestUniformBodySelectable(t *testing.T) {
+	label := func(body string) *widget.Label {
+		t.Helper()
+		l, ok := renderMessageBody(body).(*widget.Label)
+		if !ok || !l.Selectable {
+			t.Fatalf("%q did not render as a selectable label", body)
+		}
+		return l
+	}
+
+	label("hello world\nsecond line")
+	if l := label("**all bold message**"); !l.TextStyle.Bold {
+		t.Error("all-bold body lost its bold style")
+	}
+	if l := label("```go\nx := 1\n```"); !l.TextStyle.Monospace || l.Text != "x := 1" {
+		t.Errorf("code block label = %+v, want monospace 'x := 1'", l)
+	}
+	if l := label("# Big news"); !l.TextStyle.Bold || l.SizeName == "" {
+		t.Error("heading label lost its bold style or heading size")
+	}
+	label("- one\n- two")
+	label("snake_case_name stays plain")
+
+	for _, body := range []string{"", "**bold** mixed", "~~struck~~", "> quoted"} {
+		if _, ok := renderMessageBody(body).(*widget.RichText); !ok {
+			t.Errorf("%q should render as RichText", body)
+		}
+	}
 }
 
 // TestDecorationNotStretched guards the original bug: a decoration at the start

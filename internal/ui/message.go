@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,13 @@ type MessageWidget struct {
 	// bottomSpacer is the message's bottom margin, kept so SetFollowedByGroup can
 	// tighten it when a continuation is appended directly beneath this message.
 	bottomSpacer *canvas.Rectangle
+
+	// bodySlot holds the rendered message body; StartEdit swaps it for an
+	// in-place editor and CancelEdit restores body, leaving the header,
+	// attachments, and replies untouched.
+	bodySlot *fyne.Container
+	body     fyne.CanvasObject
+	editing  bool
 
 	// The hover quick-actions are built lazily on first reveal (ensureActions):
 	// the ~3 buttons and their icons aren't constructed for messages the pointer
@@ -94,6 +102,9 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
+	w.body = NewFlushContainer(renderMessageBody(text))
+	w.bodySlot = container.NewStack(w.body)
+
 	var leftColumn, body fyne.CanvasObject
 	if grouped {
 		// Transparent until hover; toggling colour (not visibility) keeps the
@@ -104,7 +115,7 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 		w.gutterTimestamp.TextSize = theme.Sizes.MessageTimestampSize
 		gutter := &GutterLayout{Width: theme.Sizes.MessageAvatarColumnWidth, TopOffset: theme.Sizes.MessageTimestampTopOffset}
 		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = buildGroupedContent(deps, message, text)
+		body = buildGroupedContent(deps, message, w.bodySlot)
 	} else {
 		name, nameColor, avatarID, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarID, avatarURL, func() {
@@ -117,7 +128,7 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 
 		w.authorText = canvas.NewText(name, nameColor)
 		w.authorText.TextStyle = fyne.TextStyle{Bold: true}
-		body = buildMessageContent(deps, message, w.authorText, fullTime, text)
+		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot)
 	}
 
 	paddedBody := container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageContentPadding), nil, body)
@@ -284,6 +295,89 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(w.background, w.content))
 }
 
+// Editing reports whether the message is in in-place edit mode.
+func (w *MessageWidget) Editing() bool { return w.editing }
+
+// StartEdit swaps the message body for an in-place editor, with save/cancel
+// buttons floating where the hover quick-actions normally appear. Enter
+// (without shift) or the save button submits the new content through onSave;
+// Escape or the cancel button calls onCancel. Saving unchanged or emptied
+// content counts as a cancel. Returns the entry for the caller to focus, or
+// nil when the message isn't editable or is already being edited.
+func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func()) *EditEntry {
+	if w.editing || !w.canEdit() {
+		return nil
+	}
+	w.editing = true
+	if w.hideTimer != nil {
+		w.hideTimer.Stop()
+		w.hideTimer = nil
+	}
+
+	entry := NewEditEntry(w.message.Content)
+	cancel := func() {
+		w.CancelEdit()
+		if onCancel != nil {
+			onCancel()
+		}
+	}
+	save := func() {
+		text := entry.Text
+		if strings.TrimSpace(text) == "" || text == w.message.Content {
+			cancel()
+			return
+		}
+		w.CancelEdit()
+		if onSave != nil {
+			onSave(text)
+		}
+	}
+	entry.OnSave, entry.OnCancel = save, cancel
+
+	hint := canvas.NewText("esc to cancel  •  enter to save", theme.Colors.TimestampText)
+	hint.TextSize = theme.Sizes.MessageTimestampSize
+	w.bodySlot.Objects = []fyne.CanvasObject{container.NewVBox(WithCaret(entry), hint)}
+	w.bodySlot.Refresh()
+
+	// The save/cancel pair replaces the hover quick-actions and stays visible
+	// for the whole edit.
+	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	background.CornerRadius = 4
+	buttons := container.NewStack(background, HBoxNoSpacing(
+		newIconButton(fynetheme.DocumentSaveIcon(), save, nil),
+		newIconButton(fynetheme.CancelIcon(), cancel, nil),
+	))
+	w.actionsOverlay.Objects = []fyne.CanvasObject{buttons}
+	w.actionsOverlay.Refresh()
+
+	w.background.FillColor = theme.Colors.MessageHoverBackground
+	w.background.Refresh()
+	return entry
+}
+
+// CancelEdit restores the rendered body and the hover quick-actions without
+// invoking the edit callbacks. Safe to call when no edit is active.
+func (w *MessageWidget) CancelEdit() {
+	if !w.editing {
+		return
+	}
+	w.editing = false
+
+	w.bodySlot.Objects = []fyne.CanvasObject{w.body}
+	w.bodySlot.Refresh()
+
+	w.actionsOverlay.Objects = nil
+	if w.actions != nil {
+		w.actions.Hide()
+		w.actionsOverlay.Objects = []fyne.CanvasObject{w.actions}
+	}
+	w.actionsOverlay.Refresh()
+
+	w.background.FillColor = color.Transparent
+	w.background.Refresh()
+	w.updateHover() // restore the hover state if the pointer is still over the row
+}
+
 // ensureActions builds the hover quick-action buttons on first reveal, mounting
 // them into the (until now empty) overlay. Subsequent reveals reuse them.
 func (w *MessageWidget) ensureActions() {
@@ -311,8 +405,12 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 }
 
 // updateHover shows the action buttons while the pointer is over the message or
-// the buttons, hiding them after a short grace period otherwise.
+// the buttons, hiding them after a short grace period otherwise. Suspended
+// while editing, which paints its own highlight and overlay buttons.
 func (w *MessageWidget) updateHover() {
+	if w.editing {
+		return
+	}
 	if w.overMessage || w.overActions {
 		if w.hideTimer != nil {
 			w.hideTimer.Stop()
@@ -331,7 +429,7 @@ func (w *MessageWidget) updateHover() {
 	}
 	w.hideTimer = time.AfterFunc(hoverHideDelay, func() {
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-			if w.overMessage || w.overActions {
+			if w.overMessage || w.overActions || w.editing {
 				return
 			}
 			w.background.FillColor = color.Transparent
@@ -412,18 +510,17 @@ func (w *MessageWidget) RefreshAuthor() {
 }
 
 // buildMessageContent assembles the author/text header plus any attachments.
-func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp, text string) fyne.CanvasObject {
-	header := buildMessageHeader(author, text, timestamp)
+func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
+	header := buildMessageHeader(author, timestamp, body)
 	if len(message.Attachments) == 0 {
 		return header
 	}
 	return container.NewVBox(header, buildAttachments(deps, message.Attachments))
 }
 
-// buildGroupedContent renders a grouped continuation message: just the body text
+// buildGroupedContent renders a grouped continuation message: just the body
 // (and any attachments), with no author/timestamp header.
-func buildGroupedContent(deps Deps, message *revoltgo.Message, text string) fyne.CanvasObject {
-	body := NewFlushContainer(renderMessageBody(text))
+func buildGroupedContent(deps Deps, message *revoltgo.Message, body fyne.CanvasObject) fyne.CanvasObject {
 	if len(message.Attachments) == 0 {
 		return body
 	}
@@ -434,14 +531,14 @@ func buildGroupedContent(deps Deps, message *revoltgo.Message, text string) fyne
 // followed by a baseline-aligned timestamp) above the message text. Keeping the
 // timestamp inline on the name line — rather than overlaid on the whole body —
 // aligns it with the username and stops long body text from running under it.
-func buildMessageHeader(author *canvas.Text, text, timestamp string) fyne.CanvasObject {
+func buildMessageHeader(author *canvas.Text, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize
 	// Drop the smaller timestamp so its baseline lines up with the bold name.
 	tsAligned := VBoxNoSpacing(VerticalSpacer(theme.Sizes.MessageTimestampTopOffset), ts)
 
 	nameLine := container.NewHBox(author, HorizontalSpacer(theme.Sizes.MessageContentPadding), tsAligned)
-	return VBoxNoSpacing(nameLine, NewFlushContainer(renderMessageBody(text)))
+	return VBoxNoSpacing(nameLine, body)
 }
 
 // buildAttachments stacks each attachment with a small gap between them.

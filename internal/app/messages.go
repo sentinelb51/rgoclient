@@ -111,6 +111,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input = ui.NewMessageInput(a.deps())
 	a.input.SetPlaceHolder("Send a message...")
 	a.input.OnSubmit = a.handleSubmit
+	a.input.OnEditLast = a.editLastOwnMessage
 	a.input.RegisterDropHandler(a.window)
 
 	// Floating composer dock: the entry, reply and attachment rows sit in a square
@@ -124,7 +125,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	inner := ui.VBoxNoSpacing(
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
-		a.input,
+		ui.WithCaret(a.input),
 	)
 	dock := container.NewStack(dockBg, container.NewBorder(nil, nil, leftBar, nil, inner))
 	composer := container.NewPadded(dock)
@@ -138,6 +139,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 
 // showStatus replaces the message list with a single centered line.
 func (a *App) showStatus(text string) {
+	a.cancelActiveEdit()
 	a.renderGen++
 	a.rendering = false
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
@@ -163,6 +165,7 @@ func (a *App) showStatus(text string) {
 
 // clearMessages empties the message list.
 func (a *App) clearMessages() {
+	a.cancelActiveEdit()
 	a.renderGen++
 	a.rendering = false
 	a.messageList.Objects = nil
@@ -219,6 +222,7 @@ func (a *App) loadChannelMessages(channelID string) {
 // batches of a superseded render abort, even when the user switches away and
 // back to the same channel before it finishes.
 func (a *App) displayMessages(messages []*revoltgo.Message) {
+	a.cancelActiveEdit()
 	a.renderGen++
 	gen := a.renderGen
 	a.rendering = true
@@ -539,6 +543,9 @@ func (a *App) removeMessage(channelID, messageID string) {
 	if i == -1 {
 		return
 	}
+	if a.editing != nil && a.editing.Message().ID == messageID {
+		a.editing = nil // the editor unmounts with its widget
+	}
 	a.messageList.Objects = append(a.messageList.Objects[:i], a.messageList.Objects[i+1:]...)
 
 	prev, next := a.mountedMessage(i-1), a.mountedMessage(i)
@@ -554,9 +561,14 @@ func (a *App) removeMessage(channelID, messageID string) {
 }
 
 // refreshMessage rebuilds the widget of an edited message in place from its
-// updated cache entry. Call on the UI thread.
+// updated cache entry. A message the user is in-place editing is left alone —
+// the rebuild would discard their open editor; the cache already holds the
+// remote update, so the next rebuild renders it. Call on the UI thread.
 func (a *App) refreshMessage(channelID, messageID string) {
 	if channelID != a.currentChannelID {
+		return
+	}
+	if a.editing != nil && a.editing.Message().ID == messageID {
 		return
 	}
 	i := a.messageWidgetIndex(messageID)
@@ -569,6 +581,31 @@ func (a *App) refreshMessage(channelID, messageID string) {
 	}
 	a.messageList.Objects[i] = a.newMessageWidget(a.mountedMessage(i-1), message, a.mountedMessage(i+1))
 	a.messageList.Refresh()
+}
+
+// editLastOwnMessage opens the in-place editor on the user's newest editable
+// message in the open channel — triggered by Up in an empty composer. It scans
+// the message cache rather than tracking "last sent" state: the cache only
+// ever gains own messages through the gateway echo (or fetched pages), so the
+// scan can't race the send path — right after a send it simply targets the
+// newest own message the server has actually confirmed.
+func (a *App) editLastOwnMessage() {
+	if a.session == nil || a.currentChannelID == "" {
+		return
+	}
+	self := a.session.State.Self()
+	if self == nil {
+		return
+	}
+
+	cached := a.messageCache.Get(a.currentChannelID)
+	for i := len(cached) - 1; i >= 0; i-- {
+		message := cached[i]
+		if message.Author == self.ID && message.System == nil && message.Content != "" {
+			a.OnEdit(message)
+			return
+		}
+	}
 }
 
 // handleSubmit sends the composed message, its attachments, and its replies.

@@ -259,7 +259,9 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 // Size hides scrollbars and flattens inputs for a metro look: no corner radius
 // and no border stroke, so the entry reads as a flat filled bar rather than an
 // outlined box (the outline — accent-blue when focused — is what makes the
-// default entry look bordered/textured).
+// default entry look bordered/textured). The zero input border also collapses
+// the entry caret, which Fyne draws InputBorder wide — ui.WithCaret restores
+// it per entry without bringing the outline back.
 func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameScrollBar:

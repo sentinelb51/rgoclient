@@ -50,15 +50,10 @@ func StyleTitlebar(win fyne.Window) bool {
 			setAttr.Call(wc.HWND, attr, uintptr(unsafe.Pointer(value)), 4)
 		}
 
-		dark := uint32(1)
-		caption := colorRef(theme.Colors.ServerListBackground)
-		text := colorRef(theme.Colors.TextPrimary)
-		border := colorRef(theme.Colors.ServerListBackground)
-
-		set(dwmwaUseImmersiveDarkMode, &dark)
-		set(dwmwaCaptionColor, &caption)
-		set(dwmwaTextColor, &text)
-		set(dwmwaBorderColor, &border)
+		set(dwmwaUseImmersiveDarkMode, new(uint32(1)))
+		set(dwmwaCaptionColor, new(colorRef(theme.Colors.ServerListBackground)))
+		set(dwmwaTextColor, new(colorRef(theme.Colors.TextPrimary)))
+		set(dwmwaBorderColor, new(colorRef(theme.Colors.ServerListBackground)))
 		applied = true
 	})
 	return applied

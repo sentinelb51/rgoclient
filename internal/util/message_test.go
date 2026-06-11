@@ -40,10 +40,10 @@ func strptr(s string) *string { return &s }
 func TestRoleColorPicksMostSeniorColouredRole(t *testing.T) {
 	server := &revoltgo.Server{
 		Roles: map[string]*revoltgo.ServerRole{
-			"admin":    {Rank: 1, Colour: strptr("#ff0000")},
-			"mod":      {Rank: 5, Colour: strptr("#00ff00")},
-			"everyone": {Rank: 10},                            // no colour: skipped
-			"broken":   {Rank: 0, Colour: strptr("gradient")}, // most senior but unparseable
+			"admin":    {Rank: 1, Colour: new("#ff0000")},
+			"mod":      {Rank: 5, Colour: new("#00ff00")},
+			"everyone": {Rank: 10},                         // no colour: skipped
+			"broken":   {Rank: 0, Colour: new("gradient")}, // most senior but unparseable
 		},
 	}
 

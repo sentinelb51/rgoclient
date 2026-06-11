@@ -2,6 +2,8 @@ fyne.io/fyne/v2 v2.7.4 h1:OVCI5mT+Onb2kA4wlmGA5pLCqKik9f4NDb5jiR1OMTc=
 fyne.io/fyne/v2 v2.7.4/go.mod h1:ZD1mmhBY75mSa97IXl3MPlICd1uNHfCXYh5hKIlVOII=
 fyne.io/systray v1.12.1 h1:ygBD6aZXwiOmZoY5N+ukbH9pih0Kq6fYgVeMYbr5skQ=
 fyne.io/systray v1.12.1/go.mod h1:RVwqP9nYMo7h5zViCBHri2FgjXF7H2cub7MAq4NSoLs=
+fyne.io/systray v1.12.2 h1:Y8DZxgLHsVQt6rY9Zrkkg+j67S7vv/1F2viOWKPpVeA=
+fyne.io/systray v1.12.2/go.mod h1:RVwqP9nYMo7h5zViCBHri2FgjXF7H2cub7MAq4NSoLs=
 github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=
 github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
 github.com/clipperhouse/uax29/v2 v2.7.0 h1:+gs4oBZ2gPfVrKPthwbMzWZDaAFPGYK72F0NJv2v7Vk=
@@ -78,6 +80,8 @@ github.com/sentinelb51/revoltgo v0.0.0-20260607031224-9f8e300a1863 h1:WlUCXTvHL1
 github.com/sentinelb51/revoltgo v0.0.0-20260607031224-9f8e300a1863/go.mod h1:a7lXXFBC9JSwMGa7w1LdssK60B33bALs3HDKgewDzL0=
 github.com/sentinelb51/revoltgo v0.0.0-20260608203726-d2f6624fb158 h1:GMJE175NTmG7m4MRBVkd2L1xrroxApJwqt58q/itfwg=
 github.com/sentinelb51/revoltgo v0.0.0-20260608203726-d2f6624fb158/go.mod h1:fxi5X0qdNmjK8ZwoDrnDbRVsX2gfiOFQuLi3XbP58ok=
+github.com/sentinelb51/revoltgo v0.0.0-20260608230118-eeea8c05edbe h1:9GVjvHgK1F9rWcTRARXv1E9wCFoJF9NZTMMhyiAXAsY=
+github.com/sentinelb51/revoltgo v0.0.0-20260608230118-eeea8c05edbe/go.mod h1:y0K/nvwTTyslE/AQMOcFLHcftsuRVxg4MYpmhJnz3rs=
 github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c h1:km8GpoQut05eY3GiYWEedbTT0qnSxrCjsVbb7yKY1KE=
 github.com/srwiley/oksvg v0.0.0-20221011165216-be6e8873101c/go.mod h1:cNQ3dwVJtS5Hmnjxy6AgTPd0Inb3pW05ftPSX7NZO7Q=
 github.com/srwiley/rasterx v0.0.0-20220730225603-2ab79fcdd4ef h1:Ch6Q+AZUxDBCVqdkI8FSpFyZDtCVBc2VmejdNrm5rRQ=
@@ -104,6 +108,8 @@ golang.org/x/mobile v0.0.0-20260602190626-68735029466e h1:YxPXu/HWDTcSSrzSX+sClt
 golang.org/x/mobile v0.0.0-20260602190626-68735029466e/go.mod h1:ltIbhcRzKgwHa4ZxKJeiv0nyzcXUUYCqMyO0Y+vPmXw=
 golang.org/x/net v0.55.0 h1:bcvxaJn3e1U6InsFWt1JUq1aSjnRxLzT2rtD2KfkDF8=
 golang.org/x/net v0.55.0/go.mod h1:L5U2KuzuOe1lY7Z+aWVIKK6qEeJXnXV9yzGA+WCHJww=
+golang.org/x/net v0.56.0 h1:Rw8j/hFzGvJUZwNBXnAtf5sVDVt+65SK2C7IxCxZt5o=
+golang.org/x/net v0.56.0/go.mod h1:D3Ku6r+V6JROoZK144D2XfMHFcMq/0zSfLelVTCFKec=
 golang.org/x/sys v0.45.0 h1:dO4czNzziLiiXplLQgBCEpCvXQ3dnkn0SdaZSYdQ+FY=
 golang.org/x/sys v0.45.0/go.mod h1:4GL1E5IUh+htKOUEOaiffhrAeqysfVGipDYzABqnCmw=
 golang.org/x/sys v0.46.0 h1:noSf2Fq6F8DBgS+LysIkx7rIExoNHJsxOAtPp4rthXw=

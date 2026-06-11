@@ -58,6 +58,10 @@ type MessageInput struct {
 	widget.Entry
 	OnSubmit func(string)
 
+	// OnEditLast fires when Up is pressed in an empty composer, Discord-style:
+	// the app opens the in-place editor on the user's newest message.
+	OnEditLast func()
+
 	deps         Deps
 	shiftPressed bool
 
@@ -86,9 +90,17 @@ func NewMessageInput(deps Deps) *MessageInput {
 
 // MinSize grows the entry up to maxInputLines as the user types.
 func (m *MessageInput) MinSize() fyne.Size {
-	size := m.Entry.MinSize()
-	lines := min(max(strings.Count(m.Text, "\n")+1, 1), maxInputLines)
-	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2
+	return composerMinSize(&m.Entry)
+}
+
+// composerMinSize sizes a growing composer-style entry: one line per newline
+// up to maxInputLines, plus the entry's inner padding and border insets (the
+// border size is the caret width under WithCaret, and inset top and bottom).
+func composerMinSize(e *widget.Entry) fyne.Size {
+	size := e.MinSize()
+	lines := min(max(strings.Count(e.Text, "\n")+1, 1), maxInputLines)
+	border := e.Theme().Size(fynetheme.SizeNameInputBorder)
+	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2 + border*2
 	return size
 }
 
@@ -124,10 +136,15 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 }
 
 // TypedKey sends the message on Enter, inserts a newline on Shift+Enter,
-// cancels pending replies/attachments on Escape, and otherwise defers to the
-// embedded entry (refreshing so MinSize recomputes).
+// cancels pending replies/attachments on Escape, starts editing the last own
+// message on Up in an empty composer, and otherwise defers to the embedded
+// entry (refreshing so MinSize recomputes).
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	switch {
+	case key.Name == fyne.KeyUp && m.Text == "":
+		if m.OnEditLast != nil {
+			m.OnEditLast()
+		}
 	case key.Name == fyne.KeyEscape:
 		if len(m.Replies) > 0 || len(m.Attachments) > 0 {
 			m.ClearReplies()

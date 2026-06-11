@@ -1,6 +1,6 @@
 # rgoclient
 
-A Fyne v2 desktop chat client (Discord-like) for Revolt, in Go 1.26. Uses
+A Fyne v2.7.4 desktop chat client (Discord-like) for Revolt, in Go 1.26.4. Uses
 `github.com/sentinelb51/revoltgo` for the REST API and gateway websocket.
 
 ## Core principle: explicit dependencies, no globals
@@ -34,14 +34,18 @@ cmd/rgoclient/main.go        Entry point: Fyne app, theme, app.New(...).Run()
 
 internal/
   app/                       Controller; owns session + caches + window + UI refs
-    app.go                   App struct, New, Run, lifecycle, doOnUI, MessageActions impl
+    app.go                   App struct, New, Run, lifecycle, doOnUI, MessageActions impl;
+                             OnEdit/startEditing/cancelActiveEdit drive the single active
+                             in-place message edit (App.editing, UI-thread only)
     session.go               startWithToken / startWithLogin + handler registration;
                              resetSessionState clears per-account caches/state on (re)login
     events.go                Gateway lifecycle handler (onError) + handler-split doc
     events_ready.go          onReady + savePendingToken
     events_message.go        onMessage / onMessageUpdate / onMessageDelete /
-                             onBulkMessageDelete + scheduleAck (coalesced read-acks
-                             for the open channel, one MessageAck per ackDelay)
+                             onBulkMessageDelete + scheduleAck/sendAck — the only
+                             read-ack path (selectChannel routes through it too):
+                             one MessageAck per ackDelay, and a pending ack for a
+                             different channel flushes immediately on switch
     events_members.go        onServerMemberJoin / Leave / Update → refresh member sidebar
     navigation.go            Server+channel sidebar + 4-column buildUI: build, refresh, select.
                              Server sidebar bookends the scrolling icons with fixed home
@@ -49,8 +53,10 @@ internal/
     messages.go              Message area: build, load, display, send, history, viewer;
                              continuesGroup/newMessageWidget (Discord-style author grouping);
                              windowed mounting (mountedCap) with up/down cache re-mount
-                             tiers; removeMessage/refreshMessage for live deletes/edits;
-                             jumpToLatest on send
+                             tiers; removeMessage/refreshMessage for live deletes/edits
+                             (refreshMessage skips a message being in-place edited);
+                             jumpToLatest on send; editLastOwnMessage (Up in empty
+                             composer → edit newest own cached message)
     members.go               Member sidebar: build/refresh/group; ensureAuthor (lazy per-author
                              user+member fetch, fetchedAuthors guard); refreshAuthorMessages
                              (in-place per-author widget update, no full re-render)
@@ -79,17 +85,33 @@ internal/
     channel.go               Channel row + collapsible category + drawn glyphs
     message.go               Message widget + content/attachments/replies rendering;
                              grouped continuation mode (no avatar/name; hover-revealed
-                             gutter timestamp); RefreshAuthor in-place update
+                             gutter timestamp); RefreshAuthor in-place update; in-place
+                             edit mode (StartEdit/CancelEdit swap the body slot for an
+                             EditEntry + floating save/cancel buttons)
+    editor.go                EditEntry — in-place edit entry (Enter saves, Shift+Enter
+                             newline, Esc cancels; grows like the composer)
+    caret.go                 WithCaret — per-entry theme override restoring the caret
+                             (AppTheme zeroes SizeNameInputBorder for flat inputs, and
+                             Fyne draws the caret InputBorder wide). Wrap every mounted
+                             entry in it
     member.go                Member row + section header + small presence-dimmed avatar
-    markdown.go              AST → RichText rendering; strike/spoiler custom segments
+    markdown.go              AST → RichText rendering; strike/spoiler custom segments;
+                             uniform-style bodies (plain, all-bold/italic, lone code
+                             block / heading / subtext, plain lists) flatten to a
+                             Selectable Label (mouse text selection); only mixed-style
+                             bodies keep the unselectable RichText
     input.go                 Message input + attachments + reply cards (slim,
                              role-colour-outlined; shared replyIconButton for the
-                             mention toggle + close)
+                             mention toggle + close); OnEditLast fires on Up in an
+                             empty composer
     sessioncard.go           Saved-session card
   markdown/                  Pure (no UI) Discord/Revolt markdown parser → small AST
     markdown.go              Document/Block/Inline AST node types
     parser.go                Block parsing (paragraph, heading, quote, list, fence…)
-    inline.go                Inline parsing (bold/italic/strike/spoiler/code/link) + PlainText
+    inline.go                Inline parsing (bold/italic/strike/spoiler/code/link) +
+                             PlainText; Discord-style emphasis guards: _ opens/closes
+                             only at word boundaries (snake_case stays literal) and
+                             single */_ content can't be whitespace-edged
   util/
     message.go               MessageAuthor — one-pass author resolution (name, avatar URL,
                              role colour; member-aware: nickname + per-server avatar, fall
@@ -148,7 +170,18 @@ internal/
    (entries are read by the UI without the cache lock, so they stay immutable) and
    rebuilds the mounted widget; `onMessageDelete` / `onBulkMessageDelete` remove
    from cache and unmount, re-evaluating neighbour grouping at the seam.
-6. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
+6. In-place editing: `OnEdit` (hover/context-menu, or Up in an empty composer via
+   `editLastOwnMessage`, which scans the cache newest→oldest for the user's own
+   message — the cache only gains own messages through the gateway echo, so the
+   scan can't race the send path) calls `startEditing`: one edit at a time
+   (`App.editing`), the widget swaps its body for an `EditEntry` with floating
+   save/cancel buttons. Save applies the edit to the cache optimistically and
+   sends `ChannelMessageEdit` (failure reverts; the gateway MessageUpdate echo
+   reconciles); Esc/cancel restores the body. Any message-area rebuild
+   (`displayMessages`/`clearMessages`/`showStatus`) cancels the active edit, and
+   `refreshMessage` leaves a message being edited alone so a remote update can't
+   discard the open editor.
+7. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
    handlers); app handler refreshes the member sidebar when it's the open server.
    `Update` also calls `refreshAuthorMessages` so that author's mounted messages
    pick up the new nickname / role colour / avatar in place.
@@ -174,8 +207,8 @@ internal/
 
 ## Known stubs / follow-ups
 
-`App.OnDelete`, `OnEdit`, `OnAvatarTapped` (profile) just print; reply-preview tap
-navigation is a TODO in `ui/message.go` (`buildReplyPreview`).
+`App.OnAvatarTapped` (profile) just prints; reply-preview tap navigation is a
+TODO in `ui/message.go` (`buildReplyPreview`).
 
 Markdown rendering (`ui/markdown.go`): strike / underline / spoiler share one
 `decoratedSegment` (Fyne renders neither strike nor underline natively). They
@@ -184,3 +217,10 @@ bridges the following space so lines/covers read as continuous. Remaining
 limitations: the blockquote bar is drawn per source line but not on wrapped
 continuation lines; a decoration can show a one-space nub at the end of a wrapped
 line; inline `code` inside a decorated span is not itself decorated.
+
+Text selection: message bodies whose whole content shares one style (plain, but
+also all-bold/italic, a lone code block, heading, subtext, plain lists, inline
+code alone) flatten to a `Selectable` `widget.Label` carrying that style. Fyne
+2.7 has no public RichText selection — its internal `selectable` helper is
+unexported and assumes one uniform text style — so bodies mixing styles within
+the text stay unselectable; right-click → Copy message covers them.

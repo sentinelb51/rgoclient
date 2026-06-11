@@ -112,8 +112,8 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 
 	return container.NewVBox(
 		widget.NewLabel("Enter credentials"),
-		email,
-		password,
+		ui.WithCaret(email),
+		ui.WithCaret(password),
 		login,
 	)
 }

@@ -56,6 +56,17 @@ func TestParseInline(t *testing.T) {
 		"unclosed **bold":   "unclosed **bold", // dangling delimiter stays literal
 		"5 * 3 = 15":        "5 * 3 = 15",      // lone asterisk with no close
 		"~~a~~ and ~~b~~":   "s(a) and s(b)",   // lazy close
+
+		// Single-delimiter emphasis guards (Discord-compatible): _ is a word
+		// character, so it only opens/closes at word boundaries, and neither *
+		// nor _ accepts whitespace-edged content.
+		"snake_case_name":    "snake_case_name",   // intraword _ never opens
+		"_open_world":        "_open_world",       // close mid-word rejected
+		"_foo_bar_":          "i(foo_bar)",        // rejected close extends the span
+		"use _force_ now":    "use i(force) now",  // boundary-delimited still works
+		"5 * 3 * 4":          "5 * 3 * 4",         // space-edged content stays literal
+		"2*3*4":              "2i(3)4",            // * needs no word boundary
+		"__init__ is dunder": "u(init) is dunder", // __ keeps matching intraword
 	}
 
 	for input, want := range cases {

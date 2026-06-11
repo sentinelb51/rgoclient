@@ -5,13 +5,13 @@ go 1.26.4
 require (
 	fyne.io/fyne/v2 v2.7.4
 	github.com/oklog/ulid/v2 v2.1.1
-	github.com/sentinelb51/revoltgo v0.0.0-20260608203726-d2f6624fb158
+	github.com/sentinelb51/revoltgo v0.0.0-20260608230118-eeea8c05edbe
 	golang.design/x/clipboard v0.8.0
 	golang.org/x/image v0.42.0
 )
 
 require (
-	fyne.io/systray v1.12.1 // indirect
+	fyne.io/systray v1.12.2 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/clipperhouse/uax29/v2 v2.7.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
@@ -49,7 +49,7 @@ require (
 	golang.design/x/x11 v0.2.0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20260603202125-055de637280b // indirect
 	golang.org/x/mobile v0.0.0-20260602190626-68735029466e // indirect
-	golang.org/x/net v0.55.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
 	golang.org/x/sys v0.46.0 // indirect
 	golang.org/x/text v0.38.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image/color"
 	"net/url"
+	"strings"
 	"unicode"
 
 	"fyne.io/fyne/v2"
@@ -16,9 +17,16 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// renderMessageBody renders a message's markdown-formatted body as a RichText.
-// The author name is drawn separately (see buildMessageHeader) so it can carry
-// an arbitrary role colour, which RichText segments can't express.
+// renderMessageBody renders a message's body. A body whose whole content
+// shares one uniform style — plain text, but also an all-bold/italic message,
+// a lone code block or heading, inline-code-only, subtext, or a plain list —
+// becomes a selectable Label (which carries one TextStyle/SizeName/colour for
+// everything) so its text can be selected and copied with the mouse. Only
+// genuinely mixed-style bodies fall back to a RichText, which Fyne cannot make
+// selectable (its internal selection machinery is unexported and assumes a
+// single uniform text style). The author name is drawn separately (see
+// buildMessageHeader) so it can carry an arbitrary role colour, which RichText
+// segments can't express.
 //
 // Fyne's RichText wraps and flows native segments (text, bold/italic, links)
 // only when every content segment is marked Inline; a non-inline segment is
@@ -32,15 +40,143 @@ import (
 // per-word segments interleaved with normal spaces (RichText only breaks rows at
 // text spaces, never between two custom segments); each word's decoration bridges
 // the following space so the line/cover still reads as continuous.
-func renderMessageBody(text string) *widget.RichText {
+func renderMessageBody(text string) fyne.CanvasObject {
+	doc := markdown.Parse(text)
+
+	// An empty body (attachment-only message) keeps the zero-height RichText; a
+	// Label would reserve a blank text line above the attachment.
+	if flat, ok := flattenDocument(doc); ok && flat.text != "" {
+		label := widget.NewLabel(flat.text)
+		label.Wrapping = fyne.TextWrapWord
+		label.Selectable = true
+		label.TextStyle = flat.style
+		label.SizeName = flat.size
+		if flat.dim {
+			label.Importance = widget.LowImportance // Disabled = the muted subtext colour
+		}
+		return label
+	}
+
 	b := &mdBuilder{}
-	for _, block := range markdown.Parse(text).Blocks {
+	for _, block := range doc.Blocks {
 		b.block(block)
 	}
 
 	rt := widget.NewRichText(b.segs...)
 	rt.Wrapping = fyne.TextWrapWord
 	return rt
+}
+
+// flatBody is a whole message body flattened to one uniform style — everything
+// a selectable Label can express.
+type flatBody struct {
+	text  string
+	style fyne.TextStyle
+	size  fyne.ThemeSizeName // "" → standard text size
+	dim   bool               // muted colour (subtext)
+}
+
+// flattenDocument tries to flatten a document into a single styled string,
+// reporting false when blocks or inlines mix styles or need custom visuals
+// (links, spoilers, strike, underline, blockquote bars). Blocks join with
+// single newlines, matching the line breaks the RichText renderer emits.
+func flattenDocument(doc *markdown.Document) (flatBody, bool) {
+	var f flatBody
+	var b strings.Builder
+
+	// merge folds one leaf's effective style into the document style: the first
+	// leaf sets it, every later leaf must agree.
+	styled := false
+	merge := func(style fyne.TextStyle, size fyne.ThemeSizeName, dim bool) bool {
+		if !styled {
+			f.style, f.size, f.dim, styled = style, size, dim, true
+			return true
+		}
+		return f.style == style && f.size == size && f.dim == dim
+	}
+
+	for i, block := range doc.Blocks {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		ok := true
+		switch n := block.(type) {
+		case *markdown.Paragraph:
+			ok = flattenInlines(&b, n.Children, emphasis{}, "", false, merge)
+		case *markdown.Heading:
+			ok = flattenInlines(&b, n.Children, emphasis{bold: true}, headingSize(n.Level), false, merge)
+		case *markdown.Subtext:
+			ok = flattenInlines(&b, n.Children, emphasis{}, fynetheme.SizeNameCaptionText, true, merge)
+		case *markdown.CodeBlock:
+			ok = merge(fyne.TextStyle{Monospace: true}, "", false)
+			b.WriteString(n.Text)
+		case *markdown.List:
+			for j, item := range n.Items {
+				if j > 0 {
+					b.WriteByte('\n')
+				}
+				marker := "•  "
+				if n.Ordered {
+					marker = fmt.Sprintf("%d.  ", n.Start+j)
+				}
+				if !merge(fyne.TextStyle{}, "", false) {
+					return f, false
+				}
+				b.WriteString(marker)
+				if !flattenInlines(&b, item, emphasis{}, "", false, merge) {
+					return f, false
+				}
+			}
+		default: // Blockquote draws an indent bar — not flattenable
+			ok = false
+		}
+		if !ok {
+			return f, false
+		}
+	}
+
+	f.text = b.String()
+	return f, true
+}
+
+// flattenInlines appends the nodes' text to b, folding each text leaf's
+// effective style (the accumulated emphasis, plus monospace for inline code)
+// into merge. It reports false on nodes that need custom visuals or when a
+// leaf's style conflicts with the styles seen so far.
+func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, size fyne.ThemeSizeName, dim bool, merge func(fyne.TextStyle, fyne.ThemeSizeName, bool) bool) bool {
+	for _, node := range nodes {
+		switch n := node.(type) {
+		case *markdown.Text:
+			if !merge(em.textStyle(), size, dim) {
+				return false
+			}
+			b.WriteString(n.Text)
+		case *markdown.LineBreak:
+			b.WriteByte('\n') // style-neutral
+		case *markdown.Code:
+			style := em.textStyle()
+			style.Monospace = true
+			if !merge(style, size, dim) {
+				return false
+			}
+			b.WriteString(n.Text)
+		case *markdown.Strong:
+			next := em
+			next.bold = true
+			if !flattenInlines(b, n.Children, next, size, dim, merge) {
+				return false
+			}
+		case *markdown.Emphasis:
+			next := em
+			next.italic = true
+			if !flattenInlines(b, n.Children, next, size, dim, merge) {
+				return false
+			}
+		default: // Underline, Strike, Spoiler, Link need custom visuals
+			return false
+		}
+	}
+	return true
 }
 
 // emphasis accumulates inline character formatting as the renderer descends the

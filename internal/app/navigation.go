@@ -225,13 +225,7 @@ func (a *App) selectChannel(channelID string) {
 		a.setHeader(a.channelHeader, channel.Name)
 		if unread && channel.LastMessageID != nil {
 			delete(a.unreadChannels, channelID)
-			lastID := *channel.LastMessageID
-			session := a.session
-			go func() {
-				if err := session.MessageAck(channelID, lastID); err != nil {
-					log.Printf("ack channel %s: %v", channelID, err)
-				}
-			}()
+			a.scheduleAck(channelID, *channel.LastMessageID)
 		}
 	}
 

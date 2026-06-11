@@ -58,7 +58,7 @@ func parseInline(s string) []Inline {
 			i += 2
 			continue
 		}
-		if node, width := matchInline(s[i:]); node != nil {
+		if node, width := matchInline(s[i:], i > 0 && isWordByte(s[i-1])); node != nil {
 			flush()
 			out = append(out, node)
 			i += width
@@ -75,8 +75,11 @@ func parseInline(s string) []Inline {
 // matchInline tries to match a formatting construct at the start of s, returning
 // the node and the number of bytes consumed, or (nil, 0) if none matches.
 // Order matters: longer delimiters are tried before their single-character
-// counterparts (** before *, __ before _).
-func matchInline(s string) (Inline, int) {
+// counterparts (** before *, __ before _). prevWord reports whether the byte
+// before s is a word character: Discord treats _ as a word character, so
+// underscore emphasis only opens at a word boundary (snake_case_names stay
+// literal) while * needs no boundary (2*3*4 italicizes the 3, as on Discord).
+func matchInline(s string, prevWord bool) (Inline, int) {
 	switch {
 	case s[0] == '`':
 		return matchCode(s)
@@ -89,13 +92,50 @@ func matchInline(s string) (Inline, int) {
 	case strings.HasPrefix(s, "~~"):
 		return wrap(s, "~~", func(c []Inline) Inline { return &Strike{Children: c} })
 	case s[0] == '*':
-		return wrap(s, "*", func(c []Inline) Inline { return &Emphasis{Children: c} })
-	case s[0] == '_':
-		return wrap(s, "_", func(c []Inline) Inline { return &Emphasis{Children: c} })
+		return matchEmphasis(s, "*", false)
+	case s[0] == '_' && !prevWord:
+		return matchEmphasis(s, "_", true)
 	case s[0] == '[':
 		return matchLink(s)
 	}
 	return nil, 0
+}
+
+// matchEmphasis matches single-delimiter emphasis (*x* or _x_) with guards
+// against the false positives the loose double-delimiter wrap would accept:
+// the content must not start or end with whitespace ("5 * 3 * 4" stays
+// literal), and underscore emphasis must also close at a word boundary
+// ("_open_world" stays literal; the opening boundary is the caller's check).
+// A rejected closing delimiter lazily extends the span to the next one, so
+// "_foo_bar_" italicizes "foo_bar" like Discord.
+func matchEmphasis(s, delim string, boundary bool) (Inline, int) {
+	rest := s[1:]
+	for end := findClose(rest, delim); end > 0; {
+		content := rest[:end]
+		edgesOK := !isSpaceByte(content[0]) && !isSpaceByte(content[end-1])
+		closeOK := !boundary || end+2 >= len(s) || !isWordByte(s[end+2])
+		if edgesOK && closeOK {
+			return &Emphasis{Children: parseInline(content)}, end + 2
+		}
+
+		next := findClose(rest[end+1:], delim)
+		if next < 0 {
+			break
+		}
+		end += 1 + next
+	}
+	return nil, 0
+}
+
+// isWordByte reports whether b is a word character for boundary checks:
+// letters, digits, underscore, or any non-ASCII byte (multibyte letters).
+func isWordByte(b byte) bool {
+	return b == '_' || b >= 0x80 ||
+		'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
+}
+
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t'
 }
 
 // wrap matches a delimiter-bounded span (e.g. **bold**), recursively parsing its

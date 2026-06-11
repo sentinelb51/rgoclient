@@ -6,6 +6,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/ui"
@@ -25,13 +26,33 @@ func (a *App) buildUI() fyne.CanvasObject {
 	)
 }
 
-// buildServerList builds the server icon sidebar.
+// buildServerList builds the server icon sidebar: a fixed home button and a
+// settings button bookend the scrolling list of server icons, each set off by a
+// short separator bar. Home and settings sit outside the scroll so they stay put
+// when the server list grows tall enough to scroll.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
 	background.SetMinSize(fyne.NewSize(theme.Sizes.ServerSidebarWidth, 0))
 
+	home := ui.NewSidebarButton(fynetheme.HomeIcon(), a.selectHome)
+	settings := ui.NewSidebarButton(fynetheme.SettingsIcon(), a.openSettings)
+
+	top := container.NewVBox(
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+		container.NewCenter(home),
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+		ui.NewSidebarSeparator(),
+	)
+	bottom := container.NewVBox(
+		ui.NewSidebarSeparator(),
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+		container.NewCenter(settings),
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+	)
+
 	a.refreshServerList()
-	return container.NewStack(background, container.NewVScroll(a.serverList))
+	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
+	return container.NewStack(background, content)
 }
 
 // refreshServerList rebuilds the server icons from the current server list.
@@ -49,6 +70,34 @@ func (a *App) refreshServerList() {
 		a.serverList.Add(container.NewCenter(w))
 	}
 	a.serverList.Refresh()
+}
+
+// selectHome is the home button handler. The home/DM view is not built yet, so
+// this is a stub.
+func (a *App) selectHome() {
+	// todo: home / direct-message view
+	log.Print("home selected")
+}
+
+// openSettings opens the (WIP) settings window. A second open focuses the
+// existing window rather than spawning another.
+func (a *App) openSettings() {
+	if a.settingsWindow != nil {
+		a.settingsWindow.RequestFocus()
+		return
+	}
+
+	window := a.fyne.NewWindow("Settings")
+	a.settingsWindow = window
+	window.SetOnClosed(func() { a.settingsWindow = nil })
+
+	heading := widget.NewLabelWithStyle("Settings", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	note := widget.NewLabelWithStyle("Work in progress.", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
+	window.SetContent(container.NewCenter(container.NewVBox(heading, note)))
+
+	window.Resize(fyne.NewSize(420, 320))
+	window.CenterOnScreen()
+	window.Show()
 }
 
 // buildChannelList builds the channel sidebar with its server-name header.

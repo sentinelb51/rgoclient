@@ -54,6 +54,8 @@ type App struct {
 	serverHeader  *widget.Label
 	channelHeader *widget.Label
 
+	settingsWindow fyne.Window // WIP settings window; nil when closed
+
 	loadingHistory bool
 
 	// renderGen identifies the current message-area render; bumping it aborts the

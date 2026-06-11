@@ -14,17 +14,26 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// tapBase provides the tap and (no-op) mouse-move plumbing shared by the
-// interactive widgets in this package. Embedders implement CreateRenderer and,
-// where they react to hover, MouseIn/MouseOut.
+// tapBase provides the tap, right-click, and (no-op) mouse-move plumbing shared
+// by the interactive widgets in this package. Embedders implement CreateRenderer
+// and, where they react to hover, MouseIn/MouseOut. Setting onSecondaryTap opts
+// the widget into a context menu (servers, channels, members, avatars); leaving
+// it nil makes right-clicks a no-op.
 type tapBase struct {
 	widget.BaseWidget
-	onTap func()
+	onTap          func()
+	onSecondaryTap func(*fyne.PointEvent)
 }
 
 func (b *tapBase) Tapped(*fyne.PointEvent) {
 	if b.onTap != nil {
 		b.onTap()
+	}
+}
+
+func (b *tapBase) TappedSecondary(e *fyne.PointEvent) {
+	if b.onSecondaryTap != nil {
+		b.onSecondaryTap(e)
 	}
 }
 
@@ -165,6 +174,64 @@ func (b *iconButton) MouseOut() {
 	if b.onHover != nil {
 		b.onHover(false)
 	}
+}
+
+// SidebarButton is a circular, icon-only button matching the server-icon
+// aesthetic. It bookends the server list as the fixed home and settings
+// entries, so it reuses the server background/hover colours for consistency.
+type SidebarButton struct {
+	tapBase
+	background *canvas.Circle
+	icon       *canvas.Image
+}
+
+var (
+	_ fyne.Tappable     = (*SidebarButton)(nil)
+	_ desktop.Hoverable = (*SidebarButton)(nil)
+)
+
+// NewSidebarButton creates a sidebar button rendering the given icon (a Fyne
+// theme icon such as theme.HomeIcon()).
+func NewSidebarButton(res fyne.Resource, onTap func()) *SidebarButton {
+	icon := newIconImage(res)
+	icon.FillMode = canvas.ImageFillContain
+	icon.ScaleMode = canvas.ImageScaleSmooth
+	size := theme.Sizes.ServerIconSize
+	icon.SetMinSize(fyne.NewSize(size*0.5, size*0.5))
+
+	b := &SidebarButton{
+		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
+		icon:       icon,
+	}
+	b.onTap = onTap
+	b.ExtendBaseWidget(b)
+	return b
+}
+
+func (b *SidebarButton) CreateRenderer() fyne.WidgetRenderer {
+	size := theme.Sizes.ServerIconSize
+	wrap := container.NewGridWrap(fyne.NewSize(size, size),
+		container.NewStack(b.background, container.NewCenter(b.icon)))
+	return widget.NewSimpleRenderer(container.NewCenter(wrap))
+}
+
+func (b *SidebarButton) MouseIn(*desktop.MouseEvent) {
+	b.background.FillColor = theme.Colors.ServerHoverBg
+	b.background.Refresh()
+}
+
+func (b *SidebarButton) MouseOut() {
+	b.background.FillColor = theme.Colors.ServerDefaultBg
+	b.background.Refresh()
+}
+
+// NewSidebarSeparator returns the short horizontal bar that visually divides the
+// fixed home/settings buttons from the scrolling server icons.
+func NewSidebarSeparator() fyne.CanvasObject {
+	bar := canvas.NewRectangle(theme.Colors.ServerListSeparator)
+	bar.CornerRadius = 1
+	bar.SetMinSize(fyne.NewSize(theme.Sizes.ServerIconSize*0.6, 2))
+	return container.NewCenter(bar)
 }
 
 // closeButtonSize is the side length of a CloseButton.

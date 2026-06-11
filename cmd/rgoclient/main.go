@@ -15,6 +15,7 @@ import (
 	TODO: Cursor when typing is invisible
 	TODO: Right-click context menu on messages
  	TODO: Selectable text for messages?
+	TODO: Add home icon at the top of server list using IconNameHome
 	TODO: Notification toasts for warnings; slide from bottom right, 5 dots each counts every second, click to dismiss, auto-dismiss after 5s (5 dots)
 */
 

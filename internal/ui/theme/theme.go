@@ -23,6 +23,7 @@ var Colors = struct {
 	ServerDefaultBg        color.Color
 	ServerHoverBg          color.Color
 	ServerSelectedBg       color.Color
+	ServerListSeparator    color.Color
 	TappableHoverBg        color.Color
 
 	// Elements
@@ -54,6 +55,7 @@ var Colors = struct {
 	ServerDefaultBg:        color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
 	ServerHoverBg:          color.RGBA{R: 53, G: 60, B: 80, A: 255},    // #353C50
 	ServerSelectedBg:       color.RGBA{R: 91, G: 124, B: 250, A: 255},  // #5B7CFA accent
+	ServerListSeparator:    color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142, subtle bar
 	TappableHoverBg:        color.RGBA{R: 38, G: 43, B: 58, A: 255},    // #262B3A
 	SwiftActionBg:          color.RGBA{R: 35, G: 40, B: 56, A: 255},    // #232838
 	SwiftActionHoverBg:     color.RGBA{R: 46, G: 53, B: 72, A: 255},    // #2E3548

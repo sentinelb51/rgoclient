@@ -64,8 +64,9 @@ type MessageWidget struct {
 }
 
 var (
-	_ fyne.Widget       = (*MessageWidget)(nil)
-	_ desktop.Hoverable = (*MessageWidget)(nil)
+	_ fyne.Widget            = (*MessageWidget)(nil)
+	_ desktop.Hoverable      = (*MessageWidget)(nil)
+	_ fyne.SecondaryTappable = (*MessageWidget)(nil)
 )
 
 // NewMessageWidget builds a message widget. When grouped is set the message is a
@@ -147,35 +148,135 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 	return w
 }
 
-// buildActions creates the hidden, rounded group of reply/edit/delete buttons.
+// buildActions creates the hidden, rounded group of quick-action buttons. The
+// set is dynamic: reply is always offered, edit only on your own (non-system)
+// message, and delete on your own message or where you can manage messages.
 func (w *MessageWidget) buildActions(deps Deps) *fyne.Container {
 	onHover := func(hovering bool) {
 		w.overActions = hovering
 		w.updateHover()
 	}
 
-	reply := newIconButton(fynetheme.MailReplyIcon(), func() {
-		if deps.Actions != nil {
-			deps.Actions.OnReply(w.message)
-		}
-	}, onHover)
-	edit := newIconButton(fynetheme.DocumentCreateIcon(), func() {
-		if deps.Actions != nil {
-			deps.Actions.OnEdit(w.message)
-		}
-	}, onHover)
-	del := newIconButton(fynetheme.DeleteIcon(), func() {
-		if deps.Actions != nil {
-			deps.Actions.OnDelete(w.message)
-		}
-	}, onHover)
+	buttons := []fyne.CanvasObject{
+		newIconButton(fynetheme.MailReplyIcon(), func() {
+			if deps.Actions != nil {
+				deps.Actions.OnReply(w.message)
+			}
+		}, onHover),
+	}
+
+	if w.canEdit() {
+		buttons = append(buttons, newIconButton(fynetheme.DocumentCreateIcon(), func() {
+			if deps.Actions != nil {
+				deps.Actions.OnEdit(w.message)
+			}
+		}, onHover))
+	}
+	if w.canDelete() {
+		buttons = append(buttons, newIconButton(fynetheme.DeleteIcon(), func() {
+			if deps.Actions != nil {
+				deps.Actions.OnDelete(w.message)
+			}
+		}, onHover))
+	}
+
+	// Overflow button: always last, opens the full context menu (the same one
+	// right-clicking the message shows) beneath itself.
+	more := newIconButton(fynetheme.MoreVerticalIcon(), nil, onHover)
+	more.onTap = func() { ShowContextMenu(more, w.menuItems(), AnchorBelow(more)) }
+	buttons = append(buttons, more)
 
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 	background.CornerRadius = 4
 
-	group := container.NewStack(background, HBoxNoSpacing(reply, edit, del))
+	group := container.NewStack(background, HBoxNoSpacing(buttons...))
 	group.Hide()
 	return group
+}
+
+// menuItems builds the message's context-menu entries, mirroring the hover
+// quick-actions (reply/edit/delete, gated the same way) plus copy helpers. Used
+// by both the overflow button and the right-click handler.
+func (w *MessageWidget) menuItems() []*fyne.MenuItem {
+	act := w.deps.Actions
+
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Reply", fynetheme.MailReplyIcon(), func() {
+			if act != nil {
+				act.OnReply(w.message)
+			}
+		}),
+	}
+	if w.canEdit() {
+		items = append(items, fyne.NewMenuItemWithIcon("Edit", fynetheme.DocumentCreateIcon(), func() {
+			if act != nil {
+				act.OnEdit(w.message)
+			}
+		}))
+	}
+
+	items = append(items, fyne.NewMenuItemSeparator())
+	if w.message.Content != "" {
+		items = append(items, fyne.NewMenuItemWithIcon("Copy message", fynetheme.ContentCopyIcon(), func() {
+			copyToClipboard(w.message.Content)
+		}))
+	}
+	items = append(items,
+		fyne.NewMenuItemWithIcon("Copy message ID", fynetheme.ContentCopyIcon(), func() {
+			copyToClipboard(w.message.ID)
+		}),
+		fyne.NewMenuItemWithIcon("Copy author ID", fynetheme.AccountIcon(), func() {
+			copyToClipboard(w.message.Author)
+		}),
+	)
+
+	if w.canDelete() {
+		del := fyne.NewMenuItemWithIcon("Delete", fynetheme.DeleteIcon(), func() {
+			if act != nil {
+				act.OnDelete(w.message)
+			}
+		})
+		items = append(items, fyne.NewMenuItemSeparator(), del)
+	}
+	return items
+}
+
+// TappedSecondary opens the message context menu at the cursor on right-click.
+func (w *MessageWidget) TappedSecondary(e *fyne.PointEvent) {
+	ShowContextMenu(w, w.menuItems(), e.AbsolutePosition)
+}
+
+// isOwnMessage reports whether the message was authored by the logged-in user.
+func (w *MessageWidget) isOwnMessage() bool {
+	if w.deps.Session == nil {
+		return false
+	}
+	self := w.deps.Session.State.Self()
+	return self != nil && self.ID == w.message.Author
+}
+
+// canEdit reports whether the edit action should be offered: only your own
+// regular messages (system messages have no editable content).
+func (w *MessageWidget) canEdit() bool {
+	return w.message.System == nil && w.isOwnMessage()
+}
+
+// canDelete reports whether the delete action should be offered: your own
+// message, or any message in a channel where you hold ManageMessages.
+func (w *MessageWidget) canDelete() bool {
+	if w.isOwnMessage() {
+		return true
+	}
+	if w.deps.Session == nil {
+		return false
+	}
+	state := w.deps.Session.State
+	self, channel := state.Self(), state.Channel(w.message.Channel)
+	if self == nil || channel == nil {
+		return false
+	}
+	perms, err := state.ChannelPermissions(self, channel)
+	return err == nil && perms&revoltgo.PermissionManageMessages != 0
 }
 
 func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {

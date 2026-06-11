@@ -31,6 +31,7 @@ import (
 //
 // Call on the UI thread: it reads State and touches fetchedAuthors without locking.
 func (a *App) ensureAuthor(serverID, userID string) {
+
 	if a.session == nil || userID == "" {
 		return
 	}
@@ -52,12 +53,17 @@ func (a *App) ensureAuthor(serverID, userID string) {
 				ok = false
 			}
 		}
-		if needMember {
-			if _, err := session.ServerMember(serverID, userID); err != nil {
-				log.Printf("fetch member %s in server %s: %v", userID, serverID, err)
-				ok = false
+
+		// If user fetch was not OK, member fetch will likely fail
+		if ok {
+			if needMember {
+				if _, err := session.ServerMember(serverID, userID); err != nil {
+					log.Printf("fetch member %s in server %s: %v", userID, serverID, err)
+					ok = false
+				}
 			}
 		}
+
 		a.doOnUI(func() {
 			if !ok {
 				delete(a.fetchedAuthors, key)

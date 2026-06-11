@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -521,29 +522,49 @@ func buildGenericAttachment(bar fyne.CanvasObject) *fyne.Container {
 	return container.NewBorder(nil, bar, nil, nil, container.NewStack(placeholder, container.NewCenter(icon)))
 }
 
+// previewCache memoises fetched text-attachment previews by URL: message
+// widgets are rebuilt on every channel revisit, and without it each rebuild
+// re-downloads every text attachment. Entries are at most ~256 runes.
+var (
+	previewMu    sync.Mutex
+	previewCache = map[string]string{}
+)
+
 // fetchTextPreview loads the first few hundred characters of a text attachment
-// into preview, formatted as a code block.
+// into preview, formatted as a code block. Fetched once per URL; failures are
+// not cached, so they retry on the next rebuild.
 func fetchTextPreview(url string, preview *widget.RichText) {
-	client := http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
+	previewMu.Lock()
+	text, ok := previewCache[url]
+	previewMu.Unlock()
 
-	buf := make([]byte, 512)
-	n, _ := io.ReadFull(resp.Body, buf)
-	if n == 0 {
-		return
-	}
+	if !ok {
+		client := http.Client{Timeout: 10 * time.Second}
+		resp, err := client.Get(url)
+		if err != nil {
+			return
+		}
+		defer resp.Body.Close()
 
-	runes := []rune(string(buf[:n]))
-	if len(runes) > 256 {
-		runes = append(runes[:256], []rune("...")...)
+		buf := make([]byte, 512)
+		n, _ := io.ReadFull(resp.Body, buf)
+		if n == 0 {
+			return
+		}
+
+		runes := []rune(string(buf[:n]))
+		if len(runes) > 256 {
+			runes = append(runes[:256], []rune("...")...)
+		}
+		text = string(runes)
+
+		previewMu.Lock()
+		previewCache[url] = text
+		previewMu.Unlock()
 	}
 
 	fyne.CurrentApp().Driver().DoFromGoroutine(func() {
-		preview.ParseMarkdown("```\n" + string(runes) + "\n```")
+		preview.ParseMarkdown("```\n" + text + "\n```")
 		preview.Refresh()
 	}, false)
 }

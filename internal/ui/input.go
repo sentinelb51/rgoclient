@@ -123,10 +123,18 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 	}
 }
 
-// TypedKey sends the message on Enter, inserts a newline on Shift+Enter, and
-// otherwise defers to the embedded entry (refreshing so MinSize recomputes).
+// TypedKey sends the message on Enter, inserts a newline on Shift+Enter,
+// cancels pending replies/attachments on Escape, and otherwise defers to the
+// embedded entry (refreshing so MinSize recomputes).
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	switch {
+	case key.Name == fyne.KeyEscape:
+		if len(m.Replies) > 0 || len(m.Attachments) > 0 {
+			m.ClearReplies()
+			m.ClearAttachments()
+			return
+		}
+		m.Entry.TypedKey(key)
 	case key.Name == fyne.KeyBackspace || key.Name == fyne.KeyDelete:
 		m.Entry.TypedKey(key)
 		m.Refresh()

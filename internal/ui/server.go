@@ -113,6 +113,9 @@ func (w *ServerWidget) Tapped(*fyne.PointEvent) {
 	}
 }
 
+// Cursor shows the pointer cursor, marking the icon as clickable.
+func (w *ServerWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
 func (w *ServerWidget) MouseIn(*desktop.MouseEvent) {
 	w.hovered = true
 	w.refreshAppearance()

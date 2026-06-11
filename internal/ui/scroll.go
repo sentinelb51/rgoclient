@@ -65,3 +65,12 @@ func (s *ObservableScroll) Dragged(ev *fyne.DragEvent) {
 	s.Refresh()
 	s.notify()
 }
+
+// DragEnd completes fyne.Draggable. Without it the driver never recognises the
+// scroll as draggable and Dragged is never called, so middle-button panning
+// only works because this method exists.
+func (s *ObservableScroll) DragEnd() {
+	s.panning = false
+}
+
+var _ fyne.Draggable = (*ObservableScroll)(nil)

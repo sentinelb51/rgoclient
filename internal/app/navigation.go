@@ -186,8 +186,13 @@ func (a *App) createChannelWidget(channelID string) *ui.ChannelWidget {
 	return w
 }
 
-// selectServer switches to a server and selects its first channel.
+// selectServer switches to a server and selects its first channel. Re-clicking
+// the current server is a no-op (it would otherwise rebuild both sidebars and
+// yank the view to the first channel).
 func (a *App) selectServer(serverID string) {
+	if a.currentServerID == serverID {
+		return
+	}
 	a.currentServerID = serverID
 	server := a.currentServer()
 	if server == nil {
@@ -231,6 +236,11 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	a.syncChannelList()
+
+	// Focus the composer so the user can type straight away.
+	if a.input != nil {
+		a.window.Canvas().Focus(a.input)
+	}
 
 	if cached := a.messageCache.Get(channelID); len(cached) > 0 {
 		a.displayMessages(cached)

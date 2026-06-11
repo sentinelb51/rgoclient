@@ -115,7 +115,9 @@ internal/
    memory. Members are resolved lazily per author (see `ensureAuthor`).
 4. `selectChannel` → show cached messages, else `loadChannelMessages` (uses
    `IncludeUsers: true`, so its page populates State's users + members); ack unread.
-   `displayMessages` mounts only the newest `renderedCap` messages, batched; each
+   `displayMessages` mounts only the newest `initialMountCount` messages (~2-3
+   screenfuls; mounting more is churn the renderer cache holds for up to a
+   minute, which is what made rapid channel switching ratchet memory); each
    run bumps `App.renderGen` so a superseded render aborts (channel IDs alone
    can't tell fast A→B→A switches apart), and sets `App.rendering`, which holds
    off live appends and re-mounts until the final pass (which then catches up via

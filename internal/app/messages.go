@@ -23,10 +23,17 @@ import (
 
 const (
 	messageBatchSize  = 100 // messages rendered per UI-thread batch
-	renderedCap       = 200 // max message widgets kept mounted at once
+	renderedCap       = 200 // max message widgets kept mounted by live appends
 	historyPageSize   = 50  // older messages fetched per scroll-up
 	initialPageSize   = 30  // messages fetched when first opening a channel
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
+
+	// initialMountCount is how many messages a channel switch mounts. Far fewer
+	// than the cache holds: only ~20 fit on screen, scrollback re-mounts the
+	// rest from cache instantly, and every mounted widget is real work — rapid
+	// channel switching churns widgets the renderer cache then holds onto for
+	// up to a minute, so this directly bounds how fast memory can ratchet up.
+	initialMountCount = 50
 
 	// mountedCap bounds the widget window during scrollback: prepends past it
 	// trim widgets off the bottom (and vice versa), so scrolling through any
@@ -206,19 +213,19 @@ func (a *App) loadChannelMessages(channelID string) {
 }
 
 // displayMessages renders messages (oldest first) in batches to keep the UI
-// responsive, scrolling to the bottom when done. Only the newest renderedCap
-// messages are mounted; older cached ones are re-mounted on scrollback by
-// loadMoreHistory's cache tier. Each call bumps renderGen so the batches of a
-// superseded render abort, even when the user switches away and back to the
-// same channel before it finishes.
+// responsive, scrolling to the bottom when done. Only the newest
+// initialMountCount messages are mounted; older cached ones are re-mounted on
+// scrollback by loadMoreHistory's cache tier. Each call bumps renderGen so the
+// batches of a superseded render abort, even when the user switches away and
+// back to the same channel before it finishes.
 func (a *App) displayMessages(messages []*revoltgo.Message) {
 	a.renderGen++
 	gen := a.renderGen
 	a.rendering = true
 	a.messageList.Objects = nil
 
-	if len(messages) > renderedCap {
-		messages = messages[len(messages)-renderedCap:]
+	if len(messages) > initialMountCount {
+		messages = messages[len(messages)-initialMountCount:]
 	}
 
 	go func() {

@@ -39,6 +39,10 @@ func (b *tapBase) TappedSecondary(e *fyne.PointEvent) {
 
 func (b *tapBase) MouseMoved(*desktop.MouseEvent) {}
 
+// Cursor shows the pointer cursor over every tappable widget, so clickable
+// elements read as clickable.
+func (b *tapBase) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
 // TappableContainer wraps content, highlighting a background on hover and
 // invoking onTap when clicked.
 type TappableContainer struct {

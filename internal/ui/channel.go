@@ -116,6 +116,9 @@ func (w *ChannelWidget) Tapped(*fyne.PointEvent) {
 	}
 }
 
+// Cursor shows the pointer cursor, marking the row as clickable.
+func (w *ChannelWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
 func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
 	if !w.selected {
 		w.background.FillColor = theme.Colors.ChannelHoverBackground
@@ -220,6 +223,9 @@ func (w *CategoryWidget) Tapped(*fyne.PointEvent) {
 		w.onToggle(w.collapsed)
 	}
 }
+
+// Cursor shows the pointer cursor, marking the header as clickable.
+func (w *CategoryWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
 
 func (w *CategoryWidget) MouseIn(*desktop.MouseEvent) {
 	w.background.FillColor = theme.Colors.ChannelHoverBackground

@@ -51,8 +51,12 @@ func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
 	return w
 }
 
-// SetState updates the selection and unread states together.
+// SetState updates the selection and unread states together. Unchanged state
+// is a no-op so sidebar-wide syncs only repaint the rows that actually changed.
 func (w *ChannelWidget) SetState(selected, unread bool) {
+	if w.selected == selected && w.unread == unread {
+		return
+	}
 	w.selected = selected
 	w.unread = unread
 	w.refreshAppearance()

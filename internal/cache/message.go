@@ -53,21 +53,67 @@ func (c *MessageCache) Get(channelID string) []*revoltgo.Message {
 	return c.byChannel[channelID]
 }
 
-// Find returns the cached message with the given ID, or nil. Message IDs are
-// ULIDs, whose lexical order is chronological — the same order the cache keeps
-// per channel — so the lookup is a binary search rather than a linear scan.
+// CompareMessageID orders a message against an ID. Message IDs are ULIDs,
+// whose lexical order is chronological — the same order the cache keeps per
+// channel — so it backs the binary searches here and in the app's message
+// mounting.
+func CompareMessageID(m *revoltgo.Message, id string) int {
+	return strings.Compare(m.ID, id)
+}
+
+// Find returns the cached message with the given ID, or nil.
 func (c *MessageCache) Find(channelID, messageID string) *revoltgo.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
 	messages := c.byChannel[channelID]
-	i, ok := slices.BinarySearchFunc(messages, messageID, func(m *revoltgo.Message, id string) int {
-		return strings.Compare(m.ID, id)
-	})
+	i, ok := slices.BinarySearchFunc(messages, messageID, CompareMessageID)
 	if !ok {
 		return nil
 	}
 	return messages[i]
+}
+
+// Remove deletes a message from a channel's cache, reporting whether it was
+// present.
+func (c *MessageCache) Remove(channelID, messageID string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	messages := c.byChannel[channelID]
+	i, ok := slices.BinarySearchFunc(messages, messageID, CompareMessageID)
+	if !ok {
+		return false
+	}
+	c.byChannel[channelID] = append(messages[:i], messages[i+1:]...)
+	return true
+}
+
+// Replace swaps the cached message sharing updated's ID for updated, reporting
+// whether it was present. Cached messages are treated as immutable — the UI
+// thread reads them without holding the cache lock — so edits are applied to a
+// copy that replaces the original rather than mutated in place.
+func (c *MessageCache) Replace(channelID string, updated *revoltgo.Message) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	messages := c.byChannel[channelID]
+	i, ok := slices.BinarySearchFunc(messages, updated.ID, CompareMessageID)
+	if !ok {
+		return false
+	}
+	messages[i] = updated
+	return true
+}
+
+// Clear drops every cached channel, used when a session ends so the next login
+// (possibly another account) starts clean.
+func (c *MessageCache) Clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.byChannel = make(map[string][]*revoltgo.Message)
+	c.depleted = make(map[string]bool)
+	c.recency = newLRUKeys()
 }
 
 // Set replaces a channel's messages with an API page (newest first) and returns

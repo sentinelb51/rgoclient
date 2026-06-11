@@ -105,6 +105,57 @@ func TestSetDoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestFindRemoveReplace(t *testing.T) {
+	c := NewMessageCache(10, 5)
+	c.Set("ch", page("d", "c", "b", "a"))
+
+	if got := c.Find("ch", "c"); got == nil || got.ID != "c" {
+		t.Fatalf("Find(c) = %v, want c", got)
+	}
+	if got := c.Find("ch", "x"); got != nil {
+		t.Fatalf("Find(x) = %v, want nil", got.ID)
+	}
+	if got := c.Find("other", "c"); got != nil {
+		t.Fatalf("Find in unknown channel = %v, want nil", got.ID)
+	}
+
+	if !c.Replace("ch", &revoltgo.Message{ID: "c", Content: "edited"}) {
+		t.Fatal("Replace(c) = false, want true")
+	}
+	if got := c.Find("ch", "c"); got == nil || got.Content != "edited" {
+		t.Fatalf("Find after Replace = %v, want edited content", got)
+	}
+	if c.Replace("ch", &revoltgo.Message{ID: "x"}) {
+		t.Fatal("Replace of uncached message should report false")
+	}
+
+	if !c.Remove("ch", "b") {
+		t.Fatal("Remove(b) = false, want true")
+	}
+	assertIDs(t, c.Get("ch"), "a", "c", "d")
+	if c.Remove("ch", "b") {
+		t.Fatal("second Remove(b) should report false")
+	}
+}
+
+func TestClear(t *testing.T) {
+	c := NewMessageCache(10, 5)
+	c.Set("ch", page("a"))
+	c.SetDepleted("ch", true)
+
+	c.Clear()
+	if c.Get("ch") != nil {
+		t.Fatal("Get after Clear should be nil")
+	}
+	if c.IsDepleted("ch") {
+		t.Fatal("depleted flag should not survive Clear")
+	}
+
+	// The cache must stay usable after Clear.
+	c.Set("ch", page("b"))
+	assertIDs(t, c.Get("ch"), "b")
+}
+
 func TestEvictionUnderManyChannels(t *testing.T) {
 	c := NewMessageCache(5, 3)
 	for i := range 10 {

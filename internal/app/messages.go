@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/cache"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -26,6 +27,15 @@ const (
 	historyPageSize   = 50  // older messages fetched per scroll-up
 	initialPageSize   = 30  // messages fetched when first opening a channel
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
+
+	// mountedCap bounds the widget window during scrollback: prepends past it
+	// trim widgets off the bottom (and vice versa), so scrolling through any
+	// amount of history keeps a constant number of widgets mounted.
+	mountedCap = renderedCap + historyPageSize
+
+	// remountThreshold is how close to the bottom (px) the view must be before
+	// trimmed-off newer messages are re-mounted from the cache.
+	remountThreshold = 200
 
 	messageGroupWindow = 7 * time.Minute // max gap for a message to group under the previous
 )
@@ -83,6 +93,10 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.messageScroll.OnScroll = func(pos fyne.Position) {
 		if pos.Y <= 0 {
 			a.loadMoreHistory()
+			return
+		}
+		if a.messageList.MinSize().Height-a.messageScroll.Size().Height-pos.Y <= remountThreshold {
+			a.mountNewerFromCache()
 		}
 	}
 	a.clearMessages()
@@ -118,6 +132,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 // showStatus replaces the message list with a single centered line.
 func (a *App) showStatus(text string) {
 	a.renderGen++
+	a.rendering = false
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
 	height := float32(400)
@@ -142,6 +157,7 @@ func (a *App) showStatus(text string) {
 // clearMessages empties the message list.
 func (a *App) clearMessages() {
 	a.renderGen++
+	a.rendering = false
 	a.messageList.Objects = nil
 	a.messageList.Refresh()
 	a.scrollToBottom()
@@ -198,6 +214,7 @@ func (a *App) loadChannelMessages(channelID string) {
 func (a *App) displayMessages(messages []*revoltgo.Message) {
 	a.renderGen++
 	gen := a.renderGen
+	a.rendering = true
 	a.messageList.Objects = nil
 
 	if len(messages) > renderedCap {
@@ -233,6 +250,10 @@ func (a *App) displayMessages(messages []*revoltgo.Message) {
 
 		a.doOnUI(func() {
 			if a.renderGen == gen {
+				a.rendering = false
+				// Messages that arrived mid-render were cached but not mounted
+				// (appendMessage holds off while rendering); catch up now.
+				a.mountNewerFromCache()
 				a.scrollToBottom()
 			}
 		}, false)
@@ -243,7 +264,22 @@ func (a *App) displayMessages(messages []*revoltgo.Message) {
 // over the render cap and keeping the scroll position stable. prev is the
 // message's predecessor in its channel, captured when the message was cached.
 func (a *App) appendMessage(message, prev *revoltgo.Message) {
-	if a.currentChannelID == "" {
+	if a.currentChannelID == "" || a.rendering {
+		return // mid-render arrivals are cached; the render's final pass mounts them
+	}
+
+	// A status line ("No messages in this channel") may be showing; the first
+	// real message replaces it.
+	if len(a.messageList.Objects) == 1 && a.mountedMessage(0) == nil {
+		a.messageList.Objects = nil
+	}
+
+	// When scrollback has trimmed the newest widgets, the view is detached from
+	// the live tail: don't mount (the predecessor isn't on screen, so the row
+	// would render against the wrong neighbour); the message is cached and
+	// mounts via mountNewerFromCache on the way back down.
+	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	if bottom != nil && prev != nil && bottom.ID != prev.ID {
 		return
 	}
 
@@ -262,15 +298,8 @@ func (a *App) appendMessage(message, prev *revoltgo.Message) {
 	}
 	a.messageList.Add(a.newMessageWidget(prev, message, nil))
 
-	if len(a.messageList.Objects) > renderedCap {
-		var removedHeight float32
-		if !atBottom {
-			removedHeight = a.messageList.Objects[0].MinSize().Height
-		}
-		a.messageList.Objects = a.messageList.Objects[1:]
-		if !atBottom {
-			a.messageScroll.Offset.Y = max(a.messageScroll.Offset.Y-removedHeight, 0)
-		}
+	if over := len(a.messageList.Objects) - renderedCap; over > 0 {
+		a.trimMountedTop(over, atBottom)
 	}
 
 	a.messageList.Refresh()
@@ -278,6 +307,22 @@ func (a *App) appendMessage(message, prev *revoltgo.Message) {
 		a.scrollToBottom()
 	} else {
 		a.messageScroll.Refresh()
+	}
+}
+
+// trimMountedTop unmounts the oldest n widgets, keeping the scroll position
+// stable unless the view is pinned to the bottom anyway (where the caller's
+// scrollToBottom makes the adjustment moot).
+func (a *App) trimMountedTop(n int, atBottom bool) {
+	var removed float32
+	if !atBottom {
+		for _, obj := range a.messageList.Objects[:n] {
+			removed += obj.MinSize().Height
+		}
+	}
+	a.messageList.Objects = a.messageList.Objects[n:]
+	if !atBottom {
+		a.messageScroll.Offset.Y = max(a.messageScroll.Offset.Y-removed, 0)
 	}
 }
 
@@ -297,7 +342,7 @@ func (a *App) loadMoreHistory() {
 	}
 
 	cached := a.messageCache.Get(channelID)
-	if i := slices.IndexFunc(cached, func(m *revoltgo.Message) bool { return m.ID == top.ID }); i > 0 {
+	if i, ok := slices.BinarySearchFunc(cached, top.ID, cache.CompareMessageID); ok && i > 0 {
 		a.prependMessages(cached[max(0, i-historyPageSize):i])
 		return
 	}
@@ -375,6 +420,74 @@ func (a *App) prependMessages(older []*revoltgo.Message) {
 		a.messageScroll.Offset.Y += diff
 		a.messageScroll.Refresh()
 	}
+
+	// Bound the mounted window by trimming widgets far below the viewport; they
+	// re-mount via mountNewerFromCache on the way back down. Skipped mid-render
+	// (displayMessages' batches assume the list tail is theirs) and skipped when
+	// the would-be bottom row is no longer cached: the cache window ends at the
+	// live tail, so once scrollback runs past its cap the downward remount could
+	// not re-serve trimmed rows, and the window is allowed to grow instead.
+	if over := len(a.messageList.Objects) - mountedCap; over > 0 && !a.rendering {
+		objects := a.messageList.Objects
+		newBottom := a.mountedMessage(len(objects) - over - 1)
+		if newBottom != nil && a.messageCache.Find(a.currentChannelID, newBottom.ID) != nil {
+			a.messageList.Objects = objects[:len(objects)-over]
+			a.messageList.Refresh()
+		}
+	}
+}
+
+// mountNewerFromCache re-mounts cached messages below the bottom-most mounted
+// one — the downward counterpart of loadMoreHistory's cache tier. It never
+// needs the network: trimming only ever drops a channel's oldest messages, so
+// everything below the mounted window is always in the cache.
+func (a *App) mountNewerFromCache() {
+	if a.currentChannelID == "" || a.rendering {
+		return
+	}
+	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	if bottom == nil {
+		return
+	}
+
+	cached := a.messageCache.Get(a.currentChannelID)
+	i, ok := slices.BinarySearchFunc(cached, bottom.ID, cache.CompareMessageID)
+	if !ok || i+1 == len(cached) {
+		return // bottom is the live tail (or no longer cached)
+	}
+	a.appendMessages(cached[i+1:min(i+1+historyPageSize, len(cached))], bottom)
+}
+
+// appendMessages mounts newer messages below the current view, preserving the
+// scroll position and trimming the top past mountedCap.
+func (a *App) appendMessages(page []*revoltgo.Message, bottom *revoltgo.Message) {
+	if len(page) == 0 {
+		return
+	}
+
+	// Tighten the old bottom widget's margin when the first new message
+	// continues its group.
+	if n := len(a.messageList.Objects); n > 0 && continuesGroup(bottom, page[0]) {
+		if w, ok := a.messageList.Objects[n-1].(*ui.MessageWidget); ok {
+			w.SetFollowedByGroup(true)
+		}
+	}
+
+	prev := bottom
+	for i, msg := range page {
+		var next *revoltgo.Message
+		if i+1 < len(page) {
+			next = page[i+1]
+		}
+		a.messageList.Add(a.newMessageWidget(prev, msg, next))
+		prev = msg
+	}
+
+	if over := len(a.messageList.Objects) - mountedCap; over > 0 {
+		a.trimMountedTop(over, false)
+	}
+	a.messageList.Refresh()
+	a.messageScroll.Refresh()
 }
 
 // scrollToBottom scrolls the message view to the newest message.
@@ -382,6 +495,73 @@ func (a *App) scrollToBottom() {
 	if a.messageScroll != nil {
 		a.messageScroll.ScrollToBottom()
 	}
+}
+
+// jumpToLatest brings the view back to the newest message: a plain scroll when
+// the live tail is mounted, a re-render when scrollback has trimmed it away.
+// Used on send, mirroring Discord's jump-to-present behaviour.
+func (a *App) jumpToLatest() {
+	cached := a.messageCache.Get(a.currentChannelID)
+	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	if len(cached) == 0 || (bottom != nil && bottom.ID == cached[len(cached)-1].ID) {
+		a.scrollToBottom()
+		return
+	}
+	a.displayMessages(cached)
+}
+
+// messageWidgetIndex returns the index of the mounted widget rendering
+// messageID, or -1.
+func (a *App) messageWidgetIndex(messageID string) int {
+	for i, obj := range a.messageList.Objects {
+		if w, ok := obj.(*ui.MessageWidget); ok && w.Message().ID == messageID {
+			return i
+		}
+	}
+	return -1
+}
+
+// removeMessage unmounts a deleted message, re-evaluating its neighbours'
+// grouping (a continuation whose group head was deleted regains its header).
+// Call on the UI thread.
+func (a *App) removeMessage(channelID, messageID string) {
+	if channelID != a.currentChannelID {
+		return
+	}
+	i := a.messageWidgetIndex(messageID)
+	if i == -1 {
+		return
+	}
+	a.messageList.Objects = append(a.messageList.Objects[:i], a.messageList.Objects[i+1:]...)
+
+	prev, next := a.mountedMessage(i-1), a.mountedMessage(i)
+	if next != nil {
+		a.messageList.Objects[i] = a.newMessageWidget(prev, next, a.mountedMessage(i+1))
+	}
+	if i > 0 {
+		if w, ok := a.messageList.Objects[i-1].(*ui.MessageWidget); ok {
+			w.SetFollowedByGroup(continuesGroup(prev, next))
+		}
+	}
+	a.messageList.Refresh()
+}
+
+// refreshMessage rebuilds the widget of an edited message in place from its
+// updated cache entry. Call on the UI thread.
+func (a *App) refreshMessage(channelID, messageID string) {
+	if channelID != a.currentChannelID {
+		return
+	}
+	i := a.messageWidgetIndex(messageID)
+	if i == -1 {
+		return
+	}
+	message := a.messageCache.Find(channelID, messageID)
+	if message == nil {
+		return
+	}
+	a.messageList.Objects[i] = a.newMessageWidget(a.mountedMessage(i-1), message, a.mountedMessage(i+1))
+	a.messageList.Refresh()
 }
 
 // handleSubmit sends the composed message, its attachments, and its replies.
@@ -398,6 +578,7 @@ func (a *App) handleSubmit(text string) {
 	a.input.SetText("")
 	a.input.ClearAttachments()
 	a.input.ClearReplies()
+	a.jumpToLatest()
 
 	go func() {
 		send := revoltgo.MessageSend{

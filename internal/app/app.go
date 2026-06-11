@@ -62,6 +62,19 @@ type App struct {
 	// batched widget mounting of any superseded displayMessages run (channel IDs
 	// alone can't tell A→B→A switches apart). UI-thread only.
 	renderGen int
+
+	// rendering is true while displayMessages is mounting batches. Live appends
+	// and cache re-mounts hold off while it is set so they can't interleave with
+	// (and reorder) the batches; the render's final pass mounts anything that
+	// arrived meanwhile. UI-thread only.
+	rendering bool
+
+	// Read-ack coalescing for the open channel: bursts produce one MessageAck
+	// for the newest message per ackDelay instead of one request per message.
+	// UI-thread only.
+	ackTimer     *time.Timer
+	ackChannelID string
+	ackMessageID string
 }
 
 var _ ui.MessageActions = (*App)(nil)

@@ -53,8 +53,12 @@ func NewServerWidget(images *cache.ImageCache, server *revoltgo.Server, onTap fu
 	return w
 }
 
-// SetSelected updates the selection state and appearance.
+// SetSelected updates the selection state and appearance. Unchanged state is a
+// no-op so selection syncs only repaint the icons that actually changed.
 func (w *ServerWidget) SetSelected(selected bool) {
+	if w.selected == selected {
+		return
+	}
 	w.selected = selected
 	w.refreshAppearance()
 }

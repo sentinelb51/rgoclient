@@ -34,10 +34,16 @@ func (a *App) startWithLogin(email, password string) error {
 // through the UI thread — the only place that field is ever written (the other
 // writer is onError's teardown), keeping every UI-thread read race-free.
 func (a *App) openSession(session *revoltgo.Session) error {
-	a.doOnUI(func() { a.session = session }, true)
+	a.doOnUI(func() {
+		a.resetSessionState()
+		a.session = session
+	}, true)
 
 	revoltgo.AddHandler(session, a.onReady)
 	revoltgo.AddHandler(session, a.onMessage)
+	revoltgo.AddHandler(session, a.onMessageUpdate)
+	revoltgo.AddHandler(session, a.onMessageDelete)
+	revoltgo.AddHandler(session, a.onBulkMessageDelete)
 	revoltgo.AddHandler(session, a.onServerMemberJoin)
 	revoltgo.AddHandler(session, a.onServerMemberLeave)
 	revoltgo.AddHandler(session, a.onServerMemberUpdate)
@@ -48,4 +54,17 @@ func (a *App) openSession(session *revoltgo.Session) error {
 		return fmt.Errorf("open session: %w", err)
 	}
 	return nil
+}
+
+// resetSessionState clears the per-account caches and view state so a re-login
+// (possibly as another account) starts clean instead of carrying the previous
+// account's messages, unread marks, and author-fetch guards. Call on the UI
+// thread.
+func (a *App) resetSessionState() {
+	a.messageCache.Clear()
+	a.fetchedAuthors = make(map[string]bool)
+	a.unreadChannels = make(map[string]bool)
+	a.serverIDs = nil
+	a.currentServerID = ""
+	a.currentChannelID = ""
 }

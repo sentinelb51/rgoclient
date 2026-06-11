@@ -35,16 +35,22 @@ cmd/rgoclient/main.go        Entry point: Fyne app, theme, app.New(...).Run()
 internal/
   app/                       Controller; owns session + caches + window + UI refs
     app.go                   App struct, New, Run, lifecycle, doOnUI, MessageActions impl
-    session.go               startWithToken / startWithLogin + handler registration
+    session.go               startWithToken / startWithLogin + handler registration;
+                             resetSessionState clears per-account caches/state on (re)login
     events.go                Gateway lifecycle handler (onError) + handler-split doc
     events_ready.go          onReady + savePendingToken
-    events_message.go        onMessage
+    events_message.go        onMessage / onMessageUpdate / onMessageDelete /
+                             onBulkMessageDelete + scheduleAck (coalesced read-acks
+                             for the open channel, one MessageAck per ackDelay)
     events_members.go        onServerMemberJoin / Leave / Update → refresh member sidebar
     navigation.go            Server+channel sidebar + 4-column buildUI: build, refresh, select.
                              Server sidebar bookends the scrolling icons with fixed home
                              (selectHome, stub) and settings (openSettings, WIP window) buttons
     messages.go              Message area: build, load, display, send, history, viewer;
-                             continuesGroup/newMessageWidget (Discord-style author grouping)
+                             continuesGroup/newMessageWidget (Discord-style author grouping);
+                             windowed mounting (mountedCap) with up/down cache re-mount
+                             tiers; removeMessage/refreshMessage for live deletes/edits;
+                             jumpToLatest on send
     members.go               Member sidebar: build/refresh/group; ensureAuthor (lazy per-author
                              user+member fetch, fetchedAuthors guard); refreshAuthorMessages
                              (in-place per-author widget update, no full re-render)
@@ -55,7 +61,9 @@ internal/
                              (maxMemoryImages) + disk + async load
     message.go               MessageCache — per-channel, oldest→newest, capped per channel
                              (Set/Append/Prepend all trim), LRU channel eviction;
-                             Find = binary search by ID (ULIDs sort chronologically)
+                             Find/Remove/Replace = binary search by ID (ULIDs sort
+                             chronologically; CompareMessageID is shared with app);
+                             entries are immutable — edits Replace a copy; Clear on logout
     lru.go                   lruKeys — shared O(1) recency tracker (list + map) used by
                              both caches
   ui/
@@ -109,9 +117,17 @@ internal/
    `IncludeUsers: true`, so its page populates State's users + members); ack unread.
    `displayMessages` mounts only the newest `renderedCap` messages, batched; each
    run bumps `App.renderGen` so a superseded render aborts (channel IDs alone
-   can't tell fast A→B→A switches apart). Scrolling to the top (`loadMoreHistory`)
-   is two-tier: cached-but-unmounted messages prepend synchronously, then older
-   pages come from the network — both anchored on the oldest *mounted* message.
+   can't tell fast A→B→A switches apart), and sets `App.rendering`, which holds
+   off live appends and re-mounts until the final pass (which then catches up via
+   `mountNewerFromCache`) so they can't interleave with the batches. Scrolling to
+   the top (`loadMoreHistory`) is two-tier: cached-but-unmounted messages prepend
+   synchronously, then older pages come from the network — both anchored on the
+   oldest *mounted* message. The mounted window is bounded at `mountedCap`:
+   prepends past it trim widgets off the bottom (only while the new bottom is
+   still cached — past the cache cap the window grows instead, since the cache
+   ends at the live tail), and scrolling back down re-mounts them from cache
+   (`mountNewerFromCache`, never network). Sending jumps to the newest message
+   (`jumpToLatest`), re-rendering if scrollback trimmed the tail away.
    Message author name/avatar resolve from the server member (nickname, per-server
    avatar, role colour), falling back to the raw user. Consecutive messages from the
    same author within `messageGroupWindow` render grouped (`continuesGroup`): no
@@ -123,7 +139,13 @@ internal/
    so grouping survives bursts) → `ensureAuthor` (a gateway message carries only the
    author ID; fetch the user and, in a server, the member when missing from State,
    then update just that author's mounted widgets via `refreshAuthorMessages` and,
-   if a member was fetched, the sidebar) → append to open channel, else mark unread.
+   if a member was fetched, the sidebar) → append to open channel + coalesced read
+   ack (`scheduleAck`), else mark unread. If scrollback has detached the view from
+   the live tail, the append is skipped — the message mounts on the way back down.
+   `onMessageUpdate` applies the edit to a *copy* that replaces the cache entry
+   (entries are read by the UI without the cache lock, so they stay immutable) and
+   rebuilds the mounted widget; `onMessageDelete` / `onBulkMessageDelete` remove
+   from cache and unmount, re-evaluating neighbour grouping at the seam.
 6. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
    handlers); app handler refreshes the member sidebar when it's the open server.
    `Update` also calls `refreshAuthorMessages` so that author's mounted messages

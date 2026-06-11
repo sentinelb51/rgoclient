@@ -361,14 +361,12 @@ func (w *MessageWidget) MouseOut() {
 // fetched author renders identically whether it was known up front or filled in
 // later.
 func resolveAuthor(deps Deps, message *revoltgo.Message) (name string, nameColor color.Color, avatarID, avatarURL string) {
-	name = util.DisplayName(deps.Session, message)
+	author := util.MessageAuthor(deps.Session, message)
 	nameColor = theme.Colors.TextPrimary
-	if c, ok := util.MessageNameColor(deps.Session, message); ok {
-		nameColor = c
+	if author.Color != nil {
+		nameColor = author.Color
 	}
-	avatarURL = util.DisplayAvatarURL(deps.Session, message)
-	avatarID = util.IDFromAttachmentURL(avatarURL)
-	return
+	return author.Name, nameColor, util.IDFromAttachmentURL(author.AvatarURL), author.AvatarURL
 }
 
 // verticalPad returns a message's top or bottom margin: tight when it abuts a
@@ -637,14 +635,10 @@ func resolveReply(deps Deps, channelID, messageID string) (author, content, avat
 		return "", "Unknown message reference", "", nil
 	}
 
-	author = util.Truncate(util.DisplayName(deps.Session, msg), maxReplyUsernameLength)
-
-	avatarURL = util.DisplayAvatarURL(deps.Session, msg)
-	if c, ok := util.MessageNameColor(deps.Session, msg); ok {
-		accent = c
-	}
+	a := util.MessageAuthor(deps.Session, msg)
+	author = util.Truncate(a.Name, maxReplyUsernameLength)
 	content = util.Truncate(msg.Content, maxReplyPreviewLength)
-	return author, content, avatarURL, accent
+	return author, content, a.AvatarURL, a.Color
 }
 
 // circularAvatar builds a circular avatar of the given size, loading the image

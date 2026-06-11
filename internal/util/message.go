@@ -22,66 +22,48 @@ func messageMember(session *revoltgo.Session, message *revoltgo.Message) *revolt
 	return session.State.Member(*channel.Server, message.Author)
 }
 
-// DisplayName returns the name to show for a message's author, preferring the
-// per-server member (nickname) and falling back to the raw user.
-func DisplayName(session *revoltgo.Session, message *revoltgo.Message) string {
+// Author bundles the display fields for a message's author.
+type Author struct {
+	Name      string
+	AvatarURL string
+	Color     color.Color // role colour of the most-senior coloured role; nil when none applies
+}
+
+// MessageAuthor resolves the name, avatar, and role colour for a message's
+// author in one pass over State (channel → member → user), preferring the
+// per-server member (nickname, server avatar, role colour) and falling back to
+// the raw user. The Color is nil when there is no member, no coloured role, or
+// the colour isn't a plain hex value (gradients and CSS-named colours are not
+// parsed); callers should then use their default.
+func MessageAuthor(session *revoltgo.Session, message *revoltgo.Message) Author {
 	switch {
 	case session == nil:
-		return "Unknown user (nil session)"
+		return Author{Name: "Unknown user (nil session)"}
 	case message.System != nil:
-		return "System"
+		return Author{Name: "System"}
 	case message.Webhook != nil:
-		return message.Webhook.Name
+		return Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL("256")}
 	}
 
 	if member := messageMember(session, message); member != nil {
-		return MemberName(session, member)
+		author := Author{
+			Name:      MemberName(session, member),
+			AvatarURL: MemberAvatarURL(session, member),
+		}
+		if server := session.State.Server(member.ID.Server); server != nil {
+			if c, ok := roleColor(server, member.Roles); ok {
+				author.Color = c
+			}
+		}
+		return author
 	}
 
 	if message.Author != "" {
 		if user := session.State.User(message.Author); user != nil {
-			return userDisplayName(user)
+			return Author{Name: userDisplayName(user), AvatarURL: user.AvatarURL("256")}
 		}
 	}
-	return "Message author: " + message.Author
-}
-
-// DisplayAvatarURL returns the avatar URL for a message's author, preferring the
-// per-server member avatar, or "" if none.
-func DisplayAvatarURL(session *revoltgo.Session, message *revoltgo.Message) string {
-	switch {
-	case session == nil, message.System != nil:
-		return ""
-	case message.Webhook != nil:
-		return message.Webhook.AvatarURL("256")
-	}
-
-	if member := messageMember(session, message); member != nil {
-		return MemberAvatarURL(session, member)
-	}
-
-	if message.Author != "" {
-		if user := session.State.User(message.Author); user != nil {
-			return user.AvatarURL("256")
-		}
-	}
-	return ""
-}
-
-// MessageNameColor returns the role color to draw a message author's name in.
-// It picks the member's most-senior coloured role; ok is false when there's no
-// member, no coloured role, or the colour isn't a plain hex value (gradients and
-// CSS-named colours are not parsed), and the caller should use the default.
-func MessageNameColor(session *revoltgo.Session, message *revoltgo.Message) (color.Color, bool) {
-	member := messageMember(session, message)
-	if member == nil {
-		return nil, false
-	}
-	server := session.State.Server(member.ID.Server)
-	if server == nil {
-		return nil, false
-	}
-	return roleColor(server, member.Roles)
+	return Author{Name: "Message author: " + message.Author}
 }
 
 // roleColor returns the colour of the member's most-senior coloured role (lowest

@@ -143,6 +143,15 @@ func (a *App) showMainUI() {
 	})
 }
 
+// stateChannel returns a channel from State, or nil when logged out or unknown.
+// It centralises the session nil-check for the channel helpers below.
+func (a *App) stateChannel(channelID string) *revoltgo.Channel {
+	if a.session == nil || channelID == "" {
+		return nil
+	}
+	return a.session.State.Channel(channelID)
+}
+
 // currentServer returns the selected server, or nil.
 func (a *App) currentServer() *revoltgo.Server {
 	if a.session == nil || a.currentServerID == "" {
@@ -153,18 +162,12 @@ func (a *App) currentServer() *revoltgo.Server {
 
 // currentChannel returns the selected channel, or nil.
 func (a *App) currentChannel() *revoltgo.Channel {
-	if a.session == nil || a.currentChannelID == "" {
-		return nil
-	}
-	return a.session.State.Channel(a.currentChannelID)
+	return a.stateChannel(a.currentChannelID)
 }
 
 // channelServerID returns the server a channel belongs to, or "" for DMs/groups.
 func (a *App) channelServerID(channelID string) string {
-	if a.session == nil {
-		return ""
-	}
-	if channel := a.session.State.Channel(channelID); channel != nil && channel.Server != nil {
+	if channel := a.stateChannel(channelID); channel != nil && channel.Server != nil {
 		return *channel.Server
 	}
 	return ""
@@ -172,12 +175,7 @@ func (a *App) channelServerID(channelID string) string {
 
 // ResolveMessage looks a message up in the local cache.
 func (a *App) ResolveMessage(channelID, messageID string) *revoltgo.Message {
-	for _, m := range a.messageCache.Get(channelID) {
-		if m.ID == messageID {
-			return m
-		}
-	}
-	return nil
+	return a.messageCache.Find(channelID, messageID)
 }
 
 // OnReply focuses the composer with the given message queued as a reply.

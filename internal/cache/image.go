@@ -2,12 +2,12 @@ package cache
 
 import (
 	"image"
+	"image/draw"
 	"image/png"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 	"time"
 
@@ -40,7 +40,7 @@ type ImageCache struct {
 	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
-	recency  []string               // decoded-image ids, least-recently-used first
+	recency  *lruKeys               // decoded-image ids by recency
 	dir      string
 	client   *http.Client
 	ticker   *time.Ticker
@@ -64,6 +64,7 @@ func NewImageCache() *ImageCache {
 		circular: make(map[string]image.Image),
 		pending:  make(map[string]image.Image),
 		inflight: make(map[string]*imageLoad),
+		recency:  newLRUKeys(),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
 		stop:     make(chan struct{}),
@@ -155,14 +156,9 @@ func (c *ImageCache) writeToDisk(id string, img image.Image) {
 // Eviction never touches pending, so queued disk writes still happen, and Get
 // reloads evicted images from disk. Callers must hold the write lock.
 func (c *ImageCache) touchLocked(id string) {
-	if i := slices.Index(c.recency, id); i != -1 {
-		c.recency = append(c.recency[:i], c.recency[i+1:]...)
-	}
-	c.recency = append(c.recency, id)
-
-	for len(c.recency) > maxMemoryImages {
-		evicted := c.recency[0]
-		c.recency = c.recency[1:]
+	c.recency.Touch(id)
+	for c.recency.Len() > maxMemoryImages {
+		evicted := c.recency.EvictOldest()
 		delete(c.memory, evicted)
 		delete(c.circular, evicted)
 	}
@@ -381,7 +377,7 @@ func (c *ImageCache) purge() {
 	c.memory = make(map[string]image.Image)
 	c.circular = make(map[string]image.Image)
 	c.pending = make(map[string]image.Image)
-	c.recency = nil
+	c.recency = newLRUKeys()
 	c.mu.Unlock()
 
 	entries, err := os.ReadDir(c.dir)
@@ -396,21 +392,30 @@ func (c *ImageCache) purge() {
 	}
 }
 
-// circleClip returns a square, circular crop of src.
+// circleClip returns a square, circular crop of src, centred on the image.
 func circleClip(src image.Image) image.Image {
 	bounds := src.Bounds()
 	size := min(bounds.Dx(), bounds.Dy())
+
+	// Flatten the crop region once so the pixel loop below copies raw bytes
+	// instead of paying an image.Image interface call plus a colour conversion
+	// for every pixel.
+	flat := image.NewRGBA(image.Rect(0, 0, size, size))
+	origin := image.Pt(bounds.Min.X+(bounds.Dx()-size)/2, bounds.Min.Y+(bounds.Dy()-size)/2)
+	draw.Draw(flat, flat.Bounds(), src, origin, draw.Src)
 
 	dst := image.NewRGBA(image.Rect(0, 0, size, size))
 	center := float64(size) / 2
 	radiusSq := center * center
 
 	for y := 0; y < size; y++ {
+		dy := float64(y) - center + 0.5
+		srcRow := flat.Pix[y*flat.Stride:]
+		dstRow := dst.Pix[y*dst.Stride:]
 		for x := 0; x < size; x++ {
 			dx := float64(x) - center + 0.5
-			dy := float64(y) - center + 0.5
 			if dx*dx+dy*dy <= radiusSq {
-				dst.Set(x, y, src.At(bounds.Min.X+x, bounds.Min.Y+y))
+				copy(dstRow[x*4:x*4+4], srcRow[x*4:x*4+4])
 			}
 		}
 	}

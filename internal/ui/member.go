@@ -6,7 +6,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -16,7 +15,6 @@ import (
 // profile). Offline members (online=false) get dimmed name text.
 func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne.CanvasObject {
 	avatarURL := util.MemberAvatarURL(deps.Session, member)
-	avatarID := util.IDFromAttachmentURL(avatarURL)
 	name := util.MemberName(deps.Session, member)
 
 	textColor := theme.Colors.TextPrimary
@@ -26,9 +24,10 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 	label := canvas.NewText(name, textColor)
 	label.TextSize = theme.Sizes.MessageTimestampSize + 1
 
+	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
 	row := container.NewHBox(
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(memberAvatar(deps.Images, avatarID, avatarURL)),
+		container.NewCenter(circularAvatar(deps.Images, avatarURL, avatarSize)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 		container.NewCenter(label),
 	)
@@ -40,19 +39,6 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 			deps.Actions.OnAvatarTapped(userID)
 		}
 	})
-}
-
-// memberAvatar builds a small circular avatar for the member list, loading the
-// image asynchronously over a circular placeholder.
-func memberAvatar(images *cache.ImageCache, avatarID, avatarURL string) fyne.CanvasObject {
-	size := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
-	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
-	content := container.NewGridWrap(size, placeholder)
-
-	if avatarURL != "" && avatarID != "" {
-		images.LoadIntoContainer(avatarID, avatarURL, size, content, true, nil)
-	}
-	return content
 }
 
 // NewMemberSection is a small, bold section header (e.g. "Online — 5") used to

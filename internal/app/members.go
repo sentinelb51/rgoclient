@@ -3,7 +3,7 @@ package app
 import (
 	"fmt"
 	"log"
-	"sort"
+	"slices"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -31,7 +31,6 @@ import (
 //
 // Call on the UI thread: it reads State and touches fetchedAuthors without locking.
 func (a *App) ensureAuthor(serverID, userID string) {
-
 	if a.session == nil || userID == "" {
 		return
 	}
@@ -54,13 +53,11 @@ func (a *App) ensureAuthor(serverID, userID string) {
 			}
 		}
 
-		// If user fetch was not OK, member fetch will likely fail
-		if ok {
-			if needMember {
-				if _, err := session.ServerMember(serverID, userID); err != nil {
-					log.Printf("fetch member %s in server %s: %v", userID, serverID, err)
-					ok = false
-				}
+		// If the user fetch failed, the member fetch would likely fail too.
+		if ok && needMember {
+			if _, err := session.ServerMember(serverID, userID); err != nil {
+				log.Printf("fetch member %s in server %s: %v", userID, serverID, err)
+				ok = false
 			}
 		}
 
@@ -132,13 +129,20 @@ func (a *App) addMemberSection(title string, members []*revoltgo.ServerMember, o
 		return
 	}
 
-	sort.Slice(members, func(i, j int) bool {
-		return strings.ToLower(util.MemberName(a.session, members[i])) <
-			strings.ToLower(util.MemberName(a.session, members[j]))
-	})
+	// Sort on a precomputed key: resolving the display name inside the
+	// comparator would re-hit State O(n log n) times on large servers.
+	type entry struct {
+		member *revoltgo.ServerMember
+		key    string
+	}
+	entries := make([]entry, len(members))
+	for i, member := range members {
+		entries[i] = entry{member, strings.ToLower(util.MemberName(a.session, member))}
+	}
+	slices.SortFunc(entries, func(x, y entry) int { return strings.Compare(x.key, y.key) })
 
 	a.memberList.Add(ui.NewMemberSection(fmt.Sprintf("%s — %d", title, len(members))))
-	for _, member := range members {
-		a.memberList.Add(ui.NewMemberWidget(deps, member, online))
+	for _, e := range entries {
+		a.memberList.Add(ui.NewMemberWidget(deps, e.member, online))
 	}
 }

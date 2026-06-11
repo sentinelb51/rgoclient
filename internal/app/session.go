@@ -11,16 +11,22 @@ func (a *App) startWithToken(token string) error {
 	return a.openSession(revoltgo.New(token))
 }
 
-// startWithLogin opens a session using credentials and returns the new token.
-func (a *App) startWithLogin(email, password string) (string, error) {
+// startWithLogin opens a session using credentials. The new token is stashed
+// in pendingToken before the gateway opens — onReady persists it, and Ready
+// can arrive before the login goroutine would otherwise get back onto the UI
+// thread to record it.
+func (a *App) startWithLogin(email, password string) error {
 	session, resp, err := revoltgo.NewWithLogin(revoltgo.LoginParams{Email: email, Password: password})
 	if err != nil {
-		return "", fmt.Errorf("create session: %w", err)
+		return fmt.Errorf("create session: %w", err)
 	}
+
+	a.doOnUI(func() { a.pendingToken = resp.Token }, true)
 	if err := a.openSession(session); err != nil {
-		return "", err
+		a.doOnUI(func() { a.pendingToken = "" }, true)
+		return err
 	}
-	return resp.Token, nil
+	return nil
 }
 
 // openSession registers handlers and opens the websocket for session.

@@ -88,9 +88,22 @@ func NewMessageInput(deps Deps) *MessageInput {
 func (m *MessageInput) MinSize() fyne.Size {
 	size := m.Entry.MinSize()
 	lines := min(max(strings.Count(m.Text, "\n")+1, 1), maxInputLines)
-	lineHeight := fyne.MeasureText("M", fynetheme.TextSize(), fyne.TextStyle{}).Height
-	size.Height = lineHeight*float32(lines) + fynetheme.InnerPadding()*2
+	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2
 	return size
+}
+
+// lineHeights memoises the measured height of one text line per size: MinSize
+// runs on every layout pass, so re-measuring there would be wasted work. Only
+// touched on the UI thread.
+var lineHeights = map[float32]float32{}
+
+func lineHeight(textSize float32) float32 {
+	h, ok := lineHeights[textSize]
+	if !ok {
+		h = fyne.MeasureText("M", textSize, fyne.TextStyle{}).Height
+		lineHeights[textSize] = h
+	}
+	return h
 }
 
 func (m *MessageInput) FocusLost() {

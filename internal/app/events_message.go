@@ -11,11 +11,10 @@ func (a *App) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 	prev := a.messageCache.Append(event.Channel, &event.Message)
 
 	a.doOnUI(func() {
-
-		// If message was sent by a user, resolve them
+		// Only real users need resolving; system and webhook messages render
+		// without an author lookup.
 		if event.System == nil && event.Webhook == nil {
 			a.ensureAuthor(a.channelServerID(event.Channel), event.Author)
-
 		}
 
 		if event.Channel == a.currentChannelID {

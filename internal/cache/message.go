@@ -2,6 +2,7 @@ package cache
 
 import (
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/sentinelb51/revoltgo"
@@ -17,7 +18,7 @@ type MessageCache struct {
 	mu          sync.RWMutex
 	byChannel   map[string][]*revoltgo.Message
 	depleted    map[string]bool // channels whose full history has been loaded
-	recency     []string        // channel IDs, least-recently-used first
+	recency     *lruKeys        // channel IDs by recency
 	maxMessages int             // cap per channel
 	maxChannels int             // cap on cached channels
 }
@@ -28,6 +29,7 @@ func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 	return &MessageCache{
 		byChannel:   make(map[string][]*revoltgo.Message),
 		depleted:    make(map[string]bool),
+		recency:     newLRUKeys(),
 		maxMessages: maxMessages,
 		maxChannels: maxChannels,
 	}
@@ -36,14 +38,9 @@ func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 // touch marks a channel as most recently used, evicting the least recently used
 // channel if the cache is over capacity. Callers must hold the write lock.
 func (c *MessageCache) touch(channelID string) {
-	if i := slices.Index(c.recency, channelID); i != -1 {
-		c.recency = append(c.recency[:i], c.recency[i+1:]...)
-	}
-	c.recency = append(c.recency, channelID)
-
-	for len(c.recency) > c.maxChannels {
-		evicted := c.recency[0]
-		c.recency = c.recency[1:]
+	c.recency.Touch(channelID)
+	for c.recency.Len() > c.maxChannels {
+		evicted := c.recency.EvictOldest()
 		delete(c.byChannel, evicted)
 		delete(c.depleted, evicted)
 	}
@@ -54,6 +51,23 @@ func (c *MessageCache) Get(channelID string) []*revoltgo.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.byChannel[channelID]
+}
+
+// Find returns the cached message with the given ID, or nil. Message IDs are
+// ULIDs, whose lexical order is chronological — the same order the cache keeps
+// per channel — so the lookup is a binary search rather than a linear scan.
+func (c *MessageCache) Find(channelID, messageID string) *revoltgo.Message {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	messages := c.byChannel[channelID]
+	i, ok := slices.BinarySearchFunc(messages, messageID, func(m *revoltgo.Message, id string) int {
+		return strings.Compare(m.ID, id)
+	})
+	if !ok {
+		return nil
+	}
+	return messages[i]
 }
 
 // Set replaces a channel's messages with an API page (newest first) and returns

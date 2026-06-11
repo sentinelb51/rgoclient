@@ -55,21 +55,22 @@ func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 	return container.NewVBox(widget.NewLabel("Recent Sessions"), cards)
 }
 
-// loginWithToken logs in using a saved session's token.
+// loginWithToken logs in using a saved session's token. On success the window
+// stays on the "Logging in..." screen until onReady swaps in the main UI —
+// building it here too would construct the whole layout twice.
 func (a *App) loginWithToken(session SavedSession) {
 	a.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
 
 	go func() {
 		err := a.startWithToken(session.Token)
+		if err == nil {
+			return
+		}
 		a.doOnUI(func() {
-			if err != nil {
-				log.Printf("token login: %v", err)
-				_ = RemoveSession(session.UserID)
-				dialog.ShowError(fmt.Errorf("session expired, please login again"), a.window)
-				a.showLogin()
-				return
-			}
-			a.showMainUI()
+			log.Printf("token login: %v", err)
+			_ = RemoveSession(session.UserID)
+			dialog.ShowError(fmt.Errorf("session expired, please login again"), a.window)
+			a.showLogin()
 		}, true)
 	}()
 }
@@ -92,17 +93,17 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 		login.Disable()
 		login.SetText("Logging in...")
 
+		// On success onReady swaps in the main UI (and persists the token
+		// startWithLogin stashed in pendingToken); only failures come back here.
 		go func() {
-			token, err := a.startWithLogin(email.Text, password.Text)
+			err := a.startWithLogin(email.Text, password.Text)
+			if err == nil {
+				return
+			}
 			a.doOnUI(func() {
-				if err != nil {
-					login.Enable()
-					login.SetText("Login")
-					dialog.ShowError(fmt.Errorf("login failed: %v", err), a.window)
-					return
-				}
-				a.pendingToken = token
-				a.showMainUI()
+				login.Enable()
+				login.SetText("Login")
+				dialog.ShowError(fmt.Errorf("login failed: %v", err), a.window)
 			}, true)
 		}()
 	})

@@ -3,8 +3,6 @@ package app
 
 import (
 	"log"
-	"os"
-	"path/filepath"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -12,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -19,7 +18,6 @@ import (
 
 const (
 	windowTitle = "Revoltgo Client"
-	iconPath    = "assets/rgo.png"
 
 	messagesPerChannel = 500 // cap of cached messages per channel
 	cachedChannels     = 5   // number of channels kept in the message cache
@@ -41,7 +39,13 @@ type App struct {
 
 	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
 	unreadChannels      map[string]bool
-	fetchedAuthors      map[string]bool // "serverID:userID" -> author resolved once (lazy, UI-thread only)
+
+	// Lazy author resolution (members.go). fetchedAuthors guards each
+	// "serverID:userID" against being queued twice; pendingAuthors accumulates
+	// the current batch until authorTimer fires. UI-thread only.
+	fetchedAuthors map[string]bool
+	pendingAuthors []author
+	authorTimer    *time.Timer
 
 	pendingToken string // saved once the Ready event arrives
 
@@ -55,23 +59,20 @@ type App struct {
 	channelHeader *widget.Label
 
 	settingsWindow fyne.Window // WIP settings window; nil when closed
+	overlay        *ui.Overlay // modal layer (attachment viewer, join dialog); nil when none
+
+	// joinDialog is the invite dialog currently on the modal layer, kept so the
+	// join result can be reported on it; nil when it isn't showing. pendingJoin
+	// marks a join request in flight, so the ServerCreate it produces knows to
+	// select the server it adds. Both UI-thread only.
+	joinDialog  *ui.JoinServerDialog
+	pendingJoin bool
 
 	// editing is the mounted message widget currently in in-place edit mode, or
 	// nil. UI-thread only; cleared whenever the message area is rebuilt.
 	editing *ui.MessageWidget
 
 	loadingHistory bool
-
-	// renderGen identifies the current message-area render; bumping it aborts the
-	// batched widget mounting of any superseded displayMessages run (channel IDs
-	// alone can't tell A→B→A switches apart). UI-thread only.
-	renderGen int
-
-	// rendering is true while displayMessages is mounting batches. Live appends
-	// and cache re-mounts hold off while it is set so they can't interleave with
-	// (and reorder) the batches; the render's final pass mounts anything that
-	// arrived meanwhile. UI-thread only.
-	rendering bool
 
 	// Read-ack coalescing for the open channel: bursts produce one MessageAck
 	// for the newest message per ackDelay instead of one request per message.
@@ -101,25 +102,27 @@ func New(fyneApp fyne.App) *App {
 		unreadChannels:      make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
 	}
-	a.setIcon()
+	window.SetIcon(assets.AppIcon)
 	return a
 }
 
 // Run shows the login window and starts the Fyne event loop.
 func (a *App) Run() {
 	a.showLogin()
-	a.styleNativeChrome()
+	a.styleNativeChrome(a.window)
 	a.window.ShowAndRun()
 }
 
-// styleNativeChrome recolors the native window chrome (the Windows title bar) to
+// styleNativeChrome recolors a window's native chrome (the Windows title bar) to
 // match the palette. The platform window handle isn't available until the event
-// loop has created it, so it retries briefly until the styling lands.
-func (a *App) styleNativeChrome() {
+// loop has created it, so it retries briefly until the styling lands. Every
+// window the client opens goes through here, so none of them shows default
+// chrome against the app's own colours.
+func (a *App) styleNativeChrome(window fyne.Window) {
 	go func() {
 		for range 40 {
 			var done bool
-			a.doOnUI(func() { done = ui.StyleTitlebar(a.window) }, true)
+			a.doOnUI(func() { done = ui.StyleTitlebar(window) }, true)
 			if done {
 				return
 			}
@@ -134,17 +137,9 @@ func (a *App) deps() ui.Deps {
 }
 
 // doOnUI runs fn on the UI thread. When wait is true it blocks until fn returns.
+// Every gateway handler and worker goroutine reaches the UI through here.
 func (a *App) doOnUI(fn func(), wait bool) {
-	fyne.CurrentApp().Driver().DoFromGoroutine(fn, wait)
-}
-
-func (a *App) setIcon() {
-	data, err := os.ReadFile(filepath.Join(iconPath))
-	if err != nil {
-		log.Printf("read icon: %v", err)
-		return
-	}
-	a.window.SetIcon(fyne.NewStaticResource(filepath.Base(iconPath), data))
+	a.fyne.Driver().DoFromGoroutine(fn, wait)
 }
 
 // showMainUI swaps the window to the main layout and wires up shutdown.
@@ -204,9 +199,9 @@ func (a *App) OnReply(message *revoltgo.Message) {
 	a.window.Canvas().Focus(a.input)
 }
 
-// OnImageTapped opens an attachment in the image viewer.
-func (a *App) OnImageTapped(attachment *revoltgo.Attachment) {
-	a.showImageViewer(attachment)
+// OnAttachmentTapped opens an attachment in the viewer.
+func (a *App) OnAttachmentTapped(attachment *revoltgo.File) {
+	a.showAttachmentViewer(attachment)
 }
 
 // OnAvatarTapped is a placeholder for opening a user profile.
@@ -214,10 +209,10 @@ func (a *App) OnAvatarTapped(userID string) {
 	log.Printf("avatar tapped: %s", userID)
 }
 
+// OnDelete deletes a message. Whether the action is offered at all is decided by
+// the widget (own message, or ManageMessages in the channel); the server is the
+// final authority, so a rejected delete just logs.
 func (a *App) OnDelete(message *revoltgo.Message) {
-	// todo: permission checks to see if you can delete messages
-	// you can always delete your own messages
-
 	session := a.session
 	if session == nil {
 		return

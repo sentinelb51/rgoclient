@@ -22,7 +22,10 @@ type Deps struct {
 // is implemented by the application controller.
 type MessageActions interface {
 	OnAvatarTapped(userID string)
-	OnImageTapped(attachment *revoltgo.Attachment)
+
+	// OnAttachmentTapped opens an attachment in the viewer.
+	OnAttachmentTapped(attachment *revoltgo.File)
+
 	OnReply(message *revoltgo.Message)
 	OnDelete(message *revoltgo.Message)
 	OnEdit(message *revoltgo.Message)

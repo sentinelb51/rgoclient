@@ -25,6 +25,9 @@ var Colors = struct {
 	ServerSelectedBg       color.Color
 	ServerListSeparator    color.Color
 	TappableHoverBg        color.Color
+	OverlayBackdrop        color.Color
+	ViewerCardBg           color.Color
+	ViewerBodyBg           color.Color
 
 	// Elements
 	AttachmentHoverBorder color.Color
@@ -43,6 +46,7 @@ var Colors = struct {
 	SwiftActionHoverBg    color.Color
 	SwiftActionText       color.Color
 	ReplyMentionActive    color.Color
+	ErrorText             color.Color
 }{
 	// Backgrounds — cool blue-slate ramp (darkest → lightest)
 	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
@@ -60,6 +64,9 @@ var Colors = struct {
 	SwiftActionBg:          color.RGBA{R: 35, G: 40, B: 56, A: 255},    // #232838
 	SwiftActionHoverBg:     color.RGBA{R: 46, G: 53, B: 72, A: 255},    // #2E3548
 	SwiftActionText:        color.RGBA{R: 196, G: 201, B: 212, A: 255}, // #C4C9D4
+	OverlayBackdrop:        color.RGBA{R: 8, G: 9, B: 12, A: 200},      // near-black dim behind a modal
+	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card itself
+	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well the content sits in
 
 	// Elements
 	AttachmentHoverBorder: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, darkest ramp
@@ -75,6 +82,7 @@ var Colors = struct {
 	XButtonNormal:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	XButtonHover:          color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 	SessionCardBg:         color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
+	ErrorText:             color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171, failed actions
 }
 
 // Sizes defines standard sizes used throughout the application.
@@ -86,10 +94,12 @@ var Sizes = struct {
 	ChannelSidebarPadding float32
 	ChannelLeftPadding    float32
 	UnreadIndicatorWidth  float32
+	ChannelLabelSize      float32
 
 	// Member list
 	MemberAvatarSize float32
 	MemberRowHeight  float32
+	MemberNameSize   float32
 
 	// Server/Channel widgets
 	ServerIconSize          float32
@@ -124,11 +134,21 @@ var Sizes = struct {
 	WindowDefaultWidth  float32
 	WindowDefaultHeight float32
 
-	// Image viewer
-	ImageViewerMaxWidth  float32
-	ImageViewerMaxHeight float32
-	ImageViewerMinWidth  float32
-	ImageViewerMinHeight float32
+	// Attachment viewer (the modal lightbox)
+	ViewerMaxWidth     float32
+	ViewerMaxHeight    float32
+	ViewerMinWidth     float32
+	ViewerMinHeight    float32
+	ViewerMargin       float32
+	ViewerHeaderHeight float32
+	ViewerPadding      float32
+	ViewerCornerRadius float32
+	ViewerTitleSize    float32
+
+	// Join-server dialog (the invite modal)
+	JoinDialogWidth        float32
+	JoinDialogCornerRadius float32
+	JoinDialogTextSize     float32
 }{
 	// Sidebar
 	ServerSidebarWidth:    60,
@@ -137,10 +157,12 @@ var Sizes = struct {
 	ChannelSidebarPadding: 6,
 	ChannelLeftPadding:    8,
 	UnreadIndicatorWidth:  1,
+	ChannelLabelSize:      14,
 
 	// Member list
 	MemberAvatarSize: 28,
 	MemberRowHeight:  36,
+	MemberNameSize:   13,
 
 	// Server/Channel widgets
 	ServerIconSize:          40,
@@ -175,11 +197,21 @@ var Sizes = struct {
 	WindowDefaultWidth:  1000,
 	WindowDefaultHeight: 600,
 
-	// Image viewer
-	ImageViewerMaxWidth:  1200,
-	ImageViewerMaxHeight: 800,
-	ImageViewerMinWidth:  400,
-	ImageViewerMinHeight: 300,
+	// Attachment viewer (the modal lightbox)
+	ViewerMaxWidth:     1200,
+	ViewerMaxHeight:    800,
+	ViewerMinWidth:     360,
+	ViewerMinHeight:    240,
+	ViewerMargin:       48,
+	ViewerHeaderHeight: 38,
+	ViewerPadding:      10,
+	ViewerCornerRadius: 6,
+	ViewerTitleSize:    13,
+
+	// Join-server dialog (the invite modal)
+	JoinDialogWidth:        320,
+	JoinDialogCornerRadius: 6,
+	JoinDialogTextSize:     12,
 }
 
 // selectionTint is the accent used for text selection, with alpha so the

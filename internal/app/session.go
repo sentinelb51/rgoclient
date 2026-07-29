@@ -44,6 +44,7 @@ func (a *App) openSession(session *revoltgo.Session) error {
 	revoltgo.AddHandler(session, a.onMessageUpdate)
 	revoltgo.AddHandler(session, a.onMessageDelete)
 	revoltgo.AddHandler(session, a.onBulkMessageDelete)
+	revoltgo.AddHandler(session, a.onServerCreate)
 	revoltgo.AddHandler(session, a.onServerMemberJoin)
 	revoltgo.AddHandler(session, a.onServerMemberLeave)
 	revoltgo.AddHandler(session, a.onServerMemberUpdate)
@@ -62,9 +63,15 @@ func (a *App) openSession(session *revoltgo.Session) error {
 // thread.
 func (a *App) resetSessionState() {
 	a.messageCache.Clear()
+	if a.authorTimer != nil {
+		a.authorTimer.Stop()
+		a.authorTimer = nil
+	}
+	a.pendingAuthors = nil
 	a.fetchedAuthors = make(map[string]bool)
 	a.unreadChannels = make(map[string]bool)
 	a.serverIDs = nil
 	a.currentServerID = ""
 	a.currentChannelID = ""
+	a.pendingJoin = false
 }

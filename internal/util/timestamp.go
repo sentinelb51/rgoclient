@@ -10,11 +10,9 @@ import (
 // Timestamp parses a ULID to extract its embedded timestamp.
 func Timestamp(id string) (time.Time, error) {
 	value, err := ulid.Parse(id)
-
 	if err != nil {
 		return time.Time{}, err
 	}
-
 	return value.Timestamp(), nil
 }
 
@@ -30,51 +28,40 @@ func ShortTime(t time.Time) string {
 	return t.Local().Format(timeLayout)
 }
 
+// NiceTime formats a message time the way a chat client reads it: the clock
+// time for today and yesterday, then a coarsening relative age.
 func NiceTime(t time.Time) string {
 	t = t.Local()
 	now := time.Now().Local()
 
-	// 1. Handle future dates (e.g., clock skew)
 	if t.After(now) {
-		return "A few moments ago"
+		return "A few moments ago" // clock skew between us and the server
 	}
 
-	// 2. Calculate calendar days difference
-	// We construct dates in UTC to avoid Daylight Saving Time issues
-	// where a day might be 23 or 25 hours long, breaking the /24 math.
+	// Compare calendar days, not elapsed hours: both dates are rebuilt at
+	// midnight UTC so a 23- or 25-hour DST day can't skew the division.
 	tDate := time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC)
 	nowDate := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
-
 	days := int(nowDate.Sub(tDate).Hours() / 24)
 
-	// 3. Format based on duration
 	switch {
 	case days == 0:
 		return fmt.Sprintf("Today, %s", t.Format(timeLayout))
-
 	case days == 1:
 		return fmt.Sprintf("Yesterday, %s", t.Format(timeLayout))
-
 	case days < daysInMonth:
 		return fmt.Sprintf("%d days ago, %s", days, t.Format(timeLayout))
-
 	case days < daysInYear:
-		months := days / daysInMonth
-		return plural(months, "month")
-
+		return plural(days/daysInMonth, "month")
 	default:
-		years := days / daysInYear
-		return plural(years, "year")
+		return plural(days/daysInYear, "year")
 	}
 }
 
-// plural returns a formatted string with correct pluralisation.
+// plural renders "1 month ago" / "3 months ago".
 func plural(count int, unit string) string {
-	// Singular
 	if count == 1 {
 		return fmt.Sprintf("%d %s ago", count, unit)
 	}
-
-	// Plural
 	return fmt.Sprintf("%d %ss ago", count, unit)
 }

@@ -36,7 +36,7 @@ var (
 // NewChannelWidget creates a channel row.
 func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
 	label := canvas.NewText(channel.Name, theme.Colors.CategoryText)
-	label.TextSize = theme.Sizes.MessageTimestampSize + 2
+	label.TextSize = theme.Sizes.ChannelLabelSize
 	label.Alignment = fyne.TextAlignLeading
 
 	w := &ChannelWidget{

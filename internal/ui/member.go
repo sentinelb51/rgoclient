@@ -22,7 +22,7 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 		textColor = theme.Colors.CategoryText
 	}
 	label := canvas.NewText(name, textColor)
-	label.TextSize = theme.Sizes.MessageTimestampSize + 1
+	label.TextSize = theme.Sizes.MemberNameSize
 
 	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
 	row := container.NewHBox(

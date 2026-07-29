@@ -12,9 +12,8 @@ import (
 // of them instead of one request per message.
 const ackDelay = time.Second
 
-// onMessage caches an incoming message, resolves its author for display, and
-// either appends it to the open channel (acknowledging it as read) or marks
-// the channel unread.
+// onMessage caches an incoming message and either appends it to the open
+// channel (acknowledging it as read) or marks the channel unread.
 func (a *App) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 	// Capture the predecessor at cache time: under a burst, several messages can
 	// be cached before their UI callbacks run, so deriving it later would group
@@ -22,13 +21,8 @@ func (a *App) onMessage(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 	prev := a.messageCache.Append(event.Channel, &event.Message)
 
 	a.doOnUI(func() {
-		// Only real users need resolving; system and webhook messages render
-		// without an author lookup.
-		if event.System == nil && event.Webhook == nil {
-			a.ensureAuthor(a.channelServerID(event.Channel), event.Author)
-		}
-
 		if event.Channel == a.currentChannelID {
+			// The author is resolved by newMessageWidget on the way in.
 			a.appendMessage(&event.Message, prev)
 			a.scheduleAck(event.Channel, event.Message.ID)
 			return

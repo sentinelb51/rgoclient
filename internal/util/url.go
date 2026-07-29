@@ -1,29 +1,35 @@
 package util
 
-func IDFromAttachmentURL(url string) string {
-	// Extracts the ID from a string like: https://cdn.stoatusercontent.com/avatars/0d_oHg1EDTnfeBNDMJGa_1GAdvVxPEpoWQSnyj-Oe3?max_side=256
-	// should return just: "0d_oHg1EDTnfeBNDMJGa_1GAdvVxPEpoWQSnyj-Oe3"
-	var start, slashes int
+import "strings"
 
+// autumnPathSegments is how many "/"-separated parts precede the file ID in an
+// Autumn CDN URL: "https:", "", "<host>", "<bucket>", then the ID.
+const autumnPathSegments = 4
+
+// IDFromAttachmentURL extracts the file ID from an Autumn CDN URL, dropping any
+// query string. It returns "" for anything not shaped like one.
+//
+//	https://cdn.stoatusercontent.com/avatars/0d_oHg1EDTnfeBNDMJGa?max_side=256
+//	                                         └──── returned ────┘
+func IDFromAttachmentURL(url string) string {
+	slashes := 0
+	start := -1
 	for i := 0; i < len(url); i++ {
 		if url[i] == '/' {
 			slashes++
-			if slashes == 4 {
+			if slashes == autumnPathSegments {
 				start = i + 1
 				break
 			}
 		}
 	}
-
-	if start == 0 {
+	if start == -1 {
 		return ""
 	}
 
-	for i := start; i < len(url); i++ {
-		if url[i] == '?' {
-			return url[start:i]
-		}
+	id := url[start:]
+	if query := strings.IndexByte(id, '?'); query != -1 {
+		id = id[:query]
 	}
-
-	return url[start:]
+	return id
 }

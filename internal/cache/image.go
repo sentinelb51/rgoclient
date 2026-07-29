@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"time"
 
@@ -32,6 +33,10 @@ const flushInterval = 2 * time.Minute
 // recently used are evicted (their disk copies remain, so Get reloads them).
 const maxMemoryImages = 200
 
+// diskHeadroomDivisor sets how far under budget a disk trim goes: 1/8th, so a
+// trim frees enough room that the next few sessions don't re-trim immediately.
+const diskHeadroomDivisor = 8
+
 // ImageCache stores decoded images in memory and persists them to disk in the
 // background. It is safe for concurrent use.
 type ImageCache struct {
@@ -40,7 +45,7 @@ type ImageCache struct {
 	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
-	recency  *lruKeys               // decoded-image ids by recency
+	recency  *LRU                   // decoded-image ids by recency
 	dir      string
 	client   *http.Client
 	ticker   *time.Ticker
@@ -55,8 +60,8 @@ type imageLoad struct {
 	img  image.Image
 }
 
-// NewImageCache creates a cache rooted at the user's cache directory, purges it
-// if it exceeds the size budget, and starts the periodic disk flush.
+// NewImageCache creates a cache rooted at the user's cache directory, trims it
+// back under the size budget, and starts the periodic disk flush.
 func NewImageCache() *ImageCache {
 	dir := cacheDir()
 	c := &ImageCache{
@@ -64,7 +69,7 @@ func NewImageCache() *ImageCache {
 		circular: make(map[string]image.Image),
 		pending:  make(map[string]image.Image),
 		inflight: make(map[string]*imageLoad),
-		recency:  newLRUKeys(),
+		recency:  NewLRU(),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
 		stop:     make(chan struct{}),
@@ -74,7 +79,7 @@ func NewImageCache() *ImageCache {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("image cache: create dir: %v", err)
 	}
-	c.purgeIfOverBudget()
+	c.trimDiskCache()
 
 	c.ticker = time.NewTicker(flushInterval)
 	go c.flushLoop()
@@ -264,6 +269,9 @@ func (c *ImageCache) LoadAsync(id, url string, circular bool, onLoaded func(imag
 		if circular {
 			img = c.circularVariant(id, img)
 		}
+		// Dispatched directly rather than through ui.DoOnUI: internal/ui imports
+		// this package. Waiting also throttles the loader to the UI thread's pace
+		// instead of queueing a callback per in-flight image.
 		fyne.CurrentApp().Driver().DoFromGoroutine(func() { onLoaded(img) }, true)
 	}()
 }
@@ -346,49 +354,54 @@ func (c *ImageCache) LoadIntoContainer(id, url string, size fyne.Size, target *f
 	})
 }
 
-// purgeIfOverBudget clears the disk cache when it exceeds the size budget.
-func (c *ImageCache) purgeIfOverBudget() {
-	size, err := c.diskSize()
-	if err != nil {
-		log.Printf("image cache: measure size: %v", err)
-		return
-	}
-	if size > c.maxBytes {
-		log.Print("image cache: over budget, purging")
-		c.purge()
-	}
-}
-
-// diskSize returns the total size of the on-disk cache in bytes.
-func (c *ImageCache) diskSize() (int64, error) {
-	var total int64
-	err := filepath.Walk(c.dir, func(_ string, info os.FileInfo, err error) error {
-		if err == nil && !info.IsDir() {
-			total += info.Size()
-		}
-		return nil
-	})
-	return total, err
-}
-
-// purge clears the in-memory cache, pending writes, and on-disk files.
-func (c *ImageCache) purge() {
-	c.mu.Lock()
-	c.memory = make(map[string]image.Image)
-	c.circular = make(map[string]image.Image)
-	c.pending = make(map[string]image.Image)
-	c.recency = newLRUKeys()
-	c.mu.Unlock()
-
+// trimDiskCache evicts the least recently modified files until the on-disk
+// cache fits inside the budget, leaving headroom so the next start isn't
+// immediately over again. Evicting oldest-first keeps the avatars and images the
+// user actually sees; the previous behaviour — wiping the directory outright the
+// moment it went over — threw away a warm cache and forced a re-download of
+// everything on screen.
+func (c *ImageCache) trimDiskCache() {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
 		log.Printf("image cache: read dir: %v", err)
 		return
 	}
+
+	type diskFile struct {
+		name     string
+		size     int64
+		modified time.Time
+	}
+
+	files := make([]diskFile, 0, len(entries))
+	var total int64
 	for _, entry := range entries {
-		if err := os.RemoveAll(filepath.Join(c.dir, entry.Name())); err != nil {
-			log.Printf("image cache: remove %s: %v", entry.Name(), err)
+		info, err := entry.Info()
+		if err != nil || info.IsDir() {
+			continue
 		}
+		files = append(files, diskFile{entry.Name(), info.Size(), info.ModTime()})
+		total += info.Size()
+	}
+	if total <= c.maxBytes {
+		return
+	}
+
+	slices.SortFunc(files, func(x, y diskFile) int { return x.modified.Compare(y.modified) })
+
+	target := c.maxBytes - c.maxBytes/diskHeadroomDivisor
+	log.Printf("image cache: %d MiB over budget, trimming to %d MiB",
+		(total-c.maxBytes)/(1024*1024), target/(1024*1024))
+
+	for _, file := range files {
+		if total <= target {
+			return
+		}
+		if err := os.Remove(filepath.Join(c.dir, file.name)); err != nil {
+			log.Printf("image cache: remove %s: %v", file.name, err)
+			continue
+		}
+		total -= file.size
 	}
 }
 

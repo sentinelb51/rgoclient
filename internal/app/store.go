@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 )
 
 const sessionsFile = ".rgoclient_sessions.json"
@@ -67,13 +68,13 @@ func AddOrUpdateSession(session SavedSession) error {
 		return err
 	}
 
-	for i, existing := range sessions {
-		if existing.UserID == session.UserID {
-			sessions[i] = session
-			return saveSessions(sessions)
-		}
+	i := slices.IndexFunc(sessions, func(s SavedSession) bool { return s.UserID == session.UserID })
+	if i >= 0 {
+		sessions[i] = session
+	} else {
+		sessions = append(sessions, session)
 	}
-	return saveSessions(append(sessions, session))
+	return saveSessions(sessions)
 }
 
 // RemoveSession deletes the saved session for a user, if present.
@@ -82,12 +83,6 @@ func RemoveSession(userID string) error {
 	if err != nil {
 		return err
 	}
-
-	kept := sessions[:0]
-	for _, session := range sessions {
-		if session.UserID != userID {
-			kept = append(kept, session)
-		}
-	}
+	kept := slices.DeleteFunc(sessions, func(s SavedSession) bool { return s.UserID == userID })
 	return saveSessions(kept)
 }

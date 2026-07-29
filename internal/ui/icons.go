@@ -1,50 +1,21 @@
 package ui
 
 import (
-	"log"
-	"os"
-	"path/filepath"
-	"sync"
-
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 )
 
-// iconResources caches asset icons as shared, in-memory resources keyed by file
-// path. A nil entry records a failed read so a missing file isn't retried on
-// every widget build.
-var (
-	iconMu        sync.Mutex
-	iconResources = map[string]fyne.Resource{}
-)
-
-// iconResource loads an asset file once and returns it as a shared resource.
-// Repeated calls for the same path return the cached resource instead of
-// re-reading and re-decoding the file, so building many widgets that share an
-// icon (notably the per-message hover actions) doesn't touch the disk once per
-// widget.
-func iconResource(path string) fyne.Resource {
-	iconMu.Lock()
-	defer iconMu.Unlock()
-
-	if res, ok := iconResources[path]; ok {
-		return res
+// newScaledIcon builds a smoothly scaled canvas image for a resource (a Fyne
+// theme icon or one of the embedded assets). A positive side pins it to that
+// square minimum; zero leaves it free to take whatever space its parent gives.
+// Every icon-bearing widget in this package draws through here so they share one
+// fill/scale policy.
+func newScaledIcon(res fyne.Resource, side float32) *canvas.Image {
+	icon := canvas.NewImageFromResource(res)
+	icon.FillMode = canvas.ImageFillContain
+	icon.ScaleMode = canvas.ImageScaleSmooth
+	if side > 0 {
+		icon.SetMinSize(fyne.NewSize(side, side))
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		log.Printf("load icon %s: %v", path, err)
-		iconResources[path] = nil
-		return nil
-	}
-
-	res := fyne.NewStaticResource(filepath.Base(path), data)
-	iconResources[path] = res
-	return res
-}
-
-// newIconImage builds a canvas image for the given resource (a Fyne theme icon
-// or an asset loaded via iconResource).
-func newIconImage(res fyne.Resource) *canvas.Image {
-	return canvas.NewImageFromResource(res)
+	return icon
 }

@@ -130,8 +130,9 @@ func (h *HoverableStack) MouseOut() {
 	}
 }
 
-// iconButton is a flat, icon-only button used for the per-message quick actions.
-type iconButton struct {
+// IconButton is a flat, icon-only button used for the per-message quick actions
+// and the attachment viewer's header.
+type IconButton struct {
 	tapBase
 	background *canvas.Rectangle
 	icon       *canvas.Image
@@ -139,32 +140,35 @@ type iconButton struct {
 }
 
 var (
-	_ fyne.Tappable     = (*iconButton)(nil)
-	_ desktop.Hoverable = (*iconButton)(nil)
+	_ fyne.Tappable     = (*IconButton)(nil)
+	_ desktop.Hoverable = (*IconButton)(nil)
 )
 
-func newIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *iconButton {
+// roundedPanel is the small rounded surface the floating message controls (the
+// hover quick-actions and the edit save/cancel pair) sit on.
+func roundedPanel() *canvas.Rectangle {
+	panel := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	panel.CornerRadius = 4
+	return panel
+}
+
+func NewIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *IconButton {
 	size := theme.Sizes.SwiftActionSize
 
 	background := canvas.NewRectangle(color.Transparent)
 	background.SetMinSize(fyne.NewSize(size, size*0.8))
 
-	icon := newIconImage(res)
-	icon.FillMode = canvas.ImageFillContain
-	icon.ScaleMode = canvas.ImageScaleSmooth
-	icon.SetMinSize(fyne.NewSize(size*0.7, size*0.7))
-
-	b := &iconButton{background: background, icon: icon, onHover: onHover}
+	b := &IconButton{background: background, icon: newScaledIcon(res, size*0.7), onHover: onHover}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	return b
 }
 
-func (b *iconButton) CreateRenderer() fyne.WidgetRenderer {
+func (b *IconButton) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewCenter(b.icon)))
 }
 
-func (b *iconButton) MouseIn(*desktop.MouseEvent) {
+func (b *IconButton) MouseIn(*desktop.MouseEvent) {
 	b.background.FillColor = theme.Colors.SwiftActionHoverBg
 	b.background.Refresh()
 	if b.onHover != nil {
@@ -172,7 +176,7 @@ func (b *iconButton) MouseIn(*desktop.MouseEvent) {
 	}
 }
 
-func (b *iconButton) MouseOut() {
+func (b *IconButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
 	if b.onHover != nil {
@@ -197,15 +201,9 @@ var (
 // NewSidebarButton creates a sidebar button rendering the given icon (a Fyne
 // theme icon such as theme.HomeIcon()).
 func NewSidebarButton(res fyne.Resource, onTap func()) *SidebarButton {
-	icon := newIconImage(res)
-	icon.FillMode = canvas.ImageFillContain
-	icon.ScaleMode = canvas.ImageScaleSmooth
-	size := theme.Sizes.ServerIconSize
-	icon.SetMinSize(fyne.NewSize(size*0.5, size*0.5))
-
 	b := &SidebarButton{
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
-		icon:       icon,
+		icon:       newScaledIcon(res, theme.Sizes.ServerIconSize*0.5),
 	}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
@@ -259,11 +257,7 @@ func NewCloseButton(onTap func()) *CloseButton {
 	background := canvas.NewRectangle(color.Transparent)
 	background.CornerRadius = 4
 
-	icon := newIconImage(fynetheme.CancelIcon())
-	icon.FillMode = canvas.ImageFillContain
-	icon.ScaleMode = canvas.ImageScaleSmooth
-
-	b := &CloseButton{background: background, icon: icon}
+	b := &CloseButton{background: background, icon: newScaledIcon(fynetheme.CancelIcon(), 0)}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	return b
@@ -288,15 +282,17 @@ func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // Avatar is a circular, tappable avatar that loads its image asynchronously.
+//
+// It deliberately does not implement desktop.Hoverable: Fyne delivers hover to
+// the innermost hoverable object, so an avatar that accepted hover would pull it
+// away from the message row and make the row's quick-actions vanish whenever the
+// pointer crossed the avatar.
 type Avatar struct {
 	tapBase
 	content *fyne.Container
 }
 
-var (
-	_ fyne.Tappable     = (*Avatar)(nil)
-	_ desktop.Hoverable = (*Avatar)(nil)
-)
+var _ fyne.Tappable = (*Avatar)(nil)
 
 // NewAvatar creates a circular avatar of the standard message size. If both
 // avatarID and avatarURL are set, the image loads in the background.
@@ -332,6 +328,3 @@ func (a *Avatar) CreateRenderer() fyne.WidgetRenderer {
 func (a *Avatar) MinSize() fyne.Size {
 	return fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
 }
-
-func (a *Avatar) MouseIn(*desktop.MouseEvent) {}
-func (a *Avatar) MouseOut()                   {}

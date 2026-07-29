@@ -17,6 +17,7 @@ var loginWindowSize = fyne.NewSize(300, 280)
 
 // showLogin displays the saved sessions and the credential form.
 func (a *App) showLogin() {
+	a.closeOverlay() // a viewer left open by a dropped session would outlive its window
 	a.window.Resize(loginWindowSize)
 
 	sessions, err := LoadSessions()
@@ -42,11 +43,10 @@ func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 
 	cards := container.NewVBox()
 	for _, session := range sessions {
-		s := session
-		cards.Add(ui.NewSessionCard(a.images, s.Username, s.AvatarID,
-			func() { a.loginWithToken(s) },
+		cards.Add(ui.NewSessionCard(a.images, session.Username, session.AvatarID,
+			func() { a.loginWithToken(session) },
 			func() {
-				_ = RemoveSession(s.UserID)
+				_ = RemoveSession(session.UserID)
 				a.showLogin()
 			},
 		))

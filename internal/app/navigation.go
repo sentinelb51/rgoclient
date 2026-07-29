@@ -64,11 +64,19 @@ func (a *App) refreshServerList() {
 			continue
 		}
 
-		id := serverID
-		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(id) })
+		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
 		w.SetSelected(serverID == a.currentServerID)
-		a.serverList.Add(container.NewCenter(w))
+		// Added bare, not wrapped in a Center: ServerWidget already centres its own
+		// icon inside whatever space it gets, and keeping the widget itself at the
+		// top level lets syncServerSelection find it without unwrapping.
+		a.serverList.Add(w)
 	}
+
+	// The join button reads as one more server icon at the end of the list, so
+	// it lives inside the scroll rather than in the fixed bookends. Objects are
+	// rebuilt wholesale here, hence re-adding it on every refresh; the selection
+	// sync skips it because it isn't a ServerWidget.
+	a.serverList.Add(ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
 	a.serverList.Refresh()
 }
 
@@ -97,6 +105,7 @@ func (a *App) openSettings() {
 
 	window.Resize(fyne.NewSize(420, 320))
 	window.CenterOnScreen()
+	a.styleNativeChrome(window)
 	window.Show()
 }
 
@@ -180,8 +189,7 @@ func (a *App) createChannelWidget(channelID string) *ui.ChannelWidget {
 	if channel == nil {
 		return nil
 	}
-	id := channelID
-	w := ui.NewChannelWidget(channel, func() { a.selectChannel(id) })
+	w := ui.NewChannelWidget(channel, func() { a.selectChannel(channelID) })
 	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
 	return w
 }
@@ -255,11 +263,7 @@ func (a *App) clearChannelSelection() {
 // syncServerSelection updates the highlighted server icon.
 func (a *App) syncServerSelection(selectedID string) {
 	for _, obj := range a.serverList.Objects {
-		center, ok := obj.(*fyne.Container)
-		if !ok || len(center.Objects) == 0 {
-			continue
-		}
-		if w, ok := center.Objects[0].(*ui.ServerWidget); ok {
+		if w, ok := obj.(*ui.ServerWidget); ok {
 			w.SetSelected(w.Server.ID == selectedID)
 		}
 	}

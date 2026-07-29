@@ -17,6 +17,7 @@ import (
 	"github.com/sentinelb51/revoltgo"
 	"golang.design/x/clipboard"
 
+	"RGOClient/assets"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -24,7 +25,6 @@ import (
 const (
 	maxInputLines    = 8
 	maxReplies       = 5
-	replyPreviewLen  = 60
 	attachPreviewW   = 200
 	attachPreviewImg = 150
 	attachPreviewGen = 64
@@ -360,7 +360,7 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	)
 
 	var mention *replyIconButton
-	mention = newReplyIconButton(iconResource("assets/mention.svg"), true, reply.Mention, func() {
+	mention = newReplyIconButton(assets.MentionIcon, true, reply.Mention, func() {
 		mention.SetActive(!mention.active)
 		reply.Mention = mention.active
 	})
@@ -404,12 +404,7 @@ func newReplyIconButton(res fyne.Resource, toggle, active bool, onTap func()) *r
 	bg := canvas.NewRectangle(color.Transparent)
 	bg.CornerRadius = 5
 
-	icon := newIconImage(res)
-	icon.FillMode = canvas.ImageFillContain
-	icon.ScaleMode = canvas.ImageScaleSmooth
-	icon.SetMinSize(fyne.NewSize(replyIconSize, replyIconSize))
-
-	b := &replyIconButton{toggle: toggle, active: active, icon: icon, bg: bg}
+	b := &replyIconButton{toggle: toggle, active: active, icon: newScaledIcon(res, replyIconSize), bg: bg}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	b.applyState()

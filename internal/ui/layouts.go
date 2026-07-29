@@ -9,6 +9,23 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 )
 
+// FitWithin scales width×height down to fit inside maxW×maxH, preserving the
+// aspect ratio; dimensions that already fit come back unchanged. A zero input
+// dimension (metadata the server didn't provide) yields a zero size, leaving the
+// fallback to the caller.
+func FitWithin(width, height int, maxW, maxH float32) fyne.Size {
+	w, h := float32(width), float32(height)
+	if w > maxW {
+		h *= maxW / w
+		w = maxW
+	}
+	if h > maxH {
+		w *= maxH / h
+		h = maxH
+	}
+	return fyne.NewSize(w, h)
+}
+
 // HorizontalSpacer returns a fixed-width transparent gap.
 func HorizontalSpacer(width float32) fyne.CanvasObject {
 	r := canvas.NewRectangle(color.Transparent)
@@ -251,6 +268,33 @@ func (l *stripPaddingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 // children are stretched to fill the available space.
 func NewMinHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&minHeightLayout{height: height}, objects...)
+}
+
+// NewMinWidthContainer wraps objects in a container with a minimum width, its
+// children stretched to fill the available space. The horizontal counterpart of
+// NewMinHeightContainer: it gives a modal card a stable width without pinning
+// its height, so the card still grows to fit its content.
+func NewMinWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&minWidthLayout{width: width}, objects...)
+}
+
+type minWidthLayout struct{ width float32 }
+
+func (l *minWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		child.Resize(size)
+		child.Move(fyne.NewPos(0, 0))
+	}
+}
+
+func (l *minWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	w, h := l.width, float32(0)
+	for _, child := range objects {
+		m := child.MinSize()
+		w = max(w, m.Width)
+		h = max(h, m.Height)
+	}
+	return fyne.NewSize(w, h)
 }
 
 type minHeightLayout struct{ height float32 }

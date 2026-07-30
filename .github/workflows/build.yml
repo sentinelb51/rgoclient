@@ -20,10 +20,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Same calendar scheme as a release (YY.M.D, UTC, unpadded) with a -dev
+      # suffix, so a CI artifact can never be mistaken for the release cut on
+      # the same day. No tag is created or consulted here.
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          $now = [datetime]::UtcNow
+          $version = "{0}.{1}.{2}-dev" -f ($now.Year % 100), $now.Month, $now.Day
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Build
         env:
           CGO_ENABLED: 1
-        run: go build -ldflags "-H windowsgui" -o dist/RGOClient.exe ./cmd/rgoclient
+        run: >
+          go build
+          -ldflags "-H windowsgui -X main.version=${{ steps.version.outputs.version }} -X main.build=${{ github.run_number }}"
+          -o dist/RGOClient.exe ./cmd/rgoclient
 
       # Self-signed only: proves the signing pipeline works and gives a verifiable
       # Authenticode signature, but does NOT clear SmartScreen or show a trusted

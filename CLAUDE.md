@@ -45,7 +45,9 @@ and the batch will simply find nothing to do; nothing here needs changing.
 
 ```
 cmd/rgoclient/main.go        Entry point: app metadata (unique ID + the fyneDo
-                             migration flag), theme, app.New(...).Run()
+                             migration flag), theme, app.New(...).Run().
+                             `version`/`build` are link-time vars stamped by CI
+                             (see "Versioning / CI")
 
 assets/                      Embedded binaries (go:embed can't reach above its own
                              source file, so this sits at the repo root)
@@ -82,7 +84,9 @@ internal/
                              icons (re-added by every refreshServerList)
     messages.go              Message area: build, load, display, refresh/remove;
                              continuesGroup/newMessageWidget (Discord-style author
-                             grouping); displayMessages/displayCached; jumpToLatest;
+                             grouping); dayLabel (day-separator text for a message,
+                             "" when it shares its predecessor's day);
+                             displayMessages/displayCached; jumpToLatest;
                              editLastOwnMessage (Up in empty composer → edit newest
                              own cached message)
     mounting.go              The mounted window — which slice of the cache has live
@@ -149,7 +153,13 @@ internal/
     server.go                Server icon widget
     channel.go               Channel row + collapsible category + drawn glyphs
     message.go               MessageWidget: construction, permissions, quick actions /
-                             context menu, in-place edit mode, hover, content assembly
+                             context menu, in-place edit mode, hover, content assembly.
+                             A non-empty dayLabel draws a day separator above the row
+                             (outside the hover-highlight stack)
+    dayseparator.go          NewDaySeparator — the dated hairline (day name left, rule
+                             out to the right edge) above the first message of a
+                             calendar day + its two-child layout. Not a list entry of
+                             its own: MessageWidget owns it
     attachment.go            Attachment rendering (image / text preview / generic card),
                              the LRU-bounded text-preview cache, fetchText (shared,
                              byte-capped download), and the name/size bar. Images and
@@ -190,7 +200,8 @@ internal/
     attachment.go            IsImageAttachment / AttachmentDimensions (nil-Metadata safe)
     text.go                  Truncate (rune-safe, "..." suffix)
     files.go                 Filetype + FormatFileSize
-    timestamp.go             ULID Timestamp + ShortTime + NiceTime
+    timestamp.go             ULID Timestamp + ShortTime + NiceTime + SameDay /
+                             DayLabel (day-separator text: Today / Yesterday / date)
     url.go                   IDFromAttachmentURL
     invite.go                InviteCode — bare code / invite link / scheme-less link
                              → code ("" when it isn't shaped like one)
@@ -236,6 +247,12 @@ internal/
    prepended message above it). Being the single funnel, `newMessageWidget` is also
    where an unresolved author is queued for resolution (`ensureAuthor`), so every
    mount path — first page, gateway, scrollback — is covered by one call.
+   The same predecessor decides the day separator (`dayLabel`): a message on a
+   different local calendar day than the one above it — or with no predecessor
+   mounted — heads its widget with a dated hairline, and a day change always
+   breaks the author group. The separator belongs to the widget rather than
+   being its own list entry, so the mounted window stays one object per message
+   and every seam rebuild (prepend, delete, edit) re-derives it for free.
 5. Author resolution: a message carries only its author's ID. `ensureAuthor`
    checks State for the user and (in a server) the member, and queues whatever is
    missing — it does not fetch. `authorTimer` fires `authorFetchDelay` later and
@@ -310,6 +327,30 @@ internal/
 
 `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`
 (expect no output).
+
+## Versioning / CI
+
+Versions are calendar-based: `YY.M.D`, UTC, no zero padding — `26.7.29`. A
+second release on the same day appends a counter (`26.7.29.1`). CI builds of
+`main`/PRs use the same date with a `-dev` suffix. There is no version literal
+in the source: `main.version` and `main.build` are `var`s stamped at link time
+with `-X`, defaulting to `0.0.0` / `0` for a local `go build`. `build` is the
+workflow run number (per-workflow, so it's only unique alongside the version).
+
+Two workflows, both `windows-latest`, both building `dist/RGOClient.exe` with
+`CGO_ENABLED=1 -H windowsgui` and Authenticode-signing it with the persistent
+self-signed cert in `CODE_SIGN_PFX_BASE64` / `CODE_SIGN_PFX_PASSWORD`:
+
+- `.github/workflows/build.yml` — push/PR to `main` + manual. Uploads the exe
+  as a run artifact. No tag, no release.
+- `.github/workflows/release.yml` — `workflow_dispatch` is the normal path: the
+  run computes today's version, skips forward past any tag that already exists,
+  creates and pushes the tag itself, then publishes the release. Pushing a `v*`
+  tag by hand also works and takes the tag verbatim as the version — that's the
+  escape hatch for re-releasing or naming an off-calendar version.
+
+The build + sign steps are duplicated between the two files; if a third
+consumer appears, lift them into a composite action.
 
 ## Known stubs / follow-ups
 

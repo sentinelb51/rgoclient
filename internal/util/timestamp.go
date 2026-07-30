@@ -18,9 +18,35 @@ func Timestamp(id string) (time.Time, error) {
 
 const (
 	timeLayout  = "3:04 PM"
+	dayLayout   = "January 2, 2006"
 	daysInMonth = 30
 	daysInYear  = 365
 )
+
+// SameDay reports whether two times fall on the same local calendar day. Used to
+// decide where a day separator belongs between two messages, so a pair minutes
+// apart across midnight is correctly treated as two days.
+func SameDay(a, b time.Time) bool {
+	a, b = a.Local(), b.Local()
+	ay, am, ad := a.Date()
+	by, bm, bd := b.Date()
+	return ay == by && am == bm && ad == bd
+}
+
+// DayLabel names a calendar day for the message list's day separator: "Today"
+// and "Yesterday" for the two most recent, the full date before that.
+func DayLabel(t time.Time) string {
+	t = t.Local()
+	now := time.Now().Local()
+	switch {
+	case SameDay(t, now):
+		return "Today"
+	case SameDay(t, now.AddDate(0, 0, -1)):
+		return "Yesterday"
+	default:
+		return t.Format(dayLayout)
+	}
+}
 
 // ShortTime formats just the local clock time (e.g. "3:04 PM"), used for the
 // gutter timestamp on grouped continuation messages.

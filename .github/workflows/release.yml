@@ -1,8 +1,14 @@
 name: Release
 
+# Two ways in:
+#   * workflow_dispatch — the normal path. The run derives today's calendar
+#     version, creates the tag itself, and releases it. Nothing to tag by hand.
+#   * pushing a v* tag — the escape hatch, for re-releasing or naming a version
+#     that isn't today's date. The tag is taken verbatim as the version.
 on:
   push:
     tags: [ 'v*' ]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -13,6 +19,40 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Versions are calendar-based: YY.M.D, unpadded (26.7.29). A second
+      # release on the same day appends a counter (26.7.29.1, .2 …) so the tag
+      # stays unique. Dates are UTC — the runner's clock, not the author's.
+      - name: Resolve version
+        id: version
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            # Tag push: the tag is the source of truth, minus the leading "v".
+            $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
+            $version = $tag -replace '^v', ''
+          } else {
+            git fetch --tags --quiet
+            $now = [datetime]::UtcNow
+            $base = "{0}.{1}.{2}" -f ($now.Year % 100), $now.Month, $now.Day
+
+            $version = $base
+            $n = 1
+            while (git tag --list "v$version") {
+              $version = "$base.$n"
+              $n++
+            }
+
+            $tag = "v$version"
+            git tag $tag
+            git push origin $tag
+          }
+
+          Write-Host "Releasing $tag (version $version, build $env:GITHUB_RUN_NUMBER)"
+          "tag=$tag"         >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -23,7 +63,10 @@ jobs:
       - name: Build
         env:
           CGO_ENABLED: 1
-        run: go build -ldflags "-H windowsgui" -o dist/RGOClient.exe ./cmd/rgoclient
+        run: >
+          go build
+          -ldflags "-H windowsgui -X main.version=${{ steps.version.outputs.version }} -X main.build=${{ github.run_number }}"
+          -o dist/RGOClient.exe ./cmd/rgoclient
 
       # Self-signed only: proves the signing pipeline works and gives a verifiable
       # Authenticode signature, but does NOT clear SmartScreen or show a trusted
@@ -65,5 +108,7 @@ jobs:
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.version }}
           files: dist/RGOClient.exe
           generate_release_notes: true

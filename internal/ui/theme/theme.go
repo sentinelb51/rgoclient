@@ -38,6 +38,8 @@ var Colors = struct {
 	CategoryIndicator     color.Color
 	TextPrimary           color.Color
 	TimestampText         color.Color
+	DaySeparatorText      color.Color
+	DaySeparatorLine      color.Color
 	XButtonNormal         color.Color
 	XButtonHover          color.Color
 	SessionCardBg         color.Color
@@ -78,6 +80,8 @@ var Colors = struct {
 	CategoryIndicator:     color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
 	TextPrimary:           color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
 	TimestampText:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	DaySeparatorText:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3, brighter than a timestamp
+	DaySeparatorLine:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142, hairline on the message bg
 	ReplyMentionActive:    color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint, on the card bg
 	XButtonNormal:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	XButtonHover:          color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
@@ -123,6 +127,11 @@ var Sizes = struct {
 	MessageAttachmentSpacing      float32
 	MessageTimestampSize          float32
 	MessageTimestampTopOffset     float32
+	DaySeparatorTextSize          float32
+	DaySeparatorThickness         float32
+	DaySeparatorTopPadding        float32
+	DaySeparatorBottomPadding     float32
+	DaySeparatorGap               float32
 
 	// Swift Actions
 	SwiftActionSize float32
@@ -186,6 +195,11 @@ var Sizes = struct {
 	MessageAttachmentSpacing:      4,
 	MessageTimestampSize:          12,
 	MessageTimestampTopOffset:     4,
+	DaySeparatorTextSize:          11,
+	DaySeparatorThickness:         1,
+	DaySeparatorTopPadding:        14,
+	DaySeparatorBottomPadding:     2,
+	DaySeparatorGap:               8,
 
 	// Swift Actions
 	SwiftActionSize: 32,

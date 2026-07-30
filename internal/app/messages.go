@@ -74,8 +74,9 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 }
 
 // newMessageWidget builds a message widget, drawing curr as a grouped
-// continuation of prev when they belong together (see continuesGroup) and
-// tightening its bottom margin when next continues it.
+// continuation of prev when they belong together (see continuesGroup),
+// tightening its bottom margin when next continues it, and heading it with a day
+// separator when it opens a new calendar day (see dayLabel).
 //
 // Every mount path funnels through here, so this is also where an unresolved
 // author is chased down: whether the message came from the gateway, the initial
@@ -86,13 +87,34 @@ func (a *App) newMessageWidget(prev, curr, next *revoltgo.Message) *ui.MessageWi
 	if curr.System == nil && curr.Webhook == nil {
 		a.ensureAuthor(a.channelServerID(curr.Channel), curr.Author)
 	}
-	return ui.NewMessageWidget(a.deps(), curr, continuesGroup(prev, curr), continuesGroup(curr, next))
+	return ui.NewMessageWidget(a.deps(), curr, dayLabel(prev, curr),
+		continuesGroup(prev, curr), continuesGroup(curr, next))
+}
+
+// dayLabel returns the day separator label for curr — "" when it belongs to the
+// same calendar day as the message above it. A message with no predecessor
+// (the top of the mounted window, or a channel's first message) is treated as
+// opening its day, so loaded history always starts with a date; prepending older
+// messages rebuilds that row, which drops the label again if the day continues.
+func dayLabel(prev, curr *revoltgo.Message) string {
+	ct, err := util.Timestamp(curr.ID)
+	if err != nil {
+		return ""
+	}
+	if prev != nil {
+		if pt, err := util.Timestamp(prev.ID); err == nil && util.SameDay(pt, ct) {
+			return ""
+		}
+	}
+	return util.DayLabel(ct)
 }
 
 // continuesGroup reports whether curr should render as a continuation of prev —
-// same author, neither a system/webhook/masqueraded message, and within
-// messageGroupWindow — so it's drawn without a repeated avatar/name header. A
-// reply always starts a fresh group.
+// same author, neither a system/webhook/masqueraded message, on the same calendar
+// day, and within messageGroupWindow — so it's drawn without a repeated
+// avatar/name header. A reply always starts a fresh group, and so does a message
+// on the far side of a day separator: the separator has to break the group, or a
+// pair minutes apart across midnight would render as one headerless block.
 func continuesGroup(prev, curr *revoltgo.Message) bool {
 	if prev == nil || curr == nil || curr.Author == "" || prev.Author != curr.Author {
 		return false
@@ -109,6 +131,9 @@ func continuesGroup(prev, curr *revoltgo.Message) bool {
 	pt, err1 := util.Timestamp(prev.ID)
 	ct, err2 := util.Timestamp(curr.ID)
 	if err1 != nil || err2 != nil {
+		return false
+	}
+	if !util.SameDay(pt, ct) {
 		return false
 	}
 	gap := ct.Sub(pt)

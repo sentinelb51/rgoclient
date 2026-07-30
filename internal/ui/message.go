@@ -43,6 +43,14 @@ type MessageWidget struct {
 	// tighten it when a continuation is appended directly beneath this message.
 	bottomSpacer *canvas.Rectangle
 
+	// daySeparator is the dated divider drawn above the first message of a
+	// calendar day, nil for every other message. It lives on the widget rather
+	// than as its own list entry so the mounted window stays one object per
+	// message: whoever ends up first on its day carries the separator, and every
+	// path that re-evaluates a message against its new predecessor (prepend seams,
+	// deletions, edits) re-derives it for free.
+	daySeparator fyne.CanvasObject
+
 	// bodySlot holds the rendered message body; StartEdit swaps it for an
 	// in-place editor and CancelEdit restores body, leaving the header,
 	// attachments, and replies untouched.
@@ -77,7 +85,10 @@ var (
 // carries the full gap above it while a continuation carries only a tight gap, and
 // followedByGroup tightens the bottom margin so a head sits flush against the
 // continuations beneath it without changing the gap between separate groups.
-func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByGroup bool) *MessageWidget {
+//
+// A non-empty dayLabel means this message opens a new calendar day, and the named
+// day separator is drawn above it.
+func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, grouped, followedByGroup bool) *MessageWidget {
 	w := &MessageWidget{
 		background: canvas.NewRectangle(color.Transparent),
 		deps:       deps,
@@ -138,6 +149,10 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 	w.actionsOverlay = container.New(&OverlayLayout{YOffset: -16, RightOffset: 6})
 	messageRow := container.NewStack(inner, w.actionsOverlay)
 
+	if dayLabel != "" {
+		w.daySeparator = NewDaySeparator(dayLabel)
+	}
+
 	w.content = messageRow
 	if !grouped && len(message.Replies) > 0 {
 		replies := container.NewVBox()
@@ -153,7 +168,13 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, grouped, followedByG
 }
 
 func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(w.background, w.content))
+	row := container.NewStack(w.background, w.content)
+	if w.daySeparator == nil {
+		return widget.NewSimpleRenderer(row)
+	}
+	// The separator sits above the hover-highlight stack, not inside it, so
+	// hovering the message doesn't light up the divider as part of the row.
+	return widget.NewSimpleRenderer(VBoxNoSpacing(w.daySeparator, row))
 }
 
 // Message returns the message this widget renders.

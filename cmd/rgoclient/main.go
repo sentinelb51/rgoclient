@@ -1,6 +1,8 @@
 package main
 
 import (
+	"strconv"
+
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/theme"
@@ -18,6 +20,19 @@ import (
 // it, Fyne invents a throwaway ID per launch and logs an error.
 const appID = "com.sentinelb51.rgoclient"
 
+// version and build are stamped at link time by the CI workflows
+// (-X main.version=... -X main.build=...). Versions are calendar-based,
+// YY.M.D with no zero padding (26.7.29), so a version reads as the date it
+// shipped; a second release on the same day gets a fourth component
+// (26.7.29.1). build is the workflow run number, unique across every build.
+//
+// These defaults are what a plain `go build` produces locally, and are what
+// marks a binary as an unreleased local build.
+var (
+	version = "0.0.0"
+	build   = "0"
+)
+
 func main() {
 	// Metadata is set in code rather than through FyneApp.toml: the toml is only
 	// read for development builds, and only from the working directory or the
@@ -27,11 +42,16 @@ func main() {
 	// the UI thread — every gateway handler and worker goroutine goes through
 	// App.doOnUI / ui.DoOnUI. Without it Fyne assumes the legacy threading model
 	// and keeps its compatibility layer (and the startup warning) in place.
+	buildNumber, err := strconv.Atoi(build)
+	if err != nil {
+		buildNumber = 0
+	}
+
 	fyneapp.SetMetadata(fyne.AppMetadata{
 		ID:         appID,
 		Name:       "RGOClient",
-		Version:    "0.1.0",
-		Build:      1,
+		Version:    version,
+		Build:      buildNumber,
 		Migrations: map[string]bool{"fyneDo": true},
 	})
 

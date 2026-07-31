@@ -166,10 +166,9 @@ func (a *App) refreshAuthorMessages(userID string) {
 // buildMemberList builds the right-hand member sidebar.
 func (a *App) buildMemberList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MemberListBackground)
-	background.SetMinSize(fyne.NewSize(theme.Sizes.MemberSidebarWidth, 0))
 
 	a.refreshMemberList()
-	return container.NewStack(background, container.NewVScroll(a.memberList))
+	return ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, background, container.NewVScroll(a.memberList))
 }
 
 // refreshMemberList rebuilds the member rows for the current server, grouped

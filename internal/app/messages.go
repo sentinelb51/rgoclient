@@ -67,7 +67,8 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	composer := container.NewPadded(dock)
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	header := container.NewPadded(container.NewHBox(ui.HashtagIcon(), a.channelHeader))
+	a.channelGlyph = container.NewStack(ui.ChannelGlyph(a.currentChannel()))
+	header := container.NewPadded(container.NewHBox(a.channelGlyph, a.channelHeader))
 
 	layout := container.NewBorder(header, composer, nil, nil, a.messageScroll)
 	return container.NewStack(background, layout)
@@ -138,6 +139,17 @@ func continuesGroup(prev, curr *revoltgo.Message) bool {
 	}
 	gap := ct.Sub(pt)
 	return gap >= 0 && gap <= messageGroupWindow
+}
+
+// setChannelGlyph repoints the message header's prefix mark at the open
+// channel's type, so a DM reads "@name" rather than "#name". Call on the UI
+// thread; a nil channel falls back to the hashtag.
+func (a *App) setChannelGlyph(channel *revoltgo.Channel) {
+	if a.channelGlyph == nil {
+		return
+	}
+	a.channelGlyph.Objects = []fyne.CanvasObject{ui.ChannelGlyph(channel)}
+	a.channelGlyph.Refresh()
 }
 
 // showStatus replaces the message list with a single centered line.

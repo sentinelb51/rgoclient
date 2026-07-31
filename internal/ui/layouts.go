@@ -278,6 +278,34 @@ func NewMinWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.Con
 	return container.New(&minWidthLayout{width: width}, objects...)
 }
 
+// NewFixedWidthContainer pins a column to exactly width whatever its contents
+// ask for, stretching children to fill it. The sidebars use it because a
+// vertical scroller reports its content's minimum *width* as its own: without
+// this, one long channel or member name widens the column and shoves the
+// message area sideways. Contrast NewMinWidthContainer, which treats width as a
+// floor and still grows. Content wider than the slot is clipped by the scroller,
+// so pair it with NewEllipsisText on anything holding user-supplied text.
+func NewFixedWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&fixedWidthLayout{width: width}, objects...)
+}
+
+type fixedWidthLayout struct{ width float32 }
+
+func (l *fixedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		child.Resize(size)
+		child.Move(fyne.NewPos(0, 0))
+	}
+}
+
+func (l *fixedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var h float32
+	for _, child := range objects {
+		h = max(h, child.MinSize().Height)
+	}
+	return fyne.NewSize(l.width, h)
+}
+
 type minWidthLayout struct{ width float32 }
 
 func (l *minWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {

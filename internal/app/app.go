@@ -37,6 +37,15 @@ type App struct {
 	currentServerID  string
 	currentChannelID string
 
+	// The home view (directmessages.go). homeSelected replaces currentServerID
+	// as the "what is open" marker while it is: home has no server, so an empty
+	// currentServerID alone can't tell it apart from nothing being selected.
+	// dmChannels holds only the sidebar order — the channels themselves live in
+	// State, which DirectMessages() feeds. UI-thread only.
+	homeSelected bool
+	dmChannels   []string
+	loadingDMs   bool
+
 	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
 	unreadChannels      map[string]bool
 
@@ -55,8 +64,10 @@ type App struct {
 	messageList   *fyne.Container
 	messageScroll *ui.ObservableScroll
 	input         *ui.MessageInput
+	homeButton    *ui.SidebarButton
 	serverHeader  *widget.Label
 	channelHeader *widget.Label
+	channelGlyph  *fyne.Container // holds the message header's # / @ / group mark
 
 	settingsWindow fyne.Window // WIP settings window; nil when closed
 	overlay        *ui.Overlay // modal layer (attachment viewer, join dialog); nil when none
@@ -156,7 +167,10 @@ func (a *App) showMainUI() {
 }
 
 // stateChannel returns a channel from State, or nil when logged out or unknown.
-// It centralises the session nil-check for the channel helpers below.
+// It centralises the session nil-check for the channel helpers below. DMs and
+// groups need no special case: DirectMessages() feeds its result into State, so
+// a conversation the Ready snapshot didn't carry is known here from the moment
+// the home view loads it.
 func (a *App) stateChannel(channelID string) *revoltgo.Channel {
 	if a.session == nil || channelID == "" {
 		return nil

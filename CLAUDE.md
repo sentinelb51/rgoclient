@@ -79,10 +79,19 @@ internal/
                              as one the user just asked to join
     navigation.go            Server+channel sidebar + 4-column buildUI: build, refresh, select.
                              Server sidebar bookends the scrolling icons with fixed home
-                             (selectHome, stub) and settings (openSettings, WIP window)
-                             buttons; the join-server "+" sits at the end of the scrolling
-                             icons (re-added by every refreshServerList)
+                             (selectHome, directmessages.go) and settings (openSettings, WIP
+                             window) buttons; the join-server "+" sits at the end of the
+                             scrolling icons (re-added by every refreshServerList).
+                             refreshChannelList renders either a server's categorised
+                             channels or, in the home view, the flat DM list
+    directmessages.go        The home view: selectHome + loadDirectMessages /
+                             setDirectMessages (Session.DirectMessages, which feeds
+                             State itself — only the order is kept here),
+                             sortConversations (closed DMs dropped, newest activity
+                             first, returns IDs) and resolveRecipients (bounded user
+                             fetch so DM rows have names)
     messages.go              Message area: build, load, display, refresh/remove;
+                             setChannelGlyph (the header's # / @ / group mark);
                              continuesGroup/newMessageWidget (Discord-style author
                              grouping); dayLabel (day-separator text for a message,
                              "" when it shares its predecessor's day);
@@ -128,12 +137,19 @@ internal/
     thread.go                DoOnUI — the package's UI-thread dispatch
     layouts.go               Custom layouts + spacer helpers (incl. GutterLayout:
                              zero-height fixed-width column for the grouped timestamp;
-                             NewMinWidth/MinHeightContainer, one pinned axis apiece)
+                             NewMinWidth/MinHeightContainer, one pinned axis apiece;
+                             NewFixedWidthContainer, which pins a sidebar's width
+                             against its own content — see "Sidebar widths")
                              + FitWithin (aspect-preserving downscale, shared by the
                              attachment preview and the image viewer)
+    ellipsis.go              NewEllipsisText + TruncateToWidth — a canvas.Text that
+                             shortens to the width it is given (zero minimum width,
+                             so a long name can't widen its column)
     interactive.go           Shared tap/hover widgets (TappableContainer, HoverableStack,
                              IconButton, CloseButton, Avatar, SidebarButton + the
-                             NewSidebarSeparator bar) built on tapBase; roundedPanel
+                             NewSidebarSeparator bar) built on tapBase; roundedPanel.
+                             SidebarButton carries a selected state (selection outranks
+                             hover) so the home button lights like a server icon
     overlay.go               Overlay — the full-canvas modal layer (dim backdrop,
                              centred content, tap/Esc to dismiss) + tapSink, which
                              stops taps on the content reaching the backdrop
@@ -151,7 +167,10 @@ internal/
     icons.go                 newScaledIcon — the one fill/scale policy for every icon
     scroll.go                ObservableScroll (wheel amplify + middle-button pan)
     server.go                Server icon widget
-    channel.go               Channel row + collapsible category + drawn glyphs
+    channel.go               Channel row (named via util.ChannelName, so a DM row shows
+                             the other participant; the name takes the leftover width
+                             through NewEllipsisText) + collapsible category + the glyph
+                             set ChannelGlyph picks from: HashtagIcon / AtIcon / GroupIcon
     message.go               MessageWidget: construction, permissions, quick actions /
                              context menu, in-place edit mode, hover, content assembly.
                              A non-empty dayLabel draws a day separator above the row
@@ -172,7 +191,8 @@ internal/
                              Fyne draws the caret InputBorder wide). Wrap every mounted
                              entry in it
     contextmenu.go           ShowContextMenu / AnchorBelow / copyToClipboard
-    member.go                Member row + section header + small presence-dimmed avatar
+    member.go                Member row (name via NewEllipsisText, as in the channel
+                             row) + section header + small presence-dimmed avatar
     markdown.go              AST → RichText rendering; strike/spoiler custom segments;
                              uniform-style bodies (plain, all-bold/italic, lone code
                              block / heading / subtext, plain lists) flatten to a
@@ -197,6 +217,8 @@ internal/
                              role colour; member-aware: nickname + per-server avatar, fall
                              back to user) / FormatSystemMessage (session arg)
     member.go                MemberName / MemberAvatarURL / MemberOnline (session arg)
+    channel.go               ChannelName (DM → the other participant, SavedMessages →
+                             "Saved Notes", else the channel's own name) / DMRecipientID
     attachment.go            IsImageAttachment / AttachmentDimensions (nil-Metadata safe)
     text.go                  Truncate (rune-safe, "..." suffix)
     files.go                 Filetype + FormatFileSize
@@ -214,7 +236,8 @@ internal/
    `pendingToken` *before* opening (Ready can beat the login goroutine back to the
    UI thread). The login screen stays up until Ready; only failures return to it.
 2. `onReady` → save pending token, record unreads, `showMainUI` (the only place the
-   main layout is built), `refreshServerList`, `selectServer(first)`.
+   main layout is built), `refreshServerList`, `selectServer(first)` — or
+   `selectHome` when the account is in no servers, so the client never lands blank.
 3. `selectServer` → `refreshChannelList`, `refreshMemberList` (paints whatever
    members State currently holds) → `selectChannel(first)`. There is no bulk member
    fetch: Revolt's members endpoint has no pagination, so large servers would flood
@@ -286,7 +309,24 @@ internal/
    handlers); app handler refreshes the member sidebar when it's the open server.
    `Update` also calls `refreshAuthorMessages` so that author's mounted messages
    pick up the new nickname / role colour / avatar in place.
-9. Joining a server: the "+" at the end of the server sidebar opens
+9. The home view: the fixed home button swaps the channel sidebar from a
+   server's channels to the user's direct messages and groups. `App.homeSelected`
+   is what marks it open — home has no server, so an empty `currentServerID`
+   alone can't be told apart from nothing selected — and `selectServer` clears it.
+   The list comes from `Session.DirectMessages()`, which feeds the channels into
+   State on the way through, so the app keeps only the sidebar *order*
+   (`App.dmChannels`, a slice of IDs) and looks every channel up through
+   `App.stateChannel` like any other. It is still a plain fetch with no gateway
+   event maintaining it, which is why the order is re-asked for rather than
+   pushed. `selectHome` paints the cache immediately and refreshes
+   in the background (stale-while-revalidate), so re-opening home never blanks
+   the sidebar; each refresh re-sorts by `LastMessageID` (a ULID, so string
+   comparison sorts chronologically) and resolves any recipients missing from
+   State, since a DM has no name of its own. Ordering is a snapshot: an incoming
+   message marks its row unread rather than re-sorting the list under the reader.
+   Everything downstream of the sidebar is channel-keyed and needs no special
+   case; the member sidebar simply stays empty, as a DM has no server members.
+10. Joining a server: the "+" at the end of the server sidebar opens
    `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
    The dialog resolves what was pasted through `util.InviteCode` (bare code,
    invite link, or link without a scheme) and hands `joinServer` a code, which
@@ -319,6 +359,16 @@ internal/
   never recognises it as draggable.
 - Colors and sizes come from `ui/theme`, never hardcoded. Don't express one size
   as an offset from an unrelated one — add a named entry.
+- **Sidebar widths.** The three side columns are pinned by
+  `ui.NewFixedWidthContainer`, not by a minimum-size background rectangle: only
+  the message area (`RowLayout.FillIndex`) may change width, and it changes only
+  when the window does. A minimum size is a *floor*, and `container.NewVScroll`
+  reports its content's minimum width as its own, so one long channel or member
+  name used to widen its column and shove the message area sideways. Anything
+  rendering a user-supplied name into a sidebar row therefore goes in the
+  stretching slot of a `Border` wrapped in `ui.NewEllipsisText` (or, for a
+  `widget.Label`, with `Truncation = fyne.TextTruncateEllipsis`) so it shortens
+  to fit instead of pushing outwards.
 - Use the `log` package for diagnostics.
 - Keep this file current when adding files/packages, changing data flow, adding
   widgets, modifying `App` fields, or changing event handling.
@@ -354,10 +404,15 @@ consumer appears, lift them into a composite action.
 
 ## Known stubs / follow-ups
 
-`App.OnAvatarTapped` (profile) just prints; `selectHome` is a stub; the settings
-window is a placeholder; reply-preview tap navigation is a TODO in `ui/reply.go`
+`App.OnAvatarTapped` (profile) just prints; the settings window is a
+placeholder; reply-preview tap navigation is a TODO in `ui/reply.go`
 (`buildReplyPreview`); `App.createServer` (the join dialog's "Create a server"
 button) only reports that creation isn't built yet.
+
+The home view has no `ChannelCreate` handler, so a DM opened while the client is
+running (by the other party, or from a profile once that exists) only appears
+the next time the DM list is refreshed — its messages are still cached and its
+unread mark still recorded, they just have no row until then.
 
 The attachment viewer and the join-server dialog are modal overlays, not
 windows: they have no native chrome to recolour, cannot be left behind, and

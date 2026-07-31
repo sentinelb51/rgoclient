@@ -5,7 +5,7 @@ go 1.26.4
 require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/oklog/ulid/v2 v2.1.2
-	github.com/sentinelb51/revoltgo v0.0.0-20260728140441-038c63dd27d9
+	github.com/sentinelb51/revoltgo v0.0.0-20260731170001-d300083efbf2
 	golang.design/x/clipboard v0.8.0
 	golang.org/x/image v0.44.0
 )
@@ -49,7 +49,7 @@ require (
 	github.com/yuin/goldmark v1.8.5 // indirect
 	golang.design/x/x11 v0.2.0 // indirect
 	golang.org/x/exp/shiny v0.0.0-20260727155853-b88d891fe743 // indirect
-	golang.org/x/mobile v0.0.0-20260709172247-6129f5bee9d5 // indirect
+	golang.org/x/mobile v0.0.0-20260730202154-c700fe717e6e // indirect
 	golang.org/x/net v0.57.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect

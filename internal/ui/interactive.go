@@ -186,11 +186,16 @@ func (b *IconButton) MouseOut() {
 
 // SidebarButton is a circular, icon-only button matching the server-icon
 // aesthetic. It bookends the server list as the fixed home and settings
-// entries, so it reuses the server background/hover colours for consistency.
+// entries, so it reuses the server background/hover colours for consistency —
+// including the accent fill of a selected server, which the home button carries
+// while the direct-message view is open.
 type SidebarButton struct {
 	tapBase
 	background *canvas.Circle
 	icon       *canvas.Image
+
+	selected bool
+	hovered  bool
 }
 
 var (
@@ -217,14 +222,39 @@ func (b *SidebarButton) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewCenter(wrap))
 }
 
-func (b *SidebarButton) MouseIn(*desktop.MouseEvent) {
-	b.background.FillColor = theme.Colors.ServerHoverBg
+// SetSelected marks the button as the active view, tinting it with the accent a
+// selected server icon uses. Unchanged state is a no-op so selection syncs only
+// repaint when something actually changed.
+func (b *SidebarButton) SetSelected(selected bool) {
+	if b.selected == selected {
+		return
+	}
+	b.selected = selected
+	b.refreshAppearance()
+}
+
+// refreshAppearance repaints the circle for the current selected/hovered state.
+// Selection outranks hover, so hovering the active view doesn't dim it.
+func (b *SidebarButton) refreshAppearance() {
+	switch {
+	case b.selected:
+		b.background.FillColor = theme.Colors.ServerSelectedBg
+	case b.hovered:
+		b.background.FillColor = theme.Colors.ServerHoverBg
+	default:
+		b.background.FillColor = theme.Colors.ServerDefaultBg
+	}
 	b.background.Refresh()
 }
 
+func (b *SidebarButton) MouseIn(*desktop.MouseEvent) {
+	b.hovered = true
+	b.refreshAppearance()
+}
+
 func (b *SidebarButton) MouseOut() {
-	b.background.FillColor = theme.Colors.ServerDefaultBg
-	b.background.Refresh()
+	b.hovered = false
+	b.refreshAppearance()
 }
 
 // NewSidebarSeparator returns the short horizontal bar that visually divides the

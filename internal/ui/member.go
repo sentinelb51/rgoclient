@@ -24,12 +24,16 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 	label := canvas.NewText(name, textColor)
 	label.TextSize = theme.Sizes.MemberNameSize
 
+	// As in the channel row, the name fills the leftover width and is shortened to
+	// fit rather than being allowed to widen the member column.
 	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
-	row := container.NewHBox(
+	row := container.NewBorder(nil, nil,
+		container.NewHBox(
+			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+			container.NewCenter(circularAvatar(deps.Images, avatarURL, avatarSize)),
+		),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(circularAvatar(deps.Images, avatarURL, avatarSize)),
-		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(label),
+		NewEllipsisText(label),
 	)
 
 	userID := member.ID.User

@@ -74,4 +74,7 @@ func (a *App) resetSessionState() {
 	a.currentServerID = ""
 	a.currentChannelID = ""
 	a.pendingJoin = false
+	a.homeSelected = false
+	a.dmChannels = nil
+	a.loadingDMs = false
 }

@@ -11,10 +11,26 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// viewerDeps is the minimum a viewer card needs: an image cache to load from.
-// Actions are nil — the card only calls back through onClose.
+// stubActions satisfies MessageActions without doing anything. Deps is always
+// fully populated in the app, so tests populate it too rather than relying on
+// widgets tolerating a nil interface.
+type stubActions struct{}
+
+func (stubActions) OnAvatarTapped(string)                        {}
+func (stubActions) OnAttachmentTapped(*revoltgo.File)            {}
+func (stubActions) OnReply(*revoltgo.Message)                    {}
+func (stubActions) OnEdit(*revoltgo.Message)                     {}
+func (stubActions) OnDelete(*revoltgo.Message)                   {}
+func (stubActions) ResolveMessage(_, _ string) *revoltgo.Message { return nil }
+
+// viewerDeps is what a viewer card needs: an image cache to load from, plus the
+// stub actions every widget expects to be present.
 func viewerDeps() Deps {
-	return Deps{Images: cache.NewImageCache()}
+	return Deps{
+		Images:  cache.NewImageCache(),
+		Texts:   cache.NewTextCache(8),
+		Actions: stubActions{},
+	}
 }
 
 // TestAttachmentViewerFits checks that every attachment kind builds a card that

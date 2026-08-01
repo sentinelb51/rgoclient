@@ -5,6 +5,7 @@ import (
 	"image/color"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,22 +54,22 @@ type Reply struct {
 }
 
 // MessageInput is a multi-line text entry that grows with its content, supports
-// shift-enter for newlines, and manages pending attachments and replies.
+// Shift+Enter for newlines, and manages pending attachments and replies.
 type MessageInput struct {
 	widget.Entry
 	OnSubmit func(string)
 
-	// OnEditLast fires when Up is pressed in an empty composer, Discord-style:
-	// the app opens the in-place editor on the user's newest message.
+	// OnEditLast fires when Up is pressed in an empty composer: the app opens the
+	// in-place editor on the user's newest message.
 	OnEditLast func()
-
-	deps         Deps
-	shiftPressed bool
 
 	Attachments         []Attachment
 	AttachmentContainer *fyne.Container
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
+
+	deps         Deps
+	shiftPressed bool
 }
 
 // NewMessageInput creates a message input wired to the given dependencies.
@@ -81,32 +82,32 @@ func NewMessageInput(deps Deps) *MessageInput {
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
+
 	// Empty reply/attachment rows would still reserve a gap above the input bar,
-	// so keep them hidden until they actually hold something.
+	// so keep them hidden until they hold something.
 	m.ReplyContainer.Hide()
 	m.AttachmentContainer.Hide()
+
 	return m
 }
 
 // MinSize grows the entry up to maxInputLines as the user types.
-func (m *MessageInput) MinSize() fyne.Size {
-	return composerMinSize(&m.Entry)
-}
+func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 
-// composerMinSize sizes a growing composer-style entry: one line per newline
-// up to maxInputLines, plus the entry's inner padding and border insets (the
-// border size is the caret width under WithCaret, and inset top and bottom).
+// composerMinSize sizes a growing composer-style entry: one line per newline up
+// to maxInputLines, plus the entry's inner padding and border insets.
 func composerMinSize(e *widget.Entry) fyne.Size {
 	size := e.MinSize()
 	lines := min(max(strings.Count(e.Text, "\n")+1, 1), maxInputLines)
 	border := e.Theme().Size(fynetheme.SizeNameInputBorder)
 	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2 + border*2
+
 	return size
 }
 
 // lineHeights memoises the measured height of one text line per size: MinSize
-// runs on every layout pass, so re-measuring there would be wasted work. Only
-// touched on the UI thread.
+// runs on every layout pass, so re-measuring there is wasted work. UI thread
+// only, hence unsynchronised.
 var lineHeights = map[float32]float32{}
 
 func lineHeight(textSize float32) float32 {
@@ -115,8 +116,11 @@ func lineHeight(textSize float32) float32 {
 		h = fyne.MeasureText("M", textSize, fyne.TextStyle{}).Height
 		lineHeights[textSize] = h
 	}
+
 	return h
 }
+
+/* Keyboard */
 
 func (m *MessageInput) FocusLost() {
 	m.shiftPressed = false
@@ -135,10 +139,10 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 	}
 }
 
-// TypedKey sends the message on Enter, inserts a newline on Shift+Enter,
-// cancels pending replies/attachments on Escape, starts editing the last own
-// message on Up in an empty composer, and otherwise defers to the embedded
-// entry (refreshing so MinSize recomputes).
+// TypedKey sends the message on Enter, inserts a newline on Shift+Enter, cancels
+// pending replies/attachments on Escape, starts editing the last own message on
+// Up in an empty composer, and otherwise defers to the embedded entry, refreshing
+// so MinSize recomputes.
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	switch {
 	case key.Name == fyne.KeyUp && m.Text == "":
@@ -180,11 +184,12 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 		m.Refresh()
 		return
 	}
+
 	m.Entry.TypedShortcut(s)
 	m.Refresh()
 }
 
-// pasteAsAttachment attaches an image or file path from the clipboard, returning
+// pasteAsAttachment attaches an image or file path from the clipboard, reporting
 // whether it consumed the paste.
 func (m *MessageInput) pasteAsAttachment() bool {
 	if clipboard.Init() == nil {
@@ -204,8 +209,11 @@ func (m *MessageInput) pasteAsAttachment() bool {
 			return true
 		}
 	}
+
 	return false
 }
+
+/* Attachments */
 
 // RegisterDropHandler attaches files dropped onto the window.
 func (m *MessageInput) RegisterDropHandler(window fyne.Window) {
@@ -226,13 +234,13 @@ func (m *MessageInput) AddAttachment(path string) {
 
 // RemoveAttachment removes a queued file by path.
 func (m *MessageInput) RemoveAttachment(path string) {
-	for i, a := range m.Attachments {
-		if a.Path == path {
-			m.Attachments = append(m.Attachments[:i], m.Attachments[i+1:]...)
-			m.rebuildAttachments()
-			return
-		}
+	i := slices.IndexFunc(m.Attachments, func(a Attachment) bool { return a.Path == path })
+	if i < 0 {
+		return
 	}
+
+	m.Attachments = slices.Delete(m.Attachments, i, i+1)
+	m.rebuildAttachments()
 }
 
 // ClearAttachments removes all queued files.
@@ -248,6 +256,7 @@ func (m *MessageInput) rebuildAttachments() {
 	} else {
 		m.AttachmentContainer.Show()
 	}
+
 	for _, attachment := range m.Attachments {
 		var size int
 		if info, err := os.Stat(attachment.Path); err == nil {
@@ -256,17 +265,18 @@ func (m *MessageInput) rebuildAttachments() {
 
 		path := attachment.Path
 		bar := attachmentBar(attachment.Name, size, func() { m.RemoveAttachment(path) })
-		card := container.NewBorder(nil, bar, nil, nil, m.attachmentPreview(path))
+		card := container.NewBorder(nil, bar, nil, nil, attachmentPreview(path))
 
 		background := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 		background.CornerRadius = 8
 		m.AttachmentContainer.Add(container.NewPadded(container.NewStack(background, container.NewPadded(card))))
 	}
+
 	m.AttachmentContainer.Refresh()
 	m.Refresh()
 }
 
-func (m *MessageInput) attachmentPreview(path string) fyne.CanvasObject {
+func attachmentPreview(path string) fyne.CanvasObject {
 	if util.Filetype(path) == util.FileTypeImage {
 		img := canvas.NewImageFromFile(path)
 		img.FillMode = canvas.ImageFillContain
@@ -277,32 +287,34 @@ func (m *MessageInput) attachmentPreview(path string) fyne.CanvasObject {
 
 	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 	placeholder.SetMinSize(fyne.NewSize(attachPreviewW, attachPreviewGen))
+
 	return placeholder
 }
+
+/* Replies */
 
 // AddReply adds a reply target, ignoring duplicates and respecting maxReplies.
 func (m *MessageInput) AddReply(message *revoltgo.Message) {
 	if len(m.Replies) >= maxReplies {
 		return
 	}
-	for _, r := range m.Replies {
-		if r.ID == message.ID {
-			return
-		}
+	if slices.ContainsFunc(m.Replies, func(r Reply) bool { return r.ID == message.ID }) {
+		return
 	}
+
 	m.Replies = append(m.Replies, Reply{ID: message.ID, ChannelID: message.Channel})
 	m.rebuildReplies()
 }
 
 // RemoveReply removes a reply target by message ID.
 func (m *MessageInput) RemoveReply(messageID string) {
-	for i, r := range m.Replies {
-		if r.ID == messageID {
-			m.Replies = append(m.Replies[:i], m.Replies[i+1:]...)
-			m.rebuildReplies()
-			return
-		}
+	i := slices.IndexFunc(m.Replies, func(r Reply) bool { return r.ID == messageID })
+	if i < 0 {
+		return
 	}
+
+	m.Replies = slices.Delete(m.Replies, i, i+1)
+	m.rebuildReplies()
 }
 
 // ClearReplies removes all reply targets.
@@ -318,18 +330,20 @@ func (m *MessageInput) rebuildReplies() {
 	} else {
 		m.ReplyContainer.Show()
 	}
+
 	for i := range m.Replies {
 		m.ReplyContainer.Add(m.buildReplyCard(&m.Replies[i]))
 	}
+
 	m.ReplyContainer.Refresh()
 	m.Refresh()
 }
 
 // buildReplyCard renders a slim composer chip for one pending reply: avatar,
-// author, a truncated preview, a mention toggle, and a remove button. The card
-// is outlined in the replied author's role colour (falling back to the app
-// accent) and everything is vertically centred so the row reads as distinct
-// elements rather than a single blob.
+// author, a truncated preview, a mention toggle, and a remove button. The card is
+// outlined in the replied author's role colour, falling back to the app accent,
+// and everything is vertically centred so the row reads as distinct elements
+// rather than one blob.
 func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	author, content, avatarURL, accent := resolveReply(m.deps, reply.ChannelID, reply.ID)
 	if author == "" {
@@ -348,8 +362,8 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	contentLabel := canvas.NewText(content, theme.Colors.TimestampText)
 	contentLabel.TextSize = replyTextSize
 
-	// container.NewCenter vertically centres each element within the card's
-	// full height; HBoxNoSpacing keeps the horizontal gaps under explicit control.
+	// container.NewCenter vertically centres each element within the card's full
+	// height; HBoxNoSpacing keeps the horizontal gaps under explicit control.
 	left := HBoxNoSpacing(
 		HorizontalSpacer(8),
 		container.NewCenter(avatar),
@@ -377,22 +391,22 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	background.CornerRadius = 6
 	background.StrokeColor = accent
 	background.StrokeWidth = 1
+
 	return container.NewStack(background, row)
 }
 
-// replyIconButton is a small square SVG-icon button used on the reply card, so
-// the mention and close controls share one visual language. A momentary button
-// (toggle=false) just brightens on hover; a toggle (toggle=true) additionally
-// shows an accent background and stays bright while active, and dims when idle.
-// The icon is a centred canvas.Image, which avoids the vertical-alignment
-// guesswork of centring a text glyph.
+// replyIconButton is a small square icon button used on the reply card, so the
+// mention and close controls share one visual language. A momentary button
+// (toggle=false) just brightens on hover; a toggle additionally shows an accent
+// background and stays bright while active, dimming when idle.
 type replyIconButton struct {
 	tapBase
+	icon *canvas.Image
+	bg   *canvas.Rectangle
+
 	toggle  bool
 	active  bool
 	hovered bool
-	icon    *canvas.Image
-	bg      *canvas.Rectangle
 }
 
 var (
@@ -404,10 +418,11 @@ func newReplyIconButton(res fyne.Resource, toggle, active bool, onTap func()) *r
 	bg := canvas.NewRectangle(color.Transparent)
 	bg.CornerRadius = 5
 
-	b := &replyIconButton{toggle: toggle, active: active, icon: newScaledIcon(res, replyIconSize), bg: bg}
+	b := &replyIconButton{icon: newScaledIcon(res, replyIconSize), bg: bg, toggle: toggle, active: active}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 	b.applyState()
+
 	return b
 }
 
@@ -444,11 +459,12 @@ func (b *replyIconButton) applyState() {
 		b.icon.Translucency = 0
 	case b.toggle:
 		b.bg.FillColor = color.Transparent
-		b.icon.Translucency = 0.5 // inactive toggle reads as "off"
+		b.icon.Translucency = 0.5 // an inactive toggle reads as "off"
 	default:
 		b.bg.FillColor = color.Transparent
 		b.icon.Translucency = 0.25
 	}
+
 	b.bg.Refresh()
 	canvas.Refresh(b.icon)
 }

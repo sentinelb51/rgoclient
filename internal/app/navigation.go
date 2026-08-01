@@ -14,11 +14,10 @@ import (
 )
 
 // buildUI assembles the four-column layout: servers | channels | messages |
-// members. RowLayout keeps the sections flush (no seams) for the flat metro
-// look; only the message area (FillIndex 2) stretches, the others stay at their
-// fixed widths.
+// members. The fill row keeps the sections flush for the flat look; only the
+// message area (index 2) stretches, the rest stay at their fixed widths.
 func (a *App) buildUI() fyne.CanvasObject {
-	return container.New(&ui.RowLayout{FillIndex: 2},
+	return ui.NewFillRow(2,
 		a.buildServerList(),
 		a.buildChannelList(),
 		a.buildMessageArea(),
@@ -26,10 +25,11 @@ func (a *App) buildUI() fyne.CanvasObject {
 	)
 }
 
-// buildServerList builds the server icon sidebar: a fixed home button and a
-// settings button bookend the scrolling list of server icons, each set off by a
-// short separator bar. Home and settings sit outside the scroll so they stay put
-// when the server list grows tall enough to scroll.
+/* Server sidebar */
+
+// buildServerList builds the server icon sidebar: fixed home and settings buttons
+// bookend the scrolling icons, each set off by a short separator. They sit
+// outside the scroll, so they stay put when the list grows tall enough to scroll.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
 	background.SetMinSize(fyne.NewSize(theme.Sizes.ServerSidebarWidth, 0))
@@ -52,12 +52,14 @@ func (a *App) buildServerList() fyne.CanvasObject {
 
 	a.refreshServerList()
 	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
+
 	return container.NewStack(background, content)
 }
 
 // refreshServerList rebuilds the server icons from the current server list.
 func (a *App) refreshServerList() {
 	a.serverList.Objects = nil
+
 	for _, serverID := range a.serverIDs {
 		server := a.session.State.Server(serverID)
 		if server == nil {
@@ -66,29 +68,29 @@ func (a *App) refreshServerList() {
 
 		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
 		w.SetSelected(serverID == a.currentServerID)
+
 		// Added bare, not wrapped in a Center: ServerWidget already centres its own
-		// icon inside whatever space it gets, and keeping the widget itself at the
-		// top level lets syncServerSelection find it without unwrapping.
+		// icon, and keeping the widget at the top level lets syncServerSelection
+		// find it without unwrapping.
 		a.serverList.Add(w)
 	}
 
-	// The join button reads as one more server icon at the end of the list, so
-	// it lives inside the scroll rather than in the fixed bookends. Objects are
-	// rebuilt wholesale here, hence re-adding it on every refresh; the selection
-	// sync skips it because it isn't a ServerWidget.
+	// The join button reads as one more server icon at the end of the list, so it
+	// lives inside the scroll rather than in the fixed bookends. Objects are
+	// rebuilt wholesale here, hence re-adding it every time; the selection sync
+	// skips it because it isn't a ServerWidget.
 	a.serverList.Add(ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
 	a.serverList.Refresh()
 }
 
-// selectHome is the home button handler. The home/DM view is not built yet, so
-// this is a stub.
+// selectHome is the home button handler.
 func (a *App) selectHome() {
 	// todo: home / direct-message view
 	log.Print("home selected")
 }
 
-// openSettings opens the (WIP) settings window. A second open focuses the
-// existing window rather than spawning another.
+// openSettings opens the settings window. A second open focuses the existing
+// window rather than spawning another.
 func (a *App) openSettings() {
 	if a.settingsWindow != nil {
 		a.settingsWindow.RequestFocus()
@@ -99,6 +101,7 @@ func (a *App) openSettings() {
 	a.settingsWindow = window
 	window.SetOnClosed(func() { a.settingsWindow = nil })
 
+	// todo: actual settings
 	heading := widget.NewLabelWithStyle("Settings", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	note := widget.NewLabelWithStyle("Work in progress.", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
 	window.SetContent(container.NewCenter(container.NewVBox(heading, note)))
@@ -108,6 +111,8 @@ func (a *App) openSettings() {
 	a.styleNativeChrome(window)
 	window.Show()
 }
+
+/* Channel sidebar */
 
 // buildChannelList builds the channel sidebar with its server-name header.
 func (a *App) buildChannelList() fyne.CanvasObject {
@@ -121,10 +126,12 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	a.serverHeader = widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
 	a.refreshChannelList()
-	pad := theme.Sizes.ChannelSidebarPadding
-	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad), container.NewVScroll(a.channelList))
 
+	pad := theme.Sizes.ChannelSidebarPadding
+	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
+		container.NewVScroll(a.channelList))
 	content := container.NewBorder(container.NewPadded(a.serverHeader), nil, nil, nil, scroll)
+
 	return container.NewStack(background, content)
 }
 
@@ -151,7 +158,7 @@ func (a *App) refreshChannelList() {
 		if categorized[channelID] {
 			continue
 		}
-		if w := a.createChannelWidget(channelID); w != nil {
+		if w := a.newChannelRow(channelID); w != nil {
 			a.channelList.Add(w)
 		}
 	}
@@ -165,7 +172,7 @@ func (a *App) refreshChannelList() {
 
 		var rows []fyne.CanvasObject
 		for _, channelID := range cat.Channels {
-			if w := a.createChannelWidget(channelID); w != nil {
+			if w := a.newChannelRow(channelID); w != nil {
 				rows = append(rows, w)
 			}
 		}
@@ -174,6 +181,7 @@ func (a *App) refreshChannelList() {
 		for _, row := range rows {
 			a.channelList.Add(row)
 		}
+
 		category.SetChannels(rows, a.channelList)
 		if a.collapsedCategories[key] {
 			category.SetCollapsed(true)
@@ -183,24 +191,30 @@ func (a *App) refreshChannelList() {
 	a.channelList.Refresh()
 }
 
-// createChannelWidget builds a channel row reflecting its current state.
-func (a *App) createChannelWidget(channelID string) *ui.ChannelWidget {
+// newChannelRow builds a channel row reflecting its current state, or nil when
+// State doesn't know the channel.
+func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 	channel := a.session.State.Channel(channelID)
 	if channel == nil {
 		return nil
 	}
+
 	w := ui.NewChannelWidget(channel, func() { a.selectChannel(channelID) })
 	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+
 	return w
 }
 
+/* Selection */
+
 // selectServer switches to a server and selects its first channel. Re-clicking
-// the current server is a no-op (it would otherwise rebuild both sidebars and
-// yank the view to the first channel).
+// the current server is a no-op, which would otherwise rebuild both sidebars and
+// yank the view to the first channel.
 func (a *App) selectServer(serverID string) {
 	if a.currentServerID == serverID {
 		return
 	}
+
 	a.currentServerID = serverID
 	server := a.currentServer()
 	if server == nil {
@@ -214,13 +228,13 @@ func (a *App) selectServer(serverID string) {
 
 	if len(server.Channels) > 0 {
 		a.selectChannel(server.Channels[0])
-	} else {
-		a.clearChannelSelection()
+		return
 	}
+	a.clearChannelSelection()
 }
 
 // selectChannel switches to a channel, acknowledging unreads and showing its
-// messages (from cache when available).
+// messages from cache when available.
 func (a *App) selectChannel(channelID string) {
 	if a.currentChannelID == channelID {
 		return
@@ -238,16 +252,13 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	a.syncChannelList()
+	a.focusInput() // so the user can type straight away
 
-	// Focus the composer so the user can type straight away.
-	if a.input != nil {
-		a.window.Canvas().Focus(a.input)
-	}
-
-	if cached := a.messageCache.Get(channelID); len(cached) > 0 {
+	if cached := a.messages.Get(channelID); len(cached) > 0 {
 		a.displayMessages(cached)
 		return
 	}
+
 	a.showStatus("Loading messages...")
 	a.loadChannelMessages(channelID)
 }
@@ -278,9 +289,9 @@ func (a *App) syncChannelList() {
 	}
 }
 
-// refreshChannelRow updates the state of a single channel row, repainting only
-// that widget. Used on the per-message hot path so an incoming message in a
-// background channel doesn't refresh the entire sidebar.
+// refreshChannelRow updates a single channel row, repainting only that widget.
+// Used on the per-message hot path, so an incoming message in a background
+// channel doesn't refresh the entire sidebar.
 func (a *App) refreshChannelRow(channelID string) {
 	for _, obj := range a.channelList.Objects {
 		if w, ok := obj.(*ui.ChannelWidget); ok && w.Channel.ID == channelID {
@@ -299,8 +310,9 @@ func (a *App) setHeader(label *widget.Label, text string) {
 
 // channelName returns the current channel's name, or a fallback.
 func (a *App) channelName() string {
-	if ch := a.currentChannel(); ch != nil {
-		return ch.Name
+	if channel := a.currentChannel(); channel != nil {
+		return channel.Name
 	}
+
 	return "channel"
 }

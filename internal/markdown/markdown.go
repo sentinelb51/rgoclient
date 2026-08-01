@@ -1,11 +1,13 @@
-// Package markdown parses the Discord/Revolt flavor of markdown into a small
+// Package markdown parses the Discord/Revolt flavour of markdown into a small
 // AST. It is deliberately not CommonMark: a single newline is a hard line break,
-// __text__ is underline (not bold), and it adds -# subtext and ||spoiler||
+// __text__ is underline rather than bold, and it adds -# subtext and ||spoiler||
 // syntax.
 //
-// The package is pure — it has no UI dependency — so it can be unit tested in
-// isolation. Rendering the AST to Fyne widgets lives in internal/ui.
+// The package is pure — no UI dependency — so it can be tested in isolation.
+// Rendering the AST to Fyne widgets lives in internal/ui.
 package markdown
+
+/* Blocks */
 
 // Document is the root of a parsed message.
 type Document struct {
@@ -17,7 +19,7 @@ type Block interface{ isBlock() }
 
 type (
 	// Paragraph is a run of inline content; embedded LineBreak nodes mark the
-	// single newlines that Discord renders as hard breaks.
+	// single newlines that render as hard breaks.
 	Paragraph struct{ Children []Inline }
 
 	// Heading is a # / ## / ### header (levels 1-3).
@@ -52,6 +54,8 @@ func (*Subtext) isBlock()    {}
 func (*Blockquote) isBlock() {}
 func (*CodeBlock) isBlock()  {}
 func (*List) isBlock()       {}
+
+/* Inlines */
 
 // Inline is a span of formatted content within a block.
 type Inline interface{ isInline() }

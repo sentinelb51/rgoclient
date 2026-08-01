@@ -6,19 +6,49 @@ A Fyne v2.8.0 desktop chat client (Discord-like) for Revolt, in Go 1.26.4. Uses
 ## Core principle: explicit dependencies, no globals
 
 There is no global session or cache. The `*app.App` controller owns the session
-and both caches and passes what widgets need through a `ui.Deps` value:
+and all three caches, and passes what widgets need through a `ui.Deps` value:
 
 ```go
 type Deps struct {
-    Session *revoltgo.Session   // resolve users, system messages
-    Images  *cache.ImageCache   // load avatars / icons / attachments
-    Actions MessageActions      // user-interaction callbacks (implemented by *app.App)
+    Session *revoltgo.Session // resolves users, members, and system messages
+    Images  *cache.ImageCache // avatars, icons, attachments
+    Texts   *cache.TextCache  // text-attachment previews
+    Actions MessageActions    // user-interaction callbacks (implemented by *app.App)
 }
 ```
 
-Widget constructors take `Deps` (e.g. `ui.NewMessageWidget(deps, msg)`).
-`util` helpers take an explicit `*revoltgo.Session` argument. Do not reintroduce
-package-level singletons.
+`App.deps()` is the only producer, so **every field is always set** — widgets do
+not nil-check `Actions`, and tests populate it with a stub rather than relying on
+nil tolerance. Widget constructors take `Deps` (e.g. `ui.NewMessageWidget(deps,
+msg, ...)`). `util` helpers take an explicit `*revoltgo.Session` argument. Do not
+reintroduce package-level singletons.
+
+The only package-level mutable state left is pure measurement memoisation
+(`ui.lineHeights`, `ui.spaceWidths`) — caches of a pure function, UI-thread only.
+
+## Code style
+
+Follow revoltgo's conventions; they are the house style.
+
+- **Naming.** Types are `DomainRoot + Modifier`, flat (`ServerWidget`,
+  `MessageCache`). Constructors always use the verb *new* — `newX` unexported,
+  `NewX` exported; never `create`/`make`/`build` for a constructor (`buildX` is
+  reserved for assembling a UI subtree, which is not a constructor). Receivers are
+  a single letter tied to the type initial (`a *App`, `w *MessageWidget`,
+  `c *ImageCache`, `l *LRU`). Acronyms stay full-caps as a unit (`ID`, `URL`).
+- **Structs.** Field order runs identity → descriptive data → collections →
+  flags. Sections are separated by blank lines and `/* Label */` block comments.
+  A mutex sits adjacent to what it guards, with a trailing comment naming it.
+- **Functions.** Blank line after the signature before the first guard clause;
+  guard clauses and early returns over nesting; a blank line fencing the final
+  `return`. `defer Unlock()` by default.
+- **Comments.** Doc comments restate the identifier name first and stay short.
+  Struct fields get trailing comments only for semantic or unit clarification;
+  statement-level explanation goes on its own line above. Prefer `/* Label */`
+  dividers over splitting a file. **Comment only what the code cannot say** — the
+  non-obvious Fyne/revoltgo constraint, the reason an invariant holds. Do not
+  narrate mechanics.
+- **Files.** Prefer fewer, larger files with visual sectioning over fragmentation.
 
 ## revoltgo: Session vs State
 
@@ -47,7 +77,6 @@ and the batch will simply find nothing to do; nothing here needs changing.
 cmd/rgoclient/main.go        Entry point: app metadata (unique ID + the fyneDo
                              migration flag), theme, app.New(...).Run().
                              `version`/`build` are link-time vars stamped by CI
-                             (see "Versioning / CI")
 
 assets/                      Embedded binaries (go:embed can't reach above its own
                              source file, so this sits at the repo root)
@@ -59,168 +88,128 @@ assets/                      Embedded binaries (go:embed can't reach above its o
 internal/
   app/                       Controller; owns session + caches + window + UI refs
     app.go                   App struct, New, Run, lifecycle, doOnUI (the single
-                             UI-thread entry point for handlers/workers),
-                             styleNativeChrome (every window's title bar),
-                             MessageActions impl; OnEdit/startEditing/
-                             cancelActiveEdit drive the one active in-place
-                             message edit (App.editing, UI-thread only)
-    session.go               startWithToken / startWithLogin + handler registration;
-                             resetSessionState clears per-account caches/state on (re)login
-    events.go                Gateway lifecycle handler (onError) + handler-split doc
-    events_ready.go          onReady + savePendingToken
-    events_message.go        onMessage / onMessageUpdate / onMessageDelete /
-                             onBulkMessageDelete + scheduleAck/sendAck — the only
-                             read-ack path (selectChannel routes through it too):
-                             one MessageAck per ackDelay, and a pending ack for a
-                             different channel flushes immediately on switch
-    events_members.go        onServerMemberJoin / Leave / Update → refresh member sidebar
-    events_server.go         onServerCreate → append to serverIDs + refresh the sidebar,
-                             selecting the new server only when App.pendingJoin marks it
-                             as one the user just asked to join
-    navigation.go            Server+channel sidebar + 4-column buildUI: build, refresh, select.
-                             Server sidebar bookends the scrolling icons with fixed home
-                             (selectHome, stub) and settings (openSettings, WIP window)
-                             buttons; the join-server "+" sits at the end of the scrolling
-                             icons (re-added by every refreshServerList)
-    messages.go              Message area: build, load, display, refresh/remove;
-                             continuesGroup/newMessageWidget (Discord-style author
-                             grouping); dayLabel (day-separator text for a message,
-                             "" when it shares its predecessor's day);
-                             displayMessages/displayCached; jumpToLatest;
-                             editLastOwnMessage (Up in empty composer → edit newest
-                             own cached message)
-    mounting.go              The mounted window — which slice of the cache has live
-                             widgets, and how it slides: appendMessage,
-                             loadMoreHistory, prependMessages, mountNewerFromCache,
-                             appendMessages, trimMountedTop/Bottom. Its header
-                             states the invariants
-    compose.go               handleSubmit + attachment upload + reply conversion
-    viewer.go                The attachment lightbox: showAttachmentViewer +
-                             showOverlay/closeOverlay, the one modal layer
-                             (App.overlay, UI-thread only)
-    invite.go                showJoinServer + joinServer: the invite dialog on that
-                             same modal layer (App.joinDialog) and the InviteJoin
-                             call; createServer is the dialog's other button (stub)
-    members.go               Member sidebar: build/refresh/group; ensureAuthor →
-                             flushAuthors → resolveAuthor (lazy author resolution,
-                             queued then fetched in one bounded batch);
-                             refreshAuthorMessages (in-place per-author widget
-                             update, no full re-render)
-    login.go                 Login view + login flow
-    store.go                 Saved-session JSON persistence (~/.rgoclient_sessions.json)
+                             UI-thread entry point), deps, styleNativeChrome,
+                             state accessors, the ui.MessageActions impl, and the
+                             one active in-place edit (startEditing/cancelActiveEdit)
+    session.go               Opening a session (startWithToken/startWithLogin/
+                             openSession/resetSessionState), the login screen, and
+                             the saved-session JSON store (~/.rgoclient_sessions.json)
+    events.go                Every gateway handler, registered in openSession:
+                             Ready + error lifecycle, message create/update/delete,
+                             the coalesced read-ack path (scheduleAck/sendAck — the
+                             only one; selectChannel routes through it too), and
+                             server/member events
+    navigation.go            buildUI (the 4-column fill row) + the server and
+                             channel sidebars, the settings window, and selection.
+                             The server sidebar bookends its scrolling icons with
+                             fixed home and settings buttons; the join-server "+"
+                             sits at the end of the scrolling icons
+    messages.go              The message area end to end: build, compose/submit,
+                             widget construction (continuesGroup/dayLabel), load
+                             and render, and the mounted window — which slice of
+                             the cache has live widgets and how it slides. Its
+                             "mounted window" section states the invariants
+    members.go               Lazy author resolution (ensureAuthor → flushAuthors →
+                             resolveAuthor, queued then fetched in one bounded
+                             batch; refreshAuthorMessages updates widgets in place)
+                             plus the member sidebar
+    overlay.go               The modal layer: showOverlay/closeOverlay, the
+                             attachment lightbox, and the join-server dialog +
+                             joinServer/createServer
   cache/
-    image.go                 ImageCache — instance built by App; LRU-bounded memory
-                             (maxMemoryImages) + disk + async load; trimDiskCache
-                             evicts oldest-first back under budget at startup
-    message.go               MessageCache — per-channel, oldest→newest, capped per channel
-                             (Set/Append/Prepend all trim), LRU channel eviction;
-                             Find/Remove/Replace = binary search by ID (ULIDs sort
-                             chronologically; CompareMessageID is shared with app);
-                             both entries *and* published slices are immutable —
-                             Remove/Replace rebuild rather than edit in place, so a
-                             UI-thread reader holding an earlier slice is safe;
-                             Clear on logout
-    lru.go                   LRU — shared O(1) recency tracker (list + map) behind
-                             every bounded cache (images, messages, text previews)
+    cache.go                 Package doc, LRU (the shared O(1) recency tracker
+                             behind every bounded cache), and TextCache
+                             (LRU-bounded text-attachment previews)
+    message.go               MessageCache — per-channel, oldest→newest, capped per
+                             channel, LRU channel eviction; Find/Remove/Replace =
+                             binary search by ID (ULIDs sort chronologically;
+                             CompareMessageID is shared with app); both entries
+                             *and* published slices are immutable, so a UI-thread
+                             reader holding an earlier slice is safe
+    image.go                 ImageCache — LRU-bounded memory + disk + async load;
+                             trimDiskCache evicts oldest-first at startup
   ui/
-    theme/theme.go           Colors, Sizes, AppTheme (palette + scrollbar/widget overrides)
-    deps.go                  Deps struct + MessageActions interface
-    thread.go                DoOnUI — the package's UI-thread dispatch
-    layouts.go               Custom layouts + spacer helpers (incl. GutterLayout:
-                             zero-height fixed-width column for the grouped timestamp;
-                             NewMinWidth/MinHeightContainer, one pinned axis apiece)
-                             + FitWithin (aspect-preserving downscale, shared by the
-                             attachment preview and the image viewer)
-    interactive.go           Shared tap/hover widgets (TappableContainer, HoverableStack,
-                             IconButton, CloseButton, Avatar, SidebarButton + the
-                             NewSidebarSeparator bar) built on tapBase; roundedPanel
-    overlay.go               Overlay — the full-canvas modal layer (dim backdrop,
-                             centred content, tap/Esc to dismiss) + tapSink, which
-                             stops taps on the content reaching the backdrop
-    viewer.go                NewAttachmentViewer — the lightbox card: header
-                             (name/size/dimensions, open-in-browser, close) over a
-                             fitted image, a full scrollable text pane, or a
-                             no-preview placeholder
-    joinserver.go            JoinServerDialog — the invite card, laid out like the
-                             login screen (centred heading, separators, section
-                             labels, full-width controls): code/link field, status
-                             line (Fail/Notice), Join, and the Create a server stub.
-                             Validates through util.InviteCode before calling back,
-                             and its inviteEntry handles Esc itself (a focused entry
+    ui.go                    Package doc, Deps + MessageActions, DoOnUI, the one
+                             icon fill/scale policy (newScaledIcon), context menus,
+                             and WithCaret (per-entry theme override restoring the
+                             caret AppTheme's zero InputBorder collapses — wrap
+                             every mounted entry in it)
+    layouts.go               Spacers, fitWithin, and the custom layouts:
+                             noSpacingLayout (VBox/HBox/NewFillRow — one layout,
+                             optional filling child), columnLayout (the message
+                             avatar gutter; `collapse` makes it report zero height
+                             for the grouped timestamp), overlayLayout,
+                             minSizeLayout (NewMinWidth/MinHeightContainer), and
+                             stripPaddingLayout
+    widgets.go               Shared interactive widgets on tapBase
+                             (TappableContainer, HoverableStack, IconButton,
+                             SidebarButton, CloseButton, roundedPanel, separator),
+                             the one avatar loader (circularAvatar/Avatar), and
+                             ObservableScroll (wheel amplify + middle-button pan)
+    sidebar.go               ServerWidget, ChannelWidget + collapsible category,
+                             drawn glyphs (HashtagIcon), member row/section, and
+                             the saved-session card
+    message.go               MessageWidget: construction, permissions, quick
+                             actions / context menu, in-place edit mode, hover,
+                             content assembly — plus the day separator it owns
+                             (not a list entry of its own), reply previews, and
+                             EditEntry
+    markdown.go              AST → RichText rendering; strike/underline/spoiler
+                             custom segments; uniform-style bodies flatten to a
+                             Selectable Label (mouse text selection); only
+                             mixed-style bodies keep the unselectable RichText
+    attachment.go            Attachment rendering (image / text preview / generic
+                             card), the name/size bar, and fetchText (shared,
+                             byte-capped download). Images and text files are
+                             tappable → Actions.OnAttachmentTapped
+    input.go                 Message input + attachments + reply cards; OnEditLast
+                             fires on Up in an empty composer
+    modal.go                 Overlay (the full-canvas modal layer) + tapSink,
+                             NewAttachmentViewer (the lightbox card), and
+                             JoinServerDialog (validates through util.InviteCode;
+                             its entry handles Esc itself, since a focused entry
                              never reaches the canvas handler)
-    icons.go                 newScaledIcon — the one fill/scale policy for every icon
-    scroll.go                ObservableScroll (wheel amplify + middle-button pan)
-    server.go                Server icon widget
-    channel.go               Channel row + collapsible category + drawn glyphs
-    message.go               MessageWidget: construction, permissions, quick actions /
-                             context menu, in-place edit mode, hover, content assembly.
-                             A non-empty dayLabel draws a day separator above the row
-                             (outside the hover-highlight stack)
-    dayseparator.go          NewDaySeparator — the dated hairline (day name left, rule
-                             out to the right edge) above the first message of a
-                             calendar day + its two-child layout. Not a list entry of
-                             its own: MessageWidget owns it
-    attachment.go            Attachment rendering (image / text preview / generic card),
-                             the LRU-bounded text-preview cache, fetchText (shared,
-                             byte-capped download), and the name/size bar. Images and
-                             text files are tappable → Actions.OnAttachmentTapped
-    reply.go                 Reply preview line, reply resolution, circular avatar
-    editor.go                EditEntry — in-place edit entry (Enter saves, Shift+Enter
-                             newline, Esc cancels; grows like the composer)
-    caret.go                 WithCaret — per-entry theme override restoring the caret
-                             (AppTheme zeroes SizeNameInputBorder for flat inputs, and
-                             Fyne draws the caret InputBorder wide). Wrap every mounted
-                             entry in it
-    contextmenu.go           ShowContextMenu / AnchorBelow / copyToClipboard
-    member.go                Member row + section header + small presence-dimmed avatar
-    markdown.go              AST → RichText rendering; strike/spoiler custom segments;
-                             uniform-style bodies (plain, all-bold/italic, lone code
-                             block / heading / subtext, plain lists) flatten to a
-                             Selectable Label (mouse text selection); only mixed-style
-                             bodies keep the unselectable RichText
-    input.go                 Message input + attachments + reply cards (slim,
-                             role-colour-outlined; shared replyIconButton for the
-                             mention toggle + close); OnEditLast fires on Up in an
-                             empty composer
-    sessioncard.go           Saved-session card
-    titlebar_windows.go      DWM recolouring of the native title bar (no-op elsewhere,
-    titlebar_notwindows.go   see App.styleNativeChrome's retry loop)
-  markdown/                  Pure (no UI) Discord/Revolt markdown parser → small AST
+    theme/theme.go           Colors, Sizes, AppTheme (palette + scrollbar/widget
+                             overrides)
+    titlebar_windows.go      DWM recolouring of the native title bar (no-op
+    titlebar_notwindows.go   elsewhere, see App.styleNativeChrome's retry loop)
+  markdown/                  Pure (no UI) Discord/Revolt markdown parser → AST
     markdown.go              Document/Block/Inline AST node types
-    parser.go                Block parsing (paragraph, heading, quote, list, fence…)
-    inline.go                Inline parsing (bold/italic/strike/spoiler/code/link) +
-                             PlainText; Discord-style emphasis guards: _ opens/closes
-                             only at word boundaries (snake_case stays literal) and
-                             single */_ content can't be whitespace-edged
+    parser.go                Block parsing, inline parsing (bold/italic/strike/
+                             spoiler/code/link), and PlainText. Discord-style
+                             emphasis guards: _ opens/closes only at word
+                             boundaries (snake_case stays literal) and single
+                             */_ content can't be whitespace-edged
   util/
-    message.go               MessageAuthor — one-pass author resolution (name, avatar URL,
-                             role colour; member-aware: nickname + per-server avatar, fall
-                             back to user) / FormatSystemMessage (session arg)
-    member.go                MemberName / MemberAvatarURL / MemberOnline (session arg)
-    attachment.go            IsImageAttachment / AttachmentDimensions (nil-Metadata safe)
-    text.go                  Truncate (rune-safe, "..." suffix)
-    files.go                 Filetype + FormatFileSize
-    timestamp.go             ULID Timestamp + ShortTime + NiceTime + SameDay /
-                             DayLabel (day-separator text: Today / Yesterday / date)
-    url.go                   IDFromAttachmentURL
-    invite.go                InviteCode — bare code / invite link / scheme-less link
-                             → code ("" when it isn't shaped like one)
+    message.go               MessageAuthor — one-pass author resolution (name,
+                             avatar URL, role colour; member-aware) — plus
+                             MemberName/MemberAvatarURL/MemberOnline and
+                             FormatSystemMessage
+    file.go                  Filetype + FormatFileSize, IsImageAttachment /
+                             AttachmentDimensions (nil-Metadata safe), and
+                             IDFromAttachmentURL
+    text.go                  Truncate (rune-safe) + InviteCode (bare code /
+                             invite link / scheme-less link → code, "" when it
+                             isn't shaped like one)
+    timestamp.go             ULID Timestamp + ShortTime + NiceTime + SameDay +
+                             DayLabel (Today / Yesterday / date)
 ```
 
 ## Data flow
 
-1. Login (`login.go`) → `startWithToken` / `startWithLogin` → `openSession` registers
-   handlers and opens the gateway. `startWithLogin` stashes the new token in
-   `pendingToken` *before* opening (Ready can beat the login goroutine back to the
-   UI thread). The login screen stays up until Ready; only failures return to it.
-2. `onReady` → save pending token, record unreads, `showMainUI` (the only place the
-   main layout is built), `refreshServerList`, `selectServer(first)`.
+1. Login (`session.go`) → `startWithToken` / `startWithLogin` → `openSession`
+   registers handlers and opens the gateway. `startWithLogin` stashes the new
+   token in `pendingToken` *before* opening (Ready can beat the login goroutine
+   back to the UI thread). The login screen stays up until Ready; only failures
+   return to it.
+2. `onReady` → save pending token, record unreads, `showMainUI` (the only place
+   the main layout is built), `refreshServerList`, `selectServer(first)`.
 3. `selectServer` → `refreshChannelList`, `refreshMemberList` (paints whatever
-   members State currently holds) → `selectChannel(first)`. There is no bulk member
-   fetch: Revolt's members endpoint has no pagination, so large servers would flood
-   memory. Members are resolved lazily per author (see `ensureAuthor`).
+   members State currently holds) → `selectChannel(first)`. There is no bulk
+   member fetch: Revolt's members endpoint has no pagination, so large servers
+   would flood memory. Members are resolved lazily per author (`ensureAuthor`).
 4. `selectChannel` → show cached messages, else `loadChannelMessages` (asks for
-   `IncludeUsers: true`, see the revoltgo note below); ack unread.
+   `IncludeUsers: true`, see the revoltgo note above); ack unread.
    `displayMessages` is synchronous and mounts only the newest `initialMountCount`
    messages (~2-3 screenfuls; mounting more is churn the renderer cache holds for
    up to a minute, which is what made rapid channel switching ratchet memory).
@@ -238,9 +227,9 @@ internal/
    backing array. Sending jumps to the newest message (`jumpToLatest`),
    re-rendering if scrollback trimmed the tail away.
    Message author name/avatar resolve from the server member (nickname, per-server
-   avatar, role colour), falling back to the raw user. Consecutive messages from the
-   same author within `messageGroupWindow` render grouped (`continuesGroup`): no
-   repeated avatar/name, just a hover-revealed gutter timestamp. All widget
+   avatar, role colour), falling back to the raw user. Consecutive messages from
+   the same author within `messageGroupWindow` render grouped (`continuesGroup`):
+   no repeated avatar/name, just a hover-revealed gutter timestamp. All widget
    construction goes through `App.newMessageWidget(prev, curr, next)`;
    `displayMessages`, `appendMessage`, and `prependMessages` each supply the right
    predecessor (prepend also re-evaluates the old top row against the newly
@@ -283,9 +272,9 @@ internal/
    `refreshMessage` leaves a message being edited alone so a remote update can't
    discard the open editor.
 8. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
-   handlers); app handler refreshes the member sidebar when it's the open server.
-   `Update` also calls `refreshAuthorMessages` so that author's mounted messages
-   pick up the new nickname / role colour / avatar in place.
+   handlers); the app handler refreshes the member sidebar when it's the open
+   server. `Update` also calls `refreshAuthorMessages` so that author's mounted
+   messages pick up the new nickname / role colour / avatar in place.
 9. Joining a server: the "+" at the end of the server sidebar opens
    `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
    The dialog resolves what was pasted through `util.InviteCode` (bare code,
@@ -301,7 +290,8 @@ internal/
 
 ## Conventions
 
-- Pass dependencies via `ui.Deps`; never reach for global state.
+- Pass dependencies via `ui.Deps`; never reach for global state. `Deps` is always
+  fully populated, so don't add nil checks for its fields.
 - Background goroutines update the UI through `App.doOnUI(fn, wait)` (controller)
   or `ui.DoOnUI(fn)` (widgets). `internal/cache` dispatches to the driver directly
   because `internal/ui` imports it. `main.go` declares the `fyneDo` migration, so
@@ -327,6 +317,9 @@ internal/
 
 `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`
 (expect no output).
+
+Note this repo is checked out with `core.autocrlf=true`; write source files with
+LF endings so `gofmt -l` stays quiet.
 
 ## Versioning / CI
 
@@ -355,9 +348,13 @@ consumer appears, lift them into a composite action.
 ## Known stubs / follow-ups
 
 `App.OnAvatarTapped` (profile) just prints; `selectHome` is a stub; the settings
-window is a placeholder; reply-preview tap navigation is a TODO in `ui/reply.go`
+window is a placeholder; reply-preview tap navigation is a TODO in `ui/message.go`
 (`buildReplyPreview`); `App.createServer` (the join dialog's "Create a server"
 button) only reports that creation isn't built yet.
+
+`markdown.CodeBlock.Language` is parsed and tested but nothing renders syntax
+highlighting yet. `util.FileType` classifies video/audio/archive/PDF, but only
+`FileTypeImage` and `FileTypeText` are branched on.
 
 The attachment viewer and the join-server dialog are modal overlays, not
 windows: they have no native chrome to recolour, cannot be left behind, and

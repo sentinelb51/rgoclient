@@ -17,29 +17,19 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// renderMessageBody renders a message's body. A body whose whole content
-// shares one uniform style — plain text, but also an all-bold/italic message,
-// a lone code block or heading, inline-code-only, subtext, or a plain list —
-// becomes a selectable Label (which carries one TextStyle/SizeName/colour for
-// everything) so its text can be selected and copied with the mouse. Only
-// genuinely mixed-style bodies fall back to a RichText, which Fyne cannot make
-// selectable (its internal selection machinery is unexported and assumes a
-// single uniform text style). The author name is drawn separately (see
-// buildMessageHeader) so it can carry an arbitrary role colour, which RichText
-// segments can't express.
+// renderMessageBody renders a message's body. A body whose whole content shares
+// one uniform style flattens to a selectable Label, so its text can be selected
+// with the mouse; only genuinely mixed-style bodies fall back to a RichText,
+// which Fyne cannot make selectable (its selection machinery is unexported and
+// assumes a single uniform style).
 //
-// Fyne's RichText wraps and flows native segments (text, bold/italic, links)
-// only when every content segment is marked Inline; a non-inline segment is
-// isolated on its own row and forces the next onto a fresh one. So every piece
-// of content is emitted inline and each block/line is terminated by an empty
-// non-inline segment that acts as a single-line break (see mdBuilder.lineBreak).
-//
-// Strikethrough, underline (Fyne's TextStyle.Underline is not rendered) and
-// spoilers have no usable native equivalent, so they are drawn by a custom
-// decoratedSegment. To wrap like ordinary words, each such span is split into
-// per-word segments interleaved with normal spaces (RichText only breaks rows at
-// text spaces, never between two custom segments); each word's decoration bridges
-// the following space so the line/cover still reads as continuous.
+// Two RichText constraints shape the rest of this file. It only wraps and flows
+// native segments when every content segment is marked Inline, so content is
+// emitted inline and each line is terminated by an empty non-inline segment
+// acting as a break (see mdBuilder.lineBreak). And strike, underline and spoilers
+// have no native equivalent, so decoratedSegment draws them — split per word,
+// since RichText only breaks rows at text spaces, never between two custom
+// segments.
 func renderMessageBody(text string) fyne.CanvasObject {
 	doc := markdown.Parse(text)
 
@@ -77,9 +67,8 @@ type flatBody struct {
 }
 
 // flattenDocument tries to flatten a document into a single styled string,
-// reporting false when blocks or inlines mix styles or need custom visuals
-// (links, spoilers, strike, underline, blockquote bars). Blocks join with
-// single newlines, matching the line breaks the RichText renderer emits.
+// reporting false when blocks or inlines mix styles or need custom visuals.
+// Blocks join with single newlines, matching the breaks RichText emits.
 func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 	var f flatBody
 	var b strings.Builder
@@ -139,10 +128,9 @@ func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 	return f, true
 }
 
-// flattenInlines appends the nodes' text to b, folding each text leaf's
-// effective style (the accumulated emphasis, plus monospace for inline code)
-// into merge. It reports false on nodes that need custom visuals or when a
-// leaf's style conflicts with the styles seen so far.
+// flattenInlines appends the nodes' text to b, folding each leaf's effective
+// style into merge. It reports false on nodes needing custom visuals, or when a
+// leaf's style conflicts with those seen so far.
 func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, size fyne.ThemeSizeName, dim bool, merge func(fyne.TextStyle, fyne.ThemeSizeName, bool) bool) bool {
 	for _, node := range nodes {
 		switch n := node.(type) {
@@ -255,7 +243,7 @@ func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, 
 }
 
 // lineBreak terminates the current row with an empty, non-inline segment so the
-// next content starts on a fresh line. base carries the size so the break's row
+// next content starts on a fresh line. base carries the size, so the break's row
 // height matches the surrounding text.
 func (b *mdBuilder) lineBreak(base widget.RichTextStyle) {
 	style := base
@@ -453,8 +441,8 @@ func (s *decoratedSegment) Update(o fyne.CanvasObject) {
 	}
 }
 
-// decoratedText draws a single word with any combination of a strike line, an
-// underline and a tappable spoiler cover. It draws at its intrinsic (text) width
+// decoratedText draws one word with any combination of a strike line, an
+// underline and a tappable spoiler cover. It draws at its intrinsic text width
 // regardless of the size RichText gives it, so decorations never stretch to fill
 // a row; the optional bridge extends them by one space to meet the next word.
 type decoratedText struct {
@@ -503,9 +491,8 @@ func newDecoratedText(seg *decoratedSegment) *decoratedText {
 	return w
 }
 
-// apply copies the styling fields from a segment onto the widget. The set of
-// decorations (which lines/cover exist) is fixed for a given segment, so only
-// text and styling are updated here.
+// apply copies a segment's styling onto the widget. Which decorations exist is
+// fixed per segment, so only text and styling are updated here.
 func (w *decoratedText) apply(seg *decoratedSegment) {
 	w.colorName = seg.colorName
 	w.sizeName = seg.sizeName
@@ -590,9 +577,9 @@ func (r *decoratedRenderer) Layout(fyne.Size) {
 	}
 }
 
-// spaceWidths memoises the measured width of a single space per size/style, so
-// Layout doesn't re-measure text for every bridged word on every pass. Layout
-// only runs on the UI thread, so the map is unsynchronised.
+// spaceWidths memoises the measured width of a single space per size and style,
+// so Layout doesn't re-measure for every bridged word on every pass. UI thread
+// only, hence unsynchronised.
 var spaceWidths = map[spaceKey]float32{}
 
 type spaceKey struct {

@@ -12,13 +12,18 @@ import (
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
+// closeButtonSize is the side length of a CloseButton.
+const closeButtonSize = 24
+
+/* Shared plumbing */
+
 // tapBase provides the tap, right-click, and (no-op) mouse-move plumbing shared
-// by the interactive widgets in this package. Embedders implement CreateRenderer
-// and, where they react to hover, MouseIn/MouseOut. Setting onSecondaryTap opts
-// the widget into a context menu (servers, channels, members, avatars); leaving
-// it nil makes right-clicks a no-op.
+// by the interactive widgets here. Embedders implement CreateRenderer and, where
+// they react to hover, MouseIn/MouseOut. Setting onSecondaryTap opts the widget
+// into a context menu; leaving it nil makes right-clicks a no-op.
 type tapBase struct {
 	widget.BaseWidget
 	onTap          func()
@@ -39,9 +44,20 @@ func (b *tapBase) TappedSecondary(e *fyne.PointEvent) {
 
 func (b *tapBase) MouseMoved(*desktop.MouseEvent) {}
 
-// Cursor shows the pointer cursor over every tappable widget, so clickable
-// elements read as clickable.
+// Cursor shows the pointer over every tappable widget, so clickable elements
+// read as clickable.
 func (b *tapBase) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
+// roundedPanel is the small rounded surface the floating message controls — the
+// hover quick-actions and the edit save/cancel pair — sit on.
+func roundedPanel() *canvas.Rectangle {
+	panel := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	panel.CornerRadius = 4
+
+	return panel
+}
+
+/* Containers */
 
 // TappableContainer wraps content, highlighting a background on hover and
 // invoking onTap when clicked.
@@ -64,6 +80,7 @@ func NewTappableContainer(content fyne.CanvasObject, onTap func()) *TappableCont
 	}
 	t.onTap = onTap
 	t.ExtendBaseWidget(t)
+
 	return t
 }
 
@@ -95,7 +112,7 @@ var (
 	_ desktop.Hoverable = (*HoverableStack)(nil)
 )
 
-// NewHoverableStack makes content tappable with a hover border and optional
+// NewHoverableStack makes content tappable with a hover border and an optional
 // hover callback.
 func NewHoverableStack(content fyne.CanvasObject, onTap func(), onHover func(bool)) *HoverableStack {
 	h := &HoverableStack{
@@ -105,6 +122,7 @@ func NewHoverableStack(content fyne.CanvasObject, onTap func(), onHover func(boo
 	}
 	h.onTap = onTap
 	h.ExtendBaseWidget(h)
+
 	return h
 }
 
@@ -116,6 +134,7 @@ func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
 	h.background.StrokeColor = theme.Colors.AttachmentHoverBorder
 	h.background.StrokeWidth = 1
 	h.background.Refresh()
+
 	if h.onHover != nil {
 		h.onHover(true)
 	}
@@ -125,10 +144,13 @@ func (h *HoverableStack) MouseOut() {
 	h.background.StrokeColor = color.Transparent
 	h.background.StrokeWidth = 0
 	h.background.Refresh()
+
 	if h.onHover != nil {
 		h.onHover(false)
 	}
 }
+
+/* Buttons */
 
 // IconButton is a flat, icon-only button used for the per-message quick actions
 // and the attachment viewer's header.
@@ -144,14 +166,6 @@ var (
 	_ desktop.Hoverable = (*IconButton)(nil)
 )
 
-// roundedPanel is the small rounded surface the floating message controls (the
-// hover quick-actions and the edit save/cancel pair) sit on.
-func roundedPanel() *canvas.Rectangle {
-	panel := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-	panel.CornerRadius = 4
-	return panel
-}
-
 func NewIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *IconButton {
 	size := theme.Sizes.SwiftActionSize
 
@@ -161,6 +175,7 @@ func NewIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *IconBut
 	b := &IconButton{background: background, icon: newScaledIcon(res, size*0.7), onHover: onHover}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
+
 	return b
 }
 
@@ -171,6 +186,7 @@ func (b *IconButton) CreateRenderer() fyne.WidgetRenderer {
 func (b *IconButton) MouseIn(*desktop.MouseEvent) {
 	b.background.FillColor = theme.Colors.SwiftActionHoverBg
 	b.background.Refresh()
+
 	if b.onHover != nil {
 		b.onHover(true)
 	}
@@ -179,14 +195,15 @@ func (b *IconButton) MouseIn(*desktop.MouseEvent) {
 func (b *IconButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
+
 	if b.onHover != nil {
 		b.onHover(false)
 	}
 }
 
-// SidebarButton is a circular, icon-only button matching the server-icon
-// aesthetic. It bookends the server list as the fixed home and settings
-// entries, so it reuses the server background/hover colours for consistency.
+// SidebarButton is a circular, icon-only button matching the server-icon look.
+// It bookends the server list as the fixed home and settings entries, so it
+// reuses the server background and hover colours.
 type SidebarButton struct {
 	tapBase
 	background *canvas.Circle
@@ -198,8 +215,7 @@ var (
 	_ desktop.Hoverable = (*SidebarButton)(nil)
 )
 
-// NewSidebarButton creates a sidebar button rendering the given icon (a Fyne
-// theme icon such as theme.HomeIcon()).
+// NewSidebarButton creates a sidebar button rendering the given icon.
 func NewSidebarButton(res fyne.Resource, onTap func()) *SidebarButton {
 	b := &SidebarButton{
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
@@ -207,6 +223,7 @@ func NewSidebarButton(res fyne.Resource, onTap func()) *SidebarButton {
 	}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
+
 	return b
 }
 
@@ -214,6 +231,7 @@ func (b *SidebarButton) CreateRenderer() fyne.WidgetRenderer {
 	size := theme.Sizes.ServerIconSize
 	wrap := container.NewGridWrap(fyne.NewSize(size, size),
 		container.NewStack(b.background, container.NewCenter(b.icon)))
+
 	return widget.NewSimpleRenderer(container.NewCenter(wrap))
 }
 
@@ -227,20 +245,17 @@ func (b *SidebarButton) MouseOut() {
 	b.background.Refresh()
 }
 
-// NewSidebarSeparator returns the short horizontal bar that visually divides the
-// fixed home/settings buttons from the scrolling server icons.
+// NewSidebarSeparator returns the short horizontal bar dividing the fixed
+// home/settings buttons from the scrolling server icons.
 func NewSidebarSeparator() fyne.CanvasObject {
 	bar := canvas.NewRectangle(theme.Colors.ServerListSeparator)
 	bar.CornerRadius = 1
 	bar.SetMinSize(fyne.NewSize(theme.Sizes.ServerIconSize*0.6, 2))
+
 	return container.NewCenter(bar)
 }
 
-// closeButtonSize is the side length of a CloseButton.
-const closeButtonSize = 24
-
-// CloseButton is an icon-only "cancel" button for removing items, using the
-// Fyne theme cancel icon with a hover background.
+// CloseButton is an icon-only "cancel" button for removing items.
 type CloseButton struct {
 	tapBase
 	background *canvas.Rectangle
@@ -260,7 +275,12 @@ func NewCloseButton(onTap func()) *CloseButton {
 	b := &CloseButton{background: background, icon: newScaledIcon(fynetheme.CancelIcon(), 0)}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
+
 	return b
+}
+
+func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewPadded(b.icon)))
 }
 
 func (b *CloseButton) MinSize() fyne.Size {
@@ -277,11 +297,34 @@ func (b *CloseButton) MouseOut() {
 	b.background.Refresh()
 }
 
-func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewPadded(b.icon)))
+/* Avatars */
+
+// circularAvatar builds a circular avatar of the given size, loading the image
+// from avatarURL when present. It is the one place an avatar image is mounted.
+func circularAvatar(images *cache.ImageCache, avatarURL string, size fyne.Size) *fyne.Container {
+	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
+	avatar := container.NewGridWrap(size, placeholder)
+	loadAvatar(images, avatar, avatarURL, size)
+
+	return avatar
 }
 
-// Avatar is a circular, tappable avatar that loads its image asynchronously.
+// loadAvatar kicks off the circular image load for an already-built avatar
+// container, deriving the cache ID from the URL and falling back to the URL
+// itself when it isn't shaped like an Autumn one.
+func loadAvatar(images *cache.ImageCache, target *fyne.Container, avatarURL string, size fyne.Size) {
+	if avatarURL == "" {
+		return
+	}
+
+	id := util.IDFromAttachmentURL(avatarURL)
+	if id == "" {
+		id = avatarURL
+	}
+	images.LoadIntoContainer(id, avatarURL, size, target, true, nil)
+}
+
+// Avatar is the circular, tappable avatar shown beside a message.
 //
 // It deliberately does not implement desktop.Hoverable: Fyne delivers hover to
 // the innermost hoverable object, so an avatar that accepted hover would pull it
@@ -294,37 +337,98 @@ type Avatar struct {
 
 var _ fyne.Tappable = (*Avatar)(nil)
 
-// NewAvatar creates a circular avatar of the standard message size. If both
-// avatarID and avatarURL are set, the image loads in the background.
-func NewAvatar(images *cache.ImageCache, avatarID, avatarURL string, onTap func()) *Avatar {
-	size := fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
-	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
-	content := container.NewGridWrap(size, placeholder)
-
-	if avatarURL != "" && avatarID != "" {
-		images.LoadIntoContainer(avatarID, avatarURL, size, content, true, nil)
-	}
-
-	a := &Avatar{content: content}
+// NewAvatar creates a circular avatar of the standard message size.
+func NewAvatar(images *cache.ImageCache, avatarURL string, onTap func()) *Avatar {
+	a := &Avatar{content: circularAvatar(images, avatarURL, avatarSize())}
 	a.onTap = onTap
 	a.ExtendBaseWidget(a)
+
 	return a
 }
 
-// SetSource reloads the avatar image in place, used when the source resolves
+// SetSource reloads the avatar image in place, for when the source resolves
 // after the avatar was first mounted with only its placeholder.
-func (a *Avatar) SetSource(images *cache.ImageCache, avatarID, avatarURL string) {
-	if avatarURL == "" || avatarID == "" {
-		return
-	}
-	size := fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
-	images.LoadIntoContainer(avatarID, avatarURL, size, a.content, true, nil)
+func (a *Avatar) SetSource(images *cache.ImageCache, avatarURL string) {
+	loadAvatar(images, a.content, avatarURL, avatarSize())
 }
 
 func (a *Avatar) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(a.content)
 }
 
-func (a *Avatar) MinSize() fyne.Size {
+func (a *Avatar) MinSize() fyne.Size { return avatarSize() }
+
+func avatarSize() fyne.Size {
 	return fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)
+}
+
+/* Scrolling */
+
+// scrollAmplify multiplies wheel deltas so scrolling feels message-by-message.
+const scrollAmplify = 4
+
+// ObservableScroll is a vertical scroll container that reports offset changes
+// and supports middle-mouse panning.
+type ObservableScroll struct {
+	container.Scroll
+	OnScroll func(offset fyne.Position)
+	panning  bool
+}
+
+var _ fyne.Draggable = (*ObservableScroll)(nil)
+
+// NewObservableVScroll creates an observable vertical scroll container.
+func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
+	s := &ObservableScroll{}
+	s.Direction = container.ScrollVerticalOnly
+	s.Content = content
+	s.ExtendBaseWidget(s)
+
+	return s
+}
+
+// Scrolled amplifies the wheel delta and notifies listeners.
+func (s *ObservableScroll) Scrolled(ev *fyne.ScrollEvent) {
+	amplified := *ev
+	amplified.Scrolled.DX *= scrollAmplify
+	amplified.Scrolled.DY *= scrollAmplify
+
+	s.Scroll.Scrolled(&amplified)
+	s.notify()
+}
+
+// MouseDown begins panning on a middle-button press.
+func (s *ObservableScroll) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonTertiary {
+		s.panning = true
+	}
+}
+
+// MouseUp ends panning on a middle-button release.
+func (s *ObservableScroll) MouseUp(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonTertiary {
+		s.panning = false
+	}
+}
+
+// Dragged pans the view while the middle button is held.
+func (s *ObservableScroll) Dragged(ev *fyne.DragEvent) {
+	if !s.panning {
+		return
+	}
+
+	s.Offset.X -= ev.Dragged.DX
+	s.Offset.Y -= ev.Dragged.DY
+	s.Refresh()
+	s.notify()
+}
+
+// DragEnd completes fyne.Draggable. Without it the driver never recognises the
+// scroll as draggable, so Dragged is never called and panning silently dies.
+func (s *ObservableScroll) DragEnd() { s.panning = false }
+
+func (s *ObservableScroll) notify() {
+	if s.OnScroll != nil {
+		s.OnScroll(s.Offset)
+	}
 }

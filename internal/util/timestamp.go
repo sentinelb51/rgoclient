@@ -7,15 +7,6 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// Timestamp parses a ULID to extract its embedded timestamp.
-func Timestamp(id string) (time.Time, error) {
-	value, err := ulid.Parse(id)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return value.Timestamp(), nil
-}
-
 const (
 	timeLayout  = "3:04 PM"
 	dayLayout   = "January 2, 2006"
@@ -23,21 +14,31 @@ const (
 	daysInYear  = 365
 )
 
-// SameDay reports whether two times fall on the same local calendar day. Used to
-// decide where a day separator belongs between two messages, so a pair minutes
-// apart across midnight is correctly treated as two days.
+// Timestamp parses a ULID to extract its embedded timestamp.
+func Timestamp(id string) (time.Time, error) {
+	value, err := ulid.Parse(id)
+	if err != nil {
+		return time.Time{}, err
+	}
+
+	return value.Timestamp(), nil
+}
+
+// SameDay reports whether two times fall on the same local calendar day, so a
+// pair minutes apart across midnight is correctly treated as two days.
 func SameDay(a, b time.Time) bool {
 	a, b = a.Local(), b.Local()
 	ay, am, ad := a.Date()
 	by, bm, bd := b.Date()
+
 	return ay == by && am == bm && ad == bd
 }
 
 // DayLabel names a calendar day for the message list's day separator: "Today"
 // and "Yesterday" for the two most recent, the full date before that.
 func DayLabel(t time.Time) string {
-	t = t.Local()
-	now := time.Now().Local()
+	t, now := t.Local(), time.Now().Local()
+
 	switch {
 	case SameDay(t, now):
 		return "Today"
@@ -48,17 +49,16 @@ func DayLabel(t time.Time) string {
 	}
 }
 
-// ShortTime formats just the local clock time (e.g. "3:04 PM"), used for the
-// gutter timestamp on grouped continuation messages.
+// ShortTime formats just the local clock time, for the gutter timestamp on
+// grouped continuation messages.
 func ShortTime(t time.Time) string {
 	return t.Local().Format(timeLayout)
 }
 
-// NiceTime formats a message time the way a chat client reads it: the clock
-// time for today and yesterday, then a coarsening relative age.
+// NiceTime formats a message time the way a chat client reads it: the clock time
+// for today and yesterday, then a coarsening relative age.
 func NiceTime(t time.Time) string {
-	t = t.Local()
-	now := time.Now().Local()
+	t, now := t.Local(), time.Now().Local()
 
 	if t.After(now) {
 		return "A few moments ago" // clock skew between us and the server
@@ -89,5 +89,6 @@ func plural(count int, unit string) string {
 	if count == 1 {
 		return fmt.Sprintf("%d %s ago", count, unit)
 	}
+
 	return fmt.Sprintf("%d %ss ago", count, unit)
 }

@@ -23,6 +23,7 @@ func TestParseHexColor(t *testing.T) {
 		{"linear-gradient(red, blue)", nil, false},
 		{"", nil, false},
 	}
+
 	for _, tt := range tests {
 		got, ok := parseHexColor(tt.in)
 		if ok != tt.ok {
@@ -34,8 +35,6 @@ func TestParseHexColor(t *testing.T) {
 		}
 	}
 }
-
-func strptr(s string) *string { return &s }
 
 func TestRoleColorPicksMostSeniorColouredRole(t *testing.T) {
 	server := &revoltgo.Server{

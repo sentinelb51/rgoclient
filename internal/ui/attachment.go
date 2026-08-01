@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -24,34 +23,33 @@ const (
 	attachmentCardWidth   = 300    // width of a non-image attachment card
 	attachmentTextHeight  = 150    // height of a text attachment's preview box
 	attachmentFileHeight  = 64     // height of a generic file card
-	attachmentBarHeight   = 28     // height of the name/size strip beneath an attachment
+	attachmentBarHeight   = 28     // height of the name/size strip beneath one
 	attachmentFileIcon    = 32     // side length of the generic file glyph
-	attachmentPreviewRead = 512    // bytes pulled from a text attachment for its preview
+	attachmentPreviewRead = 512    // bytes pulled from a text attachment to preview
 	attachmentPreviewRune = 256    // runes of that read actually shown
-	maxCachedPreviews     = 100    // text previews kept in memory
-	attachmentViewerRead  = 262144 // bytes pulled when a text attachment is opened in the viewer
+	attachmentViewerRead  = 262144 // bytes pulled when opened in the viewer
 )
 
 // buildAttachments stacks each attachment with a small gap between them.
 func buildAttachments(deps Deps, attachments []*revoltgo.File) *fyne.Container {
 	box := container.NewVBox()
+
 	for i, attachment := range attachments {
 		if i > 0 {
 			box.Add(VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
 		// No left spacer: attachments share the body's content padding with the
-		// header text above, so the preview box lines up flush with the message
-		// text instead of drifting a few px to the right.
+		// header text above, so the preview lines up flush with the message text.
 		box.Add(container.NewHBox(buildAttachment(deps, attachment)))
 	}
+
 	return box
 }
 
-// buildAttachment renders one attachment as an image, text preview, or generic
-// file card, with a name/size bar beneath it. Images and text files open in the
-// viewer when tapped — the inline render of both is deliberately small (a capped
-// thumbnail, the first few hundred characters), so the full thing has to be
-// reachable from somewhere.
+// buildAttachment renders one attachment as an image, a text preview, or a
+// generic file card, with a name/size bar beneath it. Images and text files open
+// in the viewer when tapped — the inline render of both is deliberately small,
+// so the full thing has to be reachable from somewhere.
 func buildAttachment(deps Deps, attachment *revoltgo.File) fyne.CanvasObject {
 	isImage := util.IsImageAttachment(attachment)
 	isText := util.Filetype(attachment.Filename) == util.FileTypeText
@@ -62,21 +60,22 @@ func buildAttachment(deps Deps, attachment *revoltgo.File) fyne.CanvasObject {
 	case isImage:
 		content = buildImageAttachment(deps.Images, attachment, bar)
 	case isText:
-		content = buildTextAttachment(attachment, bar)
+		content = buildTextAttachment(deps.Texts, attachment, bar)
 	default:
 		content = buildGenericAttachment(bar)
 	}
 
 	var onTap func()
-	if (isImage || isText) && deps.Actions != nil {
+	if isImage || isText {
 		onTap = func() { deps.Actions.OnAttachmentTapped(attachment) }
 	}
+
 	return NewHoverableStack(content, onTap, nil)
 }
 
 func buildImageAttachment(images *cache.ImageCache, attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {
 	width, height := util.AttachmentDimensions(attachment)
-	size := FitWithin(width, height, theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
+	size := fitWithin(width, height, theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
 	if size.Width == 0 || size.Height == 0 {
 		// No usable metadata: reserve a wide, half-height box so the row doesn't
 		// jump much once the real image arrives.
@@ -90,10 +89,11 @@ func buildImageAttachment(images *cache.ImageCache, attachment *revoltgo.File, b
 	if url := attachment.URL(""); url != "" && attachment.ID != "" {
 		images.LoadIntoContainer(attachment.ID, url, size, image, false, nil)
 	}
+
 	return container.NewBorder(nil, bar, nil, nil, image)
 }
 
-func buildTextAttachment(attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {
+func buildTextAttachment(texts *cache.TextCache, attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {
 	preview := widget.NewRichTextFromMarkdown("Loading preview...")
 	preview.Wrapping = fyne.TextWrapWord
 
@@ -101,7 +101,8 @@ func buildTextAttachment(attachment *revoltgo.File, bar fyne.CanvasObject) *fyne
 	background.SetMinSize(fyne.NewSize(attachmentCardWidth, attachmentTextHeight))
 
 	content := container.NewStack(background, container.NewPadded(preview))
-	go fetchTextPreview(attachment.URL(""), preview)
+	go fetchTextPreview(texts, attachment.URL(""), preview)
+
 	return container.NewBorder(nil, bar, nil, nil, content)
 }
 
@@ -114,46 +115,36 @@ func buildGenericAttachment(bar fyne.CanvasObject) *fyne.Container {
 		container.NewStack(placeholder, container.NewCenter(icon)))
 }
 
-// previewCache memoises fetched text-attachment previews by URL: message widgets
-// are rebuilt on every channel revisit, and without it each rebuild re-downloads
-// every text attachment. Entries are at most attachmentPreviewRune runes and the
-// map is LRU-bounded so a long session can't accumulate them without limit.
-var (
-	previewMu      sync.Mutex
-	previewCache   = map[string]string{}
-	previewRecency = cache.NewLRU()
-)
+// attachmentBar renders a name/size strip. A non-nil onRemove also shows a close
+// button, which the composer uses.
+func attachmentBar(name string, size int, onRemove func()) fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	background.SetMinSize(fyne.NewSize(0, attachmentBarHeight))
 
-// cachedPreview returns a memoised preview for url, if any.
-func cachedPreview(url string) (string, bool) {
-	previewMu.Lock()
-	defer previewMu.Unlock()
+	nameLabel := canvas.NewText(name, theme.Colors.TextPrimary)
+	nameLabel.TextSize = 12
+	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
 
-	text, ok := previewCache[url]
-	if ok {
-		previewRecency.Touch(url)
+	sizeLabel := canvas.NewText(util.FormatFileSize(size), theme.Colors.TimestampText)
+	sizeLabel.TextSize = 12
+	sizeLabel.Alignment = fyne.TextAlignTrailing
+
+	left := container.NewHBox(HorizontalSpacer(8), nameLabel)
+	right := container.NewHBox(sizeLabel, HorizontalSpacer(8))
+	if onRemove != nil {
+		right = container.NewHBox(sizeLabel, container.NewPadded(NewCloseButton(onRemove)), HorizontalSpacer(8))
 	}
-	return text, ok
+
+	return container.NewStack(background, container.NewBorder(nil, nil, left, right))
 }
 
-// storePreview memoises a preview, evicting the least recently used entries
-// past maxCachedPreviews.
-func storePreview(url, text string) {
-	previewMu.Lock()
-	defer previewMu.Unlock()
-
-	previewCache[url] = text
-	previewRecency.Touch(url)
-	for previewRecency.Len() > maxCachedPreviews {
-		delete(previewCache, previewRecency.EvictOldest())
-	}
-}
+/* Text fetching */
 
 // fetchTextPreview loads the first few hundred characters of a text attachment
 // into preview, formatted as a code block. Fetched once per URL; failures are
-// not cached, so they retry on the next rebuild.
-func fetchTextPreview(url string, preview *widget.RichText) {
-	text, ok := cachedPreview(url)
+// not memoised, so they retry on the next rebuild. Call off the UI thread.
+func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichText) {
+	text, ok := texts.Get(url)
 	if !ok {
 		full, err := fetchText(url, attachmentPreviewRead)
 		if err != nil || full == "" {
@@ -165,7 +156,7 @@ func fetchTextPreview(url string, preview *widget.RichText) {
 			runes = append(runes[:attachmentPreviewRune], []rune("...")...)
 		}
 		text = string(runes)
-		storePreview(url, text)
+		texts.Set(url, text)
 	}
 
 	DoOnUI(func() {
@@ -175,8 +166,8 @@ func fetchTextPreview(url string, preview *widget.RichText) {
 }
 
 // fetchText downloads at most limit bytes of a text file. The cap is what keeps
-// a "text" attachment of arbitrary size from being pulled into memory whole; the
-// caller decides how much it can show. Call off the UI thread.
+// a "text" attachment of arbitrary size out of memory; the caller decides how
+// much it can show. Call off the UI thread.
 func fetchText(url string, limit int) (string, error) {
 	if url == "" {
 		return "", errors.New("no attachment URL")
@@ -200,28 +191,6 @@ func fetchText(url string, limit int) (string, error) {
 	if n == 0 && err != nil {
 		return "", err
 	}
+
 	return string(buf[:n]), nil
-}
-
-// attachmentBar renders a name/size strip. When onRemove is non-nil it also
-// shows a close button (used by the message composer).
-func attachmentBar(name string, size int, onRemove func()) fyne.CanvasObject {
-	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
-	background.SetMinSize(fyne.NewSize(0, attachmentBarHeight))
-
-	nameLabel := canvas.NewText(name, theme.Colors.TextPrimary)
-	nameLabel.TextSize = 12
-	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
-
-	sizeLabel := canvas.NewText(util.FormatFileSize(size), theme.Colors.TimestampText)
-	sizeLabel.TextSize = 12
-	sizeLabel.Alignment = fyne.TextAlignTrailing
-
-	left := container.NewHBox(HorizontalSpacer(8), nameLabel)
-	right := container.NewHBox(sizeLabel, HorizontalSpacer(8))
-	if onRemove != nil {
-		right = container.NewHBox(sizeLabel, container.NewPadded(NewCloseButton(onRemove)), HorizontalSpacer(8))
-	}
-
-	return container.NewStack(background, container.NewBorder(nil, nil, left, right))
 }

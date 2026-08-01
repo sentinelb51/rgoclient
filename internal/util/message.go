@@ -8,33 +8,21 @@ import (
 	"github.com/sentinelb51/revoltgo"
 )
 
-// messageMember resolves the server member that authored a message, or nil when
-// the message isn't in a server channel, the author isn't a known member, or
-// the message has no real author (system / webhook).
-func messageMember(session *revoltgo.Session, message *revoltgo.Message) *revoltgo.ServerMember {
-	if session == nil || message.Author == "" {
-		return nil
-	}
-	channel := session.State.Channel(message.Channel)
-	if channel == nil || channel.Server == nil {
-		return nil
-	}
-	return session.State.Member(*channel.Server, message.Author)
-}
+/* Authors */
 
 // Author bundles the display fields for a message's author.
 type Author struct {
 	Name      string
 	AvatarURL string
-	Color     color.Color // role colour of the most-senior coloured role; nil when none applies
+	Color     color.Color // most-senior coloured role; nil when none applies
 }
 
 // MessageAuthor resolves the name, avatar, and role colour for a message's
-// author in one pass over State (channel → member → user), preferring the
+// author in one pass over State (channel -> member -> user), preferring the
 // per-server member (nickname, server avatar, role colour) and falling back to
-// the raw user. The Color is nil when there is no member, no coloured role, or
-// the colour isn't a plain hex value (gradients and CSS-named colours are not
-// parsed); callers should then use their default.
+// the raw user. Color is nil when there is no member, no coloured role, or the
+// colour isn't plain hex (gradients and CSS names are not parsed), and callers
+// should then use their own default.
 func MessageAuthor(session *revoltgo.Session, message *revoltgo.Message) Author {
 	switch {
 	case session == nil:
@@ -63,11 +51,28 @@ func MessageAuthor(session *revoltgo.Session, message *revoltgo.Message) Author 
 			return Author{Name: userDisplayName(user), AvatarURL: user.AvatarURL("256")}
 		}
 	}
+
 	return Author{Name: "Message author: " + message.Author}
 }
 
+// messageMember resolves the server member that authored a message, or nil when
+// the message isn't in a server channel, the author isn't a known member, or the
+// message has no real author (system / webhook).
+func messageMember(session *revoltgo.Session, message *revoltgo.Message) *revoltgo.ServerMember {
+	if session == nil || message.Author == "" {
+		return nil
+	}
+
+	channel := session.State.Channel(message.Channel)
+	if channel == nil || channel.Server == nil {
+		return nil
+	}
+
+	return session.State.Member(*channel.Server, message.Author)
+}
+
 // roleColor returns the colour of the member's most-senior coloured role (lowest
-// Rank in Revolt's convention), or ok=false when none has a parseable colour.
+// Rank, by Revolt's convention), or ok=false when none has a parseable colour.
 func roleColor(server *revoltgo.Server, roleIDs []string) (color.Color, bool) {
 	var best *revoltgo.ServerRole
 	for _, id := range roleIDs {
@@ -79,14 +84,15 @@ func roleColor(server *revoltgo.Server, roleIDs []string) (color.Color, bool) {
 			best = role
 		}
 	}
+
 	if best == nil {
 		return nil, false
 	}
+
 	return parseHexColor(*best.Colour)
 }
 
-// parseHexColor parses "#RGB" and "#RRGGBB" colours. Anything else (gradients,
-// CSS-named colours) yields ok=false.
+// parseHexColor parses "#RGB" and "#RRGGBB". Anything else yields ok=false.
 func parseHexColor(s string) (color.Color, bool) {
 	if len(s) == 0 || s[0] != '#' {
 		return nil, false
@@ -114,8 +120,64 @@ func parseHexColor(s string) (color.Color, bool) {
 			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
 		}
 	}
+
 	return nil, false
 }
+
+/* Members */
+
+// MemberName returns the best display name for a server member: the per-server
+// nickname, then the user's display name, then the username.
+func MemberName(session *revoltgo.Session, member *revoltgo.ServerMember) string {
+	if member.Nickname != nil && *member.Nickname != "" {
+		return *member.Nickname
+	}
+	if session != nil {
+		if user := session.State.User(member.ID.User); user != nil {
+			return userDisplayName(user)
+		}
+	}
+
+	return "Unknown user"
+}
+
+// MemberAvatarURL returns a member's per-server avatar, else the user's avatar,
+// else "".
+func MemberAvatarURL(session *revoltgo.Session, member *revoltgo.ServerMember) string {
+	if member.Avatar != nil {
+		return member.Avatar.URL("256")
+	}
+	if session != nil {
+		if user := session.State.User(member.ID.User); user != nil {
+			return user.AvatarURL("256")
+		}
+	}
+
+	return ""
+}
+
+// MemberOnline reports whether the member's underlying user is online.
+func MemberOnline(session *revoltgo.Session, member *revoltgo.ServerMember) bool {
+	if session == nil {
+		return false
+	}
+	if user := session.State.User(member.ID.User); user != nil {
+		return user.Online
+	}
+
+	return false
+}
+
+// userDisplayName returns a user's display name, falling back to the username.
+func userDisplayName(user *revoltgo.User) string {
+	if user.DisplayName != nil && *user.DisplayName != "" {
+		return *user.DisplayName
+	}
+
+	return user.Username
+}
+
+/* System messages */
 
 // FormatSystemMessage renders a system message as human-readable text.
 func FormatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSystem) string {
@@ -123,7 +185,6 @@ func FormatSystemMessage(session *revoltgo.Session, message *revoltgo.MessageSys
 		return "System message"
 	}
 
-	// username resolves the user referenced by the system event.
 	username := func() string {
 		if user := session.State.User(message.ID); user != nil {
 			return user.Username

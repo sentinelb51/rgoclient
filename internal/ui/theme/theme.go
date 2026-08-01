@@ -28,6 +28,10 @@ var Colors = struct {
 	OverlayBackdrop        color.Color
 	ViewerCardBg           color.Color
 	ViewerBodyBg           color.Color
+	ComposerBg             color.Color
+	ComposerBorder         color.Color
+	ComposerBorderFocus    color.Color
+	MentionRowSelectedBg   color.Color
 
 	// Elements
 	AttachmentHoverBorder color.Color
@@ -48,6 +52,8 @@ var Colors = struct {
 	SwiftActionHoverBg    color.Color
 	SwiftActionText       color.Color
 	ReplyMentionActive    color.Color
+	MentionText           color.Color
+	MentionHandleText     color.Color
 	ErrorText             color.Color
 }{
 	// Backgrounds — cool blue-slate ramp (darkest → lightest)
@@ -69,6 +75,13 @@ var Colors = struct {
 	OverlayBackdrop:        color.RGBA{R: 8, G: 9, B: 12, A: 200},      // near-black dim behind a modal
 	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card itself
 	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well the content sits in
+	// The composer card fills with the entry's own input background so the entry's
+	// box disappears into it; the outline is what draws the boundary instead, and
+	// it lights up with the accent while the entry holds focus.
+	ComposerBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, == ColorNameInputBackground
+	ComposerBorder:       color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, idle hairline
+	ComposerBorderFocus:  color.RGBA{R: 91, G: 124, B: 250, A: 255}, // #5B7CFA accent
+	MentionRowSelectedBg: color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, the picker's active row
 
 	// Elements
 	AttachmentHoverBorder: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, darkest ramp
@@ -83,6 +96,8 @@ var Colors = struct {
 	DaySeparatorText:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3, brighter than a timestamp
 	DaySeparatorLine:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142, hairline on the message bg
 	ReplyMentionActive:    color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint, on the card bg
+	MentionText:           color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
+	MentionHandleText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
 	XButtonNormal:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	XButtonHover:          color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 	SessionCardBg:         color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
@@ -135,6 +150,18 @@ var Sizes = struct {
 
 	// Swift Actions
 	SwiftActionSize float32
+
+	// Composer (the floating message dock) and its mention picker
+	ComposerRadius      float32
+	ComposerPaddingV    float32
+	ComposerPaddingH    float32
+	ComposerGutterWidth float32
+	ComposerButtonSize  float32
+	ComposerIconSize    float32
+	MentionRowHeight    float32
+	MentionAvatarSize   float32
+	MentionNameSize     float32
+	MentionHandleSize   float32
 
 	// Session/Login
 	SessionCardAvatarSize float32
@@ -204,6 +231,20 @@ var Sizes = struct {
 	// Swift Actions
 	SwiftActionSize: 32,
 
+	// Composer. The vertical padding is deliberately small: the entry already
+	// carries InnerPadding above and below its text, so the card only needs a
+	// couple of pixels more before it starts looking slack.
+	ComposerRadius:      8,
+	ComposerPaddingV:    3,
+	ComposerPaddingH:    6,
+	ComposerGutterWidth: 30,
+	ComposerButtonSize:  24,
+	ComposerIconSize:    18,
+	MentionRowHeight:    30,
+	MentionAvatarSize:   20,
+	MentionNameSize:     13,
+	MentionHandleSize:   11,
+
 	// Session/Login
 	SessionCardAvatarSize: 32,
 
@@ -227,6 +268,11 @@ var Sizes = struct {
 	JoinDialogCornerRadius: 6,
 	JoinDialogTextSize:     12,
 }
+
+// ColorNameMention is an app-specific theme colour name. RichText segments can
+// only carry a *named* colour, so rendering an @mention in the accent needs a
+// name of our own for AppTheme.Color to answer.
+const ColorNameMention fyne.ThemeColorName = "rgoMention"
 
 // selectionTint is the accent used for text selection, with alpha so the
 // glyphs underneath stay legible.
@@ -270,6 +316,8 @@ func (t *AppTheme) Font(style fyne.TextStyle) fyne.Resource {
 // built-in widgets inherit the app's look.
 func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
+	case ColorNameMention:
+		return Colors.MentionText
 	case theme.ColorNameScrollBar:
 		return color.Transparent
 	case theme.ColorNamePrimary, theme.ColorNameFocus:

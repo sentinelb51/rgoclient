@@ -14,7 +14,7 @@ import (
 // out canvas objects, so tests can assert on their positions and sizes.
 func layoutMessage(t *testing.T, body string, width float32) []fyne.CanvasObject {
 	t.Helper()
-	rt, ok := renderMessageBody(body).(fyne.Widget)
+	rt, ok := renderMessageBody(Deps{}, body).(fyne.Widget)
 	if !ok {
 		t.Fatalf("%q: rendered body is not a widget", body)
 	}
@@ -44,7 +44,7 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 func TestUniformBodySelectable(t *testing.T) {
 	label := func(body string) *widget.Label {
 		t.Helper()
-		l, ok := renderMessageBody(body).(*widget.Label)
+		l, ok := renderMessageBody(Deps{}, body).(*widget.Label)
 		if !ok || !l.Selectable {
 			t.Fatalf("%q did not render as a selectable label", body)
 		}
@@ -65,7 +65,7 @@ func TestUniformBodySelectable(t *testing.T) {
 	label("snake_case_name stays plain")
 
 	for _, body := range []string{"", "**bold** mixed", "~~struck~~", "> quoted"} {
-		if _, ok := renderMessageBody(body).(*widget.RichText); !ok {
+		if _, ok := renderMessageBody(Deps{}, body).(*widget.RichText); !ok {
 			t.Errorf("%q should render as RichText", body)
 		}
 	}

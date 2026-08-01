@@ -105,7 +105,7 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
-	w.body = NewFlushContainer(renderMessageBody(text))
+	w.body = NewFlushContainer(renderMessageBody(deps, text))
 	w.bodySlot = container.NewStack(w.body)
 
 	var leftColumn, body fyne.CanvasObject

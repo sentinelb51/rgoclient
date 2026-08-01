@@ -91,6 +91,9 @@ internal/
                              first, returns IDs) and resolveRecipients (bounded user
                              fetch so DM rows have names)
     messages.go              Message area: build, load, display, refresh/remove;
+                             buildMessageArea assembles the composer dock (rounded
+                             card, accent focus ring, exact insets — see "Composer
+                             geometry");
                              setChannelGlyph (the header's # / @ / group mark);
                              continuesGroup/newMessageWidget (Discord-style author
                              grouping); dayLabel (day-separator text for a message,
@@ -104,6 +107,11 @@ internal/
                              appendMessages, trimMountedTop/Bottom. Its header
                              states the invariants
     compose.go               handleSubmit + attachment upload + reply conversion
+    mentions.go              refreshMentionCandidates → mentionCandidates: who the
+                             composer's @picker may offer in the open channel,
+                             resolved from State alone (a server's members, or a
+                             DM/group's recipients) and sorted by name so the
+                             suggestions don't shuffle between rebuilds
     viewer.go                The attachment lightbox: showAttachmentViewer +
                              showOverlay/closeOverlay, the one modal layer
                              (App.overlay, UI-thread only)
@@ -139,7 +147,9 @@ internal/
                              zero-height fixed-width column for the grouped timestamp;
                              NewMinWidth/MinHeightContainer, one pinned axis apiece;
                              NewFixedWidthContainer, which pins a sidebar's width
-                             against its own content — see "Sidebar widths")
+                             against its own content — see "Sidebar widths";
+                             NewInset, exact per-edge padding, unlike NewPadded
+                             and NewBorder which add theme padding of their own)
                              + FitWithin (aspect-preserving downscale, shared by the
                              attachment preview and the image viewer)
     ellipsis.go              NewEllipsisText + TruncateToWidth — a canvas.Text that
@@ -197,26 +207,48 @@ internal/
                              uniform-style bodies (plain, all-bold/italic, lone code
                              block / heading / subtext, plain lists) flatten to a
                              Selectable Label (mouse text selection); only mixed-style
-                             bodies keep the unselectable RichText
+                             bodies keep the unselectable RichText. mdBuilder carries
+                             Deps because <@id> is only an ID in the AST — mention()
+                             resolves it through the session and draws "@Name" in
+                             theme.ColorNameMention
+    composer_test.go         Composer/mention regression tests: text centred in the
+                             dock, one line of growth per newline, mentionQuery's
+                             open/don't-open rules, picker ranking, token insertion,
+                             and that opening the picker really grows the card
+    preview_test.go          Renders the composer to a PNG for eyeballing; skipped
+                             unless RGO_PREVIEW names an output path
     input.go                 Message input + attachments + reply cards (slim,
                              role-colour-outlined; shared replyIconButton for the
                              mention toggle + close); OnEditLast fires on Up in an
-                             empty composer
+                             empty composer; OnFocusChanged drives the dock's focus
+                             ring; composerMinSize (shared with EditEntry — see
+                             "Composer geometry"); the @mention trigger:
+                             mentionQuery / syncMentions / acceptMention and the
+                             cursorIndex ↔ cursorPosition pair that converts Fyne's
+                             row/column caret to a rune index and back
+    mention.go               MentionCandidate (+ its precomputed lowercase match
+                             keys) and MentionPicker — the @autocomplete list, with
+                             pooled rows re-set per keystroke, prefix-before-
+                             substring ranking, a "+N more" footer instead of a
+                             scrollbar, and Step/Accept/Reset for keyboard driving
     sessioncard.go           Saved-session card
     titlebar_windows.go      DWM recolouring of the native title bar (no-op elsewhere,
     titlebar_notwindows.go   see App.styleNativeChrome's retry loop)
   markdown/                  Pure (no UI) Discord/Revolt markdown parser → small AST
     markdown.go              Document/Block/Inline AST node types
     parser.go                Block parsing (paragraph, heading, quote, list, fence…)
-    inline.go                Inline parsing (bold/italic/strike/spoiler/code/link) +
-                             PlainText; Discord-style emphasis guards: _ opens/closes
-                             only at word boundaries (snake_case stays literal) and
-                             single */_ content can't be whitespace-edged
+    inline.go                Inline parsing (bold/italic/strike/spoiler/code/link/
+                             <@mention>) + PlainText; Discord-style emphasis guards:
+                             _ opens/closes only at word boundaries (snake_case stays
+                             literal) and single */_ content can't be whitespace-edged
   util/
     message.go               MessageAuthor — one-pass author resolution (name, avatar URL,
                              role colour; member-aware: nickname + per-server avatar, fall
                              back to user) / FormatSystemMessage (session arg)
-    member.go                MemberName / MemberAvatarURL / MemberOnline (session arg)
+    member.go                MemberName / MemberAvatarURL / MemberOnline / MemberColor
+                             (role colour, same rule MessageAuthor uses) / UserName
+                             (user ID → display name from State, "" when unknown)
+                             — all take an explicit session
     channel.go               ChannelName (DM → the other participant, SavedMessages →
                              "Saved Notes", else the channel's own name) / DMRecipientID
     attachment.go            IsImageAttachment / AttachmentDimensions (nil-Metadata safe)
@@ -305,11 +337,32 @@ internal/
    (`displayMessages`/`clearMessages`/`showStatus`) cancels the active edit, and
    `refreshMessage` leaves a message being edited alone so a remote update can't
    discard the open editor.
-8. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
+8. Mentions. Typing `@` at the start of a message or after a space opens the
+   composer's picker (`MessageInput.syncMentions`, driven from the typing methods
+   rather than `Entry.OnChanged` because the picker also has to close when the
+   caret merely *moves* out of a mention). While it is open it gets first refusal
+   on Up/Down/Enter/Tab/Esc, which the composer otherwise binds to sending and to
+   editing the last message. Accepting rewrites the `@query` span as Revolt's
+   `<@id>` wire token — the composer shows the raw token, since a Fyne entry
+   cannot draw a chip inside its text — and `ui/markdown.go` renders that token
+   back as an accent-coloured `@Name` in message bodies.
+   The candidate list is *pushed*, not pulled: `App.refreshMentionCandidates`
+   resolves it from State (on `selectChannel`, on every `refreshMemberList`, and
+   after each author batch lands) and the picker filters that snapshot per
+   keystroke. So the expensive part — walking State and resolving names — happens
+   once per membership change, and a keystroke is two string comparisons per
+   candidate with nothing allocated. Because it reads State only, a server's
+   candidates are whoever the client already knows: the gateway's members plus
+   everyone lazy author resolution has pulled in, which is the same bounded set
+   the member sidebar shows and the same reason there is no bulk member fetch.
+   The picker is mounted *inside* the composer card rather than floating over the
+   message area: a Fyne pop-up takes canvas focus, which would pull it off the
+   entry and stop the typing that drives it.
+9. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
    handlers); app handler refreshes the member sidebar when it's the open server.
    `Update` also calls `refreshAuthorMessages` so that author's mounted messages
    pick up the new nickname / role colour / avatar in place.
-9. The home view: the fixed home button swaps the channel sidebar from a
+10. The home view: the fixed home button swaps the channel sidebar from a
    server's channels to the user's direct messages and groups. `App.homeSelected`
    is what marks it open — home has no server, so an empty `currentServerID`
    alone can't be told apart from nothing selected — and `selectServer` clears it.
@@ -326,7 +379,7 @@ internal/
    message marks its row unread rather than re-sorting the list under the reader.
    Everything downstream of the sidebar is channel-keyed and needs no special
    case; the member sidebar simply stays empty, as a DM has no server members.
-10. Joining a server: the "+" at the end of the server sidebar opens
+11. Joining a server: the "+" at the end of the server sidebar opens
    `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
    The dialog resolves what was pasted through `util.InviteCode` (bare code,
    invite link, or link without a scheme) and hands `joinServer` a code, which
@@ -369,6 +422,18 @@ internal/
   stretching slot of a `Border` wrapped in `ui.NewEllipsisText` (or, for a
   `widget.Label`, with `Truncation = fyne.TextTruncateEllipsis`) so it shortens
   to fit instead of pushing outwards.
+- **Composer geometry.** A growing entry's height is
+  `lineHeight × lines + InnerPadding × 2` (`composerMinSize`, shared by the
+  composer and `EditEntry`) — and the input border is *not* added on top.
+  `entryRenderer.Layout` pays for the border out of the text provider's own
+  padding (it sets `textProvider().inset` to the border size), so the border is
+  already inside `InnerPadding`. Counting it twice made both entries four pixels
+  taller than their content, and since the entry top-aligns its text inside its
+  scroller, all four landed as dead space under the caret — which is what made
+  the composer look slack. `TestComposerTextIsVerticallyCentred` guards it.
+  Nothing around the dock may add padding it wasn't asked for either: the card
+  uses `ui.NewInset`, because `container.NewPadded` applies theme padding and
+  `container.NewBorder` inserts theme padding between its edges and its centre.
 - Use the `log` package for diagnostics.
 - Keep this file current when adding files/packages, changing data flow, adding
   widgets, modifying `App` fields, or changing event handling.
@@ -408,6 +473,16 @@ consumer appears, lift them into a composite action.
 placeholder; reply-preview tap navigation is a TODO in `ui/reply.go`
 (`buildReplyPreview`); `App.createServer` (the join dialog's "Create a server"
 button) only reports that creation isn't built yet.
+
+The composer has no attach or emoji button — files still arrive only by drag or
+paste — and no role/channel mentions (`<@id>` users only). `EditEntry` has no
+mention picker: editing a message can only mention someone by typing the raw
+token. A composed mention stays a visible `<@id>` in the entry until it is sent;
+Fyne cannot draw a chip inside an entry's text, so the alternative would be
+mapping display names back to IDs at send time, which breaks on duplicate names.
+`markdown.PlainText` renders a mention as a bare `@` for the same reason it can't
+resolve one — it has no session — so a reply preview of a message that opens with
+a mention starts with a lone `@`.
 
 The home view has no `ChannelCreate` handler, so a DM opened while the client is
 running (by the other party, or from a profile once that exists) only appears

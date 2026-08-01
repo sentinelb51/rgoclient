@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -53,7 +54,8 @@ type Reply struct {
 }
 
 // MessageInput is a multi-line text entry that grows with its content, supports
-// shift-enter for newlines, and manages pending attachments and replies.
+// shift-enter for newlines, and manages pending attachments, replies, and the
+// @mention picker.
 type MessageInput struct {
 	widget.Entry
 	OnSubmit func(string)
@@ -62,8 +64,21 @@ type MessageInput struct {
 	// the app opens the in-place editor on the user's newest message.
 	OnEditLast func()
 
+	// OnFocusChanged reports focus changes so the composer card can light its
+	// outline while the entry is live.
+	OnFocusChanged func(focused bool)
+
 	deps         Deps
+	window       fyne.Window
 	shiftPressed bool
+
+	// Mentions is the @autocomplete list. The composer mounts it above the reply
+	// cards; it stays hidden until the caret sits inside a mention. mentionStart
+	// is the rune index of the '@' the picker is currently completing, or -1 —
+	// used only to notice when the caret has moved to a *different* mention, so
+	// the highlight restarts at the top of the new list.
+	Mentions     *MentionPicker
+	mentionStart int
 
 	Attachments         []Attachment
 	AttachmentContainer *fyne.Container
@@ -71,13 +86,20 @@ type MessageInput struct {
 	ReplyContainer      *fyne.Container
 }
 
-// NewMessageInput creates a message input wired to the given dependencies.
-func NewMessageInput(deps Deps) *MessageInput {
+// NewMessageInput creates a message input wired to the given dependencies. The
+// window is what lets the composer accept dropped files and take keyboard focus
+// back after a mouse interaction (picking a mention with the pointer blurs the
+// entry, because Fyne unfocuses whenever a click lands on something that isn't
+// focusable).
+func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m := &MessageInput{
 		deps:                deps,
+		window:              window,
+		mentionStart:        -1,
 		AttachmentContainer: container.NewHBox(),
 		ReplyContainer:      container.NewVBox(),
 	}
+	m.Mentions = NewMentionPicker(deps.Images, m.acceptMention)
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
@@ -93,14 +115,23 @@ func (m *MessageInput) MinSize() fyne.Size {
 	return composerMinSize(&m.Entry)
 }
 
-// composerMinSize sizes a growing composer-style entry: one line per newline
-// up to maxInputLines, plus the entry's inner padding and border insets (the
-// border size is the caret width under WithCaret, and inset top and bottom).
+// composerMinSize sizes a growing composer-style entry: one line per newline up
+// to maxInputLines, plus the padding Fyne draws around the entry's text.
+//
+// That padding is InnerPadding above and below, and nothing else. The input
+// border looks like it should be added on top — the entry does inset its content
+// by the border — but entryRenderer.Layout pays for that inset out of the text
+// provider's own padding (it sets textProvider().inset to the border size), so
+// the border is already *inside* InnerPadding rather than extra to it. Counting
+// it twice made every composer four pixels taller than its content, and since
+// the entry top-aligns its text inside its scroller, all four landed as dead
+// space beneath the caret.
 func composerMinSize(e *widget.Entry) fyne.Size {
 	size := e.MinSize()
 	lines := min(max(strings.Count(e.Text, "\n")+1, 1), maxInputLines)
-	border := e.Theme().Size(fynetheme.SizeNameInputBorder)
-	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2 + border*2
+	th := e.Theme()
+	size.Height = lineHeight(th.Size(fynetheme.SizeNameText))*float32(lines) +
+		th.Size(fynetheme.SizeNameInnerPadding)*2
 	return size
 }
 
@@ -118,9 +149,23 @@ func lineHeight(textSize float32) float32 {
 	return h
 }
 
+func (m *MessageInput) FocusGained() {
+	m.Entry.FocusGained()
+	if m.OnFocusChanged != nil {
+		m.OnFocusChanged(true)
+	}
+}
+
 func (m *MessageInput) FocusLost() {
 	m.shiftPressed = false
 	m.Entry.FocusLost()
+	// Hide the picker but leave the caret alone: acceptMention re-derives the
+	// mention span from the caret, so a click on a picker row still resolves
+	// even though that click blurred the entry on its way in.
+	m.hideMentions()
+	if m.OnFocusChanged != nil {
+		m.OnFocusChanged(false)
+	}
 }
 
 func (m *MessageInput) KeyDown(key *fyne.KeyEvent) {
@@ -139,7 +184,16 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 // cancels pending replies/attachments on Escape, starts editing the last own
 // message on Up in an empty composer, and otherwise defers to the embedded
 // entry (refreshing so MinSize recomputes).
+//
+// An open mention picker gets first refusal on the navigation keys, since it
+// wants the same ones the composer binds: Enter would send the half-written
+// message and Up would open the editor on the previous one.
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
+	if m.Mentions.Visible() && m.handleMentionKey(key) {
+		return
+	}
+	defer m.syncMentions()
+
 	switch {
 	case key.Name == fyne.KeyUp && m.Text == "":
 		if m.OnEditLast != nil {
@@ -171,6 +225,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 func (m *MessageInput) TypedRune(r rune) {
 	m.Entry.TypedRune(r)
 	m.Refresh()
+	m.syncMentions()
 }
 
 // TypedShortcut intercepts paste to support pasting an image or a file path as
@@ -182,6 +237,133 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 	}
 	m.Entry.TypedShortcut(s)
 	m.Refresh()
+	m.syncMentions()
+}
+
+// handleMentionKey lets an open picker consume a navigation key, reporting
+// whether it did.
+func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
+	switch key.Name {
+	case fyne.KeyUp:
+		m.Mentions.Step(-1)
+	case fyne.KeyDown:
+		m.Mentions.Step(1)
+	case fyne.KeyReturn, fyne.KeyEnter, fyne.KeyTab:
+		m.Mentions.Accept()
+	case fyne.KeyEscape:
+		m.hideMentions()
+	default:
+		return false
+	}
+	return true
+}
+
+// syncMentions re-evaluates the picker against the caret after an input event.
+// It is driven from the typing methods rather than from Entry.OnChanged because
+// the picker also has to close when the caret merely *moves* out of a mention,
+// which changes no text at all.
+func (m *MessageInput) syncMentions() {
+	start, query, ok := m.mentionQuery()
+	if ok {
+		if start != m.mentionStart {
+			m.Mentions.Reset() // a different mention starts at the top of its list
+		}
+		if m.Mentions.Update(query) {
+			m.mentionStart = start
+			m.Mentions.Show()
+			return
+		}
+	}
+	m.mentionStart = -1
+	m.hideMentions()
+}
+
+// hideMentions closes the picker without disturbing the text or the caret.
+func (m *MessageInput) hideMentions() {
+	if !m.Mentions.Visible() {
+		return
+	}
+	m.Mentions.Reset()
+	m.Mentions.Hide()
+}
+
+// mentionQuery finds the @mention the caret sits in: the rune index of its '@'
+// and the text typed since. A mention only opens at the start of the message or
+// after whitespace, so an email address — or any other "foo@bar" in running
+// text — never summons the picker.
+func (m *MessageInput) mentionQuery() (start int, query string, ok bool) {
+	runes := []rune(m.Text)
+	cursor := min(m.cursorIndex(), len(runes))
+
+	// Walking back from the caret stops at the first space, so the query can
+	// never span words and the scan is bounded by the current word's length.
+	for i := cursor - 1; i >= 0; i-- {
+		switch {
+		case unicode.IsSpace(runes[i]):
+			return 0, "", false
+		case runes[i] == '@':
+			if i > 0 && !unicode.IsSpace(runes[i-1]) {
+				return 0, "", false
+			}
+			return i, string(runes[i+1 : cursor]), true
+		}
+	}
+	return 0, "", false
+}
+
+// acceptMention swaps the "@query" under the caret for a Revolt mention token,
+// leaving the caret after it and a space ready for the next word.
+//
+// The span is re-derived here rather than taken from mentionStart: picking a
+// candidate with the mouse blurs the entry before the tap is delivered, so by
+// then the picker has already been hidden.
+func (m *MessageInput) acceptMention(candidate MentionCandidate) {
+	start, _, ok := m.mentionQuery()
+	if !ok {
+		return
+	}
+
+	runes := []rune(m.Text)
+	cursor := min(m.cursorIndex(), len(runes))
+	token := "<@" + candidate.UserID + "> "
+	text := string(runes[:start]) + token + string(runes[cursor:])
+
+	m.mentionStart = -1
+	m.hideMentions()
+
+	m.SetText(text)
+	m.CursorRow, m.CursorColumn = cursorPosition(text, start+len([]rune(token)))
+	m.Refresh()
+
+	if m.window != nil {
+		m.window.Canvas().Focus(m)
+	}
+}
+
+// cursorIndex returns the caret as a rune index into Text. Fyne tracks it as a
+// row/column pair, which is what drawing the caret needs but not what editing
+// the text around it does.
+func (m *MessageInput) cursorIndex() int {
+	lines := strings.Split(m.Text, "\n")
+	index := 0
+	for i := 0; i < m.CursorRow && i < len(lines); i++ {
+		index += len([]rune(lines[i])) + 1 // + the newline itself
+	}
+	return index + m.CursorColumn
+}
+
+// cursorPosition is cursorIndex's inverse, turning a rune index back into the
+// row/column pair the entry draws from.
+func cursorPosition(text string, index int) (row, col int) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		n := len([]rune(line))
+		if index <= n || i == len(lines)-1 {
+			return i, min(max(index, 0), n)
+		}
+		index -= n + 1
+	}
+	return 0, 0
 }
 
 // pasteAsAttachment attaches an image or file path from the clipboard, returning
@@ -207,9 +389,9 @@ func (m *MessageInput) pasteAsAttachment() bool {
 	return false
 }
 
-// RegisterDropHandler attaches files dropped onto the window.
-func (m *MessageInput) RegisterDropHandler(window fyne.Window) {
-	window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
+// RegisterDropHandler attaches files dropped onto the composer's window.
+func (m *MessageInput) RegisterDropHandler() {
+	m.window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
 		for _, u := range uris {
 			if u.Scheme() == "file" {
 				m.AddAttachment(u.Path())

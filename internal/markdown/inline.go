@@ -32,6 +32,10 @@ func writePlain(b *strings.Builder, nodes []Inline) {
 			writePlain(b, v.Children)
 		case *Link:
 			writePlain(b, v.Children)
+		case *Mention:
+			// No session here to turn the ID into a name, and the raw token would
+			// be worse than nothing in a preview, so the marker alone stands in.
+			b.WriteByte('@')
 		}
 	}
 }
@@ -97,8 +101,38 @@ func matchInline(s string, prevWord bool) (Inline, int) {
 		return matchEmphasis(s, "_", true)
 	case s[0] == '[':
 		return matchLink(s)
+	case strings.HasPrefix(s, "<@"):
+		return matchMention(s)
 	}
 	return nil, 0
+}
+
+// mentionIDMaxLen bounds how far matchMention will look for the closing '>'.
+// Revolt IDs are 26-character ULIDs; the slack is there so a future ID format
+// doesn't silently stop rendering, while "<@" in ordinary prose still falls
+// through to literal text after a few bytes.
+const mentionIDMaxLen = 64
+
+// matchMention matches a <@id> user reference. The ID must be a non-empty run of
+// alphanumerics, so "<@ someone>" and other prose that happens to open with the
+// delimiter stay literal.
+func matchMention(s string) (Inline, int) {
+	for i := 2; i < len(s) && i-2 <= mentionIDMaxLen; i++ {
+		switch {
+		case s[i] == '>':
+			if i == 2 {
+				return nil, 0 // "<@>" carries no ID
+			}
+			return &Mention{UserID: s[2:i]}, i + 1
+		case !isAlphanumericByte(s[i]):
+			return nil, 0
+		}
+	}
+	return nil, 0
+}
+
+func isAlphanumericByte(b byte) bool {
+	return 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z' || '0' <= b && b <= '9'
 }
 
 // matchEmphasis matches single-delimiter emphasis (*x* or _x_) with guards

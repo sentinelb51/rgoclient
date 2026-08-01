@@ -118,10 +118,13 @@ func (a *App) flushAuthors() {
 				delete(a.fetchedAuthors, key)
 			}
 			// Only a member fetch changes the sidebar; pure user fetches (DMs, or
-			// members already present) leave it untouched.
+			// members already present) leave it untouched. The mention picker is
+			// refreshed either way — a resolved user is a new candidate in a DM
+			// even when no member record was involved.
 			if member {
 				a.refreshMemberList()
 			}
+			a.refreshMentionCandidates()
 		}, false)
 	}()
 }
@@ -193,6 +196,7 @@ func (a *App) refreshMemberList() {
 	a.addMemberSection("Online", online, true, deps)
 	a.addMemberSection("Offline", offline, false, deps)
 	a.memberList.Refresh()
+	a.refreshMentionCandidates()
 }
 
 // addMemberSection appends a titled section of member rows when non-empty,

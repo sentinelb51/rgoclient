@@ -264,6 +264,44 @@ func (l *stripPaddingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(max(w-2*l.inset, 0), max(h-2*l.inset, 0))
 }
 
+// NewInset wraps a single object in exactly the padding it is given. Neither of
+// Fyne's ready-made options does that: container.NewPadded applies the uniform
+// theme padding, and container.NewBorder inserts theme padding of its own
+// between the edge slots and the centre. The composer needs exact insets,
+// because its card padding has to compose predictably with the padding the
+// entry already draws inside itself.
+func NewInset(obj fyne.CanvasObject, top, bottom, left, right float32) *fyne.Container {
+	return container.New(&insetLayout{top: top, bottom: bottom, left: left, right: right}, obj)
+}
+
+type insetLayout struct{ top, bottom, left, right float32 }
+
+func (l *insetLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		child.Resize(fyne.NewSize(
+			max(size.Width-l.left-l.right, 0),
+			max(size.Height-l.top-l.bottom, 0),
+		))
+		child.Move(fyne.NewPos(l.left, l.top))
+	}
+}
+
+func (l *insetLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var w, h float32
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+		m := child.MinSize()
+		w = max(w, m.Width)
+		h = max(h, m.Height)
+	}
+	return fyne.NewSize(w+l.left+l.right, h+l.top+l.bottom)
+}
+
 // NewMinHeightContainer wraps objects in a container with a minimum height. Its
 // children are stretched to fill the available space.
 func NewMinHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.Container {

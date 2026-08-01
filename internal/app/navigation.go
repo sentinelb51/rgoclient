@@ -243,6 +243,7 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	a.syncChannelList()
+	a.refreshMentionCandidates()
 
 	// Focus the composer so the user can type straight away.
 	if a.input != nil {

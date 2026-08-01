@@ -86,6 +86,11 @@ type (
 		Children []Inline
 		URL      string
 	}
+
+	// Mention is a <@id> user reference. The node carries only the ID: turning
+	// it into a name needs the session, which this package deliberately has no
+	// access to, so the renderer resolves it.
+	Mention struct{ UserID string }
 )
 
 func (*Text) isInline()      {}
@@ -97,3 +102,4 @@ func (*Strike) isInline()    {}
 func (*Spoiler) isInline()   {}
 func (*Code) isInline()      {}
 func (*Link) isInline()      {}
+func (*Mention) isInline()   {}

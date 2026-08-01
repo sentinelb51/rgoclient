@@ -15,6 +15,7 @@ import (
 
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 // renderMessageBody renders a message's body. A body whose whole content
@@ -40,7 +41,9 @@ import (
 // per-word segments interleaved with normal spaces (RichText only breaks rows at
 // text spaces, never between two custom segments); each word's decoration bridges
 // the following space so the line/cover still reads as continuous.
-func renderMessageBody(text string) fyne.CanvasObject {
+// A body containing an @mention is never flattened: the mention is drawn in its
+// own colour, which is exactly the mixed-style case a Label cannot express.
+func renderMessageBody(deps Deps, text string) fyne.CanvasObject {
 	doc := markdown.Parse(text)
 
 	// An empty body (attachment-only message) keeps the zero-height RichText; a
@@ -57,7 +60,7 @@ func renderMessageBody(text string) fyne.CanvasObject {
 		return label
 	}
 
-	b := &mdBuilder{}
+	b := &mdBuilder{deps: deps}
 	for _, block := range doc.Blocks {
 		b.block(block)
 	}
@@ -189,8 +192,11 @@ func (e emphasis) textStyle() fyne.TextStyle {
 	return fyne.TextStyle{Bold: e.bold, Italic: e.italic}
 }
 
-// mdBuilder accumulates RichText segments.
+// mdBuilder accumulates RichText segments. It carries Deps because one inline
+// node — the mention — is only an ID in the AST and needs the session to become
+// a name.
 type mdBuilder struct {
+	deps Deps
 	segs []widget.RichTextSegment
 }
 
@@ -344,8 +350,32 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Link:
 			u, _ := url.Parse(n.URL)
 			b.segs = append(b.segs, &widget.HyperlinkSegment{Text: markdown.PlainText(n.Children), URL: u})
+		case *markdown.Mention:
+			b.mention(n, em, base)
 		}
 	}
+}
+
+// mention renders <@id> as a bold, accent-coloured "@Name". An author State
+// hasn't resolved yet falls back to "@unknown" rather than exposing the raw ID:
+// the lazy author fetch (see the app's ensureAuthor) fills State in shortly and
+// re-renders the message.
+//
+// The name is drawn as ordinary inline text rather than the tinted pill other
+// clients use — a pill needs a custom segment, and RichText gives custom
+// segments no way to bleed a background behind the row's line spacing without
+// the pills colliding on wrapped lines.
+func (b *mdBuilder) mention(n *markdown.Mention, em emphasis, base widget.RichTextStyle) {
+	name := util.UserName(b.deps.Session, n.UserID)
+	if name == "" {
+		name = "unknown"
+	}
+
+	style := base
+	style.Inline = true
+	style.ColorName = theme.ColorNameMention
+	style.TextStyle = fyne.TextStyle{Bold: true, Italic: em.italic, Monospace: base.TextStyle.Monospace}
+	b.segs = append(b.segs, &widget.TextSegment{Text: "@" + name, Style: style})
 }
 
 func (b *mdBuilder) list(n *markdown.List) {

@@ -44,26 +44,45 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	}
 	a.clearMessages()
 
-	a.input = ui.NewMessageInput(a.deps())
+	a.input = ui.NewMessageInput(a.deps(), a.window)
 	a.input.SetPlaceHolder("Send a message...")
 	a.input.OnSubmit = a.handleSubmit
 	a.input.OnEditLast = a.editLastOwnMessage
-	a.input.RegisterDropHandler(a.window)
+	a.input.RegisterDropHandler()
 
-	// Floating composer dock: the entry, reply and attachment rows sit in a square
-	// card inset from the window edges so it floats just above the bottom. A grey
-	// left bar — the same indicator a selected channel carries — runs the dock's
-	// full height. The card fill matches the entry's own input background, so the
-	// entry's box blends seamlessly into the card.
-	dockBg := canvas.NewRectangle(theme.Colors.ChannelListBackground)
-	leftBar := canvas.NewRectangle(theme.Colors.TextPrimary)
-	leftBar.SetMinSize(fyne.NewSize(3, 0))
+	// Floating composer dock: the mention picker, reply and attachment rows and
+	// the entry stack inside one rounded card, inset from the window edges so it
+	// floats just above the bottom. The card fill is the entry's own input
+	// background, so the entry's box disappears into it and the rounded outline
+	// is what draws the boundary — and that outline takes the accent while the
+	// entry has focus, which is the composer's only "you are typing here" cue.
+	//
+	// The padding is deliberately thin. Everything in the stack already carries
+	// its own inset (the entry draws InnerPadding around its text, the picker and
+	// reply rows their own), so the card only adds the couple of pixels that
+	// separate that content from the outline. ui.NewInset, not NewPadded or a
+	// Border, because those two would each contribute theme padding of their own
+	// on top of what is asked for.
+	dockBg := canvas.NewRectangle(theme.Colors.ComposerBg)
+	dockBg.CornerRadius = theme.Sizes.ComposerRadius
+	dockBg.StrokeColor = theme.Colors.ComposerBorder
+	dockBg.StrokeWidth = 1
+	a.input.OnFocusChanged = func(focused bool) {
+		dockBg.StrokeColor = theme.Colors.ComposerBorder
+		if focused {
+			dockBg.StrokeColor = theme.Colors.ComposerBorderFocus
+		}
+		dockBg.Refresh()
+	}
+
 	inner := ui.VBoxNoSpacing(
+		a.input.Mentions,
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
 		ui.WithCaret(a.input),
 	)
-	dock := container.NewStack(dockBg, container.NewBorder(nil, nil, leftBar, nil, inner))
+	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
+	dock := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
 	composer := container.NewPadded(dock)
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})

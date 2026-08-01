@@ -100,19 +100,27 @@ internal/
                              only one; selectChannel routes through it too), and
                              server/member events
     navigation.go            buildUI (the 4-column fill row) + the server and
-                             channel sidebars, the settings window, and selection.
-                             The server sidebar bookends its scrolling icons with
-                             fixed home and settings buttons; the join-server "+"
-                             sits at the end of the scrolling icons
-    messages.go              The message area end to end: build, compose/submit,
-                             widget construction (continuesGroup/dayLabel), load
-                             and render, and the mounted window — which slice of
-                             the cache has live widgets and how it slides. Its
-                             "mounted window" section states the invariants
+                             channel sidebars, the settings window, selection, and
+                             the home view (selectHome / loadDirectMessages /
+                             sortConversations / resolveRecipients). The server
+                             sidebar bookends its scrolling icons with fixed home
+                             and settings buttons; the join-server "+" sits at the
+                             end of the scrolling icons. refreshChannelList renders
+                             either a server's categorised channels or, in the home
+                             view, the flat DM list
+    messages.go              The message area end to end: build (the composer dock —
+                             see "Composer geometry"), compose/submit, widget
+                             construction (continuesGroup/dayLabel), setChannelGlyph
+                             (the header's # / @ / group mark), load and render, and
+                             the mounted window — which slice of the cache has live
+                             widgets and how it slides. Its "mounted window" section
+                             states the invariants
     members.go               Lazy author resolution (ensureAuthor → flushAuthors →
                              resolveAuthor, queued then fetched in one bounded
-                             batch; refreshAuthorMessages updates widgets in place)
-                             plus the member sidebar
+                             batch; refreshAuthorMessages updates widgets in place),
+                             the member sidebar, and the mention candidates the
+                             composer's picker offers — the same State walk, so
+                             they refresh together
     overlay.go               The modal layer: showOverlay/closeOverlay, the
                              attachment lightbox, and the join-server dialog +
                              joinServer/createServer
@@ -139,16 +147,26 @@ internal/
                              optional filling child), columnLayout (the message
                              avatar gutter; `collapse` makes it report zero height
                              for the grouped timestamp), overlayLayout,
-                             minSizeLayout (NewMinWidth/MinHeightContainer), and
-                             stripPaddingLayout
+                             minSizeLayout (NewMinWidth/MinHeight/FixedWidth —
+                             `pinWidth` turns the floor into a ceiling, see
+                             "Sidebar widths"), and insetLayout (NewInset: exact
+                             per-edge padding, and with negative insets the way a
+                             RichText's own inner padding is stripped)
     widgets.go               Shared interactive widgets on tapBase
                              (TappableContainer, HoverableStack, IconButton,
-                             SidebarButton, CloseButton, roundedPanel, separator),
-                             the one avatar loader (circularAvatar/Avatar), and
-                             ObservableScroll (wheel amplify + middle-button pan)
-    sidebar.go               ServerWidget, ChannelWidget + collapsible category,
-                             drawn glyphs (HashtagIcon), member row/section, and
-                             the saved-session card
+                             SidebarButton — which carries a selected state so the
+                             home button lights like a server icon — CloseButton,
+                             roundedPanel, separator), the one avatar loader
+                             (circularAvatar/Avatar/avatarCacheID), ObservableScroll
+                             (wheel amplify + middle-button pan), and NewEllipsisText
+                             /TruncateToWidth (text that shortens to the width it is
+                             given, at zero minimum width)
+    sidebar.go               ServerWidget, ChannelWidget (named through
+                             util.ChannelName, so a DM row shows the other
+                             participant) + collapsible category, the drawn glyph set
+                             ChannelGlyph picks from (HashtagIcon / AtIcon /
+                             GroupIcon), member row/section, and the saved-session
+                             card
     message.go               MessageWidget: construction, permissions, quick
                              actions / context menu, in-place edit mode, hover,
                              content assembly — plus the day separator it owns
@@ -157,34 +175,47 @@ internal/
     markdown.go              AST → RichText rendering; strike/underline/spoiler
                              custom segments; uniform-style bodies flatten to a
                              Selectable Label (mouse text selection); only
-                             mixed-style bodies keep the unselectable RichText
+                             mixed-style bodies keep the unselectable RichText.
+                             mdBuilder carries Deps because <@id> is only an ID in
+                             the AST — mention() resolves it and draws "@Name" in
+                             theme.ColorNameMention
     attachment.go            Attachment rendering (image / text preview / generic
                              card), the name/size bar, and fetchText (shared,
                              byte-capped download). Images and text files are
                              tappable → Actions.OnAttachmentTapped
     input.go                 Message input + attachments + reply cards; OnEditLast
-                             fires on Up in an empty composer
+                             fires on Up in an empty composer, OnFocusChanged drives
+                             the dock's focus ring, composerMinSize is shared with
+                             EditEntry. Plus the @mention half: the trigger
+                             (mentionQuery / syncMentions / acceptMention and the
+                             cursorIndex ↔ cursorPosition pair converting Fyne's
+                             row/column caret to a rune index and back) and the
+                             MentionPicker it drives — pooled rows re-set per
+                             keystroke, prefix-before-substring ranking, and a
+                             "+N more" footer instead of a scrollbar
     modal.go                 Overlay (the full-canvas modal layer) + tapSink,
                              NewAttachmentViewer (the lightbox card), and
                              JoinServerDialog (validates through util.InviteCode;
                              its entry handles Esc itself, since a focused entry
                              never reaches the canvas handler)
     theme/theme.go           Colors, Sizes, AppTheme (palette + scrollbar/widget
-                             overrides)
+                             overrides + ColorNameMention, the app-specific colour
+                             name a RichText segment can carry)
     titlebar_windows.go      DWM recolouring of the native title bar (no-op
     titlebar_notwindows.go   elsewhere, see App.styleNativeChrome's retry loop)
   markdown/                  Pure (no UI) Discord/Revolt markdown parser → AST
     markdown.go              Document/Block/Inline AST node types
     parser.go                Block parsing, inline parsing (bold/italic/strike/
-                             spoiler/code/link), and PlainText. Discord-style
-                             emphasis guards: _ opens/closes only at word
-                             boundaries (snake_case stays literal) and single
+                             spoiler/code/link/<@mention>), and PlainText.
+                             Discord-style emphasis guards: _ opens/closes only at
+                             word boundaries (snake_case stays literal) and single
                              */_ content can't be whitespace-edged
   util/
-    message.go               MessageAuthor — one-pass author resolution (name,
-                             avatar URL, role colour; member-aware) — plus
-                             MemberName/MemberAvatarURL/MemberOnline and
-                             FormatSystemMessage
+    state.go                 Everything resolved out of Session.State: MessageAuthor
+                             (one-pass author resolution — name, avatar URL, role
+                             colour, member-aware), MemberName/MemberAvatarURL/
+                             MemberOnline/MemberColor, UserName, ChannelName +
+                             DMRecipientID, and FormatSystemMessage
     file.go                  Filetype + FormatFileSize, IsImageAttachment /
                              AttachmentDimensions (nil-Metadata safe), and
                              IDFromAttachmentURL
@@ -203,7 +234,8 @@ internal/
    back to the UI thread). The login screen stays up until Ready; only failures
    return to it.
 2. `onReady` → save pending token, record unreads, `showMainUI` (the only place
-   the main layout is built), `refreshServerList`, `selectServer(first)`.
+   the main layout is built), `refreshServerList`, `selectServer(first)` — or
+   `selectHome` when the account is in no servers, so the client never lands blank.
 3. `selectServer` → `refreshChannelList`, `refreshMemberList` (paints whatever
    members State currently holds) → `selectChannel(first)`. There is no bulk
    member fetch: Revolt's members endpoint has no pagination, so large servers
@@ -271,22 +303,59 @@ internal/
    (`displayMessages`/`clearMessages`/`showStatus`) cancels the active edit, and
    `refreshMessage` leaves a message being edited alone so a remote update can't
    discard the open editor.
-8. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
+8. Mentions. Typing `@` at the start of a message or after a space opens the
+   composer's picker (`MessageInput.syncMentions`, driven from the typing methods
+   rather than `Entry.OnChanged` because the picker also has to close when the
+   caret merely *moves* out of a mention). While open it gets first refusal on
+   Up/Down/Enter/Tab/Esc, which the composer otherwise binds to sending and to
+   editing the last message. Accepting rewrites the `@query` span as Revolt's
+   `<@id>` wire token — the composer shows the raw token, since a Fyne entry
+   cannot draw a chip inside its text — and `ui/markdown.go` renders that token
+   back as an accent-coloured `@Name` in message bodies.
+   The candidate list is *pushed*, not pulled: `App.refreshMentionCandidates`
+   resolves it from State (on `selectChannel`, on every `refreshMemberList`, and
+   after each author batch lands) and the picker filters that snapshot per
+   keystroke. So the expensive part — walking State and resolving names — happens
+   once per membership change, and a keystroke is two string comparisons per
+   candidate with nothing allocated. Reading State only, a server's candidates are
+   whoever the client already knows: the gateway's members plus everyone lazy
+   author resolution has pulled in, the same bounded set the member sidebar shows
+   and the same reason there is no bulk member fetch. The picker is mounted
+   *inside* the composer card rather than floating over the message area: a Fyne
+   pop-up takes canvas focus, which would pull it off the entry and stop the
+   typing that drives it.
+9. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
    handlers); the app handler refreshes the member sidebar when it's the open
    server. `Update` also calls `refreshAuthorMessages` so that author's mounted
    messages pick up the new nickname / role colour / avatar in place.
-9. Joining a server: the "+" at the end of the server sidebar opens
-   `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
-   The dialog resolves what was pasted through `util.InviteCode` (bare code,
-   invite link, or link without a scheme) and hands `joinServer` a code, which
-   calls `Session.InviteJoin` off-thread. The response is not what adds the
-   server — the join payload carries the server as an object, which revoltgo
-   decodes into an `Invite` whose `ServerID` is never populated — so the sidebar
-   is updated by the `ServerCreate` gateway event instead (`onServerCreate`).
-   `App.pendingJoin`, set for the duration of the request, is what tells that
-   handler to *select* the server it adds; servers appearing for any other
-   reason are added without moving the view. A failed join leaves the dialog up
-   with a short message on its status line and the real error in the log.
+10. The home view: the fixed home button swaps the channel sidebar from a server's
+    channels to the user's direct messages and groups. `App.homeSelected` marks it
+    open — home has no server, so an empty `currentServerID` alone can't be told
+    apart from nothing selected — and `selectServer` clears it. The list comes from
+    `Session.DirectMessages()`, which feeds the channels into State on the way
+    through, so the app keeps only the sidebar *order* (`App.dmChannels`, a slice
+    of IDs) and looks every channel up through `App.stateChannel` like any other.
+    It is still a plain fetch with no gateway event maintaining it, which is why
+    the order is re-asked for rather than pushed: `selectHome` paints the cache
+    immediately and refreshes in the background, so re-opening home never blanks
+    the sidebar. Each refresh re-sorts by `LastMessageID` (a ULID, so string
+    comparison sorts chronologically) and resolves any recipients missing from
+    State, since a DM has no name of its own. Ordering is a snapshot — an incoming
+    message marks its row unread rather than re-sorting the list under the reader.
+    Everything downstream of the sidebar is channel-keyed and needs no special
+    case; the member sidebar simply stays empty, as a DM has no server members.
+11. Joining a server: the "+" at the end of the server sidebar opens
+    `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
+    The dialog resolves what was pasted through `util.InviteCode` (bare code,
+    invite link, or link without a scheme) and hands `joinServer` a code, which
+    calls `Session.InviteJoin` off-thread. The response is not what adds the
+    server — the join payload carries the server as an object, which revoltgo
+    decodes into an `Invite` whose `ServerID` is never populated — so the sidebar
+    is updated by the `ServerCreate` gateway event instead (`onServerCreate`).
+    `App.pendingJoin`, set for the duration of the request, is what tells that
+    handler to *select* the server it adds; servers appearing for any other
+    reason are added without moving the view. A failed join leaves the dialog up
+    with a short message on its status line and the real error in the log.
 
 ## Conventions
 
@@ -309,6 +378,27 @@ internal/
   never recognises it as draggable.
 - Colors and sizes come from `ui/theme`, never hardcoded. Don't express one size
   as an offset from an unrelated one — add a named entry.
+- **Sidebar widths.** The three side columns are pinned by
+  `ui.NewFixedWidthContainer`, not by a minimum-size background rectangle: only
+  the message area (`NewFillRow`'s fill index) may change width, and only when the
+  window does. A minimum size is a *floor*, and `container.NewVScroll` reports its
+  content's minimum width as its own, so one long channel or member name used to
+  widen its column and shove the message area sideways. Anything rendering a
+  user-supplied name into a sidebar row therefore goes in the stretching slot of a
+  `Border` wrapped in `ui.NewEllipsisText` (or, for a `widget.Label`, with
+  `Truncation = fyne.TextTruncateEllipsis`) so it shortens instead of pushing out.
+- **Composer geometry.** A growing entry's height is
+  `lineHeight × lines + InnerPadding × 2` (`composerMinSize`, shared by the
+  composer and `EditEntry`) — the input border is *not* added on top.
+  `entryRenderer.Layout` pays for the border out of the text provider's own
+  padding (it sets `textProvider().inset` to the border size), so the border is
+  already inside `InnerPadding`. Counting it twice made both entries four pixels
+  taller than their content, and since the entry top-aligns its text inside its
+  scroller, all four landed as dead space under the caret.
+  `TestComposerTextIsVerticallyCentred` guards it. Nothing around the dock may add
+  padding it wasn't asked for either: the card uses `ui.NewInset`, because
+  `container.NewPadded` applies theme padding and `container.NewBorder` inserts
+  theme padding between its edges and its centre.
 - Use the `log` package for diagnostics.
 - Keep this file current when adding files/packages, changing data flow, adding
   widgets, modifying `App` fields, or changing event handling.
@@ -347,14 +437,29 @@ consumer appears, lift them into a composite action.
 
 ## Known stubs / follow-ups
 
-`App.OnAvatarTapped` (profile) just prints; `selectHome` is a stub; the settings
-window is a placeholder; reply-preview tap navigation is a TODO in `ui/message.go`
-(`buildReplyPreview`); `App.createServer` (the join dialog's "Create a server"
-button) only reports that creation isn't built yet.
+`App.OnAvatarTapped` (profile) just prints; the settings window is a placeholder;
+reply-preview tap navigation is a TODO in `ui/message.go` (`buildReplyPreview`);
+`App.createServer` (the join dialog's "Create a server" button) only reports that
+creation isn't built yet.
 
 `markdown.CodeBlock.Language` is parsed and tested but nothing renders syntax
 highlighting yet. `util.FileType` classifies video/audio/archive/PDF, but only
 `FileTypeImage` and `FileTypeText` are branched on.
+
+The composer has no attach or emoji button — files still arrive only by drag or
+paste — and no role/channel mentions (`<@id>` users only). `EditEntry` has no
+mention picker: editing a message can only mention someone by typing the raw
+token. A composed mention stays a visible `<@id>` in the entry until it is sent;
+Fyne cannot draw a chip inside an entry's text, so the alternative would be
+mapping display names back to IDs at send time, which breaks on duplicate names.
+`markdown.PlainText` renders a mention as a bare `@` for the same reason it can't
+resolve one — it has no session — so a reply preview of a message that opens with
+a mention starts with a lone `@`.
+
+The home view has no `ChannelCreate` handler, so a DM opened while the client is
+running (by the other party, or from a profile once that exists) only appears the
+next time the DM list is refreshed — its messages are still cached and its unread
+mark still recorded, they just have no row until then.
 
 The attachment viewer and the join-server dialog are modal overlays, not
 windows: they have no native chrome to recolour, cannot be left behind, and
@@ -378,4 +483,5 @@ also all-bold/italic, a lone code block, heading, subtext, plain lists, inline
 code alone) flatten to a `Selectable` `widget.Label` carrying that style. Fyne
 2.8 has no public RichText selection — its internal `selectable` helper is
 unexported and assumes one uniform text style — so bodies mixing styles within
-the text stay unselectable; right-click → Copy message covers them.
+the text stay unselectable, as does any body carrying a mention (its colour is a
+second style); right-click → Copy message covers them.

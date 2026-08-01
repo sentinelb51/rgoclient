@@ -39,8 +39,12 @@ func (a *App) onReady(_ *revoltgo.Session, event *revoltgo.EventReady) {
 		}
 		a.refreshServerList()
 
+		// An account in no servers still has somewhere to land: the home view opens
+		// on its direct messages rather than leaving the client blank.
 		if len(a.serverIDs) > 0 {
 			a.selectServer(a.serverIDs[0])
+		} else {
+			a.selectHome()
 		}
 	}, true)
 }

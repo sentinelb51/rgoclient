@@ -2,12 +2,14 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -19,6 +21,7 @@ import (
 	"golang.design/x/clipboard"
 
 	"RGOClient/assets"
+	"RGOClient/internal/cache"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -54,7 +57,8 @@ type Reply struct {
 }
 
 // MessageInput is a multi-line text entry that grows with its content, supports
-// Shift+Enter for newlines, and manages pending attachments and replies.
+// shift-enter for newlines, and manages pending attachments, replies, and the
+// @mention picker.
 type MessageInput struct {
 	widget.Entry
 	OnSubmit func(string)
@@ -63,22 +67,41 @@ type MessageInput struct {
 	// in-place editor on the user's newest message.
 	OnEditLast func()
 
+	// OnFocusChanged reports focus changes so the composer card can light its
+	// outline while the entry is live.
+	OnFocusChanged func(focused bool)
+
+	// Mentions is the @autocomplete list, mounted by the composer above the reply
+	// cards and hidden until the caret sits inside a mention. mentionStart is the
+	// rune index of the '@' being completed, or -1 — used only to notice when the
+	// caret has moved to a *different* mention, so the highlight restarts.
+	Mentions     *MentionPicker
+	mentionStart int
+
 	Attachments         []Attachment
 	AttachmentContainer *fyne.Container
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
 
 	deps         Deps
+	window       fyne.Window
 	shiftPressed bool
 }
 
-// NewMessageInput creates a message input wired to the given dependencies.
-func NewMessageInput(deps Deps) *MessageInput {
+// NewMessageInput creates a message input wired to the given dependencies. The
+// window is what lets the composer accept dropped files and take keyboard focus
+// back after a mouse interaction (picking a mention with the pointer blurs the
+// entry, because Fyne unfocuses whenever a click lands on something that isn't
+// focusable).
+func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m := &MessageInput{
 		deps:                deps,
+		window:              window,
+		mentionStart:        -1,
 		AttachmentContainer: container.NewHBox(),
 		ReplyContainer:      container.NewVBox(),
 	}
+	m.Mentions = NewMentionPicker(deps.Images, m.acceptMention)
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
@@ -95,12 +118,18 @@ func NewMessageInput(deps Deps) *MessageInput {
 func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 
 // composerMinSize sizes a growing composer-style entry: one line per newline up
-// to maxInputLines, plus the entry's inner padding and border insets.
+// to maxInputLines, plus the padding Fyne draws around the entry's text.
+//
+// That padding is InnerPadding above and below, and nothing else. The input
+// border looks like it should be added on top, but entryRenderer.Layout pays for
+// that inset out of the text provider's own padding, so the border is already
+// *inside* InnerPadding. Counting it twice left four dead pixels under the caret.
 func composerMinSize(e *widget.Entry) fyne.Size {
 	size := e.MinSize()
 	lines := min(max(strings.Count(e.Text, "\n")+1, 1), maxInputLines)
-	border := e.Theme().Size(fynetheme.SizeNameInputBorder)
-	size.Height = lineHeight(fynetheme.TextSize())*float32(lines) + fynetheme.InnerPadding()*2 + border*2
+	th := e.Theme()
+	size.Height = lineHeight(th.Size(fynetheme.SizeNameText))*float32(lines) +
+		th.Size(fynetheme.SizeNameInnerPadding)*2
 
 	return size
 }
@@ -122,9 +151,23 @@ func lineHeight(textSize float32) float32 {
 
 /* Keyboard */
 
+func (m *MessageInput) FocusGained() {
+	m.Entry.FocusGained()
+	if m.OnFocusChanged != nil {
+		m.OnFocusChanged(true)
+	}
+}
+
 func (m *MessageInput) FocusLost() {
 	m.shiftPressed = false
 	m.Entry.FocusLost()
+	// Hide the picker but leave the caret alone: acceptMention re-derives the
+	// mention span from the caret, so a click on a picker row still resolves
+	// even though that click blurred the entry on its way in.
+	m.hideMentions()
+	if m.OnFocusChanged != nil {
+		m.OnFocusChanged(false)
+	}
 }
 
 func (m *MessageInput) KeyDown(key *fyne.KeyEvent) {
@@ -143,7 +186,16 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 // pending replies/attachments on Escape, starts editing the last own message on
 // Up in an empty composer, and otherwise defers to the embedded entry, refreshing
 // so MinSize recomputes.
+//
+// An open mention picker gets first refusal on the navigation keys, since it
+// binds the same ones: Enter would send the half-written message and Up would
+// open the editor on the previous one.
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
+	if m.Mentions.Visible() && m.handleMentionKey(key) {
+		return
+	}
+	defer m.syncMentions()
+
 	switch {
 	case key.Name == fyne.KeyUp && m.Text == "":
 		if m.OnEditLast != nil {
@@ -175,6 +227,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 func (m *MessageInput) TypedRune(r rune) {
 	m.Entry.TypedRune(r)
 	m.Refresh()
+	m.syncMentions()
 }
 
 // TypedShortcut intercepts paste to support pasting an image or a file path as
@@ -187,6 +240,140 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 
 	m.Entry.TypedShortcut(s)
 	m.Refresh()
+	m.syncMentions()
+}
+
+/* The mention picker */
+
+// handleMentionKey lets an open picker consume a navigation key, reporting
+// whether it did.
+func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
+	switch key.Name {
+	case fyne.KeyUp:
+		m.Mentions.Step(-1)
+	case fyne.KeyDown:
+		m.Mentions.Step(1)
+	case fyne.KeyReturn, fyne.KeyEnter, fyne.KeyTab:
+		m.Mentions.Accept()
+	case fyne.KeyEscape:
+		m.hideMentions()
+	default:
+		return false
+	}
+
+	return true
+}
+
+// syncMentions re-evaluates the picker against the caret after an input event.
+// It is driven from the typing methods rather than from Entry.OnChanged because
+// the picker also has to close when the caret merely *moves* out of a mention,
+// which changes no text at all.
+func (m *MessageInput) syncMentions() {
+	start, query, ok := m.mentionQuery()
+	if ok {
+		if start != m.mentionStart {
+			m.Mentions.Reset() // a different mention starts at the top of its list
+		}
+		if m.Mentions.Update(query) {
+			m.mentionStart = start
+			m.Mentions.Show()
+			return
+		}
+	}
+	m.mentionStart = -1
+	m.hideMentions()
+}
+
+// hideMentions closes the picker without disturbing the text or the caret.
+func (m *MessageInput) hideMentions() {
+	if !m.Mentions.Visible() {
+		return
+	}
+
+	m.Mentions.Reset()
+	m.Mentions.Hide()
+}
+
+// mentionQuery finds the @mention the caret sits in: the rune index of its '@'
+// and the text typed since. A mention only opens at the start of the message or
+// after whitespace, so an email address — or any other "foo@bar" in running
+// text — never summons the picker.
+func (m *MessageInput) mentionQuery() (start int, query string, ok bool) {
+	runes := []rune(m.Text)
+	cursor := min(m.cursorIndex(), len(runes))
+
+	// Walking back from the caret stops at the first space, so the query can
+	// never span words and the scan is bounded by the current word's length.
+	for i := cursor - 1; i >= 0; i-- {
+		switch {
+		case unicode.IsSpace(runes[i]):
+			return 0, "", false
+		case runes[i] == '@':
+			if i > 0 && !unicode.IsSpace(runes[i-1]) {
+				return 0, "", false
+			}
+			return i, string(runes[i+1 : cursor]), true
+		}
+	}
+
+	return 0, "", false
+}
+
+// acceptMention swaps the "@query" under the caret for a Revolt mention token,
+// leaving the caret after it and a space ready for the next word.
+//
+// The span is re-derived here rather than taken from mentionStart: picking a
+// candidate with the mouse blurs the entry before the tap is delivered, so by
+// then the picker has already been hidden.
+func (m *MessageInput) acceptMention(candidate MentionCandidate) {
+	start, _, ok := m.mentionQuery()
+	if !ok {
+		return
+	}
+
+	runes := []rune(m.Text)
+	cursor := min(m.cursorIndex(), len(runes))
+	token := "<@" + candidate.UserID + "> "
+	text := string(runes[:start]) + token + string(runes[cursor:])
+
+	m.mentionStart = -1
+	m.hideMentions()
+
+	m.SetText(text)
+	m.CursorRow, m.CursorColumn = cursorPosition(text, start+len([]rune(token)))
+	m.Refresh()
+
+	if m.window != nil {
+		m.window.Canvas().Focus(m)
+	}
+}
+
+// cursorIndex returns the caret as a rune index into Text. Fyne tracks it as a
+// row/column pair, which is what drawing the caret needs but not what editing
+// the text around it does.
+func (m *MessageInput) cursorIndex() int {
+	lines := strings.Split(m.Text, "\n")
+	index := 0
+	for i := 0; i < m.CursorRow && i < len(lines); i++ {
+		index += len([]rune(lines[i])) + 1 // + the newline itself
+	}
+
+	return index + m.CursorColumn
+}
+
+// cursorPosition is cursorIndex's inverse, turning a rune index back into the
+// row/column pair the entry draws from.
+func cursorPosition(text string, index int) (row, col int) {
+	lines := strings.Split(text, "\n")
+	for i, line := range lines {
+		n := len([]rune(line))
+		if index <= n || i == len(lines)-1 {
+			return i, min(max(index, 0), n)
+		}
+		index -= n + 1
+	}
+
+	return 0, 0
 }
 
 // pasteAsAttachment attaches an image or file path from the clipboard, reporting
@@ -213,11 +400,9 @@ func (m *MessageInput) pasteAsAttachment() bool {
 	return false
 }
 
-/* Attachments */
-
-// RegisterDropHandler attaches files dropped onto the window.
-func (m *MessageInput) RegisterDropHandler(window fyne.Window) {
-	window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
+// RegisterDropHandler attaches files dropped onto the composer's window.
+func (m *MessageInput) RegisterDropHandler() {
+	m.window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
 		for _, u := range uris {
 			if u.Scheme() == "file" {
 				m.AddAttachment(u.Path())
@@ -467,4 +652,345 @@ func (b *replyIconButton) applyState() {
 
 	b.bg.Refresh()
 	canvas.Refresh(b.icon)
+}
+
+/* The mention picker */
+
+const (
+	// mentionMaxRows bounds both the picker's height and its per-keystroke work:
+	// filtering stops counting matches past this and the surplus is reported as a
+	// "+N more" hint instead of a scrolling list. A picker you have to scroll is
+	// slower to use than one that tells you to keep typing.
+	mentionMaxRows = 8
+
+	// mentionNameMaxRunes keeps one very long display name from stretching a row
+	// wider than the composer. The picker's rows are packed left, so unlike a
+	// sidebar row there is no column to ellipsise against.
+	mentionNameMaxRunes = 32
+
+	mentionRowInset = 8 // left/right breathing room inside a row
+	mentionRowGap   = 8 // between avatar, name and handle
+)
+
+// MentionCandidate is one person the mention picker can insert. Name and
+// Username are both matched against what the user has typed, so either the
+// nickname shown in chat or the underlying @handle finds someone.
+type MentionCandidate struct {
+	UserID    string
+	Name      string // nickname / display name, as chat shows it
+	Username  string // the @handle, without the @
+	AvatarURL string
+	Color     color.Color // role colour; nil falls back to the standard text colour
+
+	// Lowercased match keys, computed once when the candidate is built. The
+	// picker filters the whole candidate set on every keystroke, so folding case
+	// here rather than per keystroke is what keeps a 2000-member server cheap.
+	nameKey, userKey string
+}
+
+// NewMentionCandidate builds a candidate with its match keys precomputed.
+func NewMentionCandidate(userID, name, username, avatarURL string, roleColor color.Color) MentionCandidate {
+	return MentionCandidate{
+		UserID:    userID,
+		Name:      name,
+		Username:  username,
+		AvatarURL: avatarURL,
+		Color:     roleColor,
+		nameKey:   strings.ToLower(name),
+		userKey:   strings.ToLower(username),
+	}
+}
+
+// rank scores a candidate against an already-lowercased query: 0 when the
+// display name or handle starts with it, 1 when either merely contains it, -1
+// for no match. An empty query (the bare "@") matches everyone at rank 0, so
+// typing @ alone opens the picker on the full list.
+func (c MentionCandidate) rank(query string) int {
+	switch {
+	case query == "",
+		strings.HasPrefix(c.nameKey, query), strings.HasPrefix(c.userKey, query):
+		return 0
+	case strings.Contains(c.nameKey, query), strings.Contains(c.userKey, query):
+		return 1
+	}
+
+	return -1
+}
+
+// MentionPicker is the autocomplete list the composer shows while an @mention is
+// being typed. It lives inside the composer card rather than floating over the
+// message area: a Fyne pop-up takes canvas focus, which would pull it away from
+// the entry and stop the typing that drives the picker in the first place.
+//
+// Its row widgets are pooled — mentionMaxRows of them, built once and re-set as
+// the query changes — so a keystroke re-labels existing widgets instead of
+// building and discarding a list of new ones.
+type MentionPicker struct {
+	widget.BaseWidget
+	images   *cache.ImageCache
+	onAccept func(MentionCandidate)
+
+	all      []MentionCandidate
+	matches  []MentionCandidate
+	overflow int // matches beyond mentionMaxRows, reported by the footer
+	selected int
+
+	rows      []*mentionRow
+	footer    *canvas.Text
+	footerRow *fyne.Container // the footer's padded wrapper, shown/hidden as a unit
+	content   fyne.CanvasObject
+}
+
+var _ fyne.Widget = (*MentionPicker)(nil)
+
+// NewMentionPicker builds an empty, hidden picker. onAccept receives the chosen
+// candidate; the composer turns it into a mention token.
+func NewMentionPicker(images *cache.ImageCache, onAccept func(MentionCandidate)) *MentionPicker {
+	p := &MentionPicker{images: images, onAccept: onAccept}
+
+	rowBox := VBoxNoSpacing()
+	for i := range mentionMaxRows {
+		row := newMentionRow(images, func() { p.selectRow(i) }, func() { p.selectRow(i); p.Accept() })
+		row.Hide()
+		p.rows = append(p.rows, row)
+		rowBox.Add(row)
+	}
+
+	p.footer = canvas.NewText("", theme.Colors.MentionHandleText)
+	p.footer.TextSize = theme.Sizes.MentionHandleSize
+	p.footerRow = NewInset(p.footer, 2, 4, mentionRowInset, mentionRowInset)
+	p.footerRow.Hide()
+
+	rule := canvas.NewRectangle(theme.Colors.DaySeparatorLine)
+	rule.SetMinSize(fyne.NewSize(0, theme.Sizes.DaySeparatorThickness))
+
+	p.content = VBoxNoSpacing(rowBox, p.footerRow, rule)
+	p.Hide()
+	p.ExtendBaseWidget(p)
+
+	return p
+}
+
+func (p *MentionPicker) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(p.content)
+}
+
+// SetCandidates replaces the pool the picker filters. Call it when the open
+// channel changes or its membership does; the picker snapshots this list and
+// never goes to the network itself.
+func (p *MentionPicker) SetCandidates(candidates []MentionCandidate) {
+	p.all = candidates
+}
+
+// Update refilters against query — the text between the "@" and the caret — and
+// reports whether anything matched. A false result means the caller should hide
+// the picker: there is nobody to offer.
+func (p *MentionPicker) Update(query string) bool {
+	p.filter(strings.ToLower(query))
+	if len(p.matches) == 0 {
+		return false
+	}
+
+	p.selected = min(p.selected, len(p.matches)-1)
+	for i, row := range p.rows {
+		if i >= len(p.matches) {
+			row.Hide()
+			continue
+		}
+		row.set(p.matches[i], i == p.selected)
+		row.Show()
+	}
+
+	if p.overflow > 0 {
+		p.footer.Text = fmt.Sprintf("+%d more — keep typing", p.overflow)
+		p.footer.Refresh()
+		p.footerRow.Show()
+	} else {
+		p.footerRow.Hide()
+	}
+
+	p.Refresh()
+
+	return true
+}
+
+// filter collects the best mentionMaxRows matches, prefix hits before substring
+// hits. Two passes over the candidates beat one pass plus a sort: the set is
+// walked at most twice with a string comparison per entry and nothing is
+// allocated, which is what lets this run on every keystroke.
+func (p *MentionPicker) filter(query string) {
+	p.matches, p.overflow = p.matches[:0], 0
+	for pass := range 2 {
+		for _, candidate := range p.all {
+			if candidate.rank(query) != pass {
+				continue
+			}
+			if len(p.matches) < mentionMaxRows {
+				p.matches = append(p.matches, candidate)
+			} else {
+				p.overflow++
+			}
+		}
+	}
+}
+
+// Step moves the highlight by delta, wrapping at both ends so Up from the first
+// row lands on the last. Named Step rather than Move because a fyne.Widget's
+// Move is the one that positions it on the canvas.
+func (p *MentionPicker) Step(delta int) {
+	if len(p.matches) == 0 {
+		return
+	}
+
+	n := len(p.matches)
+	p.selectRow(((p.selected+delta)%n + n) % n)
+}
+
+// selectRow highlights row i, repainting only the two rows that changed.
+func (p *MentionPicker) selectRow(i int) {
+	if i == p.selected || i >= len(p.matches) {
+		return
+	}
+
+	p.rows[p.selected].setSelected(false)
+	p.selected = i
+	p.rows[i].setSelected(true)
+}
+
+// Accept hands the highlighted candidate to the composer.
+func (p *MentionPicker) Accept() {
+	if p.selected < len(p.matches) && p.onAccept != nil {
+		p.onAccept(p.matches[p.selected])
+	}
+}
+
+// Reset clears the highlight so the next mention starts at the top of its list.
+func (p *MentionPicker) Reset() {
+	if p.selected != 0 && p.selected < len(p.rows) {
+		p.rows[p.selected].setSelected(false)
+	}
+	p.selected = 0
+}
+
+// mentionRow is one pooled row of the picker: avatar, display name in the
+// author's role colour, and the dim @handle.
+type mentionRow struct {
+	tapBase
+	images *cache.ImageCache
+
+	background  *canvas.Rectangle
+	avatar      *fyne.Container
+	placeholder *canvas.Circle
+	name        *canvas.Text
+	handle      *canvas.Text
+	content     fyne.CanvasObject
+
+	// generation guards a reused row against a slow avatar load: by the time an
+	// image arrives the row may already show somebody else.
+	generation int
+
+	onHover func()
+}
+
+var (
+	_ fyne.Tappable     = (*mentionRow)(nil)
+	_ desktop.Hoverable = (*mentionRow)(nil)
+)
+
+func newMentionRow(images *cache.ImageCache, onHover, onTap func()) *mentionRow {
+	size := fyne.NewSize(theme.Sizes.MentionAvatarSize, theme.Sizes.MentionAvatarSize)
+
+	r := &mentionRow{
+		images:      images,
+		background:  canvas.NewRectangle(color.Transparent),
+		placeholder: canvas.NewCircle(theme.Colors.AvatarPlaceholder),
+		name:        canvas.NewText("", theme.Colors.TextPrimary),
+		handle:      canvas.NewText("", theme.Colors.MentionHandleText),
+		onHover:     onHover,
+	}
+	r.avatar = container.NewGridWrap(size, r.placeholder)
+	r.name.TextSize = theme.Sizes.MentionNameSize
+	r.name.TextStyle = fyne.TextStyle{Bold: true}
+	r.handle.TextSize = theme.Sizes.MentionHandleSize
+
+	// As on the reply card, container.NewCenter is what vertically centres each
+	// element inside the row's full height; HBoxNoSpacing keeps the horizontal
+	// gaps explicit rather than inheriting theme padding.
+	row := HBoxNoSpacing(
+		HorizontalSpacer(mentionRowInset),
+		container.NewCenter(r.avatar),
+		HorizontalSpacer(mentionRowGap),
+		container.NewCenter(r.name),
+		HorizontalSpacer(mentionRowGap),
+		container.NewCenter(r.handle),
+	)
+	r.content = container.NewStack(r.background, row)
+
+	r.onTap = onTap
+	r.ExtendBaseWidget(r)
+
+	return r
+}
+
+func (r *mentionRow) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(r.content)
+}
+
+func (r *mentionRow) MinSize() fyne.Size {
+	return fyne.NewSize(0, theme.Sizes.MentionRowHeight)
+}
+
+func (r *mentionRow) MouseIn(*desktop.MouseEvent) {
+	if r.onHover != nil {
+		r.onHover()
+	}
+}
+
+func (r *mentionRow) MouseOut() {}
+
+// set re-labels the row for a candidate. Only the avatar can be slow, and it is
+// fetched through the shared cache, so a row that scrolls past under a fast
+// typist costs one map lookup.
+func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
+	r.generation++
+	generation := r.generation
+
+	r.name.Text = util.Truncate(candidate.Name, mentionNameMaxRunes)
+	r.name.Color = theme.Colors.TextPrimary
+	if candidate.Color != nil {
+		r.name.Color = candidate.Color
+	}
+	r.handle.Text = "@" + candidate.Username
+	r.name.Refresh()
+	r.handle.Refresh()
+	r.setSelected(selected)
+
+	// Back to the placeholder first: the row may be showing the previous
+	// candidate's face, and this one may have no avatar at all.
+	r.avatar.Objects = []fyne.CanvasObject{r.placeholder}
+	r.avatar.Refresh()
+	if candidate.AvatarURL == "" || r.images == nil {
+		return
+	}
+
+	size := fyne.NewSize(theme.Sizes.MentionAvatarSize, theme.Sizes.MentionAvatarSize)
+	r.images.LoadAsync(avatarCacheID(candidate.AvatarURL), candidate.AvatarURL, true, func(img image.Image) {
+		if r.generation != generation {
+			return
+		}
+
+		face := canvas.NewImageFromImage(img)
+		face.FillMode = canvas.ImageFillContain
+		face.SetMinSize(size)
+		r.avatar.Objects = []fyne.CanvasObject{face}
+		r.avatar.Refresh()
+	})
+}
+
+func (r *mentionRow) setSelected(selected bool) {
+	r.background.FillColor = color.Transparent
+	if selected {
+		r.background.FillColor = theme.Colors.MentionRowSelectedBg
+	}
+	r.background.Refresh()
 }

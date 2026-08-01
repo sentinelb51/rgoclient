@@ -1,7 +1,8 @@
-// Package util holds the small, UI-free helpers shared across the client:
-// author and member resolution, file classification, timestamps, and string
-// tidying. Everything here takes an explicit *revoltgo.Session; nothing reaches
-// for global state.
+// Package util holds the small, UI-free helpers shared across the client: what
+// state.go resolves out of Session.State (authors, members, channels, system
+// messages), plus file classification, timestamps, and string tidying.
+// Everything here takes an explicit *revoltgo.Session; nothing reaches for
+// global state.
 package util
 
 import "strings"

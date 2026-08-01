@@ -2,15 +2,20 @@ package app
 
 import (
 	"log"
+	"slices"
+	"strings"
+	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 // buildUI assembles the four-column layout: servers | channels | messages |
@@ -32,14 +37,13 @@ func (a *App) buildUI() fyne.CanvasObject {
 // outside the scroll, so they stay put when the list grows tall enough to scroll.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
-	background.SetMinSize(fyne.NewSize(theme.Sizes.ServerSidebarWidth, 0))
 
-	home := ui.NewSidebarButton(fynetheme.HomeIcon(), a.selectHome)
+	a.homeButton = ui.NewSidebarButton(fynetheme.HomeIcon(), a.selectHome)
 	settings := ui.NewSidebarButton(fynetheme.SettingsIcon(), a.openSettings)
 
 	top := container.NewVBox(
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
-		container.NewCenter(home),
+		container.NewCenter(a.homeButton),
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 		ui.NewSidebarSeparator(),
 	)
@@ -53,7 +57,7 @@ func (a *App) buildServerList() fyne.CanvasObject {
 	a.refreshServerList()
 	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
 
-	return container.NewStack(background, content)
+	return ui.NewFixedWidthContainer(theme.Sizes.ServerSidebarWidth, background, content)
 }
 
 // refreshServerList rebuilds the server icons from the current server list.
@@ -81,12 +85,6 @@ func (a *App) refreshServerList() {
 	// skips it because it isn't a ServerWidget.
 	a.serverList.Add(ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
 	a.serverList.Refresh()
-}
-
-// selectHome is the home button handler.
-func (a *App) selectHome() {
-	// todo: home / direct-message view
-	log.Print("home selected")
 }
 
 // openSettings opens the settings window. A second open focuses the existing
@@ -117,13 +115,13 @@ func (a *App) openSettings() {
 // buildChannelList builds the channel sidebar with its server-name header.
 func (a *App) buildChannelList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ChannelListBackground)
-	background.SetMinSize(fyne.NewSize(theme.Sizes.ChannelSidebarWidth, 0))
 
 	name := "Server"
 	if s := a.currentServer(); s != nil {
 		name = s.Name
 	}
 	a.serverHeader = widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	a.serverHeader.Truncation = fyne.TextTruncateEllipsis
 
 	a.refreshChannelList()
 
@@ -132,13 +130,24 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 		container.NewVScroll(a.channelList))
 	content := container.NewBorder(container.NewPadded(a.serverHeader), nil, nil, nil, scroll)
 
-	return container.NewStack(background, content)
+	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background, content)
 }
 
 // refreshChannelList rebuilds the channel rows for the current server, grouping
-// channels under their categories.
+// channels under their categories — or, in the home view, the flat list of
+// cached direct messages and groups, which has no categories to group under.
 func (a *App) refreshChannelList() {
 	a.channelList.Objects = nil
+
+	if a.homeSelected {
+		for _, channelID := range a.dmChannels {
+			if w := a.newChannelRow(channelID); w != nil {
+				a.channelList.Add(w)
+			}
+		}
+		a.channelList.Refresh()
+		return
+	}
 
 	server := a.currentServer()
 	if server == nil {
@@ -194,12 +203,12 @@ func (a *App) refreshChannelList() {
 // newChannelRow builds a channel row reflecting its current state, or nil when
 // State doesn't know the channel.
 func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
-	channel := a.session.State.Channel(channelID)
+	channel := a.stateChannel(channelID)
 	if channel == nil {
 		return nil
 	}
 
-	w := ui.NewChannelWidget(channel, func() { a.selectChannel(channelID) })
+	w := ui.NewChannelWidget(a.deps(), channel, func() { a.selectChannel(channelID) })
 	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
 
 	return w
@@ -211,10 +220,11 @@ func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 // the current server is a no-op, which would otherwise rebuild both sidebars and
 // yank the view to the first channel.
 func (a *App) selectServer(serverID string) {
-	if a.currentServerID == serverID {
+	if a.currentServerID == serverID && !a.homeSelected {
 		return
 	}
 
+	a.homeSelected = false
 	a.currentServerID = serverID
 	server := a.currentServer()
 	if server == nil {
@@ -243,8 +253,10 @@ func (a *App) selectChannel(channelID string) {
 	unread := a.unreadChannels[channelID]
 	a.currentChannelID = channelID
 
-	if channel := a.currentChannel(); channel != nil {
-		a.setHeader(a.channelHeader, channel.Name)
+	channel := a.currentChannel()
+	a.setChannelGlyph(channel)
+	if channel != nil {
+		a.setHeader(a.channelHeader, util.ChannelName(a.session, channel))
 		if unread && channel.LastMessageID != nil {
 			delete(a.unreadChannels, channelID)
 			a.scheduleAck(channelID, *channel.LastMessageID)
@@ -252,6 +264,7 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	a.syncChannelList()
+	a.refreshMentionCandidates()
 	a.focusInput() // so the user can type straight away
 
 	if cached := a.messages.Get(channelID); len(cached) > 0 {
@@ -268,11 +281,17 @@ func (a *App) clearChannelSelection() {
 	a.currentChannelID = ""
 	a.clearMessages()
 	a.setHeader(a.channelHeader, "")
+	a.setChannelGlyph(nil)
 	a.syncChannelList()
 }
 
-// syncServerSelection updates the highlighted server icon.
+// syncServerSelection updates the highlighted server icon. The home button is
+// part of the same one-of-N selection, so it is cleared or lit here too rather
+// than by whichever handler happens to run.
 func (a *App) syncServerSelection(selectedID string) {
+	if a.homeButton != nil {
+		a.homeButton.SetSelected(a.homeSelected)
+	}
 	for _, obj := range a.serverList.Objects {
 		if w, ok := obj.(*ui.ServerWidget); ok {
 			w.SetSelected(w.Server.ID == selectedID)
@@ -308,11 +327,176 @@ func (a *App) setHeader(label *widget.Label, text string) {
 	}
 }
 
-// channelName returns the current channel's name, or a fallback.
+// channelName returns the current channel's display name, or a fallback.
 func (a *App) channelName() string {
 	if channel := a.currentChannel(); channel != nil {
-		return channel.Name
+		return util.ChannelName(a.session, channel)
 	}
 
 	return "channel"
+}
+
+/* The home view */
+
+// homeHeader titles the channel sidebar while the home view is open, standing
+// in for the server name.
+const homeHeader = "Direct Messages"
+
+// selectHome opens the home view. The cached DM list paints immediately and a
+// refresh is fired regardless: the list is a fetched snapshot with no gateway
+// event behind it, so re-opening home is the natural moment to re-ask for it.
+// Re-clicking home is a no-op — it would otherwise yank the view back to the
+// first conversation.
+func (a *App) selectHome() {
+	if a.homeSelected {
+		return
+	}
+
+	a.homeSelected = true
+	a.currentServerID = ""
+
+	a.syncServerSelection("")
+	a.setHeader(a.serverHeader, homeHeader)
+	a.refreshChannelList()
+	a.refreshMemberList()
+
+	if len(a.dmChannels) > 0 {
+		a.selectChannel(a.dmChannels[0])
+	} else {
+		a.clearChannelSelection()
+		a.showStatus("Loading direct messages...")
+	}
+	a.loadDirectMessages()
+}
+
+// loadDirectMessages refreshes the cached DM/group list from the API. It is
+// stale-while-revalidate: whatever is already cached stays on screen until the
+// response lands, so re-opening home never blanks the sidebar. Recipients
+// missing from State are resolved in the same pass, because a DM has no name of
+// its own — the row is titled after the other participant.
+func (a *App) loadDirectMessages() {
+	session := a.session
+	if session == nil || a.loadingDMs {
+		return
+	}
+
+	a.loadingDMs = true
+
+	go func() {
+		// Every hop back to the UI thread re-checks that this is still the open
+		// session: a logout and re-login can land mid-request, and the previous
+		// account's conversations must not be painted into the new one's sidebar.
+		defer a.doOnUI(func() {
+			if a.session == session {
+				a.loadingDMs = false
+			}
+		}, false)
+
+		channels, err := session.DirectMessages()
+		if err != nil {
+			log.Printf("fetch direct messages: %v", err)
+			a.doOnUI(func() {
+				if a.session == session && a.homeSelected && len(a.dmChannels) == 0 {
+					a.showStatus("Failed to load direct messages")
+				}
+			}, false)
+			return
+		}
+
+		resolveRecipients(session, channels)
+		a.doOnUI(func() {
+			if a.session == session {
+				a.setDirectMessages(channels)
+			}
+		}, false)
+	}()
+}
+
+// setDirectMessages records the sidebar order and repaints the home view when
+// it's open, selecting the first conversation if none is. Call on the UI thread.
+func (a *App) setDirectMessages(channels []*revoltgo.Channel) {
+	a.dmChannels = sortConversations(channels)
+
+	if !a.homeSelected {
+		return
+	}
+
+	a.refreshChannelList()
+
+	switch {
+	case len(a.dmChannels) == 0:
+		a.clearChannelSelection()
+		a.showStatus("No direct messages yet")
+	case a.currentChannelID == "":
+		a.selectChannel(a.dmChannels[0])
+	default:
+		a.syncChannelList()
+	}
+}
+
+// sortConversations drops closed DMs, orders the rest by most recent activity,
+// and returns only their IDs: DirectMessages() feeds the channels themselves into
+// State, so keeping a second copy would be a cache of a cache. LastMessageID is
+// compared directly, ULIDs sorting chronologically as strings. The order is a
+// snapshot — a new message marks its row unread but doesn't re-sort the sidebar
+// under the user mid-read; the next refresh picks the new order up.
+func sortConversations(channels []*revoltgo.Channel) []string {
+	channels = slices.DeleteFunc(channels, func(channel *revoltgo.Channel) bool {
+		return channel == nil || (channel.ChannelType == revoltgo.ChannelTypeDM && !channel.Active)
+	})
+	slices.SortStableFunc(channels, func(x, y *revoltgo.Channel) int {
+		return strings.Compare(lastActivity(y), lastActivity(x))
+	})
+
+	ids := make([]string, len(channels))
+	for i, channel := range channels {
+		ids[i] = channel.ID
+	}
+
+	return ids
+}
+
+// lastActivity returns a channel's newest message ID, or "" when it has none —
+// which sorts an empty conversation to the bottom.
+func lastActivity(channel *revoltgo.Channel) string {
+	if channel.LastMessageID != nil {
+		return *channel.LastMessageID
+	}
+
+	return ""
+}
+
+// resolveRecipients pulls the users behind a DM list into State so each row can
+// be titled. Runs off the UI thread, bounded by authorFetchWorkers so a long DM
+// list doesn't open a connection per conversation. Failures are logged and left
+// alone: the row falls back to a generic title rather than going missing.
+func resolveRecipients(session *revoltgo.Session, channels []*revoltgo.Channel) {
+	var missing []string
+	queued := make(map[string]bool)
+	for _, channel := range channels {
+		if channel == nil || channel.ChannelType != revoltgo.ChannelTypeDM {
+			continue
+		}
+		for _, id := range channel.Recipients {
+			if queued[id] || session.State.User(id) != nil {
+				continue
+			}
+			queued[id] = true
+			missing = append(missing, id)
+		}
+	}
+
+	var wg sync.WaitGroup
+	slots := make(chan struct{}, authorFetchWorkers)
+	for _, id := range missing {
+		wg.Add(1)
+		slots <- struct{}{}
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			if _, err := session.User(id); err != nil {
+				log.Printf("fetch dm recipient %s: %v", id, err)
+			}
+		}()
+	}
+	wg.Wait()
 }

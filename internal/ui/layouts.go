@@ -216,9 +216,24 @@ func NewMinHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.C
 	return container.New(&minSizeLayout{min: fyne.NewSize(0, height)}, objects...)
 }
 
+// NewFixedWidthContainer pins a column to exactly width whatever its contents ask
+// for. The sidebars use it because a vertical scroller reports its content's
+// minimum *width* as its own: without this, one long channel or member name
+// widens the column and shoves the message area sideways. Contrast
+// NewMinWidthContainer, which treats width as a floor and still grows. Content
+// wider than the slot is clipped by the scroller, so pair it with NewEllipsisText
+// on anything holding user-supplied text.
+func NewFixedWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&minSizeLayout{min: fyne.NewSize(width, 0), pinWidth: true}, objects...)
+}
+
 // minSizeLayout stretches every child to fill the container and reports a
-// minimum size that is at least min on each axis.
-type minSizeLayout struct{ min fyne.Size }
+// minimum size that is at least min on each axis. pinWidth makes min.Width a
+// ceiling too, so the container reports exactly that width.
+type minSizeLayout struct {
+	min      fyne.Size
+	pinWidth bool
+}
 
 func (l *minSizeLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	for _, child := range objects {
@@ -234,38 +249,55 @@ func (l *minSizeLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 		m.Width = max(m.Width, c.Width)
 		m.Height = max(m.Height, c.Height)
 	}
+	if l.pinWidth {
+		m.Width = l.min.Width
+	}
 
 	return m
 }
 
 /* Padding */
 
+// NewInset wraps a single object in exactly the padding it is given. Neither of
+// Fyne's ready-made options does that: container.NewPadded applies the uniform
+// theme padding, and container.NewBorder inserts theme padding of its own between
+// the edge slots and the centre. The composer needs exact insets, because its
+// card padding has to compose predictably with the padding the entry already
+// draws inside itself.
+func NewInset(obj fyne.CanvasObject, top, bottom, left, right float32) *fyne.Container {
+	return container.New(&insetLayout{top: top, bottom: bottom, left: left, right: right}, obj)
+}
+
 // newFlushContainer wraps a single widget that carries Fyne's built-in inner
 // padding (notably widget.RichText) so its content sits flush against the
 // container's top-left origin instead of being inset. That lets the message body
 // line up with the author name, a plain canvas.Text with no padding of its own.
 func newFlushContainer(obj fyne.CanvasObject) *fyne.Container {
-	return container.New(&stripPaddingLayout{inset: fynetheme.InnerPadding()}, obj)
+	inset := -fynetheme.InnerPadding()
+	return NewInset(obj, inset, inset, inset, inset)
 }
 
-// stripPaddingLayout neutralises a uniform inset on its single child by
-// over-sizing the child and offsetting it by the inset, so the child's content
-// aligns with the container origin. What the child draws outside the container
-// bounds is its transparent padding, so nothing visible spills onto neighbours.
-type stripPaddingLayout struct{ inset float32 }
+// insetLayout pads its single child by a per-side amount. A negative inset
+// over-sizes the child and offsets it instead, so the child's content aligns with
+// the container origin; what it then draws outside the container bounds is its
+// own transparent padding, so nothing visible spills onto neighbours.
+type insetLayout struct{ top, bottom, left, right float32 }
 
-func (l *stripPaddingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+func (l *insetLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	for _, child := range objects {
 		if !child.Visible() {
 			continue
 		}
 
-		child.Resize(fyne.NewSize(size.Width+2*l.inset, size.Height+2*l.inset))
-		child.Move(fyne.NewPos(-l.inset, -l.inset))
+		child.Resize(fyne.NewSize(
+			max(size.Width-l.left-l.right, 0),
+			max(size.Height-l.top-l.bottom, 0),
+		))
+		child.Move(fyne.NewPos(l.left, l.top))
 	}
 }
 
-func (l *stripPaddingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+func (l *insetLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	var w, h float32
 	for _, child := range objects {
 		if !child.Visible() {
@@ -277,5 +309,5 @@ func (l *stripPaddingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 		h = max(h, m.Height)
 	}
 
-	return fyne.NewSize(max(w-2*l.inset, 0), max(h-2*l.inset, 0))
+	return fyne.NewSize(max(w+l.left+l.right, 0), max(h+l.top+l.bottom, 0))
 }

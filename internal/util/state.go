@@ -156,6 +156,24 @@ func MemberAvatarURL(session *revoltgo.Session, member *revoltgo.ServerMember) s
 	return ""
 }
 
+// MemberColor returns the colour of a member's most-senior coloured role, under
+// the same rule MessageAuthor applies, or nil when none applies.
+func MemberColor(session *revoltgo.Session, member *revoltgo.ServerMember) color.Color {
+	if session == nil {
+		return nil
+	}
+
+	server := session.State.Server(member.ID.Server)
+	if server == nil {
+		return nil
+	}
+	if c, ok := roleColor(server, member.Roles); ok {
+		return c
+	}
+
+	return nil
+}
+
 // MemberOnline reports whether the member's underlying user is online.
 func MemberOnline(session *revoltgo.Session, member *revoltgo.ServerMember) bool {
 	if session == nil {
@@ -168,6 +186,20 @@ func MemberOnline(session *revoltgo.Session, member *revoltgo.ServerMember) bool
 	return false
 }
 
+// UserName resolves a user ID to the name to show for them, without going to the
+// network. A user State has never heard of yields "", so callers can decide what
+// to show in their place.
+func UserName(session *revoltgo.Session, userID string) string {
+	if session == nil || userID == "" {
+		return ""
+	}
+	if user := session.State.User(userID); user != nil {
+		return userDisplayName(user)
+	}
+
+	return ""
+}
+
 // userDisplayName returns a user's display name, falling back to the username.
 func userDisplayName(user *revoltgo.User) string {
 	if user.DisplayName != nil && *user.DisplayName != "" {
@@ -175,6 +207,56 @@ func userDisplayName(user *revoltgo.User) string {
 	}
 
 	return user.Username
+}
+
+/* Channels */
+
+// ChannelName returns the best display name for a channel. Server channels and
+// groups carry their own name, but a DM has none — it is titled after the other
+// participant — and the saved-messages channel every account has gets a fixed
+// title rather than the user's own name.
+func ChannelName(session *revoltgo.Session, channel *revoltgo.Channel) string {
+	if channel == nil {
+		return ""
+	}
+
+	switch channel.ChannelType {
+	case revoltgo.ChannelTypeSavedMessages:
+		return "Saved Notes"
+	case revoltgo.ChannelTypeDM:
+		if name := UserName(session, DMRecipientID(session, channel)); name != "" {
+			return name
+		}
+		return "Direct Message"
+	}
+
+	if channel.Name != "" {
+		return channel.Name
+	}
+
+	return "Unnamed channel"
+}
+
+// DMRecipientID returns the other participant of a direct message channel, or ""
+// when the channel isn't a DM or holds nobody but the current user (a DM with
+// yourself lists only you). Groups have many recipients and no single "other",
+// so they are not handled here.
+func DMRecipientID(session *revoltgo.Session, channel *revoltgo.Channel) string {
+	if session == nil || channel == nil || channel.ChannelType != revoltgo.ChannelTypeDM {
+		return ""
+	}
+
+	var selfID string
+	if self := session.State.Self(); self != nil {
+		selfID = self.ID
+	}
+	for _, id := range channel.Recipients {
+		if id != selfID {
+			return id
+		}
+	}
+
+	return ""
 }
 
 /* System messages */

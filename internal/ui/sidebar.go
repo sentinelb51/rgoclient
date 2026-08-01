@@ -147,7 +147,9 @@ type ChannelWidget struct {
 	background         *canvas.Rectangle
 	selectionIndicator *canvas.Rectangle
 	unreadIndicator    *canvas.Rectangle
+	glyph              fyne.CanvasObject
 	label              *canvas.Text
+	labelBox           *fyne.Container // label fitted to its slot; see NewEllipsisText
 
 	selected bool
 	unread   bool
@@ -158,9 +160,11 @@ var (
 	_ desktop.Hoverable = (*ChannelWidget)(nil)
 )
 
-// NewChannelWidget creates a channel row.
-func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
-	label := canvas.NewText(channel.Name, theme.Colors.CategoryText)
+// NewChannelWidget creates a channel row. The label and prefix glyph come from
+// the channel's type rather than its raw name: a DM has no name of its own, so
+// deps.Session is what turns it into the other participant.
+func NewChannelWidget(deps Deps, channel *revoltgo.Channel, onTap func()) *ChannelWidget {
+	label := canvas.NewText(util.ChannelName(deps.Session, channel), theme.Colors.CategoryText)
 	label.TextSize = theme.Sizes.ChannelLabelSize
 	label.Alignment = fyne.TextAlignLeading
 
@@ -170,7 +174,12 @@ func NewChannelWidget(channel *revoltgo.Channel, onTap func()) *ChannelWidget {
 		background:         canvas.NewRectangle(color.Transparent),
 		selectionIndicator: canvas.NewRectangle(color.Transparent),
 		unreadIndicator:    canvas.NewRectangle(color.Transparent),
+		glyph:              ChannelGlyph(channel),
 		label:              label,
+		// Wrapped here rather than in CreateRenderer, which Fyne may run again
+		// after a renderer is dropped: by then the label holds the shortened text,
+		// and wrapping that would take the full name to be whatever survived.
+		labelBox: NewEllipsisText(label),
 	}
 	w.ExtendBaseWidget(w)
 
@@ -197,11 +206,13 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// Both indicators share the same 3px slot; the unread bar is wrapped in an
 	// HBox so it keeps its 1px width and stays left-aligned.
 	indicators := container.NewStack(w.selectionIndicator, container.NewHBox(w.unreadIndicator))
-	content := container.NewHBox(
-		indicators,
+
+	// The name takes the leftover width rather than its natural width: a long DM
+	// title would otherwise widen the whole channel column.
+	content := container.NewBorder(nil, nil,
+		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.glyph),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		HashtagIcon(),
-		w.label,
+		w.labelBox,
 	)
 
 	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
@@ -419,6 +430,25 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
+// ChannelGlyph returns the glyph that prefixes a channel's name, both in the
+// sidebar row and in the message-area header: "#" for a server text channel,
+// "@" for a direct message, and a two-head mark for a group. A nil channel (no
+// selection yet) falls back to the hashtag.
+func ChannelGlyph(channel *revoltgo.Channel) fyne.CanvasObject {
+	if channel == nil {
+		return HashtagIcon()
+	}
+
+	switch channel.ChannelType {
+	case revoltgo.ChannelTypeDM, revoltgo.ChannelTypeSavedMessages:
+		return AtIcon()
+	case revoltgo.ChannelTypeGroup:
+		return GroupIcon()
+	}
+
+	return HashtagIcon()
+}
+
 // HashtagIcon returns a drawn "#" glyph used to prefix channel names.
 func HashtagIcon() fyne.CanvasObject {
 	col := theme.Colors.HashtagIcon
@@ -443,6 +473,41 @@ func HashtagIcon() fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), glyph))
 }
 
+// AtIcon returns the "@" glyph prefixing direct messages. Unlike the hashtag it
+// is set as text rather than drawn: the shape is a spiral, which no small set of
+// straight lines renders convincingly.
+func AtIcon() fyne.CanvasObject {
+	size := theme.Sizes.HashtagIconSize
+
+	glyph := canvas.NewText("@", theme.Colors.HashtagIcon)
+	glyph.TextSize = size * 0.9
+	glyph.Alignment = fyne.TextAlignCenter
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewCenter(glyph)))
+}
+
+// GroupIcon returns the two-head glyph prefixing group channels: a pair of
+// overlapping outlined circles, drawn on the same 20-unit grid as the hashtag so
+// the two read as one icon set.
+func GroupIcon() fyne.CanvasObject {
+	col := theme.Colors.HashtagIcon
+	size := theme.Sizes.HashtagIconSize
+	scale := size / 20
+
+	head := func(cx, cy, r float32) *canvas.Circle {
+		c := canvas.NewCircle(color.Transparent)
+		c.StrokeColor = col
+		c.StrokeWidth = 2 * scale
+		c.Move(fyne.NewPos((cx-r)*scale, (cy-r)*scale))
+		c.Resize(fyne.NewSize(2*r*scale, 2*r*scale))
+		return c
+	}
+
+	glyph := container.NewWithoutLayout(head(13, 10, 5.5), head(7, 10, 5.5))
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), glyph))
+}
+
 /* Member rows */
 
 // NewMemberWidget builds a member row: a small circular avatar and the display
@@ -459,11 +524,15 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
 	avatar := circularAvatar(deps.Images, util.MemberAvatarURL(deps.Session, member), avatarSize)
 
-	row := container.NewHBox(
+	// As in the channel row, the name fills the leftover width and is shortened to
+	// fit rather than being allowed to widen the member column.
+	row := container.NewBorder(nil, nil,
+		container.NewHBox(
+			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+			container.NewCenter(avatar),
+		),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(avatar),
-		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(label),
+		NewEllipsisText(label),
 	)
 
 	userID := member.ID.User

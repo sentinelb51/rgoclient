@@ -34,6 +34,10 @@ var Colors = struct {
 	OverlayBackdrop        color.Color
 	ViewerCardBg           color.Color
 	ViewerBodyBg           color.Color
+	ComposerBg             color.Color
+	ComposerBorder         color.Color
+	ComposerBorderFocus    color.Color
+	MentionRowSelectedBg   color.Color
 
 	/* Elements */
 
@@ -48,6 +52,8 @@ var Colors = struct {
 	DaySeparatorText      color.Color
 	DaySeparatorLine      color.Color
 	ReplyMentionActive    color.Color
+	MentionText           color.Color
+	MentionHandleText     color.Color
 	ErrorText             color.Color
 }{
 	// Cool blue-slate ramp, darkest to lightest.
@@ -70,6 +76,14 @@ var Colors = struct {
 	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, the modal card
 	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},   // #13151C, inset well
 
+	// The composer card fills with the entry's own input background so the entry's
+	// box disappears into it; the outline draws the boundary instead, and lights up
+	// with the accent while the entry holds focus.
+	ComposerBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, == ColorNameInputBackground
+	ComposerBorder:       color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, idle hairline
+	ComposerBorderFocus:  color.RGBA{R: 91, G: 124, B: 250, A: 255}, // #5B7CFA accent
+	MentionRowSelectedBg: color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, the picker's active row
+
 	AttachmentHoverBorder: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
 	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
 	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
@@ -81,6 +95,8 @@ var Colors = struct {
 	DaySeparatorText:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	DaySeparatorLine:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142 hairline
 	ReplyMentionActive:    color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint
+	MentionText:           color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
+	MentionHandleText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
 	ErrorText:             color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 }
 
@@ -133,6 +149,19 @@ var Sizes = struct {
 	DaySeparatorBottomPadding     float32
 	DaySeparatorGap               float32
 	SwiftActionSize               float32
+
+	/* Composer and its mention picker */
+
+	ComposerRadius      float32
+	ComposerPaddingV    float32
+	ComposerPaddingH    float32
+	ComposerGutterWidth float32
+	ComposerButtonSize  float32
+	ComposerIconSize    float32
+	MentionRowHeight    float32
+	MentionAvatarSize   float32
+	MentionNameSize     float32
+	MentionHandleSize   float32
 
 	/* Login */
 
@@ -197,6 +226,20 @@ var Sizes = struct {
 	DaySeparatorGap:               8,
 	SwiftActionSize:               32,
 
+	// The composer's vertical padding is deliberately small: the entry already
+	// carries InnerPadding above and below its text, so the card only needs a
+	// couple of pixels more before it starts looking slack.
+	ComposerRadius:      8,
+	ComposerPaddingV:    3,
+	ComposerPaddingH:    6,
+	ComposerGutterWidth: 30,
+	ComposerButtonSize:  24,
+	ComposerIconSize:    18,
+	MentionRowHeight:    30,
+	MentionAvatarSize:   20,
+	MentionNameSize:     13,
+	MentionHandleSize:   11,
+
 	SessionCardAvatarSize: 32,
 	WindowDefaultWidth:    1000,
 	WindowDefaultHeight:   600,
@@ -215,6 +258,11 @@ var Sizes = struct {
 	JoinDialogCornerRadius: 6,
 	JoinDialogTextSize:     12,
 }
+
+// ColorNameMention is an app-specific theme colour name. A RichText segment can
+// only carry a *named* colour, so drawing an @mention in the accent needs a name
+// of our own for AppTheme.Color to answer.
+const ColorNameMention fyne.ThemeColorName = "rgoMention"
 
 // selectionTint is the accent used for text selection, alpha'd so the glyphs
 // underneath stay legible.
@@ -256,6 +304,8 @@ func (t *AppTheme) Font(style fyne.TextStyle) fyne.Resource {
 // Color maps Fyne's semantic colour names onto the palette.
 func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
+	case ColorNameMention:
+		return Colors.MentionText
 	case theme.ColorNameScrollBar:
 		return color.Transparent
 	case theme.ColorNamePrimary, theme.ColorNameFocus:

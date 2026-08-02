@@ -5,6 +5,8 @@ package ui
 
 import (
 	"image/color"
+	"log"
+	"net/url"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -113,6 +115,23 @@ func showMenuHook(anchor fyne.CanvasObject, hook func() []*fyne.MenuItem, event 
 // CopyToClipboard puts text on the system clipboard.
 func CopyToClipboard(text string) {
 	fyne.CurrentApp().Clipboard().SetContent(text)
+}
+
+/* Links */
+
+// openURL hands a link to the system browser. Fyne only does this for its own
+// hyperlink widget and segment; an embed's title and the viewer's browser button
+// are drawn from plainer parts and ask for themselves.
+func openURL(raw string) {
+	link, err := url.Parse(raw)
+	if err != nil {
+		log.Printf("open %s: %v", raw, err)
+		return
+	}
+
+	if err := fyne.CurrentApp().OpenURL(link); err != nil {
+		log.Printf("open %s: %v", raw, err)
+	}
 }
 
 /* Entry caret */

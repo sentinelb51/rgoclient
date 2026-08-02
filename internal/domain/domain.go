@@ -94,6 +94,7 @@ type Message struct {
 
 	Content     string
 	Attachments []*File
+	Embeds      []*Embed
 	Replies     []string // IDs of the messages this one answers
 
 	Edited *time.Time
@@ -180,6 +181,41 @@ func (s *SystemMessage) Text(who string) string {
 	default:
 		return "System event"
 	}
+}
+
+/* Embeds */
+
+// EmbedKind is what an embed came from: a link the server unfurled, a bare
+// picture or video, or a card an integration composed itself.
+type EmbedKind uint8
+
+const (
+	EmbedNone EmbedKind = iota
+	EmbedWebsite
+	EmbedImage
+	EmbedVideo
+	EmbedText
+)
+
+// Embed is a card drawn beneath a message. One shape covers every kind Revolt
+// sends, because they overlap almost entirely: a link preview names the site and
+// quotes the page, an integration's card sets its own title, colour and picture,
+// and a bare image carries nothing but the picture. So a renderer branches on
+// what is filled in rather than on Kind, which is kept only for the cases where
+// two embeds carrying the same fields mean different things.
+//
+// Description is markdown and is rendered exactly as a message body is.
+type Embed struct {
+	Kind EmbedKind
+	URL  string // where the title leads; "" leaves it plain text
+
+	SiteName    string
+	Title       string
+	Description string
+	IconURL     string // the site's own mark, drawn beside its name
+
+	Image *File
+	Color color.Color // the accent stripe; nil for the default
 }
 
 /* Channels */

@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"image/color"
-	"net/url"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -171,20 +170,21 @@ func viewerHeader(attachment *domain.File, detail string, onClose func()) fyne.C
 	name.TextSize = theme.Sizes.ViewerTitleSize
 	name.TextStyle = fyne.TextStyle{Bold: true}
 
-	meta := util.FormatFileSize(attachment.Size)
-	if detail != "" {
-		meta = detail + "  ·  " + meta
+	// An embed's picture is not an upload and carries no byte count, so the size is
+	// left out rather than reported as nothing at all.
+	meta := detail
+	if attachment.Size > 0 {
+		meta = util.FormatFileSize(attachment.Size)
+		if detail != "" {
+			meta = detail + "  ·  " + meta
+		}
 	}
 	info := canvas.NewText(meta, theme.Colors.TimestampText)
 	info.TextSize = theme.Sizes.ViewerTitleSize
 
 	actions := container.NewHBox(info, HorizontalSpacer(theme.Sizes.ViewerPadding))
 	if link := attachment.URL; link != "" {
-		actions.Add(NewIconButton(fynetheme.ComputerIcon(), func() {
-			if u, err := url.Parse(link); err == nil {
-				_ = fyne.CurrentApp().OpenURL(u)
-			}
-		}, nil))
+		actions.Add(NewIconButton(fynetheme.ComputerIcon(), func() { openURL(link) }, nil))
 	}
 	actions.Add(NewCloseButton(onClose))
 
@@ -206,8 +206,8 @@ func viewerImage(deps Deps, attachment *domain.File, bounds fyne.Size) (fyne.Can
 	size = fyne.NewSize(max(size.Width, theme.Sizes.ViewerMinWidth), max(size.Height, theme.Sizes.ViewerMinHeight))
 
 	frame := container.NewStack()
-	if link := attachment.URL; link != "" && attachment.ID != "" {
-		deps.Images.LoadIntoContainer(attachment.ID, link, size, frame, false, nil)
+	if link := attachment.URL; link != "" {
+		deps.Images.LoadIntoContainer(imageCacheID(link), link, size, frame, false, nil)
 	}
 
 	detail := ""

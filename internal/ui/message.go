@@ -71,6 +71,7 @@ type MessageWidget struct {
 	actions        *fyne.Container
 
 	editing     bool
+	emptyBody   bool // the message says nothing, so the slot stays hidden outside an edit
 	overMessage bool
 	overActions bool
 	hideTimer   *time.Timer
@@ -113,6 +114,16 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 	// pointer never lands somewhere that swallows a right-click silently.
 	w.body = newFlushContainer(renderMessageBody(deps, text, w.TappedSecondary))
 	w.bodySlot = container.NewStack(w.body)
+
+	// A message that says nothing — a bot's embed, an attachment on its own —
+	// still renders an empty body one text line tall, which draws as a gap above
+	// whatever it does carry. Hiding the slot is what removes it: the layouts
+	// around it skip hidden children entirely, so no spacing is charged for it
+	// either. StartEdit shows it again, since an editor needs somewhere to sit.
+	w.emptyBody = text == ""
+	if w.emptyBody {
+		w.bodySlot.Hide()
+	}
 
 	var leftColumn, body fyne.CanvasObject
 	if grouped {
@@ -357,6 +368,7 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 	hint := canvas.NewText("esc to cancel  •  enter to save", theme.Colors.TimestampText)
 	hint.TextSize = theme.Sizes.MessageTimestampSize
 	w.bodySlot.Objects = []fyne.CanvasObject{container.NewVBox(WithCaret(entry), hint)}
+	w.bodySlot.Show()
 	w.bodySlot.Refresh()
 
 	// The save/cancel pair replaces the hover quick-actions for the whole edit.
@@ -380,6 +392,9 @@ func (w *MessageWidget) CancelEdit() {
 	w.editing = false
 
 	w.bodySlot.Objects = []fyne.CanvasObject{w.body}
+	if w.emptyBody {
+		w.bodySlot.Hide()
+	}
 	w.bodySlot.Refresh()
 
 	w.actionsOverlay.Objects = nil
@@ -540,24 +555,45 @@ func verticalPad(tight bool) float32 {
 	return theme.Sizes.MessageVerticalPadding
 }
 
-// buildMessageContent assembles the author header plus any attachments.
+// buildMessageContent assembles the author header plus whatever the message
+// carries beneath its text.
 func buildMessageContent(deps Deps, message *domain.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	header := buildMessageHeader(author, timestamp, body)
-	if len(message.Attachments) == 0 {
+
+	extras := buildMessageExtras(deps, message, onMenu)
+	if len(extras) == 0 {
 		return header
 	}
 
-	return container.NewVBox(header, buildAttachments(deps, message.Attachments, onMenu))
+	return container.NewVBox(append([]fyne.CanvasObject{header}, extras...)...)
 }
 
-// buildGroupedContent renders a grouped continuation: just the body and any
-// attachments, with no author/timestamp header.
+// buildGroupedContent renders a grouped continuation: the body and its extras,
+// with no author/timestamp header.
 func buildGroupedContent(deps Deps, message *domain.Message, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	if len(message.Attachments) == 0 {
+	extras := buildMessageExtras(deps, message, onMenu)
+	if len(extras) == 0 {
 		return body
 	}
 
-	return container.NewVBox(body, buildAttachments(deps, message.Attachments, onMenu))
+	return container.NewVBox(append([]fyne.CanvasObject{body}, extras...)...)
+}
+
+// buildMessageExtras is what hangs below a message's text: its attachments, then
+// the embeds — what was uploaded before what was unfurled, since only the first
+// was deliberate. Empty for the great majority of messages, which is why both
+// callers check before wrapping the body in a box at all.
+func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) []fyne.CanvasObject {
+	var extras []fyne.CanvasObject
+
+	if len(message.Attachments) > 0 {
+		extras = append(extras, buildAttachments(deps, message.Attachments, onMenu))
+	}
+	if len(message.Embeds) > 0 {
+		extras = append(extras, buildEmbeds(deps, message.Embeds, onMenu))
+	}
+
+	return extras
 }
 
 // buildMessageHeader renders the author line — the bold name in its role colour

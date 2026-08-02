@@ -76,6 +76,7 @@ type App struct {
 	memberSidebar *fyne.Container // the member column itself, hidden by its header toggle
 	messageList   *fyne.Container
 	messageScroll *ui.ObservableScroll
+	composerDock  *fyne.Container // the floating card the message column runs under
 	input         *ui.MessageInput
 	homeButton    *ui.SidebarButton
 	serverHeader  *widget.Label

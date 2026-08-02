@@ -129,9 +129,12 @@ func (a *App) refreshAuthorMessages(userIDs ...string) {
 func (a *App) buildMemberList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MemberListBackground)
 
+	// The member list is the one column with nothing to its right, so it carries
+	// its seam on the left — and hiding the sidebar takes that seam with it,
+	// leaving the message area flush against the window edge.
 	a.refreshMemberList()
-	a.memberSidebar = ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth,
-		background, container.NewVScroll(a.memberList))
+	a.memberSidebar = ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, background,
+		ui.NewFillRow(1, ui.NewColumnDivider(), container.NewVScroll(a.memberList)))
 
 	return a.memberSidebar
 }

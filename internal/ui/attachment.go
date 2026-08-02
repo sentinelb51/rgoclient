@@ -73,6 +73,8 @@ func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.Point
 		onTap = func() { deps.Actions.OnAttachmentTapped(attachment) }
 	}
 
+	// The stack is what frames the card: it draws the shared outline over the
+	// content, square like the picture it edges.
 	stack := NewHoverableStack(content, onTap, nil)
 	stack.onSecondaryTap = onMenu
 
@@ -92,8 +94,8 @@ func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar
 	placeholder.SetMinSize(size)
 	image := container.NewStack(placeholder)
 
-	if url := attachment.URL; url != "" && attachment.ID != "" {
-		images.LoadIntoContainer(attachment.ID, url, size, image, false, nil)
+	if url := attachment.URL; url != "" {
+		images.LoadIntoContainer(imageCacheID(url), url, size, image, false, nil)
 	}
 
 	return container.NewBorder(nil, bar, nil, nil, image)

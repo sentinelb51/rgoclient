@@ -67,6 +67,15 @@ func NewFillRow(fillIndex int, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{horizontal: true, fill: fillIndex}, objects...)
 }
 
+// NewFillColumn stacks objects top to bottom with no gaps, the child at
+// fillIndex absorbing the leftover height. It backs the message area, where the
+// composer's margin has to be exactly what it asks for: a Border charges theme
+// padding between its centre and each edge slot, so the dock's gap to the
+// messages came out wider than its gap to the window.
+func NewFillColumn(fillIndex int, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&noSpacingLayout{fill: fillIndex}, objects...)
+}
+
 // Relayout re-runs c's own layout and repaints it, without touching its
 // children. Hiding or showing a child does neither on its own, so the vacated
 // slot stays reserved until something else forces a layout; Container.Refresh
@@ -217,6 +226,88 @@ func (l *overlayLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 }
 
 func (l *overlayLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Size{} }
+
+/* Docking */
+
+// NewFloatingDock hangs card over the bottom of body, inset by the composer's
+// margin on three sides. Body is laid out *past* the card's top edge rather than
+// stopping above it: a column that ends above a card ends at a hard cut through
+// whatever glyph the viewport landed on, and that cut — not the gap — is what
+// reads as the top of a separate bar. Sliding the content under the card instead
+// puts the cut behind the card, where the only thing left to see is the shadow
+// darkening the content on its way under.
+//
+// Body stops a corner radius short of the card's bottom edge, since the rounded
+// corners would otherwise leave the cut showing in the two notches beside them.
+// Pair this with NewDockReserve, or the newest content sits under the card with
+// no way to scroll it clear.
+func NewFloatingDock(body, card fyne.CanvasObject) *fyne.Container {
+	return container.New(&dockLayout{}, body, card)
+}
+
+// DockReserve is the room a floating card takes out of the column it hangs over:
+// its own height plus the gutter above and below it.
+func DockReserve(card fyne.CanvasObject) float32 {
+	return card.MinSize().Height + theme.Sizes.ComposerDockMargin*2
+}
+
+// NewDockReserve wraps a scroller's content so the bottom of it can still be
+// read: it reports its child's height plus DockReserve, so the last message
+// comes to rest above the card instead of under it. The card is measured on
+// demand rather than pushed in, so one that grows — a reply preview, an
+// attachment row, the mention picker — is accounted for without anything having
+// to notice that it grew.
+func NewDockReserve(content, card fyne.CanvasObject) *fyne.Container {
+	return container.New(&dockReserveLayout{card: card}, content)
+}
+
+// dockLayout places the card of NewFloatingDock; objects are body then card.
+type dockLayout struct{}
+
+func (l *dockLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	body, card := objects[0], objects[1]
+	margin := theme.Sizes.ComposerDockMargin
+
+	height := card.MinSize().Height
+	card.Resize(fyne.NewSize(max(size.Width-margin*2, 0), height))
+	card.Move(fyne.NewPos(margin, size.Height-margin-height))
+
+	body.Resize(fyne.NewSize(size.Width, max(size.Height-margin-theme.Sizes.ComposerRadius, 0)))
+	body.Move(fyne.Position{})
+}
+
+func (l *dockLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	margin := theme.Sizes.ComposerDockMargin
+
+	m := objects[0].MinSize()
+	card := objects[1].MinSize()
+
+	return m.Max(fyne.NewSize(card.Width+margin*2, card.Height+margin*2))
+}
+
+// dockReserveLayout pads its single child by the height of the card hanging over
+// it. The padding is on the far side of the child from the card, in the sense
+// that it is the child that shrinks: the container itself is what the scroller
+// measures, so the reserve has to be part of the height it reports.
+type dockReserveLayout struct{ card fyne.CanvasObject }
+
+func (l *dockReserveLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	reserve := DockReserve(l.card)
+	for _, child := range objects {
+		child.Resize(fyne.NewSize(size.Width, max(size.Height-reserve, 0)))
+		child.Move(fyne.Position{})
+	}
+}
+
+func (l *dockReserveLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var m fyne.Size
+	for _, child := range objects {
+		m = m.Max(child.MinSize())
+	}
+	m.Height += DockReserve(l.card)
+
+	return m
+}
 
 /* Minimum size */
 

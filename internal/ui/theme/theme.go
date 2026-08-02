@@ -37,9 +37,13 @@ var Colors = struct {
 	ViewerCardBg           color.Color
 	ViewerBodyBg           color.Color
 	ComposerBg             color.Color
-	ComposerBorder         color.Color
 	ComposerBorderFocus    color.Color
 	MentionRowSelectedBg   color.Color
+
+	/* Edges */
+
+	Outline    color.Color
+	CardShadow color.Color
 
 	/* Elements */
 
@@ -58,6 +62,13 @@ var Colors = struct {
 	MentionText           color.Color
 	MentionHandleText     color.Color
 	ErrorText             color.Color
+
+	/* Message embeds */
+
+	EmbedBg     color.Color
+	EmbedAccent color.Color
+	EmbedTitle  color.Color
+	EmbedSite   color.Color
 
 	/* User profiles */
 
@@ -83,7 +94,7 @@ var Colors = struct {
 	ChannelListBackground:  color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
 	MemberListBackground:   color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
 	MessageAreaBackground:  color.RGBA{R: 24, G: 27, B: 36, A: 255},   // #181B24
-	MessageHoverBackground: color.RGBA{R: 30, G: 34, B: 45, A: 255},   // #1E222D
+	MessageHoverBackground: color.RGBA{R: 28, G: 31, B: 42, A: 255},   // #1C1F2A, a small lift off the area
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},   // #262B3A
 	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
 	ServerDefaultBg:        color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
@@ -104,11 +115,28 @@ var Colors = struct {
 	// box disappears into it; the outline draws the boundary instead, and lights up
 	// with the accent while the entry holds focus.
 	ComposerBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, == ColorNameInputBackground
-	ComposerBorder:       color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, idle hairline
 	ComposerBorderFocus:  color.RGBA{R: 91, G: 124, B: 250, A: 255}, // #5B7CFA accent
 	MentionRowSelectedBg: color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, the picker's active row
 
-	AttachmentHoverBorder: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
+	// One hairline draws every edge in the client: a card lifted off a surface
+	// (an embed, an attachment, the composer dock) and the seam between two
+	// columns of the main row. It is darker than anything it is ever drawn
+	// against — including the message row's hover fill, which paints *under* any
+	// card the row contains — so no state of what is behind it can wash it out.
+	// That ordering is the invariant, not the literal value.
+	Outline: color.RGBA{R: 15, G: 17, B: 23, A: 255}, // #0F1117
+
+	// The cast shadow under the one card that floats. Black rather than a palette
+	// entry: it multiplies whatever is behind it instead of naming a surface, so
+	// it stays correct over the message area, a hovered row and a message alike.
+	// Weak on purpose — it only has to say the card is nearer than the message
+	// sliding under it. Enough to read as a bar's own fill and it becomes one.
+	CardShadow: color.RGBA{A: 90},
+
+	// An attachment is outlined at rest, so hovering one lightens its edge rather
+	// than drawing it: a hover border a shade off the outline it replaces would
+	// read as nothing happening at all.
+	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
 	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
 	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
 	HashtagIcon:           color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
@@ -123,6 +151,16 @@ var Colors = struct {
 	MentionText:           color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
 	MentionHandleText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
 	ErrorText:             color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
+
+	// An embed is a card lifted off the message area, not a panel: it carries the
+	// same fill the other cards do, and the stripe down its side is what the eye
+	// reads it by. The stripe falls back to a slate rather than the accent, which
+	// on a channel of link previews would be a column of blue bars. Its edge is
+	// the shared Outline above.
+	EmbedBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330
+	EmbedAccent: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
+	EmbedTitle:  color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, the mention accent — a title is a link
+	EmbedSite:   color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
 	// The banner is the profile card's one block of colour, so it falls back to a
 	// slate the palette already uses rather than the accent, which would make every
@@ -202,8 +240,30 @@ var Sizes = struct {
 	DaySeparatorGap               float32
 	SwiftActionSize               float32
 
+	/* Edges */
+
+	OutlineWidth   float32
+	CardShadowBlur float32
+
+	/* Message embeds */
+
+	EmbedMaxWidth       float32
+	EmbedAccentWidth    float32
+	EmbedRadius         float32
+	EmbedPaddingV       float32
+	EmbedPaddingH       float32
+	EmbedAccentGap      float32
+	EmbedRowGap         float32
+	EmbedIconSize       float32
+	EmbedIconGap        float32
+	EmbedSiteTextSize   float32
+	EmbedTitleTextSize  float32
+	EmbedImageMaxHeight float32
+	EmbedSpacing        float32
+
 	/* Composer and its mention picker */
 
+	ComposerDockMargin  float32
 	ComposerRadius      float32
 	ComposerPaddingV    float32
 	ComposerPaddingH    float32
@@ -334,9 +394,43 @@ var Sizes = struct {
 	DaySeparatorGap:               8,
 	SwiftActionSize:               32,
 
-	// The composer's vertical padding is deliberately small: the entry already
-	// carries InnerPadding above and below its text, so the card only needs a
-	// couple of pixels more before it starts looking slack.
+	// A hairline, everywhere: a card's outline and a column seam are the same
+	// stroke, so a card never reads as more framed than the column beside it.
+	//
+	// The blur reaches past the gap the elevated card sits in and onto the content
+	// behind, because what it has to darken is the message passing underneath. A
+	// halo that stopped inside the margin would only outline the gutter, which is
+	// what a card sitting *in* a strip looks like.
+	OutlineWidth:   1,
+	CardShadowBlur: 14,
+
+	// EmbedMaxWidth is a ceiling on the text column, not the width every card is
+	// drawn at: an embed is measured against what it says and only capped here, so
+	// a two-word preview stays small and a paragraph wraps instead of running the
+	// width of the window.
+	EmbedMaxWidth:       400,
+	EmbedAccentWidth:    3,
+	EmbedRadius:         6,
+	EmbedPaddingV:       10,
+	EmbedPaddingH:       12,
+	EmbedAccentGap:      10,
+	EmbedRowGap:         5,
+	EmbedIconSize:       16,
+	EmbedIconGap:        6,
+	EmbedSiteTextSize:   11,
+	EmbedTitleTextSize:  14,
+	EmbedImageMaxHeight: 240,
+	EmbedSpacing:        4,
+
+	// The dock's margin is the gap it floats in, not what does the floating — the
+	// messages running under it are. It also has to stay under the message row's
+	// own horizontal padding: content wider than the gutter would show beside the
+	// card instead of disappearing behind it.
+	//
+	// The padding *inside* the card is deliberately small by contrast: the entry
+	// already carries InnerPadding above and below its text, so the card only
+	// needs a couple of pixels more before it starts looking slack.
+	ComposerDockMargin:  8,
 	ComposerRadius:      8,
 	ComposerPaddingV:    3,
 	ComposerPaddingH:    6,
@@ -421,8 +515,12 @@ const ColorNameMention fyne.ThemeColorName = "rgoMention"
 // underneath stay legible.
 var selectionTint = color.RGBA{R: 91, G: 124, B: 250, A: 90}
 
-// flatShadow softens scroll-edge shadows into a seam, keeping the flat look.
-var flatShadow = color.RGBA{A: 40}
+// noShadow removes Fyne's only other edge treatment. A scroll paints this as a
+// gradient along whichever edge has more content past it — a wide smear across a
+// flat surface rather than a line, which read as a bar welded under the message
+// area once the composer floated free of it. The hairline Outline is the single
+// edge in the client; nothing may draw a competing one.
+var noShadow = color.Transparent
 
 // AppTheme applies the palette to Fyne's built-in widgets so they match the
 // client's own, and hides scrollbars.
@@ -492,7 +590,7 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 	case theme.ColorNameMenuBackground, theme.ColorNameOverlayBackground:
 		return Colors.ChannelListBackground
 	case theme.ColorNameShadow:
-		return flatShadow
+		return noShadow
 	}
 
 	return t.Theme.Color(name, variant)

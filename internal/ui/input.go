@@ -475,8 +475,12 @@ func (m *MessageInput) rebuildAttachments() {
 		bar := attachmentBar(attachment.Name, size, func() { m.RemoveAttachment(path) })
 		card := container.NewBorder(nil, bar, nil, nil, attachmentPreview(path))
 
+		// The preview sits inside the card's padding, so the outline goes on the
+		// background itself rather than over the content the way a message
+		// attachment's does.
 		background := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 		background.CornerRadius = 8
+		Outline(background)
 		m.AttachmentContainer.Add(container.NewPadded(container.NewStack(background, container.NewPadded(card))))
 	}
 
@@ -1048,7 +1052,7 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	}
 
 	size := fyne.NewSize(theme.Sizes.MentionAvatarSize, theme.Sizes.MentionAvatarSize)
-	r.images.LoadAsync(avatarCacheID(candidate.AvatarURL), candidate.AvatarURL, true, func(img image.Image) {
+	r.images.LoadAsync(imageCacheID(candidate.AvatarURL), candidate.AvatarURL, true, func(img image.Image) {
 		if r.generation != generation {
 			return
 		}

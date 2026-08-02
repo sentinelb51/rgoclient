@@ -11,6 +11,7 @@ package client
 import (
 	"image/color"
 	"strconv"
+	"strings"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -83,9 +84,9 @@ func toFiles(files []*revoltgo.File) []*domain.File {
 
 /* Messages */
 
-// toMessage converts a message. Embeds, reactions, flags and the masquerade's
-// contents are dropped: nothing renders them, and carrying them would mean
-// holding a second copy of every cached message's payload.
+// toMessage converts a message. Reactions, flags and the masquerade's contents
+// are dropped: nothing renders them, and carrying them would mean holding a
+// second copy of every cached message's payload.
 func toMessage(message *revoltgo.Message) *domain.Message {
 	if message == nil {
 		return nil
@@ -97,6 +98,7 @@ func toMessage(message *revoltgo.Message) *domain.Message {
 		AuthorID:    message.Author,
 		Content:     message.Content,
 		Attachments: toFiles(message.Attachments),
+		Embeds:      toEmbeds(message.Embeds),
 		Replies:     message.Replies,
 		Edited:      message.Edited,
 		Masquerade:  message.Masquerade != nil,
@@ -122,6 +124,112 @@ func toMessages(messages []*revoltgo.Message) []*domain.Message {
 	out := make([]*domain.Message, 0, len(messages))
 	for _, message := range messages {
 		if converted := toMessage(message); converted != nil {
+			out = append(out, converted)
+		}
+	}
+
+	return out
+}
+
+/* Embeds */
+
+func toEmbedKind(kind string) domain.EmbedKind {
+	switch kind {
+	case "Website":
+		return domain.EmbedWebsite
+	case "Image":
+		return domain.EmbedImage
+	case "Video":
+		return domain.EmbedVideo
+	case "Text":
+		return domain.EmbedText
+	}
+
+	return domain.EmbedNone
+}
+
+// toEmbed converts one embed, reporting nil for the ones nothing can draw.
+//
+// A video is one of them: Revolt puts a bare video's dimensions beside its type
+// rather than under a field of their own, so revoltgo carries only the URL, and
+// there is no player here to hand it to. The other is an unfurl that came back
+// with nothing to say — no title, no text and no picture — which would otherwise
+// draw an empty card under the link.
+func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
+	if embed == nil {
+		return nil
+	}
+
+	kind := toEmbedKind(embed.Type)
+	if kind == domain.EmbedVideo {
+		return nil
+	}
+
+	out := &domain.Embed{
+		Kind:        kind,
+		URL:         embed.URL,
+		SiteName:    embed.SiteName,
+		Title:       embed.Title,
+		Description: embed.Description,
+		IconURL:     embed.IconURL,
+	}
+	if out.URL == "" {
+		out.URL = embed.OriginalURL
+	}
+	if colour, ok := parseHexColor(embed.Colour); ok {
+		out.Color = colour
+	}
+
+	switch {
+	case embed.Image != nil:
+		out.Image = &domain.File{
+			Name:   nameFromURL(embed.Image.URL),
+			URL:    embed.Image.URL,
+			Kind:   domain.FileImage,
+			Width:  embed.Image.Width,
+			Height: embed.Image.Height,
+		}
+	case embed.Media != nil:
+		// An integration can attach anything to its card; only a picture is drawn.
+		if media := toFile(embed.Media); media.Kind == domain.FileImage {
+			out.Image = media
+		}
+	case kind == domain.EmbedImage:
+		// A bare image embed *is* its URL, and its dimensions sit beside the type
+		// where revoltgo has no field for them — so it is drawn against the same
+		// placeholder box an attachment with no metadata gets.
+		out.Image = &domain.File{Name: nameFromURL(embed.URL), URL: embed.URL, Kind: domain.FileImage}
+	}
+
+	if out.Title == "" && out.Description == "" && out.Image == nil {
+		return nil
+	}
+
+	return out
+}
+
+// nameFromURL is what an embed's picture is called. Unlike an attachment it has
+// no name of its own, and the last segment of the path is a filename often
+// enough to be worth titling the lightbox with.
+func nameFromURL(raw string) string {
+	if query := strings.IndexByte(raw, '?'); query != -1 {
+		raw = raw[:query]
+	}
+	if slash := strings.LastIndexByte(raw, '/'); slash != -1 {
+		raw = raw[slash+1:]
+	}
+
+	return raw
+}
+
+func toEmbeds(embeds []*revoltgo.MessageEmbed) []*domain.Embed {
+	if len(embeds) == 0 {
+		return nil
+	}
+
+	out := make([]*domain.Embed, 0, len(embeds))
+	for _, embed := range embeds {
+		if converted := toEmbed(embed); converted != nil {
 			out = append(out, converted)
 		}
 	}

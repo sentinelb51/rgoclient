@@ -50,18 +50,6 @@ const (
 func (a *App) buildMessageArea() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
-	a.messageScroll = ui.NewObservableVScroll(a.messageList)
-	a.messageScroll.OnScroll = func(pos fyne.Position) {
-		if pos.Y <= 0 {
-			a.loadMoreHistory()
-			return
-		}
-		if a.contentHeight()-a.messageScroll.Size().Height-pos.Y <= remountThreshold {
-			a.mountNewerFromCache()
-		}
-	}
-	a.clearMessages()
-
 	a.input = ui.NewMessageInput(a.deps(), a.window)
 	a.input.SetPlaceHolder("Send a message...")
 	a.input.OnSubmit = a.handleSubmit
@@ -75,12 +63,21 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// typing here" cue. The padding is thin because everything in the stack already
 	// carries its own inset, and it goes through ui.NewInset because NewPadded and
 	// Border would each add theme padding on top of what is asked for.
+	//
+	// What makes it float is that the messages run *under* it: ui.NewFloatingDock
+	// hangs it over a column taller than itself, so there is no cut above the card
+	// to read as the top of a bar, and ui.Elevate's shadow darkens the content
+	// disappearing beneath it. The gap around it is only a gutter.
+	//
+	// Which is why AppTheme answers ColorNameShadow with nothing: Fyne's ambient
+	// shadow is a scroll-edge gradient that would land in this same gap and draw
+	// the bar straight back on. One deliberate cast shadow, no ambient ones.
 	dockBg := canvas.NewRectangle(theme.Colors.ComposerBg)
 	dockBg.CornerRadius = theme.Sizes.ComposerRadius
-	dockBg.StrokeColor = theme.Colors.ComposerBorder
-	dockBg.StrokeWidth = 1
+	ui.Outline(dockBg)
+	ui.Elevate(dockBg)
 	a.input.OnFocusChanged = func(focused bool) {
-		dockBg.StrokeColor = theme.Colors.ComposerBorder
+		dockBg.StrokeColor = theme.Colors.Outline
 		if focused {
 			dockBg.StrokeColor = theme.Colors.ComposerBorderFocus
 		}
@@ -94,7 +91,19 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		ui.WithCaret(a.input),
 	)
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
-	dock := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
+	a.composerDock = container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
+
+	a.messageScroll = ui.NewObservableVScroll(ui.NewDockReserve(a.messageList, a.composerDock))
+	a.messageScroll.OnScroll = func(pos fyne.Position) {
+		if pos.Y <= 0 {
+			a.loadMoreHistory()
+			return
+		}
+		if a.contentHeight()-a.messageScroll.Size().Height-pos.Y <= remountThreshold {
+			a.mountNewerFromCache()
+		}
+	}
+	a.clearMessages()
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.channelGlyph = container.NewStack(ui.ChannelGlyph(a.channelKind()))
@@ -102,7 +111,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
 	header := container.NewPadded(container.NewBorder(nil, nil, title, members))
 
-	layout := container.NewBorder(header, container.NewPadded(dock), nil, nil, a.messageScroll)
+	layout := ui.NewFillColumn(1, header, ui.NewFloatingDock(a.messageScroll, a.composerDock))
 	return container.NewStack(background, layout)
 }
 
@@ -307,9 +316,11 @@ func (a *App) showStatus(text string) {
 	a.cancelActiveEdit()
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 
+	// Centred on what can be seen, so the room held for the dock doesn't push the
+	// line low and leave the column scrollable by exactly that much.
 	height := float32(400)
 	if a.messageScroll != nil {
-		if h := a.messageScroll.Size().Height - 5; h > 100 {
+		if h := a.messageScroll.Size().Height - ui.DockReserve(a.composerDock) - 5; h > 100 {
 			height = h
 		}
 	}

@@ -160,6 +160,32 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		if event.Data.Edited != nil {
 			updated.Edited = event.Data.Edited
 		}
+		if event.Data.Embeds != nil {
+			updated.Embeds = toEmbeds(event.Data.Embeds)
+		}
+		c.messages.Replace(event.Channel, &updated)
+
+		c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
+	})
+
+	// A link is unfurled after the message carrying it has been delivered, and the
+	// preview arrives as an append rather than an edit. Embeds are the only thing
+	// Revolt appends, so that is the whole of this handler.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageAppend) {
+		embeds := toEmbeds(event.Append.Embeds)
+		if len(embeds) == 0 {
+			return
+		}
+
+		current := c.messages.Find(event.Channel, event.ID)
+		if current == nil {
+			return
+		}
+
+		// As above: the append goes onto a copy, and the slice is a new one, so a
+		// reader holding the earlier message keeps seeing what it already had.
+		updated := *current
+		updated.Embeds = append(append(make([]*domain.Embed, 0, len(current.Embeds)+len(embeds)), current.Embeds...), embeds...)
 		c.messages.Replace(event.Channel, &updated)
 
 		c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})

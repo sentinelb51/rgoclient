@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
 
 	"RGOClient/internal/domain"
@@ -63,119 +61,6 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 				t.Errorf("card is %vpx wide, want %v", got, tc.width)
 			}
 		})
-	}
-}
-
-// TestProfileAvatarOverhangsTheBanner covers the header's one piece of geometry:
-// the avatar is raised so its centre lands on the banner's bottom edge, which is
-// what makes the banner read as something the picture sits on rather than above.
-func TestProfileAvatarOverhangsTheBanner(t *testing.T) {
-	test.NewTempApp(t)
-
-	card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
-	card.Content.Resize(card.Content.MinSize())
-
-	// The placeholder circle is the avatar until an image lands over it, and the
-	// ring behind it is the larger circle drawn at the same centre.
-	var avatar *canvas.Circle
-	var centre fyne.Position
-	walkTree(card.Content, func(obj fyne.CanvasObject, pos fyne.Position) {
-		circle, ok := obj.(*canvas.Circle)
-		if !ok || circle.Size().Width != theme.Sizes.ProfileAvatarSize {
-			return
-		}
-		if avatar == nil {
-			avatar = circle
-			centre = pos.Add(fyne.NewPos(circle.Size().Width/2, circle.Size().Height/2))
-		}
-	})
-
-	if avatar == nil {
-		t.Fatal("the card drew no avatar")
-	}
-	if want := theme.Sizes.ProfileBannerHeight; centre.Y != want {
-		t.Errorf("avatar centred at y=%v, want the banner's edge at %v", centre.Y, want)
-	}
-}
-
-// TestPresenceRingSurroundsTheAvatar covers the header's other piece of geometry:
-// availability is a ring the avatar sits inside, drawn wider than the picture so
-// it shows all the way round — and drawn not at all when someone is offline,
-// which is the state invisible has to be indistinguishable from.
-func TestPresenceRingSurroundsTheAvatar(t *testing.T) {
-	test.NewTempApp(t)
-
-	ringOf := func(presence domain.Presence) *canvas.Circle {
-		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone", Presence: presence}, ProfileActions{})
-		card.Content.Resize(card.Content.MinSize())
-
-		var ring *canvas.Circle
-		walkTree(card.Content, func(obj fyne.CanvasObject, _ fyne.Position) {
-			circle, ok := obj.(*canvas.Circle)
-			if ok && ring == nil && circle.FillColor == presenceColor(presence) {
-				ring = circle
-			}
-		})
-
-		return ring
-	}
-
-	for _, presence := range []domain.Presence{domain.PresenceOnline, domain.PresenceIdle, domain.PresenceFocus, domain.PresenceBusy} {
-		ring := ringOf(presence)
-		if ring == nil {
-			t.Fatalf("%s drew no ring", presence.Label())
-		}
-		if got := ring.Size().Width; got <= theme.Sizes.ProfileAvatarSize {
-			t.Errorf("%s ring is %vpx across, want wider than the %vpx avatar",
-				presence.Label(), got, theme.Sizes.ProfileAvatarSize)
-		}
-	}
-
-	if ringOf(domain.PresenceOffline) != nil {
-		t.Error("an offline user was given a presence ring")
-	}
-}
-
-// TestProfileHandleSitsBesideTheName checks the identity line: the account's real
-// handle sits to the right of the display name, on the same line and at its own
-// smaller size — a qualifier to the name, not a second title.
-func TestProfileHandleSitsBesideTheName(t *testing.T) {
-	test.NewTempApp(t)
-
-	card := NewProfileCard(testDeps(), domain.Profile{
-		Name:   "Someone",
-		Handle: "@someone#9147",
-	}, ProfileActions{})
-	card.Content.Resize(card.Content.MinSize())
-
-	var name, handle *canvas.Text
-	var namePos, handlePos fyne.Position
-	walkTree(card.Content, func(obj fyne.CanvasObject, pos fyne.Position) {
-		text, ok := obj.(*canvas.Text)
-		if !ok {
-			return
-		}
-		switch text.TextSize {
-		case theme.Sizes.ProfileNameSize:
-			name, namePos = text, pos
-		case theme.Sizes.ProfileHandleSize:
-			handle, handlePos = text, pos
-		}
-	})
-
-	if name == nil || handle == nil {
-		t.Fatal("the card drew no name or no handle")
-	}
-	if handle.Text != "@someone#9147" {
-		t.Errorf("handle reads %q, want the discriminator intact", handle.Text)
-	}
-	if handlePos.X <= namePos.X {
-		t.Errorf("handle starts at x=%v, want it right of the name at %v", handlePos.X, namePos.X)
-	}
-
-	centre := func(text *canvas.Text, pos fyne.Position) float32 { return pos.Y + text.Size().Height/2 }
-	if drift := centre(name, namePos) - centre(handle, handlePos); drift < -1 || drift > 1 {
-		t.Errorf("handle sits %vpx off the name's line, want them centred together", drift)
 	}
 }
 

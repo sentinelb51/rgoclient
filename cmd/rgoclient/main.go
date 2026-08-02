@@ -3,12 +3,12 @@ package main
 import (
 	"strconv"
 
+	"RGOClient/internal/app"
+	apptheme "RGOClient/internal/ui/theme"
+
 	"fyne.io/fyne/v2"
 	fyneapp "fyne.io/fyne/v2/app"
 	"fyne.io/fyne/v2/theme"
-
-	"RGOClient/internal/app"
-	apptheme "RGOClient/internal/ui/theme"
 )
 
 /*

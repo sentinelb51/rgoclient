@@ -63,7 +63,10 @@ func (a *App) buildServerList() fyne.CanvasObject {
 	a.refreshServerList()
 	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
 
-	return ui.NewFixedWidthContainer(theme.Sizes.ServerSidebarWidth, background, content)
+	// The seam is drawn by the column to its left, so each divider is the last
+	// child of the column it edges and the main row keeps its four children.
+	return ui.NewFixedWidthContainer(theme.Sizes.ServerSidebarWidth, background,
+		ui.NewFillRow(0, content, ui.NewColumnDivider()))
 }
 
 // refreshServerList rebuilds the server icons from the current server list. Any
@@ -147,7 +150,8 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 		container.NewVScroll(a.channelList))
 	content := container.NewBorder(container.NewPadded(a.serverHeader), nil, nil, nil, scroll)
 
-	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background, content)
+	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background,
+		ui.NewFillRow(0, content, ui.NewColumnDivider()))
 }
 
 // refreshChannelList rebuilds the channel rows for the current server, grouping

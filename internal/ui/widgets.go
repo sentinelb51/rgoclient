@@ -1,7 +1,9 @@
 package ui
 
 import (
+	"hash/fnv"
 	"image/color"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -62,6 +64,55 @@ func roundedPanel() *canvas.Rectangle {
 	panel.CornerRadius = 4
 
 	return panel
+}
+
+/* Edges */
+
+// Outline edges rect with the client's hairline. Every card is drawn with the
+// same one — an embed, an attachment, the composer dock — and it is darker than
+// anything it is ever laid over, so no fill behind it can close on it.
+//
+// Which rectangle carries it matters. A card whose content sits inside padding
+// can wear it on its own background; one whose content reaches its edge — a
+// picture — needs it on a rectangle stacked over the content instead, or it is
+// simply painted over.
+func Outline(rect *canvas.Rectangle) {
+	rect.StrokeColor = theme.Colors.Outline
+	rect.StrokeWidth = theme.Sizes.OutlineWidth
+}
+
+// Elevate casts rect's shadow onto whatever it is laid over. The composer dock
+// is the only thing in the client that carries one: an outline and a margin make
+// a card, but only a cast shadow makes a card that is *above* something. Without
+// it the gutter reads as a strip the card was dropped into, which is the
+// difference between an island and a bar.
+//
+// DropShadow follows the corner radius and paints nothing beneath the fill, so a
+// translucent shadow cannot darken the card itself. The blur deliberately
+// overruns the margin — it is the surface behind that has to darken — and Fyne
+// grows the object's own quad to fit the shadow, so it draws outside rect's
+// bounds rather than being clipped to them.
+func Elevate(rect *canvas.Rectangle) {
+	rect.Shadow = canvas.Shadow{
+		Color:      theme.Colors.CardShadow,
+		BlurRadius: theme.Sizes.CardShadowBlur,
+		Variant:    canvas.DropShadow,
+	}
+}
+
+// NewColumnDivider is the seam between two columns of the main row: the same
+// hairline, one pixel wide, stretched to the column's height by the row it is
+// placed in.
+//
+// It belongs to a column rather than sitting between two. The main row
+// addresses its children by position to find the one that stretches, and a
+// divider of its own would both shift that index and stay behind when the
+// member sidebar is hidden.
+func NewColumnDivider() fyne.CanvasObject {
+	divider := canvas.NewRectangle(theme.Colors.Outline)
+	divider.SetMinSize(fyne.NewSize(theme.Sizes.OutlineWidth, 0))
+
+	return divider
 }
 
 /* Containers */
@@ -138,14 +189,20 @@ var (
 	_ desktop.Hoverable = (*HoverableStack)(nil)
 )
 
-// NewHoverableStack makes content tappable with a hover border and an optional
-// hover callback.
+// NewHoverableStack makes content tappable with an outline and an optional hover
+// callback.
+//
+// Its rectangle is stacked *over* the content, which is what lets an attachment
+// be framed at all: the picture is drawn to the card's own edge, so a border
+// behind it would simply be painted over. The stroke is the shared hairline at
+// rest and lifts to a lighter slate under the pointer.
 func NewHoverableStack(content fyne.CanvasObject, onTap func(), onHover func(bool)) *HoverableStack {
 	h := &HoverableStack{
 		background: canvas.NewRectangle(color.Transparent),
 		content:    content,
 		onHover:    onHover,
 	}
+	Outline(h.background)
 	h.onTap = onTap
 	h.ExtendBaseWidget(h)
 
@@ -158,7 +215,6 @@ func (h *HoverableStack) CreateRenderer() fyne.WidgetRenderer {
 
 func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
 	h.background.StrokeColor = theme.Colors.AttachmentHoverBorder
-	h.background.StrokeWidth = 1
 	h.background.Refresh()
 
 	if h.onHover != nil {
@@ -167,8 +223,7 @@ func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
 }
 
 func (h *HoverableStack) MouseOut() {
-	h.background.StrokeColor = color.Transparent
-	h.background.StrokeWidth = 0
+	h.background.StrokeColor = theme.Colors.Outline
 	h.background.Refresh()
 
 	if h.onHover != nil {
@@ -449,17 +504,28 @@ func loadAvatar(images *cache.ImageCache, target *fyne.Container, avatarURL stri
 		return
 	}
 
-	images.LoadIntoContainer(avatarCacheID(avatarURL), avatarURL, size, target, true, nil)
+	images.LoadIntoContainer(imageCacheID(avatarURL), avatarURL, size, target, true, nil)
 }
 
-// avatarCacheID is the key an avatar URL is cached under: its Autumn file ID,
-// falling back to the URL itself when it isn't shaped like an Autumn one.
-func avatarCacheID(avatarURL string) string {
-	if id := util.IDFromAttachmentURL(avatarURL); id != "" {
+// imageCacheID is the key a picture is cached under: its Autumn file ID where
+// the URL is one of Revolt's, and a hash of the URL where it isn't.
+//
+// The hash is not decoration. The ID doubles as the picture's filename in the
+// disk cache, and an embed's preview or a site's mark comes from wherever the
+// page it was unfurled from serves it — a URL with a scheme and slashes in it,
+// which no file can be called. Hashing is what lets those be cached at all.
+func imageCacheID(imageURL string) string {
+	if imageURL == "" {
+		return ""
+	}
+	if id := util.IDFromAttachmentURL(imageURL); id != "" {
 		return id
 	}
 
-	return avatarURL
+	sum := fnv.New64a()
+	sum.Write([]byte(imageURL))
+
+	return strconv.FormatUint(sum.Sum64(), 16)
 }
 
 // Avatar is the circular, tappable avatar shown beside a message.

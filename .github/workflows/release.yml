@@ -20,6 +20,19 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # Ahead of the version step, which pushes the tag: a failure here must not
+      # leave a tag behind pointing at a tree that never built.
+      - name: Test
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
+
       # YY.M.D, UTC, unpadded (26.7.29); a second release on the same day
       # appends a counter (26.7.29.1) so the tag stays unique.
       - name: Resolve version
@@ -49,12 +62,6 @@ jobs:
           Write-Host "Releasing $tag (version $version, build $env:GITHUB_RUN_NUMBER)"
           "tag=$tag"         >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
 
       - name: Build
         env:

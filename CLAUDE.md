@@ -3,14 +3,35 @@
 A Fyne v2.8.0 desktop chat client (Discord-like) for Revolt, in Go 1.26.4. Uses
 `github.com/sentinelb51/revoltgo` for the REST API and gateway websocket.
 
-## Core principle: explicit dependencies, no globals
+## Core principle: one boundary, concrete types either side
 
-There is no global session or cache. The `*app.App` controller owns the session
-and all three caches, and passes what widgets need through a `ui.Deps` value:
+`internal/client` is the **only** package that imports `revoltgo`. It converts the
+wire types into `internal/domain` values on the way in and hands those upwards;
+everything above is written against the domain and never sees what it came from.
+The dependency graph is a strict DAG:
+
+```
+domain, util, markdown    no internal dependencies
+cache      -> domain
+client     -> cache, domain          (+ revoltgo)
+ui         -> cache, domain, markdown, util
+app        -> cache, client, domain, ui, util
+```
+
+That seam exists for a concrete reason, not tidiness: `revoltgo.State`'s caches
+are unexported and `newState()` is package-private, so **nothing holding a
+`*revoltgo.Session` can be built in a test**. `domain.Store` can — `internal/ui`
+has a `fakeStore` backed by maps (`ui/store_test.go`), and `internal/app`'s
+grouping and ordering rules are now exercised directly.
+
+## Explicit dependencies, no globals
+
+There is no global session or cache. The `*app.App` controller owns the client,
+the image caches and the widgets, and passes what widgets need through `ui.Deps`:
 
 ```go
 type Deps struct {
-    Session *revoltgo.Session // resolves users, members, and system messages
+    Store   domain.Store      // resolves IDs into names, avatars and permissions
     Images  *cache.ImageCache // avatars, icons, attachments
     Texts   *cache.TextCache  // text-attachment previews
     Actions MessageActions    // user-interaction callbacks (implemented by *app.App)
@@ -18,13 +39,39 @@ type Deps struct {
 ```
 
 `App.deps()` is the only producer, so **every field is always set** — widgets do
-not nil-check `Actions`, and tests populate it with a stub rather than relying on
-nil tolerance. Widget constructors take `Deps` (e.g. `ui.NewMessageWidget(deps,
-msg, ...)`). `util` helpers take an explicit `*revoltgo.Session` argument. Do not
-reintroduce package-level singletons.
+not nil-check `Actions` or `Store`, and tests populate both rather than relying
+on nil tolerance. Widget constructors take `Deps` (e.g. `ui.NewMessageWidget(deps,
+msg, ...)`). Do not reintroduce package-level singletons.
 
 The only package-level mutable state left is pure measurement memoisation
 (`ui.lineHeights`, `ui.spaceWidths`) — caches of a pure function, UI-thread only.
+
+## The client's contract
+
+Three ways in, and the threading rule for each is the whole point:
+
+- **`Client.Store()`** — reads, safe from any goroutine. Never the network; a
+  miss reports `ok=false` and the caller decides whether to show a placeholder,
+  queue a fetch, or both. Returns resolved domain values: a `domain.Member`
+  already carries the nickname, per-server avatar and role colour, a
+  `domain.Channel` already carries the name a DM is titled under.
+- **`Client.Events()`** — one buffered channel carrying everything the server
+  pushes, in gateway order. `app.pumpEvents` is its single reader and `dispatch`
+  hops onto the UI thread once per event. `client.Event`'s marker method is
+  unexported, so the type switch is exhaustive by construction.
+- **Action methods** (`SendMessage`, `HistoryBefore`, `JoinInvite`, …) — these
+  **block**. They do the request and the cache update and return; they never
+  touch a widget and never spawn a goroutine. The caller owns the UI thread, so
+  the caller decides when to leave it (`App.background` is the usual shape).
+
+Being logged out is a valid state, not an error: reads report nothing known and
+actions return `client.ErrNoSession`. `Client.session` is an
+`atomic.Pointer[revoltgo.Session]` because actions read it off-thread while the
+controller replaces it on the UI thread. `Client.epoch` counts sessions and each
+gateway handler captures its own, so an event produced by a session that has
+since been replaced is dropped rather than delivered; `App.epoch` is the same
+guard on the controller's side, captured before a worker leaves the UI thread and
+checked through `App.stale` on the way back.
 
 ## Code style
 
@@ -50,18 +97,19 @@ Follow revoltgo's conventions; they are the house style.
   narrate mechanics.
 - **Files.** Prefer fewer, larger files with visual sectioning over fragmentation.
 
-## revoltgo: Session vs State
+## revoltgo, inside internal/client only
 
 - `Session.X(...)` — authoritative, always a network request. Use when data must
-  be fresh or on a cache miss.
+  be fresh or on a cache miss. These are what the action methods wrap.
 - `Session.State.X(...)` — local cache from gateway events / prior calls. Fast,
-  zero-network, may return nil (always nil-check).
+  zero-network, may return nil (always nil-check). This is what `store` reads.
 
 Attachments/avatars/icons are all `*revoltgo.File` (the type was renamed from
 `Attachment`). Its `Metadata` is a *pointer* and is nil for files the server
-couldn't introspect — go through `util.IsImageAttachment` /
-`util.AttachmentDimensions` rather than dereferencing it. Uploads take
-`*revoltgo.FileParams`, not `File`.
+couldn't introspect, which is why `domain.File` carries plain `Width`/`Height`
+ints and a `Kind` instead: `client/convert.go` absorbs the nil check once, and
+nothing above it has a pointer to dereference. Uploads take `*revoltgo.FileParams`,
+not `File`.
 
 **Known revoltgo bug.** `Session.ChannelMessages(..., IncludeUsers: true)` returns
 the page's `Users` and `Members`, but only feeds them into State when the request
@@ -70,6 +118,12 @@ channel gets messages whose authors State has never heard of, and the client has
 to resolve them itself — that is what the batched `ensureAuthor` path exists for.
 Once the library is fixed, State will already hold every author of a fetched page
 and the batch will simply find nothing to do; nothing here needs changing.
+
+**No `context.Context`.** revoltgo's REST layer takes none, so a superseded
+request cannot be cancelled — only its result discarded. That is what
+`Client.fetching` (per-channel in-flight dedup, raising `ErrBusy`) and the two
+epoch counters do instead. Do not thread a `ctx` argument through the action
+methods to look correct; it would cancel nothing.
 
 ## Project structure
 
@@ -87,21 +141,56 @@ assets/                      Embedded binaries (go:embed can't reach above its o
                              any cwd
 
 internal/
-  app/                       Controller; owns session + caches + window + UI refs
+  domain/                    The vocabulary. Value types + the one boundary
+                             interface; no internal dependencies, no revoltgo, no
+                             fyne — so anything written against it is testable
+    domain.go                File/FileKind, Message/SystemMessage/Webhook,
+                             Channel/ChannelKind, Server/Category, User/Member/
+                             Role/Author/Presence, Profile, and the composer's
+                             Attachment/Reply. SystemMessage.Text is pure: the
+                             store supplies the name, the wording lives here
+    store.go                 Store — the read side of a session. Small, and
+                             returns *resolved* values (a Member already carries
+                             its nickname and role colour); handing back wire
+                             types would only move the resolution to the callers
+
+  client/                    Everything that talks to Revolt. The only importer of
+                             revoltgo
+    client.go                Package doc (incl. the threading contract), Client,
+                             New/Open/Login/Close/Shutdown, the atomic session
+                             pointer, the epoch counter, and emit
+    convert.go               revoltgo → domain. Messages convert once, on the way
+                             into the cache, so the per-widget cost of the seam is
+                             zero. Also parseHexColor, presence and badge mapping
+    store.go                 The domain.Store implementation over revoltgo.State
+                             (what used to be internal/util/state.go). Members()
+                             sorts, which is what lets the sidebar and the mention
+                             picker share one walk
+    events.go                Event (a closed sum type, unexported marker) and the
+                             twelve gateway handlers registered per session. Each
+                             keeps the message cache in step and emits one value
+    actions.go               Every network action, each blocking: send/edit/delete,
+                             acks, LatestMessages + HistoryBefore (per-channel
+                             in-flight dedup → ErrBusy), ResolveAuthors (the
+                             bounded batch), Conversations, OpenConversation,
+                             join/leave/close/kick, UserBio
+
+  app/                       Controller; owns view state + image caches + widgets
     app.go                   App struct, New, Run, lifecycle, doOnUI (the single
-                             UI-thread entry point), deps, styleNativeChrome,
+                             UI-thread entry point), background (spawn → act →
+                             notify on failure), stale, deps, styleNativeChrome,
                              state accessors, the ui.MessageActions impl, and the
                              one active in-place edit (startEditing/cancelActiveEdit)
     session.go               Opening a session (startWithToken/startWithLogin/
-                             openSession/resetSessionState), the login screen, and
-                             the saved-session JSON store (~/.rgoclient_sessions.json)
-    events.go                Every gateway handler, registered in openSession:
-                             Ready + error lifecycle, message create/update/delete,
-                             the coalesced read-ack path (scheduleAck/sendAck — the
-                             only one; selectChannel routes through it too), and
-                             server/channel/member events — including the
-                             ServerDelete and ChannelDelete departures, which are
-                             what actually take a left server or closed
+                             resetSessionState), the login screen, and the
+                             saved-session JSON store (~/.rgoclient_sessions.json)
+    events.go                The event pump: pumpEvents + dispatch, then one
+                             handler per client.Event — Ready and Disconnected,
+                             the message paths, the coalesced read-ack
+                             (scheduleAck/sendAck — the only one; selectChannel
+                             routes through it too), and the server/channel/member
+                             events, including the ServerLeft and ChannelClosed
+                             departures that actually take a left server or closed
                              conversation out of the sidebar
     notify.go                The notification system's controller half: notify
                              (post a transient message) and confirm (ask before
@@ -130,21 +219,29 @@ internal/
                              member-sidebar toggle at the header's right edge),
                              load and render, and the mounted window — which slice
                              of the cache has live widgets and how it slides. Its
-                             "mounted window" section states the invariants
-    members.go               Lazy author resolution (ensureAuthor → flushAuthors →
-                             resolveAuthor, queued then fetched in one bounded
-                             batch; refreshAuthorMessages updates widgets in place),
-                             the member sidebar (toggleMemberList hides and shows
-                             the whole column), and the mention candidates the
-                             composer's picker offers — the same State walk, so
-                             they refresh together
+                             "mounted window" section states the invariants.
+                             remountMessages and contentHeight are what every
+                             mutation of that window goes through — see
+                             "Repainting the message column"
+    messages_test.go         continuesGroup, dayLabel, sortConversations and
+                             toReplies — the pure rules, none of which was
+                             reachable from a test before the client took the
+                             session away
+    members.go               Lazy author resolution (ensureAuthor queues,
+                             flushAuthors hands the batch to Client.ResolveAuthors
+                             and repaints once; refreshAuthorMessages updates the
+                             whole batch's widgets in one pass), the member sidebar
+                             (toggleMemberList hides and shows the whole column),
+                             and the mention candidates the composer's picker
+                             offers — Store.Members is the one walk both the rows
+                             and the candidates are built from
     overlay.go               The modal layer: showOverlay (centred) / showPopover
                              (anchored) / closeOverlay / repositionOverlay, the
                              attachment lightbox, and the join-server dialog +
                              joinServer/createServer
     profile.go               User profiles: OnUserTapped (the compact card, beside
                              whatever was clicked) and showProfileDialog (the full
-                             one, centred), profileOf — the one State walk both are
+                             one, centred), profileOf — the one store walk both are
                              drawn from — loadBio, and openConversation /
                              showConversation, the "Message" button's path into the
                              home view
@@ -152,15 +249,23 @@ internal/
     cache.go                 Package doc, LRU (the shared O(1) recency tracker
                              behind every bounded cache), and TextCache
                              (LRU-bounded text-attachment previews)
-    message.go               MessageCache — per-channel, oldest→newest, capped per
-                             channel, LRU channel eviction; Find/Remove/Replace =
-                             binary search by ID (ULIDs sort chronologically;
-                             CompareMessageID is shared with app); both entries
-                             *and* published slices are immutable, so a UI-thread
-                             reader holding an earlier slice is safe
-    image.go                 ImageCache — LRU-bounded memory + disk + async load;
-                             trimDiskCache evicts oldest-first at startup
-  ui/
+    message.go               MessageCache — per-channel `*domain.Message`,
+                             oldest→newest, capped per channel, LRU channel
+                             eviction; Find/Remove/Replace = binary search by ID
+                             (ULIDs sort chronologically; CompareMessageID is
+                             shared with app); both entries *and* published slices
+                             are immutable, so a UI-thread reader holding an
+                             earlier slice is safe. Owned by the client, which
+                             clears it when a session is replaced
+    image.go                 ImageCache — memory + disk + async load. Memory is
+                             bounded in *bytes*, not entries (an avatar and a 12
+                             megapixel photo are one slot each), and every decode
+                             is capped at maxImageEdge on its longest side. The
+                             flush goroutine owns the directory: it writes pending
+                             images, and trimDiskCache evicts least-recently-*used*
+                             — Get stamps mtime on a hit, which is what makes mtime
+                             mean recency rather than insertion order
+  ui/                        Widgets. Imports domain; never sees revoltgo
     ui.go                    Package doc, Deps + MessageActions, DoOnUI, the one
                              icon fill/scale policy (newScaledIcon), context menus,
                              and WithCaret (per-entry theme override restoring the
@@ -197,16 +302,16 @@ internal/
                              ObservableScroll (wheel amplify + middle-button pan),
                              and NewEllipsisText/TruncateToWidth (text that shortens
                              to the width it is given, at zero minimum width)
-    sidebar.go               ServerWidget, ChannelWidget (named through
-                             util.ChannelName, so a DM row shows the other
-                             participant) + collapsible category, the drawn glyph set
-                             ChannelGlyph picks from (HashtagIcon / AtIcon /
-                             GroupIcon), member row/section, and the saved-session
-                             card. What leads a channel row is its type
-                             (channelLeading): a server channel gets the glyph, a
-                             conversation (isConversation — DM, group, saved notes)
-                             gets a taller card led by util.ChannelAvatarURL's
-                             picture, blank when there is none. All three rows carry
+    sidebar.go               ServerWidget, ChannelWidget (drawn from a
+                             domain.Channel, whose Name the store already resolved,
+                             so a DM row shows the other participant) + collapsible
+                             category, the drawn glyph set ChannelGlyph picks from
+                             (HashtagIcon / AtIcon / GroupIcon), member row/section,
+                             and the saved-session card. What leads a channel row is
+                             its type (channelLeading): a server channel gets the
+                             glyph, a conversation (ChannelKind.IsConversation — DM,
+                             group, saved notes) gets a taller card led by the
+                             channel's AvatarURL, blank when there is none. All three rows carry
                              a Menu hook the controller fills with right-click items
                              (the member row's is on the TappableContainer it is
                              built from);
@@ -222,15 +327,20 @@ internal/
                              the row's rhythm is decided: messageLineHeight and the
                              two offsets derived from it (avatarTopOffset,
                              gutterTimestampTopOffset) — see "Message row rhythm"
+    store_test.go            fakeStore — domain.Store from a struct of maps — and
+                             testDeps, the fully populated bundle every widget test
+                             mounts against. This file is the seam's payoff
     markdown.go              AST → RichText rendering; strike/underline/spoiler
                              custom segments; uniform-style bodies flatten to a
                              Selectable Label (bodyText, mouse text selection); only
                              mixed-style bodies keep the unselectable RichText.
                              mdBuilder carries Deps because <@id> is only an ID in
-                             the AST — mention() resolves it and draws "@Name" in
-                             theme.ColorNameMention. bodyText + selectionCatcher are
-                             what keep a right-click on selectable text reaching the
-                             message — see "Right-clicking a message"
+                             the AST — mention() resolves it through
+                             Store.UserName (the allocation-free half of User) and
+                             draws "@Name" in theme.ColorNameMention. bodyText +
+                             selectionCatcher are what keep a right-click on
+                             selectable text reaching the message — see
+                             "Right-clicking a message"
     attachment.go            Attachment rendering (image / text preview / generic
                              card), the name/size bar, and fetchText (shared,
                              byte-capped download). Images and text files are
@@ -286,17 +396,10 @@ internal/
                              Discord-style emphasis guards: _ opens/closes only at
                              word boundaries (snake_case stays literal) and single
                              */_ content can't be whitespace-edged
-  util/
-    state.go                 Everything resolved out of Session.State: MessageAuthor
-                             (one-pass author resolution — name, avatar URL, role
-                             colour, member-aware), MemberName/MemberAvatarURL/
-                             MemberOnline/MemberColor/MemberRoles (Role, ordered
-                             by seniority), UserName/UserHandle/UserBadges,
-                             ChannelName + ChannelAvatarURL + DMRecipientID, and
-                             FormatSystemMessage
-    file.go                  Filetype + FormatFileSize, IsImageAttachment /
-                             AttachmentDimensions (nil-Metadata safe), and
-                             IDFromAttachmentURL
+  util/                      Pure helpers only — no session, no domain types
+    file.go                  FormatFileSize and IDFromAttachmentURL. What used to
+                             live here alongside them is now domain (FileKindOf,
+                             the File dimensions) or client (state.go, wholesale)
     text.go                  Truncate (rune-safe) + InviteCode (bare code /
                              invite link / scheme-less link → code, "" when it
                              isn't shaped like one)
@@ -306,20 +409,27 @@ internal/
 
 ## Data flow
 
-1. Login (`session.go`) → `startWithToken` / `startWithLogin` → `openSession`
-   registers handlers and opens the gateway. `startWithLogin` stashes the new
-   token in `pendingToken` *before* opening (Ready can beat the login goroutine
-   back to the UI thread). The login screen stays up until Ready; only failures
-   return to it.
+0. `App.Run` starts `pumpEvents` before the login screen, so no event can arrive
+   before there is somebody to read it — the stream is buffered, not unbounded.
+   Every event lands in `dispatch`, which is the only place `client.Event` is
+   turned back into a repaint.
+1. Login (`session.go`) → `startWithToken` / `startWithLogin` → `Client.Open` /
+   `Client.Login`, which drop the previous session, register the handlers against
+   a fresh epoch, and open the gateway. `startWithLogin` stashes the new token in
+   `pendingToken` *before* Ready can land (it can beat the login goroutine back to
+   the UI thread). The login screen stays up until Ready; only failures return to
+   it.
 2. `onReady` → save pending token, record unreads, `showMainUI` (the only place
    the main layout is built), `refreshServerList`, `selectServer(first)` — or
    `selectHome` when the account is in no servers, so the client never lands blank.
 3. `selectServer` → `refreshChannelList`, `refreshMemberList` (paints whatever
-   members State currently holds) → `selectChannel(first)`. There is no bulk
+   members the store currently holds) → `selectChannel(first)`. There is no bulk
    member fetch: Revolt's members endpoint has no pagination, so large servers
    would flood memory. Members are resolved lazily per author (`ensureAuthor`).
-4. `selectChannel` → show cached messages, else `loadChannelMessages` (asks for
-   `IncludeUsers: true`, see the revoltgo note above); ack unread.
+4. `selectChannel` → show cached messages, else `loadChannelMessages` →
+   `Client.LatestMessages` (asks for `IncludeUsers: true`, see the revoltgo note
+   above, and dedupes per channel so rapid switching fires one request, not one
+   per switch); ack unread.
    `displayMessages` is synchronous and mounts only the newest `initialMountCount`
    messages (~2-3 screenfuls; mounting more is churn the renderer cache holds for
    up to a minute, which is what made rapid channel switching ratchet memory).
@@ -352,31 +462,40 @@ internal/
    breaks the author group. The separator belongs to the widget rather than
    being its own list entry, so the mounted window stays one object per message
    and every seam rebuild (prepend, delete, edit) re-derives it for free.
-5. Author resolution: a message carries only its author's ID. `ensureAuthor`
-   checks State for the user and (in a server) the member, and queues whatever is
-   missing — it does not fetch. `authorTimer` fires `authorFetchDelay` later and
-   `flushAuthors` resolves the whole batch through `authorFetchWorkers` goroutines,
-   refreshing each author's mounted widgets as they land (`refreshAuthorMessages`,
-   in place) and the member sidebar once at the end. Batching matters because
-   mounting a page calls `ensureAuthor` per widget: unbatched, opening a busy
-   channel would fan out dozens of requests and rebuild the sidebar after each one.
+5. Author resolution: a message carries only its author's ID. `ensureAuthor` asks
+   the store whether the user and (in a server) the member are already known —
+   through `HasUser`/`HasMember`, which exist precisely because this runs once per
+   mounted message and must not allocate — and queues whatever is missing. It does
+   not fetch. `authorTimer` fires `authorFetchDelay` later and `flushAuthors` hands
+   the whole batch to `Client.ResolveAuthors` (bounded by `resolveWorkers`), then
+   makes a *single* trip back to the UI thread: every resolved author's mounted
+   widgets update in one pass (`refreshAuthorMessages`, variadic, in place) and the
+   member sidebar rebuilds once, only if a member record was actually fetched.
+   Batching matters because mounting a page calls `ensureAuthor` per widget:
+   unbatched, opening a busy channel would fan out dozens of requests, walk the
+   mounted column once per author, and rebuild the sidebar after each one.
    `fetchedAuthors` guards each (server, user) against being queued twice, and is
    released on failure so a later message retries.
-6. `onMessage` → cache append (which returns the predecessor under the cache lock,
-   so grouping survives bursts) → append to open channel + coalesced read
-   ack (`scheduleAck`), else mark unread. If scrollback has detached the view from
-   the live tail, the append is skipped — the message mounts on the way back down.
-   `onMessageUpdate` applies the edit to a *copy* that replaces the cache entry
-   (entries are read by the UI without the cache lock, so they stay immutable) and
-   rebuilds the mounted widget; `onMessageDelete` / `onBulkMessageDelete` remove
-   from cache and unmount, re-evaluating neighbour grouping at the seam.
+6. The client's message handler caches the message (the cache returns the
+   predecessor under its own lock, so grouping survives bursts) and emits
+   `MessageCreated` carrying both. `onMessageCreated` appends it to the open
+   channel with a coalesced read ack (`scheduleAck`), else marks the channel
+   unread. If scrollback has detached the view from the live tail, the append is
+   skipped — the message mounts on the way back down. An edit is applied to a
+   *copy* that replaces the cache entry (entries are read by the UI without the
+   cache lock, so they stay immutable) and arrives as `MessageUpdated`, which
+   rebuilds the mounted widget. Both delete events arrive as one `MessageDeleted`
+   carrying a slice, unmounted through one `removeMessages` pass with
+   `rebuildSeams` re-evaluating neighbour grouping at each seam a removal leaves
+   behind. A moderation sweep therefore scans and repaints the column once, not
+   once per ID.
 7. In-place editing: `OnEdit` (hover/context-menu, or Up in an empty composer via
    `editLastOwnMessage`, which scans the cache newest→oldest for the user's own
    message — the cache only gains own messages through the gateway echo, so the
    scan can't race the send path) calls `startEditing`: one edit at a time
    (`App.editing`), the widget swaps its body for an `EditEntry` with floating
    save/cancel buttons. Save applies the edit to the cache optimistically and
-   sends `ChannelMessageEdit` (failure reverts; the gateway MessageUpdate echo
+   calls `Client.EditMessage` (failure reverts; the `MessageUpdated` echo
    reconciles); Esc/cancel restores the body. Any message-area rebuild
    (`displayMessages`/`clearMessages`/`showStatus`) cancels the active edit, and
    `refreshMessage` leaves a message being edited alone so a remote update can't
@@ -391,36 +510,44 @@ internal/
    cannot draw a chip inside its text — and `ui/markdown.go` renders that token
    back as an accent-coloured `@Name` in message bodies.
    The candidate list is *pushed*, not pulled: `App.refreshMentionCandidates`
-   resolves it from State (on `selectChannel`, on every `refreshMemberList`, and
-   after each author batch lands) and the picker filters that snapshot per
-   keystroke. So the expensive part — walking State and resolving names — happens
-   once per membership change, and a keystroke is two string comparisons per
-   candidate with nothing allocated. Reading State only, a server's candidates are
+   resolves it from the store (on `selectChannel`, and after an author batch lands
+   that didn't rebuild the sidebar) and the picker filters that snapshot per
+   keystroke. In a server it is not a walk of its own: `refreshMemberList` builds
+   the rows and the candidates from one `Store.Members` result and hands the picker
+   its half through `setMentionCandidates`, since they are the same people under
+   the same names sorted the same way — which is why `Members` sorts rather than
+   leaving it to each caller. So the expensive part — walking State and resolving
+   names — happens once per membership change, and a keystroke is two string
+   comparisons per candidate with nothing allocated (and none at all when the query
+   is unchanged, or for a picker row already showing that person).
+   Reading local state only, a server's candidates are
    whoever the client already knows: the gateway's members plus everyone lazy
    author resolution has pulled in, the same bounded set the member sidebar shows
    and the same reason there is no bulk member fetch. The picker is mounted
    *inside* the composer card rather than floating over the message area: a Fyne
    pop-up takes canvas focus, which would pull it off the entry and stop the
    typing that drives it.
-9. `onServerMember{Join,Leave,Update}` → State auto-updates (revoltgo default
+9. `MembersChanged` / `MemberUpdated` → State auto-updates (revoltgo's default
    handlers); the app handler refreshes the member sidebar when it's the open
-   server. `Update` also calls `refreshAuthorMessages` so that author's mounted
-   messages pick up the new nickname / role colour / avatar in place.
+   server. `MemberUpdated` also calls `refreshAuthorMessages` so that author's
+   mounted messages pick up the new nickname / role colour / avatar in place.
 10. The home view: the fixed home button swaps the channel sidebar from a server's
     channels to the user's direct messages and groups. `App.homeSelected` marks it
     open — home has no server, so an empty `currentServerID` alone can't be told
     apart from nothing selected — and `selectServer` clears it. The list comes from
-    `Session.DirectMessages()`, which feeds the channels into State on the way
-    through, so the app keeps only the sidebar *order* (`App.dmChannels`, a slice
-    of IDs) and looks every channel up through `App.stateChannel` like any other.
+    `Client.Conversations`, which feeds the channels into State on the way through
+    and resolves their recipients in the same pass, so the app keeps only the
+    sidebar *order* (`App.dmChannels`, a slice of IDs) and looks every channel up
+    through the store like any other.
     It is still a plain fetch with no gateway event maintaining it, which is why
     the order is re-asked for rather than pushed: `selectHome` paints the cache
     immediately and refreshes in the background, so re-opening home never blanks
     the sidebar. Each refresh re-sorts by `LastMessageID` (a ULID, so string
-    comparison sorts chronologically) and resolves any recipients missing from
-    State, since a DM has no name of its own — the same resolution the row's
-    avatar needs, conversations being drawn as taller cards led by the other
-    participant's picture instead of a glyph. Ordering is a snapshot — an incoming
+    comparison sorts chronologically); the recipients behind each row are resolved
+    by the client on the way through, since a DM has no name of its own — the same
+    resolution the row's avatar needs, conversations being drawn as taller cards
+    led by the other participant's picture instead of a glyph. Ordering is a
+    snapshot — an incoming
     message marks its row unread rather than re-sorting the list under the reader.
     Everything downstream of the sidebar is channel-keyed and needs no special
     case; the member sidebar simply stays empty, as a DM has no server members.
@@ -428,10 +555,10 @@ internal/
     `showJoinServer`, an overlay on the same modal layer as the attachment viewer.
     The dialog resolves what was pasted through `util.InviteCode` (bare code,
     invite link, or link without a scheme) and hands `joinServer` a code, which
-    calls `Session.InviteJoin` off-thread. The response is not what adds the
+    calls `Client.JoinInvite` off-thread. The response is not what adds the
     server — the join payload carries the server as an object, which revoltgo
     decodes into an `Invite` whose `ServerID` is never populated — so the sidebar
-    is updated by the `ServerCreate` gateway event instead (`onServerCreate`).
+    is updated by the `ServerJoined` event instead (`onServerJoined`).
     `App.pendingJoin`, set for the duration of the request, is what tells that
     handler to *select* the server it adds; servers appearing for any other
     reason are added without moving the view. A failed join leaves the dialog up
@@ -445,9 +572,9 @@ internal/
     never how it should look.
     The destructive actions all have the same shape: a `can…`/`is…` check decides
     whether the menu offers it at all, `confirm…` asks, and the action fires
-    off-thread and lets the *gateway event* update the UI — `ServerDelete` for
-    leaving a server, `ChannelDelete` for closing a conversation,
-    `ServerMemberLeave` for removing someone. Nothing is removed optimistically,
+    through `App.background` and lets the *gateway event* update the UI —
+    `ServerLeft` for leaving a server, `ChannelClosed` for closing a conversation,
+    `MembersChanged` for removing someone. Nothing is removed optimistically,
     so a rejected request leaves the client exactly as it was and the failure
     arrives as a notice. Deleting a message goes through the same confirmation:
     the quick actions put it one click from the pointer, and the card quotes the
@@ -458,25 +585,35 @@ internal/
     it on the modal layer (`showPopover`, an `ui.Overlay` with a clear backdrop
     and `placeBeside` doing the placement). Its "Full profile" button swaps it for
     the dialog, centred and dimmed like every other modal.
-    Both presentations are drawn from one `ui.Profile` that `profileOf` resolves
-    out of State in a single pass: the user gives the handle, avatar, presence,
-    badges and creation date (from the ULID), and the *open server's* member record
-    overrides the name, avatar and colour with the nickname, per-server avatar and
-    role colour, and adds the roles and join date. A user State has never heard of
-    still gets a card, with their resolution queued through `ensureAuthor`, because
-    a click that does nothing is worse than a card that is thin.
-    The bio is the one thing the client doesn't already hold: `Session.UserProfile`
+    Both presentations are drawn from one `domain.Profile` that `profileOf`
+    resolves out of the store in a single pass: the user gives the handle, avatar,
+    presence, badges and creation date (from the ULID), and the *open server's*
+    member record overrides the name, avatar and colour with the nickname,
+    per-server avatar and role colour, and adds the join date and (through
+    `Store.MemberRoles`, kept off `Member` so a sidebar rebuild doesn't allocate a
+    role slice per row) the roles. A user the store has never heard of still gets a
+    card, with their resolution queued through `ensureAuthor`, because a click that
+    does nothing is worse than a card that is thin.
+    The bio is the one thing the client doesn't already hold: `Client.UserBio`
     is fetched *after* the card is up and filled in through `ProfileCard.SetBio`,
     which grows the card — hence `repositionOverlay`, since neither placement
     re-runs on its own. A bio that fails to load is only logged; a profile reads
     perfectly well without one.
-    "Message" goes through `openConversation` → `Session.DirectMessageCreate`,
-    which unlike `DirectMessages` does *not* feed its channel into State, so the
-    channel is asked for once before `showConversation` puts it at the top of the
-    home view and selects it.
+    "Message" goes through `openConversation` → `Client.OpenConversation`, which
+    unlike the conversation list does *not* get its channel fed into State by
+    revoltgo, so the client asks for it once before `showConversation` puts it at
+    the top of the home view and selects it.
 
 ## Conventions
 
+- **Keep revoltgo inside `internal/client`.** Nothing above it may import the
+  library. A new field the UI needs is a field on a `domain` type plus a line in
+  `client/convert.go`; a new lookup is a `domain.Store` method. If a call site
+  outside `internal/client` wants a `*revoltgo.Anything`, the boundary is in the
+  wrong place, not the rule.
+- **Store methods return resolved values and never touch the network.** A miss is
+  `ok=false`, not a fetch. If something has to be fetched, it is an action on
+  `Client` and the caller decides when to leave the UI thread.
 - Pass dependencies via `ui.Deps`; never reach for global state. `Deps` is always
   fully populated, so don't add nil checks for its fields.
 - Background goroutines update the UI through `App.doOnUI(fn, wait)` (controller)
@@ -484,10 +621,13 @@ internal/
   because `internal/ui` imports it. `main.go` declares the `fyneDo` migration, so
   Fyne no longer relocates stray off-thread calls onto the UI thread for us — a
   widget touched from a goroutine is now a real data race, not a logged warning.
-- `App.session` is written only on the UI thread (`openSession`, `onError`
-  teardown). Worker goroutines capture `session := a.session` before launching
-  and use the local — at worst they call into a closed session, which errors.
-- Widget receiver is `w`; app receiver is `a`; cache receiver is `c`.
+- **A worker that outlives its session must not paint.** Capture `epoch :=
+  a.epoch` before leaving the UI thread and check `a.stale(epoch)` on the way
+  back, wherever the result would be written into view state. A logout and login
+  can land mid-request, and the previous account's conversations, bio or sidebar
+  must not appear in the new one's.
+- Widget receiver is `w`; app receiver is `a`; cache and client receivers are `c`;
+  the store's is `s`.
 - Interface assertions live near the type: `var _ fyne.Tappable = (*T)(nil)`.
   Do *not* implement `desktop.Hoverable` with no-op methods: Fyne delivers hover
   to the innermost hoverable object, so an inner widget that accepts hover steals
@@ -576,6 +716,19 @@ internal/
   is one `NewFillRow` for that reason, and the theme value now says what it draws.
   Reach for `NewFillRow` / `HBoxNoSpacing` / `NewInset` when the spacing has to be
   exact, and only for a Border when the padding is wanted.
+- **Repainting the message column.** `Container.Refresh` calls `Refresh` on every
+  child, and `widget.RichText.Refresh` drops its cached minimum size and re-runs
+  `updateRowBounds` — a full re-wrap of its text. So `messageList.Refresh()` told
+  the list one widget had arrived and re-flowed every one of the up-to-`mountedCap`
+  message bodies already mounted, on every gateway message, edit, delete, prepend
+  and remount. Every mutation of the mounted window goes through
+  `App.remountMessages` (`ui.Relayout`: re-run this one layout, repaint, don't walk
+  the children) — widgets built during the mutation are new and already carry their
+  content. Use `Refresh` only when what a *mounted* widget says has changed.
+  For the same reason nothing on the scroll path may call `MinSize` on the list:
+  `BaseWidget.MinSize` is not memoised, so it walks every mounted renderer.
+  `App.contentHeight` reads the size the scroller already gave the content.
+  `prependMessages` is the one exception and says why.
 - Use the `log` package for diagnostics.
 - Keep this file current when adding files/packages, changing data flow, adding
   widgets, modifying `App` fields, or changing event handling.
@@ -597,8 +750,11 @@ in the source: `main.version` and `main.build` are `var`s stamped at link time
 with `-X`, defaulting to `0.0.0` / `0` for a local `go build`. `build` is the
 workflow run number (per-workflow, so it's only unique alongside the version).
 
-Two workflows, both `windows-latest`, both building `dist/RGOClient.exe` with
-`CGO_ENABLED=1 -H windowsgui`. The exe is unsigned:
+Two workflows, both `windows-latest`, both running `go test ./...` and building
+`dist/RGOClient.exe` with `CGO_ENABLED=1 -H windowsgui`. The tests need cgo like
+the build does — `internal/ui` mounts real widgets — and in `release.yml` they
+run *before* the version step, which is what pushes the tag: a failing tree must
+not leave a tag behind. The exe is unsigned:
 
 - `.github/workflows/build.yml` — push/PR to `main` + manual. Uploads the exe
   as a run artifact. No tag, no release.
@@ -608,8 +764,8 @@ Two workflows, both `windows-latest`, both building `dist/RGOClient.exe` with
   tag by hand also works and takes the tag verbatim as the version — that's the
   escape hatch for re-releasing or naming an off-calendar version.
 
-The build step is duplicated between the two files; if a third consumer
-appears, lift it into a composite action.
+The test and build steps are duplicated between the two files; if a third
+consumer appears, lift them into a composite action.
 
 ## Known stubs / follow-ups
 
@@ -631,8 +787,14 @@ someone shouldn't chase their formatting. Neither presentation refreshes: a
 `UserUpdate` arriving while one is open leaves it as it was until reopened.
 
 `markdown.CodeBlock.Language` is parsed and tested but nothing renders syntax
-highlighting yet. `util.FileType` classifies video/audio/archive/PDF, but only
-`FileTypeImage` and `FileTypeText` are branched on.
+highlighting yet. `domain.FileKind` classifies video/audio/archive/PDF, but only
+`FileImage` and `FileText` are branched on.
+
+`domain.Message` deliberately drops what nothing renders: embeds, reactions,
+flags, mentions, pins, and the masquerade's contents (only *that* it carries one
+survives, for grouping). Adding any of them is a field plus a line in
+`client/convert.go`. `client.Client` has no test of its own — its actions want an
+HTTP fake, and revoltgo's REST layer takes no injectable transport.
 
 The composer has no attach or emoji button — files still arrive only by drag or
 paste — and no role/channel mentions (`<@id>` users only). `EditEntry` has no

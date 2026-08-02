@@ -20,6 +20,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # internal/ui mounts real widgets, so the tests need the same cgo toolchain
+      # the build does; they are not a pure-Go unit suite.
+      - name: Test
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
+
       # Today's calendar version with a -dev suffix, so a CI artifact can never
       # be mistaken for the release cut on the same day. No tag is involved.
       - name: Resolve version

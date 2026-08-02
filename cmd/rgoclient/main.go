@@ -13,7 +13,6 @@ import (
 
 /*
 	TODO: Login screen, hovering over an active session; highlight is partial, should highlight the whole tile
-	TODO: Notification toasts for warnings; slide from bottom right, 5 dots each counts every second, click to dismiss, auto-dismiss after 5s (5 dots)
 */
 
 // appID identifies the client to Fyne's preferences and storage APIs. Without it

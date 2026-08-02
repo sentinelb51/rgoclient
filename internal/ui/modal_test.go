@@ -1,9 +1,12 @@
 package ui
 
 import (
+	"image/color"
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 	"github.com/sentinelb51/revoltgo"
 
@@ -16,7 +19,7 @@ import (
 // widgets tolerating a nil interface.
 type stubActions struct{}
 
-func (stubActions) OnAvatarTapped(string)                        {}
+func (stubActions) OnUserTapped(string, fyne.CanvasObject)       {}
 func (stubActions) OnAttachmentTapped(*revoltgo.File)            {}
 func (stubActions) OnReply(*revoltgo.Message)                    {}
 func (stubActions) OnEdit(*revoltgo.Message)                     {}
@@ -96,5 +99,36 @@ func TestOverlayDismiss(t *testing.T) {
 	overlay.Tapped(&fyne.PointEvent{})
 	if dismissed != 1 {
 		t.Errorf("tapping the backdrop dismissed %d times, want 1", dismissed)
+	}
+}
+
+// TestPopoverMountsBesideItsAnchor covers the anchored overlay end to end: the
+// card is sized from its own minimum and placed clear of the anchor's right
+// edge. The placement arithmetic itself is TestPlaceBesideStaysOnScreen's; what
+// this checks is that a mounted layer measures the anchor against the same
+// origin it positions within.
+func TestPopoverMountsBesideItsAnchor(t *testing.T) {
+	test.NewTempApp(t)
+
+	anchor := canvas.NewRectangle(color.Transparent)
+	anchor.SetMinSize(fyne.NewSize(40, 40))
+
+	win := test.NewWindow(container.NewWithoutLayout(anchor))
+	t.Cleanup(win.Close)
+	win.Resize(fyne.NewSize(900, 600))
+	anchor.Resize(anchor.MinSize())
+	anchor.Move(fyne.NewPos(60, 300))
+
+	card := NewProfileCard(viewerDeps(), Profile{Name: "Someone"}, ProfileActions{})
+	win.Canvas().Overlays().Add(NewPopover(card.Content, anchor, func() {}))
+
+	driver := fyne.CurrentApp().Driver()
+	right := driver.AbsolutePositionForObject(anchor).X + anchor.Size().Width
+
+	if got := driver.AbsolutePositionForObject(card.Content).X; got <= right {
+		t.Errorf("card starts at x=%v, want it clear of the anchor's edge at %v", got, right)
+	}
+	if got := card.Content.Size(); got != card.Content.MinSize() {
+		t.Errorf("card was mounted at %v, want its minimum %v", got, card.Content.MinSize())
 	}
 }

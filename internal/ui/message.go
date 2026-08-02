@@ -109,7 +109,9 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
-	w.body = newFlushContainer(renderMessageBody(deps, text))
+	// Every interactive piece of the row takes the same context menu, so the
+	// pointer never lands somewhere that swallows a right-click silently.
+	w.body = newFlushContainer(renderMessageBody(deps, text, w.TappedSecondary))
 	w.bodySlot = container.NewStack(w.body)
 
 	var leftColumn, body fyne.CanvasObject
@@ -121,25 +123,39 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 
 		gutter := &columnLayout{
 			width:     theme.Sizes.MessageAvatarColumnWidth,
-			topOffset: theme.Sizes.MessageTimestampTopOffset,
+			topOffset: gutterTimestampTopOffset(),
 			collapse:  true,
 		}
 		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = buildGroupedContent(deps, message, w.bodySlot)
+		body = buildGroupedContent(deps, message, w.bodySlot, w.TappedSecondary)
 	} else {
 		name, nameColor, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
-			deps.Actions.OnAvatarTapped(message.Author)
+			deps.Actions.OnUserTapped(message.Author, w.avatar)
 		})
-		leftColumn = container.New(&columnLayout{width: theme.Sizes.MessageAvatarColumnWidth}, w.avatar)
+		w.avatar.onSecondaryTap = w.TappedSecondary
+		leftColumn = container.New(&columnLayout{
+			width:     theme.Sizes.MessageAvatarColumnWidth,
+			topOffset: avatarTopOffset(),
+		}, w.avatar)
 
 		w.authorText = canvas.NewText(name, nameColor)
 		w.authorText.TextStyle = fyne.TextStyle{Bold: true}
-		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot)
+		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot, w.TappedSecondary)
 	}
 
-	paddedBody := container.NewBorder(nil, nil, HorizontalSpacer(theme.Sizes.MessageContentPadding), nil, body)
-	row := container.NewBorder(nil, nil, leftColumn, nil, paddedBody)
+	// One row rather than a Border inside a Border: each of those inserts theme
+	// padding between its edges and its centre, so the gap after the avatar gutter
+	// was three times MessageContentPadding with nothing saying so.
+	row := NewFillRow(2, leftColumn, HorizontalSpacer(theme.Sizes.MessageContentPadding), body)
+
+	// Replies belong inside the row's margins, above the message they answer, so
+	// carrying one leaves the avatar and the name exactly where a message without
+	// one puts them.
+	content := fyne.CanvasObject(row)
+	if !grouped && len(message.Replies) > 0 {
+		content = VBoxNoSpacing(buildReplyBlock(deps, message, w.TappedSecondary), row)
+	}
 
 	hPad := theme.Sizes.MessageHorizontalPadding
 	w.bottomSpacer = canvas.NewRectangle(color.Transparent)
@@ -147,24 +163,14 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 	inner := container.NewBorder(
 		VerticalSpacer(verticalPad(grouped)), w.bottomSpacer,
 		HorizontalSpacer(hPad), HorizontalSpacer(hPad),
-		row,
+		content,
 	)
 
 	w.actionsOverlay = container.New(&overlayLayout{yOffset: -16, rightOffset: 6})
-	messageRow := container.NewStack(inner, w.actionsOverlay)
+	w.content = container.NewStack(inner, w.actionsOverlay)
 
 	if dayLabel != "" {
 		w.daySeparator = newDaySeparator(dayLabel)
-	}
-
-	w.content = messageRow
-	if !grouped && len(message.Replies) > 0 {
-		replies := container.NewVBox()
-		for _, replyID := range message.Replies {
-			replies.Add(buildReplyPreview(deps, message.Channel, replyID))
-			replies.Add(VerticalSpacer(-15))
-		}
-		w.content = container.NewVBox(replies, messageRow)
 	}
 
 	w.ExtendBaseWidget(w)
@@ -303,15 +309,15 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	items = append(items, fyne.NewMenuItemSeparator())
 	if w.message.Content != "" {
 		items = append(items, fyne.NewMenuItemWithIcon("Copy message", fynetheme.ContentCopyIcon(), func() {
-			copyToClipboard(w.message.Content)
+			CopyToClipboard(w.message.Content)
 		}))
 	}
 	items = append(items,
 		fyne.NewMenuItemWithIcon("Copy message ID", fynetheme.ContentCopyIcon(), func() {
-			copyToClipboard(w.message.ID)
+			CopyToClipboard(w.message.ID)
 		}),
 		fyne.NewMenuItemWithIcon("Copy author ID", fynetheme.AccountIcon(), func() {
-			copyToClipboard(w.message.Author)
+			CopyToClipboard(w.message.Author)
 		}),
 	)
 
@@ -513,6 +519,28 @@ func resolveAuthor(deps Deps, message *revoltgo.Message) (name string, nameColor
 	return author.Name, nameColor, author.AvatarURL
 }
 
+/* Vertical alignment */
+
+// messageLineHeight is the height of one line of message text. The author name
+// and a single-line body share it, both being drawn at the theme's text size.
+func messageLineHeight() float32 { return lineHeight(fynetheme.TextSize()) }
+
+// avatarTopOffset places the avatar centred on the block a single-line message
+// occupies: the author line plus one line of body. It is an offset from the top
+// of the row rather than a centring of the whole row, so a longer body, an
+// attachment or a reply grows away from it and every message's avatar sits at
+// the same height whatever it says.
+func avatarTopOffset() float32 {
+	return (messageLineHeight()*2 - theme.Sizes.MessageAvatarSize) / 2
+}
+
+// gutterTimestampTopOffset centres a grouped continuation's hover timestamp on
+// the one body line it stands beside. It is smaller text than the body, so
+// sharing that line's centre takes an offset of its own.
+func gutterTimestampTopOffset() float32 {
+	return (messageLineHeight() - lineHeight(theme.Sizes.MessageTimestampSize)) / 2
+}
+
 // verticalPad returns a message's top or bottom margin: tight when it abuts a
 // same-author continuation, the full gap otherwise.
 func verticalPad(tight bool) float32 {
@@ -524,36 +552,38 @@ func verticalPad(tight bool) float32 {
 }
 
 // buildMessageContent assembles the author header plus any attachments.
-func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
+func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	header := buildMessageHeader(author, timestamp, body)
 	if len(message.Attachments) == 0 {
 		return header
 	}
 
-	return container.NewVBox(header, buildAttachments(deps, message.Attachments))
+	return container.NewVBox(header, buildAttachments(deps, message.Attachments, onMenu))
 }
 
 // buildGroupedContent renders a grouped continuation: just the body and any
 // attachments, with no author/timestamp header.
-func buildGroupedContent(deps Deps, message *revoltgo.Message, body fyne.CanvasObject) fyne.CanvasObject {
+func buildGroupedContent(deps Deps, message *revoltgo.Message, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	if len(message.Attachments) == 0 {
 		return body
 	}
 
-	return container.NewVBox(body, buildAttachments(deps, message.Attachments))
+	return container.NewVBox(body, buildAttachments(deps, message.Attachments, onMenu))
 }
 
 // buildMessageHeader renders the author line — the bold name in its role colour
-// followed by a baseline-aligned timestamp — above the message text. Keeping the
-// timestamp inline on the name line aligns it with the username and stops long
-// body text running under it.
+// followed by the timestamp — above the message text. Keeping the timestamp
+// inline on the name line aligns it with the username and stops long body text
+// running under it.
+//
+// Both texts go straight into the HBox, which stretches each to the line's full
+// height; canvas.Text centres its glyphs in whatever height it is given, so the
+// smaller timestamp lands centred against the name with no offset of our own.
 func buildMessageHeader(author *canvas.Text, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize
 
-	// Drop the smaller timestamp so its baseline lines up with the bold name.
-	tsAligned := VBoxNoSpacing(VerticalSpacer(theme.Sizes.MessageTimestampTopOffset), ts)
-	nameLine := container.NewHBox(author, HorizontalSpacer(theme.Sizes.MessageContentPadding), tsAligned)
+	nameLine := HBoxNoSpacing(author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts)
 
 	return VBoxNoSpacing(nameLine, body)
 }
@@ -617,9 +647,64 @@ func (l *daySeparatorLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 /* Reply previews */
 
+// buildReplyBlock stacks the quoted lines above the message answering them,
+// ending in the gap that separates the two.
+func buildReplyBlock(deps Deps, message *revoltgo.Message, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+	quotes := make([]fyne.CanvasObject, 0, len(message.Replies)+1)
+	for _, replyID := range message.Replies {
+		quotes = append(quotes, buildReplyPreview(deps, message.Channel, replyID, onMenu))
+	}
+
+	return VBoxNoSpacing(append(quotes, VerticalSpacer(theme.Sizes.MessageReplyBlockGap))...)
+}
+
+// newReplyLine draws the elbow that ties a quoted line to the message answering
+// it: a leg standing in the avatar gutter and an arm running right to the quote.
+// Both are plain rectangles meeting at a square corner — nothing rounds the turn.
+// Every quoted line carries its own, so a stack of them reads as several separate
+// answers rather than one bracket around the group.
+func newReplyLine() fyne.CanvasObject {
+	leg := canvas.NewRectangle(theme.Colors.ReplyLine)
+	arm := canvas.NewRectangle(theme.Colors.ReplyLine)
+
+	return container.New(&replyLineLayout{}, leg, arm)
+}
+
+// replyLineLayout draws the elbow across the width the avatar gutter and the gap
+// after it occupy, so the quote it leads starts exactly where the message body
+// below does. It reports no height of its own — the quoted line decides the row,
+// and the elbow is measured against whatever that comes to. Exactly two children,
+// leg first.
+type replyLineLayout struct{}
+
+func (l *replyLineLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 2 {
+		return
+	}
+	leg, arm := objects[0], objects[1]
+
+	thickness := theme.Sizes.MessageReplyLineThickness
+	x := theme.Sizes.MessageReplyLineInset
+	// The arm sits on the quoted line's centre and the leg hangs from the corner to
+	// the foot of the row, pointing at the message the quote belongs to.
+	y := (size.Height - thickness) / 2
+
+	leg.Resize(fyne.NewSize(thickness, max(size.Height-y, 0)))
+	leg.Move(fyne.NewPos(x, y))
+
+	arm.Resize(fyne.NewSize(max(size.Width-x-theme.Sizes.MessageReplyLineGap, 0), thickness))
+	arm.Move(fyne.NewPos(x, y))
+}
+
+func (l *replyLineLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	width := theme.Sizes.MessageAvatarColumnWidth + theme.Sizes.MessageContentPadding
+
+	return fyne.NewSize(width, 0)
+}
+
 // buildReplyPreview renders the small quoted line shown above a message that
 // replies to another.
-func buildReplyPreview(deps Deps, channelID, messageID string) fyne.CanvasObject {
+func buildReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	author, content, avatarURL, _ := resolveReply(deps, channelID, messageID)
 
 	size := fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize)
@@ -639,14 +724,14 @@ func buildReplyPreview(deps Deps, channelID, messageID string) fyne.CanvasObject
 		HorizontalSpacer(5),
 		container.NewCenter(contentLabel),
 	)
-	padded := container.NewBorder(VerticalSpacer(3), VerticalSpacer(3), HorizontalSpacer(3), HorizontalSpacer(3), row)
+	quote := NewTappableContainer(row, func() {})
+	quote.onSecondaryTap = onMenu
 
-	// Indent to the message content column so the quoted line sits directly above
-	// the body rather than under the avatar gutter.
+	// The elbow both indents the quote to the message content column and draws the
+	// line down to the message. The row's own horizontal margin is already applied
+	// around the block, so it only has the gutter and the gap after it to span.
 	// TODO: navigate to the referenced message on tap.
-	indent := theme.Sizes.MessageHorizontalPadding + theme.Sizes.MessageAvatarColumnWidth + theme.Sizes.MessageContentPadding
-
-	return container.NewHBox(HorizontalSpacer(indent), NewTappableContainer(padded, func() {}))
+	return HBoxNoSpacing(newReplyLine(), quote)
 }
 
 // resolveReply looks up a referenced message and returns its author, truncated

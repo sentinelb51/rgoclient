@@ -13,12 +13,18 @@ import (
 //go:embed mention.svg
 var mentionSVG []byte
 
+//go:embed members.svg
+var membersSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
 var (
 	// MentionIcon marks the "also mention the author" toggle on a reply card.
 	MentionIcon fyne.Resource = fyne.NewStaticResource("mention.svg", mentionSVG)
+
+	// MembersIcon marks the message header's member-sidebar toggle.
+	MembersIcon fyne.Resource = fyne.NewStaticResource("members.svg", membersSVG)
 
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)

@@ -19,19 +19,28 @@ import (
 
 /* The modal layer */
 
-// Overlay is a modal layer drawn over the whole window: a dimmed backdrop with
-// content centred on it. Fyne sizes an overlay to the canvas when it is pushed
-// onto Canvas().Overlays() and routes every pointer event to the top-most
-// overlay, so the backdrop both dims and blocks the UI underneath. Tapping it
-// dismisses the overlay.
+// Overlay is a modal layer drawn over the whole window: a backdrop with content
+// placed on it. Fyne sizes an overlay to the canvas when it is pushed onto
+// Canvas().Overlays() and routes every pointer event to the top-most overlay, so
+// the backdrop both dims and blocks the UI underneath. Tapping it dismisses the
+// overlay.
 //
 // It is a plain widget rather than a widget.PopUp because a pop-up draws its own
 // themed card around the content and paints its backdrop from the theme's shadow
 // colour — a light seam tint, far too faint to read as a lightbox.
+//
+// An anchored overlay (NewPopover) is the same layer with the content placed
+// beside a widget instead of centred, and its backdrop left clear: a card that
+// belongs to the thing it points at should not dim what surrounds it, but it
+// still has to take the click that dismisses it.
 type Overlay struct {
 	tapBase
 	backdrop *canvas.Rectangle
 	content  fyne.CanvasObject
+	anchor   fyne.CanvasObject // nil for a centred modal
+
+	// placement holds the content, so Reposition can re-run only that layout.
+	placement *fyne.Container
 }
 
 var (
@@ -39,8 +48,8 @@ var (
 	_ desktop.Cursorable = (*Overlay)(nil)
 )
 
-// NewOverlay creates a modal layer showing content, dismissed by tapping the
-// backdrop around it.
+// NewOverlay creates a modal layer showing content centred on a dimmed backdrop,
+// dismissed by tapping around it.
 func NewOverlay(content fyne.CanvasObject, onDismiss func()) *Overlay {
 	o := &Overlay{
 		backdrop: canvas.NewRectangle(theme.Colors.OverlayBackdrop),
@@ -52,9 +61,32 @@ func NewOverlay(content fyne.CanvasObject, onDismiss func()) *Overlay {
 	return o
 }
 
-func (o *Overlay) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(o.backdrop, container.NewCenter(o.content)))
+// NewPopover creates a modal layer showing content beside anchor, dismissed by
+// tapping anywhere else. anchor must be mounted on the same canvas.
+func NewPopover(content, anchor fyne.CanvasObject, onDismiss func()) *Overlay {
+	o := NewOverlay(content, onDismiss)
+	o.backdrop.FillColor = color.Transparent
+	o.anchor = anchor
+
+	return o
 }
+
+func (o *Overlay) CreateRenderer() fyne.WidgetRenderer {
+	if o.anchor == nil {
+		o.placement = container.NewCenter(o.content)
+	} else {
+		o.placement = container.New(&popoverLayout{anchor: o.anchor, host: o}, o.content)
+	}
+
+	return widget.NewSimpleRenderer(container.NewStack(o.backdrop, o.placement))
+}
+
+// Reposition re-places the content after it changed size — a profile card grows
+// when its About section arrives, and both placements size the card from its own
+// minimum. Neither re-runs on its own: Refresh repaints without laying out, and
+// Resize is a no-op while the layer still fills the same canvas. Call on the UI
+// thread.
+func (o *Overlay) Reposition() { Relayout(o.placement) }
 
 // Cursor keeps the normal pointer over the backdrop: tapBase advertises the hand
 // for things that look clickable, and a dimmed background isn't one.

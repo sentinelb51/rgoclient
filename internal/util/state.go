@@ -1,8 +1,10 @@
 package util
 
 import (
+	"cmp"
 	"fmt"
 	"image/color"
+	"slices"
 	"strconv"
 
 	"github.com/sentinelb51/revoltgo"
@@ -186,6 +188,102 @@ func MemberOnline(session *revoltgo.Session, member *revoltgo.ServerMember) bool
 	return false
 }
 
+// Role is a server role the way a profile card shows one: its name, in its own
+// colour.
+type Role struct {
+	Name  string
+	Color color.Color // nil when the role has no colour, or none that parses
+}
+
+// MemberRoles returns a member's roles, most senior first — Revolt ranks the
+// most senior lowest — skipping any the server has not published to us. The
+// colour follows the same rule as MessageAuthor's: plain hex only.
+func MemberRoles(session *revoltgo.Session, member *revoltgo.ServerMember) []Role {
+	if session == nil {
+		return nil
+	}
+
+	return serverRoles(session.State.Server(member.ID.Server), member.Roles)
+}
+
+// serverRoles resolves role IDs against the server that defines them, in the
+// order MemberRoles promises.
+func serverRoles(server *revoltgo.Server, roleIDs []string) []Role {
+	if server == nil {
+		return nil
+	}
+
+	known := make([]*revoltgo.ServerRole, 0, len(roleIDs))
+	for _, id := range roleIDs {
+		if role := server.Roles[id]; role != nil {
+			known = append(known, role)
+		}
+	}
+	slices.SortFunc(known, func(x, y *revoltgo.ServerRole) int { return cmp.Compare(x.Rank, y.Rank) })
+
+	roles := make([]Role, len(known))
+	for i, role := range known {
+		roles[i] = Role{Name: role.Name}
+		if role.Colour != nil {
+			if c, ok := parseHexColor(*role.Colour); ok {
+				roles[i].Color = c
+			}
+		}
+	}
+
+	return roles
+}
+
+/* Users */
+
+// UserHandle is the account's unique handle — "@username#0001" — which is what
+// tells two people sharing a display name apart. The discriminator is left off
+// when the account carries none.
+func UserHandle(user *revoltgo.User) string {
+	if user == nil || user.Username == "" {
+		return ""
+	}
+	if user.Discriminator == "" {
+		return "@" + user.Username
+	}
+
+	return "@" + user.Username + "#" + user.Discriminator
+}
+
+// badges maps Revolt's badge bits to what each is called, in the order a profile
+// lists them. Bits the platform adds later are ignored rather than shown as a
+// number nobody can read.
+var badges = []struct {
+	bit  uint32
+	name string
+}{
+	{1, "Developer"},
+	{2, "Translator"},
+	{4, "Supporter"},
+	{8, "Responsible Disclosure"},
+	{16, "Founder"},
+	{32, "Moderation"},
+	{64, "Active Supporter"},
+	{128, "Paw"},
+	{256, "Early Adopter"},
+}
+
+// UserBadges names the badges a user carries.
+func UserBadges(user *revoltgo.User) []string {
+	if user == nil || user.Badges == 0 {
+		return nil
+	}
+
+	var names []string
+	for _, badge := range badges {
+		if user.Badges&badge.bit != 0 {
+			names = append(names, badge.name)
+		}
+	}
+
+	return names
+}
+
 // UserName resolves a user ID to the name to show for them, without going to the
 // network. A user State has never heard of yields "", so callers can decide what
 // to show in their place.
@@ -235,6 +333,35 @@ func ChannelName(session *revoltgo.Session, channel *revoltgo.Channel) string {
 	}
 
 	return "Unnamed channel"
+}
+
+// ChannelAvatarURL returns the picture a conversation is shown under: a direct
+// message wears the other participant's avatar, saved notes the account's own,
+// and a group its icon. "" when there is none — a group without an icon, or a
+// server channel, which is prefixed with a glyph rather than a picture — leaving
+// the caller to draw a blank avatar. A user always resolves to something, since
+// revoltgo falls back to the default avatar endpoint.
+func ChannelAvatarURL(session *revoltgo.Session, channel *revoltgo.Channel) string {
+	if session == nil || channel == nil {
+		return ""
+	}
+
+	switch channel.ChannelType {
+	case revoltgo.ChannelTypeDM:
+		if user := session.State.User(DMRecipientID(session, channel)); user != nil {
+			return user.AvatarURL("256")
+		}
+	case revoltgo.ChannelTypeSavedMessages:
+		if self := session.State.Self(); self != nil {
+			return self.AvatarURL("256")
+		}
+	case revoltgo.ChannelTypeGroup:
+		if channel.Icon != nil {
+			return channel.Icon.URL("256")
+		}
+	}
+
+	return ""
 }
 
 // DMRecipientID returns the other participant of a direct message channel, or ""

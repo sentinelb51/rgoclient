@@ -4,7 +4,9 @@
 package app
 
 import (
+	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -16,6 +18,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 const (
@@ -24,6 +27,10 @@ const (
 	messagesPerChannel = 500 // cached messages per channel
 	cachedChannels     = 5   // channels kept in the message cache
 	cachedPreviews     = 100 // text-attachment previews kept in memory
+
+	// deletePreviewRunes is how much of a message the delete confirmation quotes
+	// back: enough to recognise it, short enough to keep the card one question.
+	deletePreviewRunes = 120
 )
 
 // App holds the session, the caches, and all mutable UI state. It also
@@ -59,9 +66,13 @@ type App struct {
 
 	/* Mounted UI */
 
+	mainRow       *fyne.Container // the four-column fill row, relaid out by toggleMemberList
+	tooltip       *ui.Tooltip     // the hover label floating over that row
+	notices       *ui.NoticeStack // the transient messages floating over it too
 	serverList    *fyne.Container
 	channelList   *fyne.Container
 	memberList    *fyne.Container
+	memberSidebar *fyne.Container // the member column itself, hidden by its header toggle
 	messageList   *fyne.Container
 	messageScroll *ui.ObservableScroll
 	input         *ui.MessageInput
@@ -112,6 +123,8 @@ func New(fyneApp fyne.App) *App {
 		channelList:         container.NewVBox(),
 		memberList:          ui.VBoxNoSpacing(),
 		messageList:         ui.VBoxNoSpacing(),
+		tooltip:             ui.NewTooltip(),
+		notices:             ui.NewNoticeStack(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
@@ -182,13 +195,18 @@ func (a *App) stateChannel(channelID string) *revoltgo.Channel {
 	return a.session.State.Channel(channelID)
 }
 
-// currentServer returns the selected server, or nil.
-func (a *App) currentServer() *revoltgo.Server {
-	if a.session == nil || a.currentServerID == "" {
+// stateServer returns a server from State, or nil when logged out or unknown.
+func (a *App) stateServer(serverID string) *revoltgo.Server {
+	if a.session == nil || serverID == "" {
 		return nil
 	}
 
-	return a.session.State.Server(a.currentServerID)
+	return a.session.State.Server(serverID)
+}
+
+// currentServer returns the selected server, or nil.
+func (a *App) currentServer() *revoltgo.Server {
+	return a.stateServer(a.currentServerID)
 }
 
 // currentChannel returns the selected channel, or nil.
@@ -234,15 +252,41 @@ func (a *App) OnAttachmentTapped(attachment *revoltgo.File) {
 	a.showAttachmentViewer(attachment)
 }
 
-// OnAvatarTapped is a placeholder for opening a user profile.
-func (a *App) OnAvatarTapped(userID string) {
-	// todo: user profile view
-	log.Printf("avatar tapped: %s", userID)
+// OnUserTapped opens a profile; it lives in profile.go with the rest of them.
+
+// OnDelete asks before deleting a message. Whether the action is offered at all
+// is decided by the widget; the confirmation is here because deleting is
+// irreversible and the quick actions put it one click from the pointer.
+func (a *App) OnDelete(message *revoltgo.Message) {
+	if message == nil {
+		return
+	}
+
+	a.confirm(ui.Confirm{
+		Title:     "Delete message",
+		Body:      deletePrompt(message),
+		Action:    "Delete",
+		Tone:      ui.ToneDanger,
+		OnConfirm: func() { a.deleteMessage(message) },
+	})
 }
 
-// OnDelete deletes a message. Whether the action is offered at all is decided by
-// the widget; the server is the final authority, so a rejected delete just logs.
-func (a *App) OnDelete(message *revoltgo.Message) {
+// deletePrompt quotes what is about to go, so a misaimed delete shows itself
+// before it happens rather than after. The quoted text is flattened onto one
+// line: the card asks a question, it isn't a second copy of the message.
+func deletePrompt(message *revoltgo.Message) string {
+	content := strings.Join(strings.Fields(message.Content), " ")
+	if content == "" {
+		return "This message will be deleted for everyone."
+	}
+
+	return fmt.Sprintf("“%s” will be deleted for everyone.", util.Truncate(content, deletePreviewRunes))
+}
+
+// deleteMessage deletes without waiting: the message leaves the view through the
+// MessageDelete gateway event. The server is the final authority, so a rejected
+// delete leaves it where it is and says so.
+func (a *App) deleteMessage(message *revoltgo.Message) {
 	session := a.session
 	if session == nil {
 		return
@@ -251,6 +295,7 @@ func (a *App) OnDelete(message *revoltgo.Message) {
 	go func() {
 		if err := session.ChannelMessageDelete(message.Channel, message.ID); err != nil {
 			log.Printf("delete message %s: %v", message.ID, err)
+			a.doOnUI(func() { a.notify(ui.ToneDanger, "Could not delete that message.") }, false)
 		}
 	}()
 }
@@ -304,6 +349,7 @@ func (a *App) startEditing(w *ui.MessageWidget) {
 				a.doOnUI(func() {
 					a.messages.Replace(message.Channel, message)
 					a.refreshMessage(message.Channel, message.ID)
+					a.notify(ui.ToneDanger, "Could not save your edit.")
 				}, false)
 			}
 		}()

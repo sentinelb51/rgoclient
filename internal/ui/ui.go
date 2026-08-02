@@ -30,7 +30,9 @@ type Deps struct {
 // MessageActions handles the user interactions that originate from widgets. It
 // is implemented by the application controller.
 type MessageActions interface {
-	OnAvatarTapped(userID string)
+	// OnUserTapped opens someone's profile. anchor is the widget that was clicked
+	// — a message avatar, a member row — which the compact card is placed beside.
+	OnUserTapped(userID string, anchor fyne.CanvasObject)
 	OnAttachmentTapped(attachment *revoltgo.File)
 	OnReply(message *revoltgo.Message)
 	OnEdit(message *revoltgo.Message)
@@ -96,7 +98,20 @@ func AnchorBelow(obj fyne.CanvasObject) fyne.Position {
 	return fyne.NewPos(pos.X, pos.Y+obj.Size().Height)
 }
 
-func copyToClipboard(text string) {
+// showMenuHook pops the items hook supplies at the cursor. It is what the
+// sidebar widgets' exported Menu fields are wired to: the items themselves are
+// the controller's business, and building them on demand keeps the menu in step
+// with state that changed since the row was mounted. A nil hook is a no-op.
+func showMenuHook(anchor fyne.CanvasObject, hook func() []*fyne.MenuItem, event *fyne.PointEvent) {
+	if hook == nil {
+		return
+	}
+
+	ShowContextMenu(anchor, hook(), event.AbsolutePosition)
+}
+
+// CopyToClipboard puts text on the system clipboard.
+func CopyToClipboard(text string) {
 	fyne.CurrentApp().Clipboard().SetContent(text)
 }
 

@@ -49,6 +49,13 @@ func DayLabel(t time.Time) string {
 	}
 }
 
+// FullDate names a calendar day outright, for the dates a profile carries —
+// when an account was made, or when someone joined a server — where "Today" and
+// a relative age tell the reader less than the day itself.
+func FullDate(t time.Time) string {
+	return t.Local().Format(dayLayout)
+}
+
 // ShortTime formats just the local clock time, for the gutter timestamp on
 // grouped continuation messages.
 func ShortTime(t time.Time) string {
@@ -61,7 +68,7 @@ func NiceTime(t time.Time) string {
 	t, now := t.Local(), time.Now().Local()
 
 	if t.After(now) {
-		return "A few moments ago" // clock skew between us and the server
+		return "Just now" // clock skew between us and the server
 	}
 
 	// Compare calendar days, not elapsed hours: both dates are rebuilt at

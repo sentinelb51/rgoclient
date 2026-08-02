@@ -179,7 +179,27 @@ func (a *App) buildMemberList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MemberListBackground)
 
 	a.refreshMemberList()
-	return ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, background, container.NewVScroll(a.memberList))
+	a.memberSidebar = ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth,
+		background, container.NewVScroll(a.memberList))
+
+	return a.memberSidebar
+}
+
+// toggleMemberList shows or hides the member sidebar, handing its width to the
+// message area. Rows keep being rebuilt while it is hidden, so re-showing it
+// costs nothing beyond the layout.
+func (a *App) toggleMemberList() {
+	if a.memberSidebar == nil {
+		return
+	}
+
+	if a.memberSidebar.Visible() {
+		a.memberSidebar.Hide()
+	} else {
+		a.memberSidebar.Show()
+	}
+
+	ui.Relayout(a.mainRow)
 }
 
 // refreshMemberList rebuilds the member rows for the current server, grouped into
@@ -227,9 +247,13 @@ func (a *App) addMemberSection(title string, members []*revoltgo.ServerMember, o
 	}
 	slices.SortFunc(entries, func(x, y entry) int { return strings.Compare(x.key, y.key) })
 
+	serverID := a.currentServerID
 	a.memberList.Add(ui.NewMemberSection(fmt.Sprintf("%s — %d", title, len(members))))
 	for _, e := range entries {
-		a.memberList.Add(ui.NewMemberWidget(deps, e.member, online))
+		w := ui.NewMemberWidget(deps, e.member, online)
+		userID := e.member.ID.User
+		w.Menu = func() []*fyne.MenuItem { return a.memberMenu(serverID, userID) }
+		a.memberList.Add(w)
 	}
 }
 

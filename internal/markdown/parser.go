@@ -20,6 +20,42 @@ func PlainText(nodes []Inline) string {
 	return b.String()
 }
 
+// DocumentText returns a whole document as one run of unformatted text, blocks
+// joined by a space. It is for a preview with room for a sentence rather than a
+// body — a profile card's bio — where the formatting would only get in the way
+// of the words.
+func DocumentText(doc *Document) string {
+	var b strings.Builder
+
+	for _, block := range doc.Blocks {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+
+		switch v := block.(type) {
+		case *Paragraph:
+			writePlain(&b, v.Children)
+		case *Heading:
+			writePlain(&b, v.Children)
+		case *Subtext:
+			writePlain(&b, v.Children)
+		case *Blockquote:
+			writePlain(&b, v.Children)
+		case *CodeBlock:
+			b.WriteString(v.Text)
+		case *List:
+			for i, item := range v.Items {
+				if i > 0 {
+					b.WriteByte(' ')
+				}
+				writePlain(&b, item)
+			}
+		}
+	}
+
+	return b.String()
+}
+
 func writePlain(b *strings.Builder, nodes []Inline) {
 	for _, n := range nodes {
 		switch v := n.(type) {

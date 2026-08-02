@@ -160,3 +160,15 @@ func TestParseBlockquote(t *testing.T) {
 		t.Errorf("triple-quote = %#v", doc.Blocks[0])
 	}
 }
+
+func TestDocumentText(t *testing.T) {
+	input := "# Heading\n**bold** and `code`\n\n- one\n- two\n\n> quoted <@01USER>"
+	want := "Heading bold and code one two quoted @"
+
+	if got := DocumentText(Parse(input)); got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+	if got := DocumentText(Parse("")); got != "" {
+		t.Errorf("an empty document yielded %q", got)
+	}
+}

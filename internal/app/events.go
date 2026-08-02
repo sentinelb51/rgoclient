@@ -230,6 +230,61 @@ func (a *App) onServerCreate(_ *revoltgo.Session, event *revoltgo.EventServerCre
 	}, false)
 }
 
+// onServerDelete drops a server the user is no longer a member of, whether they
+// left it, were removed from it, or it was deleted outright — the gateway sends
+// the same event for all three. If it was the server in view, the client moves
+// somewhere that still exists rather than showing an empty shell.
+func (a *App) onServerDelete(_ *revoltgo.Session, event *revoltgo.EventServerDelete) {
+	log.Printf("left server %s", event.ID)
+
+	a.doOnUI(func() {
+		i := slices.Index(a.serverIDs, event.ID)
+		if i == -1 {
+			return
+		}
+
+		a.serverIDs = slices.Delete(a.serverIDs, i, i+1)
+		a.refreshServerList()
+
+		if a.currentServerID != event.ID {
+			return
+		}
+
+		// Cleared first: selectServer treats re-selecting the current server as a
+		// no-op, and this one is about to stop existing.
+		a.currentServerID = ""
+		if len(a.serverIDs) > 0 {
+			a.selectServer(a.serverIDs[0])
+			return
+		}
+		a.selectHome()
+	}, false)
+}
+
+// onChannelDelete drops a closed conversation or a deleted server channel. Both
+// arrive here, so the sidebar is rebuilt either way and only the home view's own
+// ordering needs maintaining.
+func (a *App) onChannelDelete(_ *revoltgo.Session, event *revoltgo.EventChannelDelete) {
+	log.Printf("channel %s closed", event.ID)
+
+	a.doOnUI(func() {
+		delete(a.unreadChannels, event.ID)
+		if i := slices.Index(a.dmChannels, event.ID); i >= 0 {
+			a.dmChannels = slices.Delete(a.dmChannels, i, i+1)
+		}
+		a.refreshChannelList()
+
+		if a.currentChannelID != event.ID {
+			return
+		}
+
+		a.clearChannelSelection()
+		if a.homeSelected && len(a.dmChannels) > 0 {
+			a.selectChannel(a.dmChannels[0])
+		}
+	}, false)
+}
+
 // onServerMemberJoin refreshes the member list when someone joins the open
 // server.
 func (a *App) onServerMemberJoin(_ *revoltgo.Session, event *revoltgo.EventServerMemberJoin) {

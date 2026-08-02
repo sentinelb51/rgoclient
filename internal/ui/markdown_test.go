@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
 
@@ -14,7 +15,7 @@ import (
 // out canvas objects, so tests can assert on their positions and sizes.
 func layoutMessage(t *testing.T, body string, width float32) []fyne.CanvasObject {
 	t.Helper()
-	rt, ok := renderMessageBody(Deps{}, body).(fyne.Widget)
+	rt, ok := renderMessageBody(Deps{}, body, nil).(fyne.Widget)
 	if !ok {
 		t.Fatalf("%q: rendered body is not a widget", body)
 	}
@@ -44,11 +45,11 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 func TestUniformBodySelectable(t *testing.T) {
 	label := func(body string) *widget.Label {
 		t.Helper()
-		l, ok := renderMessageBody(Deps{}, body).(*widget.Label)
-		if !ok || !l.Selectable {
+		b, ok := renderMessageBody(Deps{}, body, nil).(*bodyText)
+		if !ok || !b.Selectable {
 			t.Fatalf("%q did not render as a selectable label", body)
 		}
-		return l
+		return &b.Label
 	}
 
 	label("hello world\nsecond line")
@@ -65,8 +66,81 @@ func TestUniformBodySelectable(t *testing.T) {
 	label("snake_case_name stays plain")
 
 	for _, body := range []string{"", "**bold** mixed", "~~struck~~", "> quoted"} {
-		if _, ok := renderMessageBody(Deps{}, body).(*widget.RichText); !ok {
+		if _, ok := renderMessageBody(Deps{}, body, nil).(*widget.RichText); !ok {
 			t.Errorf("%q should render as RichText", body)
+		}
+	}
+}
+
+// bodyCatcher renders a selectable body at the given width and returns the
+// catcher covering its selection overlay.
+func bodyCatcher(t *testing.T, onMenu func(*fyne.PointEvent)) (*bodyText, *selectionCatcher) {
+	t.Helper()
+
+	body, ok := renderMessageBody(Deps{}, "hello world", onMenu).(*bodyText)
+	if !ok {
+		t.Fatal("plain body did not render as a selectable label")
+	}
+
+	win := test.NewWindow(body)
+	t.Cleanup(win.Close)
+	body.Resize(fyne.NewSize(200, 40))
+
+	objects := test.WidgetRenderer(body).Objects()
+	catcher, ok := objects[len(objects)-1].(*selectionCatcher)
+	if !ok {
+		t.Fatalf("last renderer object is %T, want the catcher on top of the selection", objects[len(objects)-1])
+	}
+
+	return body, catcher
+}
+
+// TestSelectableBodyCatchesRightClick covers the reason bodyText exists: Fyne's
+// selection overlay would otherwise take the right-click and answer it with its
+// own "Copy" menu. The catcher has to sit above it and hand the click on, while
+// still driving the overlay for everything selection needs.
+func TestSelectableBodyCatchesRightClick(t *testing.T) {
+	test.NewTempApp(t)
+
+	var menued int
+	body, catcher := bodyCatcher(t, func(*fyne.PointEvent) { menued++ })
+
+	catcher.TappedSecondary(&fyne.PointEvent{})
+	if menued != 1 {
+		t.Fatalf("right-click raised the message menu %d times, want once", menued)
+	}
+
+	// Selecting is a press and a drag across the text; the overlay only answers if
+	// the catcher really is forwarding to it. The drag has to carry its delta —
+	// the overlay takes the span's start to be where the pointer came from.
+	catcher.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonPrimary})
+	catcher.Dragged(&fyne.DragEvent{
+		PointEvent: fyne.PointEvent{Position: fyne.NewPos(180, 10)},
+		Dragged:    fyne.NewDelta(180, 0),
+	})
+	catcher.DragEnd()
+
+	if body.SelectedText() == "" {
+		t.Error("dragging across the body selected nothing, so the catcher is swallowing selection")
+	}
+}
+
+// TestSelectableBodyWithoutMenu covers the fallback: with no menu to raise there
+// is nothing to catch for, and the body stays an ordinary selectable Label.
+func TestSelectableBodyWithoutMenu(t *testing.T) {
+	test.NewTempApp(t)
+
+	body, ok := renderMessageBody(Deps{}, "hello world", nil).(*bodyText)
+	if !ok {
+		t.Fatal("plain body did not render as a selectable label")
+	}
+
+	win := test.NewWindow(body)
+	t.Cleanup(win.Close)
+
+	for _, object := range test.WidgetRenderer(body).Objects() {
+		if _, ok := object.(*selectionCatcher); ok {
+			t.Fatal("a body with no context menu mounted a catcher anyway")
 		}
 	}
 }

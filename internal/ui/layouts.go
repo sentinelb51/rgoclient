@@ -7,6 +7,8 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
+
+	"RGOClient/internal/ui/theme"
 )
 
 /* Spacers and fitting */
@@ -63,6 +65,19 @@ func HBoxNoSpacing(objects ...fyne.CanvasObject) *fyne.Container {
 // against each other and only the message area stretches.
 func NewFillRow(fillIndex int, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{horizontal: true, fill: fillIndex}, objects...)
+}
+
+// Relayout re-runs c's own layout and repaints it, without touching its
+// children. Hiding or showing a child does neither on its own, so the vacated
+// slot stays reserved until something else forces a layout; Container.Refresh
+// would reclaim it, but only by walking every descendant.
+func Relayout(c *fyne.Container) {
+	if c == nil || c.Layout == nil {
+		return
+	}
+
+	c.Layout.Layout(c.Objects, c.Size())
+	canvas.Refresh(c)
 }
 
 // noSpacingLayout arranges visible children edge to edge along one axis, each
@@ -254,6 +269,127 @@ func (l *minSizeLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	}
 
 	return m
+}
+
+/* Flow */
+
+// NewFlow lays children left to right, wrapping onto a new row once the next one
+// would pass width, with spacing between them on both axes. It is what a run of
+// chips — a profile's roles and badges — is laid out with.
+//
+// The width is given rather than measured because MinSize is asked for before
+// the container is handed a width: a row that wrapped only once it was laid out
+// would draw outside the height its parent had already reserved. Callers pass
+// the width they are about to give it, which for a card of fixed width is known.
+func NewFlow(width, spacing float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&flowLayout{width: width, spacing: spacing}, objects...)
+}
+
+type flowLayout struct {
+	width   float32
+	spacing float32
+}
+
+func (l *flowLayout) Layout(objects []fyne.CanvasObject, _ fyne.Size) {
+	l.arrange(objects, func(child fyne.CanvasObject, pos fyne.Position, size fyne.Size) {
+		child.Resize(size)
+		child.Move(pos)
+	})
+}
+
+func (l *flowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var width, height float32
+	l.arrange(objects, func(_ fyne.CanvasObject, pos fyne.Position, size fyne.Size) {
+		width = max(width, pos.X+size.Width)
+		height = max(height, pos.Y+size.Height)
+	})
+
+	return fyne.NewSize(width, height)
+}
+
+// arrange walks the visible children in row order, reporting where each one goes
+// and how big it is. Laying out and measuring are the same walk, so the two can
+// never disagree about how many rows the children take.
+func (l *flowLayout) arrange(objects []fyne.CanvasObject, place func(fyne.CanvasObject, fyne.Position, fyne.Size)) {
+	var x, y, rowHeight float32
+
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+
+		size := child.MinSize()
+		if x > 0 && x+size.Width > l.width {
+			x, y = 0, y+rowHeight+l.spacing
+			rowHeight = 0
+		}
+
+		place(child, fyne.NewPos(x, y), size)
+		x += size.Width + l.spacing
+		rowHeight = max(rowHeight, size.Height)
+	}
+}
+
+/* Anchored placement */
+
+// popoverLayout places a single card beside an anchor widget — the profile card
+// a click on an avatar opens next to it. The card takes its minimum size and is
+// kept wholly on screen: it flips to the anchor's other side rather than run off
+// the right edge, and slides along the anchor rather than off the top or bottom.
+//
+// host is the layer the card is positioned within, which is what the anchor's
+// canvas-absolute position is measured against — the same conversion Tooltip
+// makes for the same reason.
+type popoverLayout struct {
+	anchor fyne.CanvasObject
+	host   fyne.CanvasObject
+}
+
+func (l *popoverLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	driver := fyne.CurrentApp().Driver()
+	origin := driver.AbsolutePositionForObject(l.host)
+	anchor := driver.AbsolutePositionForObject(l.anchor).Subtract(origin)
+
+	for _, child := range objects {
+		card := child.MinSize()
+		child.Resize(card)
+		child.Move(placeBeside(anchor, l.anchor.Size(), card, size))
+	}
+}
+
+func (l *popoverLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var m fyne.Size
+	for _, child := range objects {
+		m = m.Max(child.MinSize())
+	}
+
+	return m
+}
+
+// placeBeside returns where a card of size card goes next to an anchor of size
+// anchorSize at anchor, inside a layer of size bounds. It prefers the anchor's
+// right, centred on it vertically, and gives way to the edges of the layer: a
+// card that cannot fit on the right goes on the left, and one that would hang
+// off the top or bottom is pulled back inside.
+func placeBeside(anchor fyne.Position, anchorSize, card, bounds fyne.Size) fyne.Position {
+	gap, margin := theme.Sizes.PopoverGap, theme.Sizes.PopoverMargin
+
+	x := anchor.X + anchorSize.Width + gap
+	if x+card.Width > bounds.Width-margin {
+		x = anchor.X - card.Width - gap
+	}
+	y := anchor.Y + anchorSize.Height/2 - card.Height/2
+
+	return fyne.NewPos(
+		clampWithin(x, margin, bounds.Width-card.Width-margin),
+		clampWithin(y, margin, bounds.Height-card.Height-margin),
+	)
+}
+
+// clampWithin holds v between low and high, preferring low when the two cross —
+// a card taller than the layer starts at the top rather than being pushed off it.
+func clampWithin(v, low, high float32) float32 {
+	return max(low, min(v, high))
 }
 
 /* Padding */

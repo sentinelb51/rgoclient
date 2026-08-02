@@ -2,6 +2,7 @@ package util
 
 import (
 	"image/color"
+	"slices"
 	"testing"
 
 	"github.com/sentinelb51/revoltgo"
@@ -68,5 +69,72 @@ func TestRoleColorPicksMostSeniorColouredRole(t *testing.T) {
 	}
 	if _, ok := roleColor(server, []string{"missing"}); ok {
 		t.Error("unknown role id: expected ok=false")
+	}
+}
+
+func TestServerRolesOrdersBySeniority(t *testing.T) {
+	server := &revoltgo.Server{
+		Roles: map[string]*revoltgo.ServerRole{
+			"admin":    {Name: "Admin", Rank: 1, Colour: new("#ff0000")},
+			"mod":      {Name: "Mod", Rank: 5, Colour: new("gradient")}, // unparseable: no colour
+			"everyone": {Name: "Everyone", Rank: 10},
+		},
+	}
+
+	roles := serverRoles(server, []string{"everyone", "missing", "mod", "admin"})
+	if len(roles) != 3 {
+		t.Fatalf("got %d roles, want the 3 the server defines", len(roles))
+	}
+
+	want := []string{"Admin", "Mod", "Everyone"}
+	for i, name := range want {
+		if roles[i].Name != name {
+			t.Errorf("role %d is %q, want %q (lowest rank first)", i, roles[i].Name, name)
+		}
+	}
+
+	if roles[0].Color != (color.NRGBA{R: 255, A: 255}) {
+		t.Errorf("Admin is %v, want red", roles[0].Color)
+	}
+	if roles[1].Color != nil || roles[2].Color != nil {
+		t.Error("a role with no parseable colour should carry none")
+	}
+
+	if serverRoles(nil, []string{"admin"}) != nil {
+		t.Error("an unknown server should resolve no roles")
+	}
+}
+
+func TestUserHandle(t *testing.T) {
+	cases := []struct {
+		name string
+		user *revoltgo.User
+		want string
+	}{
+		{"unknown", nil, ""},
+		{"nameless", &revoltgo.User{}, ""},
+		{"full", &revoltgo.User{Username: "sentinel", Discriminator: "9147"}, "@sentinel#9147"},
+		{"no discriminator", &revoltgo.User{Username: "sentinel"}, "@sentinel"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UserHandle(tc.user); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestUserBadges(t *testing.T) {
+	if got := UserBadges(&revoltgo.User{}); got != nil {
+		t.Errorf("an account with no badges got %v", got)
+	}
+
+	// Developer (1) + Supporter (4) + a bit this client doesn't know (1 << 20).
+	got := UserBadges(&revoltgo.User{Badges: 1 | 4 | 1<<20})
+	want := []string{"Developer", "Supporter"}
+	if !slices.Equal(got, want) {
+		t.Errorf("got %v, want %v with the unknown bit ignored", got, want)
 	}
 }

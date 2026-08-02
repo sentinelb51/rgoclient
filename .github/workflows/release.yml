@@ -1,10 +1,8 @@
 name: Release
 
-# Two ways in:
-#   * workflow_dispatch — the normal path. The run derives today's calendar
-#     version, creates the tag itself, and releases it. Nothing to tag by hand.
-#   * pushing a v* tag — the escape hatch, for re-releasing or naming a version
-#     that isn't today's date. The tag is taken verbatim as the version.
+# workflow_dispatch is the normal path: the run derives today's calendar
+# version and creates the tag itself. Pushing a v* tag is the escape hatch —
+# the tag is taken verbatim as the version.
 on:
   push:
     tags: [ 'v*' ]
@@ -22,15 +20,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Versions are calendar-based: YY.M.D, unpadded (26.7.29). A second
-      # release on the same day appends a counter (26.7.29.1, .2 …) so the tag
-      # stays unique. Dates are UTC — the runner's clock, not the author's.
+      # YY.M.D, UTC, unpadded (26.7.29); a second release on the same day
+      # appends a counter (26.7.29.1) so the tag stays unique.
       - name: Resolve version
         id: version
         shell: pwsh
         run: |
           if ($env:GITHUB_REF -like 'refs/tags/*') {
-            # Tag push: the tag is the source of truth, minus the leading "v".
             $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
             $version = $tag -replace '^v', ''
           } else {
@@ -67,43 +63,6 @@ jobs:
           go build
           -ldflags "-H windowsgui -X main.version=${{ steps.version.outputs.version }} -X main.build=${{ github.run_number }}"
           -o dist/RGOClient.exe ./cmd/rgoclient
-
-      # Self-signed only: proves the signing pipeline works and gives a verifiable
-      # Authenticode signature, but does NOT clear SmartScreen or show a trusted
-      # publisher name on end-user machines (no real CA backs this certificate).
-      # The certificate is persistent (generated once, stored as a secret) rather
-      # than regenerated per run, so its identity/thumbprint stays stable across
-      # builds, which matters for SmartScreen reputation.
-      - name: Import code-signing certificate
-        shell: pwsh
-        env:
-          CERT_BASE64: ${{ secrets.CODE_SIGN_PFX_BASE64 }}
-          CERT_PASSWORD: ${{ secrets.CODE_SIGN_PFX_PASSWORD }}
-        run: |
-          $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
-          [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:CERT_BASE64))
-          $securePassword = ConvertTo-SecureString -String $env:CERT_PASSWORD -Force -AsPlainText
-          $cert = Import-PfxCertificate -FilePath $pfxPath -CertStoreLocation Cert:\CurrentUser\My -Password $securePassword -Exportable
-          Remove-Item $pfxPath
-
-          # Trust the cert within this job only, so the signature verifies as
-          # "Valid" in CI. This has no effect on trust outside this runner.
-          $store = New-Object System.Security.Cryptography.X509Certificates.X509Store("Root", "CurrentUser")
-          $store.Open("ReadWrite")
-          $store.Add($cert)
-          $store.Close()
-
-          echo "CERT_THUMBPRINT=$($cert.Thumbprint)" >> $env:GITHUB_ENV
-
-      - name: Sign executable
-        shell: pwsh
-        run: |
-          $cert = Get-Item "Cert:\CurrentUser\My\$env:CERT_THUMBPRINT"
-          $sig = Set-AuthenticodeSignature -FilePath dist\RGOClient.exe -Certificate $cert -TimestampServer "http://timestamp.digicert.com" -HashAlgorithm SHA256
-          $sig | Format-List
-          if ($sig.Status -ne "Valid") {
-            throw "Signing failed or signature not valid: $($sig.StatusMessage)"
-          }
 
       - name: Publish release
         uses: softprops/action-gh-release@v2

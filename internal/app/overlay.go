@@ -1,9 +1,12 @@
 package app
 
-// The modal layer: one overlay at a time over the main window, holding either the
-// attachment lightbox or the join-server dialog. Both are overlays rather than
-// windows because there is no native chrome to recolour, they cannot be left
-// behind, and they cannot drift off-centre.
+// The modal layer: one overlay at a time over the main window, holding the
+// attachment lightbox, the join-server dialog, a confirmation, or a profile.
+// They are overlays rather than windows because there is no native chrome to
+// recolour, they cannot be left behind, and they cannot drift off-centre.
+//
+// A profile card is the one that is anchored rather than centred (showPopover),
+// which is the only difference between the two ways in.
 
 import (
 	"log"
@@ -24,16 +27,36 @@ import (
 // dialog's entry) has to handle Esc itself, since Fyne routes keys to the focused
 // widget and never calls this handler. Call on the UI thread.
 func (a *App) showOverlay(content fyne.CanvasObject) {
+	a.mountOverlay(ui.NewOverlay(content, a.closeOverlay))
+}
+
+// showPopover puts content on the modal layer beside anchor, undimmed — for a
+// card that belongs to the widget it points at rather than to the window. Call
+// on the UI thread.
+func (a *App) showPopover(content, anchor fyne.CanvasObject) {
+	a.mountOverlay(ui.NewPopover(content, anchor, a.closeOverlay))
+}
+
+// mountOverlay replaces the modal layer with overlay and takes the keyboard.
+func (a *App) mountOverlay(overlay *ui.Overlay) {
 	a.closeOverlay()
 
 	canvas := a.window.Canvas()
-	a.overlay = ui.NewOverlay(content, a.closeOverlay)
+	a.overlay = overlay
 	canvas.Overlays().Add(a.overlay)
 	canvas.SetOnTypedKey(func(event *fyne.KeyEvent) {
 		if event.Name == fyne.KeyEscape {
 			a.closeOverlay()
 		}
 	})
+}
+
+// repositionOverlay re-places what is on the modal layer after it changed size,
+// as a profile card does when its bio arrives. Call on the UI thread.
+func (a *App) repositionOverlay() {
+	if a.overlay != nil {
+		a.overlay.Reposition()
+	}
 }
 
 // closeOverlay dismisses the modal layer and hands the keyboard back. Safe to

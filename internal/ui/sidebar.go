@@ -27,6 +27,11 @@ type ServerWidget struct {
 	widget.BaseWidget
 	Server *revoltgo.Server
 
+	// OnHover reports the pointer entering and leaving, so the sidebar can name
+	// the server in a Tooltip. Menu supplies the right-click items.
+	OnHover func(hovering bool)
+	Menu    func() []*fyne.MenuItem
+
 	images      *cache.ImageCache
 	onTap       func()
 	background  *canvas.Circle
@@ -42,8 +47,9 @@ type ServerWidget struct {
 }
 
 var (
-	_ fyne.Tappable     = (*ServerWidget)(nil)
-	_ desktop.Hoverable = (*ServerWidget)(nil)
+	_ fyne.Tappable          = (*ServerWidget)(nil)
+	_ fyne.SecondaryTappable = (*ServerWidget)(nil)
+	_ desktop.Hoverable      = (*ServerWidget)(nil)
 )
 
 // NewServerWidget creates a server icon widget.
@@ -122,11 +128,16 @@ func (w *ServerWidget) Tapped(*fyne.PointEvent) {
 	}
 }
 
+func (w *ServerWidget) TappedSecondary(event *fyne.PointEvent) {
+	showMenuHook(w, w.Menu, event)
+}
+
 func (w *ServerWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
 
 func (w *ServerWidget) MouseIn(*desktop.MouseEvent) {
 	w.hovered = true
 	w.refreshAppearance()
+	w.notifyHover(true)
 }
 
 func (w *ServerWidget) MouseMoved(*desktop.MouseEvent) {}
@@ -134,6 +145,13 @@ func (w *ServerWidget) MouseMoved(*desktop.MouseEvent) {}
 func (w *ServerWidget) MouseOut() {
 	w.hovered = false
 	w.refreshAppearance()
+	w.notifyHover(false)
+}
+
+func (w *ServerWidget) notifyHover(hovering bool) {
+	if w.OnHover != nil {
+		w.OnHover(hovering)
+	}
 }
 
 /* Channel rows */
@@ -142,31 +160,43 @@ func (w *ServerWidget) MouseOut() {
 type ChannelWidget struct {
 	widget.BaseWidget
 	Channel *revoltgo.Channel
-	onTap   func()
+
+	// Menu supplies the items right-clicking the row offers.
+	Menu func() []*fyne.MenuItem
+
+	onTap func()
 
 	background         *canvas.Rectangle
 	selectionIndicator *canvas.Rectangle
 	unreadIndicator    *canvas.Rectangle
-	glyph              fyne.CanvasObject
+	leading            fyne.CanvasObject // the type glyph, or a conversation's avatar
 	label              *canvas.Text
 	labelBox           *fyne.Container // label fitted to its slot; see NewEllipsisText
+
+	height float32 // a conversation card is taller than a channel row
 
 	selected bool
 	unread   bool
 }
 
 var (
-	_ fyne.Tappable     = (*ChannelWidget)(nil)
-	_ desktop.Hoverable = (*ChannelWidget)(nil)
+	_ fyne.Tappable          = (*ChannelWidget)(nil)
+	_ fyne.SecondaryTappable = (*ChannelWidget)(nil)
+	_ desktop.Hoverable      = (*ChannelWidget)(nil)
 )
 
-// NewChannelWidget creates a channel row. The label and prefix glyph come from
-// the channel's type rather than its raw name: a DM has no name of its own, so
-// deps.Session is what turns it into the other participant.
+// NewChannelWidget creates a channel row. Both the label and what precedes it
+// come from the channel's type rather than its raw name: a DM has no name of its
+// own, so deps.Session is what turns it into the other participant.
 func NewChannelWidget(deps Deps, channel *revoltgo.Channel, onTap func()) *ChannelWidget {
 	label := canvas.NewText(util.ChannelName(deps.Session, channel), theme.Colors.CategoryText)
 	label.TextSize = theme.Sizes.ChannelLabelSize
 	label.Alignment = fyne.TextAlignLeading
+
+	height := theme.Sizes.ChannelItemHeight
+	if isConversation(channel) {
+		height = theme.Sizes.ConversationItemHeight
+	}
 
 	w := &ChannelWidget{
 		Channel:            channel,
@@ -174,7 +204,8 @@ func NewChannelWidget(deps Deps, channel *revoltgo.Channel, onTap func()) *Chann
 		background:         canvas.NewRectangle(color.Transparent),
 		selectionIndicator: canvas.NewRectangle(color.Transparent),
 		unreadIndicator:    canvas.NewRectangle(color.Transparent),
-		glyph:              ChannelGlyph(channel),
+		leading:            channelLeading(deps, channel),
+		height:             height,
 		label:              label,
 		// Wrapped here rather than in CreateRenderer, which Fyne may run again
 		// after a renderer is dropped: by then the label holds the shortened text,
@@ -210,12 +241,12 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// The name takes the leftover width rather than its natural width: a long DM
 	// title would otherwise widen the whole channel column.
 	content := container.NewBorder(nil, nil,
-		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.glyph),
+		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 		w.labelBox,
 	)
 
-	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
+	w.background.SetMinSize(fyne.NewSize(0, w.height))
 	w.refreshAppearance()
 
 	return widget.NewSimpleRenderer(container.NewStack(w.background, content))
@@ -252,6 +283,10 @@ func (w *ChannelWidget) Tapped(*fyne.PointEvent) {
 	if w.onTap != nil {
 		w.onTap()
 	}
+}
+
+func (w *ChannelWidget) TappedSecondary(event *fyne.PointEvent) {
+	showMenuHook(w, w.Menu, event)
 }
 
 func (w *ChannelWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
@@ -430,6 +465,37 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
+// isConversation reports whether a channel is a conversation — a direct message,
+// a group, or the account's saved notes — rather than a channel belonging to a
+// server. Those are the home view's rows, and they are drawn as taller cards led
+// by a picture instead of a glyph.
+func isConversation(channel *revoltgo.Channel) bool {
+	if channel == nil {
+		return false
+	}
+
+	switch channel.ChannelType {
+	case revoltgo.ChannelTypeDM, revoltgo.ChannelTypeGroup, revoltgo.ChannelTypeSavedMessages:
+		return true
+	}
+
+	return false
+}
+
+// channelLeading returns what precedes a channel's name in its sidebar row: a
+// conversation is led by its avatar, everything else by its type glyph. Centred,
+// because the row is taller than either.
+func channelLeading(deps Deps, channel *revoltgo.Channel) fyne.CanvasObject {
+	if !isConversation(channel) {
+		return ChannelGlyph(channel)
+	}
+
+	side := theme.Sizes.ConversationAvatarSize
+	avatar := circularAvatar(deps.Images, util.ChannelAvatarURL(deps.Session, channel), fyne.NewSize(side, side))
+
+	return container.NewCenter(avatar)
+}
+
 // ChannelGlyph returns the glyph that prefixes a channel's name, both in the
 // sidebar row and in the message-area header: "#" for a server text channel,
 // "@" for a direct message, and a two-head mark for a group. A nil channel (no
@@ -511,8 +577,10 @@ func GroupIcon() fyne.CanvasObject {
 /* Member rows */
 
 // NewMemberWidget builds a member row: a small circular avatar and the display
-// name, the whole row tappable. Offline members get dimmed name text.
-func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne.CanvasObject {
+// name, the whole row tappable. Offline members get dimmed name text. The row is
+// returned as its TappableContainer so the controller can fill in the Menu hook,
+// as it does for the server and channel rows.
+func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) *TappableContainer {
 	textColor := theme.Colors.TextPrimary
 	if !online {
 		textColor = theme.Colors.CategoryText
@@ -538,7 +606,12 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) fyne
 	userID := member.ID.User
 	content := NewMinHeightContainer(theme.Sizes.MemberRowHeight, row)
 
-	return NewTappableContainer(content, func() { deps.Actions.OnAvatarTapped(userID) })
+	// The row is its own anchor, so the profile card opens beside the name that
+	// was clicked; the handler is set after construction because it needs it.
+	tappable := NewTappableContainer(content, nil)
+	tappable.onTap = func() { deps.Actions.OnUserTapped(userID, tappable) }
+
+	return tappable
 }
 
 // NewMemberSection is the small bold header grouping members, e.g. "Online — 5".

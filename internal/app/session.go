@@ -63,6 +63,8 @@ func (a *App) openSession(session *revoltgo.Session) error {
 	revoltgo.AddHandler(session, a.onMessageDelete)
 	revoltgo.AddHandler(session, a.onBulkMessageDelete)
 	revoltgo.AddHandler(session, a.onServerCreate)
+	revoltgo.AddHandler(session, a.onServerDelete)
+	revoltgo.AddHandler(session, a.onChannelDelete)
 	revoltgo.AddHandler(session, a.onServerMemberJoin)
 	revoltgo.AddHandler(session, a.onServerMemberLeave)
 	revoltgo.AddHandler(session, a.onServerMemberUpdate)
@@ -82,6 +84,7 @@ func (a *App) openSession(session *revoltgo.Session) error {
 // thread.
 func (a *App) resetSessionState() {
 	a.messages.Clear()
+	a.notices.Clear() // a failure from the last account has nothing to say to this one
 
 	if a.authorTimer != nil {
 		a.authorTimer.Stop()

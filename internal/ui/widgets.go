@@ -15,8 +15,15 @@ import (
 	"RGOClient/internal/util"
 )
 
-// closeButtonSize is the side length of a CloseButton.
-const closeButtonSize = 24
+const (
+	// closeButtonSize is the side length of a CloseButton.
+	closeButtonSize = 24
+
+	// iconRestTranslucency dims an icon button while the pointer is elsewhere.
+	// Hovering clears it, so what lights up is the icon itself rather than a plate
+	// drawn behind it.
+	iconRestTranslucency = 0.45
+)
 
 /* Shared plumbing */
 
@@ -63,13 +70,20 @@ func roundedPanel() *canvas.Rectangle {
 // invoking onTap when clicked.
 type TappableContainer struct {
 	tapBase
+
+	// Menu supplies the items right-clicking the row offers, as on the sidebar's
+	// server and channel rows. It is the option for rows that are a plain
+	// container rather than a widget of their own — the member list's.
+	Menu func() []*fyne.MenuItem
+
 	background *canvas.Rectangle
 	content    fyne.CanvasObject
 }
 
 var (
-	_ fyne.Tappable     = (*TappableContainer)(nil)
-	_ desktop.Hoverable = (*TappableContainer)(nil)
+	_ fyne.Tappable          = (*TappableContainer)(nil)
+	_ fyne.SecondaryTappable = (*TappableContainer)(nil)
+	_ desktop.Hoverable      = (*TappableContainer)(nil)
 )
 
 // NewTappableContainer makes content tappable with a hover highlight.
@@ -86,6 +100,18 @@ func NewTappableContainer(content fyne.CanvasObject, onTap func()) *TappableCont
 
 func (t *TappableContainer) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(t.background, t.content))
+}
+
+// TappedSecondary raises Menu's items when one is set, falling back to the
+// handler tapBase carries — the reply preview inside a message hands its
+// right-click to the message rather than opening a menu of its own.
+func (t *TappableContainer) TappedSecondary(event *fyne.PointEvent) {
+	if t.Menu != nil {
+		showMenuHook(t, t.Menu, event)
+		return
+	}
+
+	t.tapBase.TappedSecondary(event)
 }
 
 func (t *TappableContainer) MouseIn(*desktop.MouseEvent) {
@@ -153,12 +179,12 @@ func (h *HoverableStack) MouseOut() {
 /* Buttons */
 
 // IconButton is a flat, icon-only button used for the per-message quick actions
-// and the attachment viewer's header.
+// and the attachment viewer's header. It draws no background of its own: the
+// icon rests dimmed and brightens under the pointer.
 type IconButton struct {
 	tapBase
-	background *canvas.Rectangle
-	icon       *canvas.Image
-	onHover    func(bool)
+	icon    *canvas.Image
+	onHover func(bool)
 }
 
 var (
@@ -167,12 +193,8 @@ var (
 )
 
 func NewIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *IconButton {
-	size := theme.Sizes.SwiftActionSize
-
-	background := canvas.NewRectangle(color.Transparent)
-	background.SetMinSize(fyne.NewSize(size, size*0.8))
-
-	b := &IconButton{background: background, icon: newScaledIcon(res, size*0.7), onHover: onHover}
+	b := &IconButton{icon: newScaledIcon(res, theme.Sizes.SwiftActionSize*0.7), onHover: onHover}
+	b.icon.Translucency = iconRestTranslucency
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 
@@ -180,12 +202,19 @@ func NewIconButton(res fyne.Resource, onTap func(), onHover func(bool)) *IconBut
 }
 
 func (b *IconButton) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewCenter(b.icon)))
+	return widget.NewSimpleRenderer(container.NewCenter(b.icon))
+}
+
+// MinSize gives every icon button the same box whatever its icon measures, so a
+// row of them is evenly spaced.
+func (b *IconButton) MinSize() fyne.Size {
+	size := theme.Sizes.SwiftActionSize
+
+	return fyne.NewSize(size, size*0.8)
 }
 
 func (b *IconButton) MouseIn(*desktop.MouseEvent) {
-	b.background.FillColor = theme.Colors.SwiftActionHoverBg
-	b.background.Refresh()
+	b.setLit(true)
 
 	if b.onHover != nil {
 		b.onHover(true)
@@ -193,12 +222,22 @@ func (b *IconButton) MouseIn(*desktop.MouseEvent) {
 }
 
 func (b *IconButton) MouseOut() {
-	b.background.FillColor = color.Transparent
-	b.background.Refresh()
+	b.setLit(false)
 
 	if b.onHover != nil {
 		b.onHover(false)
 	}
+}
+
+// setLit brightens or dims the icon.
+func (b *IconButton) setLit(lit bool) {
+	translucency := float64(iconRestTranslucency)
+	if lit {
+		translucency = 0
+	}
+
+	b.icon.Translucency = translucency
+	b.icon.Refresh()
 }
 
 // SidebarButton is a circular, icon-only button matching the server-icon look.
@@ -325,6 +364,71 @@ func (b *CloseButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
 }
+
+/* Tooltips */
+
+// Tooltip is the floating label an icon-only control shows on hover, naming
+// what the icon stands for.
+//
+// Layer is mounted over the whole window rather than inside the column that
+// triggers it, because the label has to be able to overhang that column. A Fyne
+// pop-up would do the same job but cannot be used: pushing an overlay routes the
+// entire hit test into it, so the widget being hovered would never receive
+// MouseOut and the tooltip would never come back down.
+type Tooltip struct {
+	Layer *fyne.Container // stack this over the main layout
+
+	card  *fyne.Container
+	label *canvas.Text
+}
+
+// NewTooltip builds an empty, hidden tooltip.
+func NewTooltip() *Tooltip {
+	label := canvas.NewText("", theme.Colors.TextPrimary)
+	label.TextSize = theme.Sizes.TooltipTextSize
+	label.TextStyle = fyne.TextStyle{Bold: true}
+
+	background := canvas.NewRectangle(theme.Colors.TooltipBg)
+	background.CornerRadius = theme.Sizes.TooltipRadius
+
+	padV, padH := theme.Sizes.TooltipPaddingV, theme.Sizes.TooltipPaddingH
+	card := container.NewStack(background, NewInset(label, padV, padV, padH, padH))
+	card.Hide()
+
+	// Nothing in the layer is tappable or hoverable, so it never takes an event
+	// from the widgets underneath it.
+	return &Tooltip{Layer: container.NewWithoutLayout(card), card: card, label: label}
+}
+
+// Show names obj, placing the label just past its right edge and centred on it.
+// An empty name hides the tooltip instead.
+func (t *Tooltip) Show(text string, obj fyne.CanvasObject) {
+	if text == "" {
+		t.Hide()
+		return
+	}
+
+	t.label.Text = text
+	t.label.Refresh()
+
+	// Both positions are canvas-absolute; the difference is the offset inside the
+	// layer, wherever the layer itself happens to sit.
+	driver := fyne.CurrentApp().Driver()
+	anchor := driver.AbsolutePositionForObject(obj).Subtract(driver.AbsolutePositionForObject(t.Layer))
+
+	size := t.card.MinSize()
+	t.card.Resize(size)
+	t.card.Move(fyne.NewPos(
+		anchor.X+obj.Size().Width+theme.Sizes.TooltipGap,
+		anchor.Y+(obj.Size().Height-size.Height)/2,
+	))
+
+	t.card.Show()
+	t.card.Refresh() // Show alone neither lays the card out nor repaints it
+}
+
+// Hide takes the tooltip down. Safe to call when nothing is showing.
+func (t *Tooltip) Hide() { t.card.Hide() }
 
 /* Avatars */
 

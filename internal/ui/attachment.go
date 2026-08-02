@@ -31,7 +31,10 @@ const (
 )
 
 // buildAttachments stacks each attachment with a small gap between them.
-func buildAttachments(deps Deps, attachments []*revoltgo.File) *fyne.Container {
+// onMenu is the owning message's right-click handler, which each attachment
+// takes over: an attachment fills most of the row it belongs to, and being the
+// innermost object under the pointer it would otherwise swallow the click.
+func buildAttachments(deps Deps, attachments []*revoltgo.File, onMenu func(*fyne.PointEvent)) *fyne.Container {
 	box := container.NewVBox()
 
 	for i, attachment := range attachments {
@@ -40,7 +43,7 @@ func buildAttachments(deps Deps, attachments []*revoltgo.File) *fyne.Container {
 		}
 		// No left spacer: attachments share the body's content padding with the
 		// header text above, so the preview lines up flush with the message text.
-		box.Add(container.NewHBox(buildAttachment(deps, attachment)))
+		box.Add(container.NewHBox(buildAttachment(deps, attachment, onMenu)))
 	}
 
 	return box
@@ -50,7 +53,7 @@ func buildAttachments(deps Deps, attachments []*revoltgo.File) *fyne.Container {
 // generic file card, with a name/size bar beneath it. Images and text files open
 // in the viewer when tapped — the inline render of both is deliberately small,
 // so the full thing has to be reachable from somewhere.
-func buildAttachment(deps Deps, attachment *revoltgo.File) fyne.CanvasObject {
+func buildAttachment(deps Deps, attachment *revoltgo.File, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	isImage := util.IsImageAttachment(attachment)
 	isText := util.Filetype(attachment.Filename) == util.FileTypeText
 	bar := attachmentBar(attachment.Filename, attachment.Size, nil)
@@ -70,7 +73,10 @@ func buildAttachment(deps Deps, attachment *revoltgo.File) fyne.CanvasObject {
 		onTap = func() { deps.Actions.OnAttachmentTapped(attachment) }
 	}
 
-	return NewHoverableStack(content, onTap, nil)
+	stack := NewHoverableStack(content, onTap, nil)
+	stack.onSecondaryTap = onMenu
+
+	return stack
 }
 
 func buildImageAttachment(images *cache.ImageCache, attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {

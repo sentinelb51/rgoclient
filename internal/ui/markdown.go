@@ -34,13 +34,16 @@ import (
 //
 // A body carrying an @mention is never flattened: the mention has its own
 // colour, exactly the mixed-style case a Label cannot express.
-func renderMessageBody(deps Deps, text string) fyne.CanvasObject {
+//
+// onMenu is the owning message's right-click handler, which a selectable body
+// has to be given explicitly — see bodyText.
+func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	doc := markdown.Parse(text)
 
 	// An empty body (attachment-only message) keeps the zero-height RichText; a
 	// Label would reserve a blank text line above the attachment.
 	if flat, ok := flattenDocument(doc); ok && flat.text != "" {
-		label := widget.NewLabel(flat.text)
+		label := newBodyText(flat.text, onMenu)
 		label.Wrapping = fyne.TextWrapWord
 		label.Selectable = true
 		label.TextStyle = flat.style
@@ -60,6 +63,153 @@ func renderMessageBody(deps Deps, text string) fyne.CanvasObject {
 	rt.Wrapping = fyne.TextWrapWord
 	return rt
 }
+
+/* Selectable body */
+
+// bodyText is the flattened, selectable message body.
+//
+// It exists to get a right-click back. A selectable Label mounts an invisible
+// selection overlay above its text, and the driver delivers pointer events to
+// the *innermost* object under the cursor — so that overlay takes the click and
+// answers it with Fyne's own one-item "Copy" menu instead of the message's
+// context menu, having first pulled keyboard focus off the composer. Neither is
+// reachable from outside the widget: the overlay is unexported, and its
+// behaviour is not configurable.
+//
+// So the renderer mounts a catcher above it, and the overlay — which the Label's
+// own renderer hands over as a plain fyne.CanvasObject — is driven through the
+// exported interfaces it satisfies. A Fyne that stops exposing it leaves the
+// catcher out entirely (newSelectionCatcher returns nil) and the body degrades to
+// an ordinary selectable Label.
+type bodyText struct {
+	widget.Label
+	onMenu func(*fyne.PointEvent)
+}
+
+var _ fyne.Widget = (*bodyText)(nil)
+
+// newBodyText creates a message body carrying the message's context menu.
+func newBodyText(text string, onMenu func(*fyne.PointEvent)) *bodyText {
+	t := &bodyText{onMenu: onMenu}
+	t.Text = text
+	t.ExtendBaseWidget(t)
+
+	return t
+}
+
+func (t *bodyText) CreateRenderer() fyne.WidgetRenderer {
+	// Label.CreateRenderer is what builds the selection overlay, so it has to run
+	// before one can be found. Its own ExtendBaseWidget call is a no-op here: the
+	// base widget already points at us.
+	renderer := t.Label.CreateRenderer()
+
+	catcher := newSelectionCatcher(renderer.Objects(), t.onMenu)
+	if catcher == nil {
+		return renderer
+	}
+
+	return &bodyRenderer{WidgetRenderer: renderer, catcher: catcher}
+}
+
+// bodyRenderer is the Label's own renderer with the catcher laid over it. The
+// catcher goes last because the driver's hit test keeps the last match in tree
+// order, which is what puts it in front of the selection overlay.
+type bodyRenderer struct {
+	fyne.WidgetRenderer
+	catcher *selectionCatcher
+}
+
+func (r *bodyRenderer) Layout(size fyne.Size) {
+	r.WidgetRenderer.Layout(size)
+	r.catcher.Resize(size)
+}
+
+func (r *bodyRenderer) Objects() []fyne.CanvasObject {
+	inner := r.WidgetRenderer.Objects()
+	objects := make([]fyne.CanvasObject, 0, len(inner)+1)
+
+	return append(append(objects, inner...), r.catcher)
+}
+
+// selectionCatcher covers a Label's selection overlay, answering right-clicks
+// itself and passing everything selection needs straight through. It is
+// transparent and not hoverable, so the message row underneath still lights up
+// and still owns the pointer for everything else.
+type selectionCatcher struct {
+	widget.BaseWidget
+	onMenu func(*fyne.PointEvent)
+
+	/* The selection overlay, by the interfaces it answers */
+
+	mouse  desktop.Mouseable
+	drag   fyne.Draggable
+	tap    fyne.Tappable
+	double fyne.DoubleTappable
+}
+
+var (
+	_ fyne.Tappable          = (*selectionCatcher)(nil)
+	_ fyne.SecondaryTappable = (*selectionCatcher)(nil)
+	_ fyne.DoubleTappable    = (*selectionCatcher)(nil)
+	_ fyne.Draggable         = (*selectionCatcher)(nil)
+	_ desktop.Mouseable      = (*selectionCatcher)(nil)
+	_ desktop.Cursorable     = (*selectionCatcher)(nil)
+)
+
+// newSelectionCatcher finds the selection overlay among a Label renderer's
+// objects and builds a catcher for it, or returns nil when there is nothing to
+// catch for — an unselectable label, no menu to show, or a Fyne whose overlay no
+// longer answers the interfaces the forwarding depends on. Nothing else in a
+// Label's renderer is interactive, so answering all four identifies it.
+func newSelectionCatcher(objects []fyne.CanvasObject, onMenu func(*fyne.PointEvent)) *selectionCatcher {
+	if onMenu == nil {
+		return nil
+	}
+
+	for _, object := range objects {
+		mouse, isMouse := object.(desktop.Mouseable)
+		drag, isDrag := object.(fyne.Draggable)
+		tap, isTap := object.(fyne.Tappable)
+		double, isDouble := object.(fyne.DoubleTappable)
+		if !isMouse || !isDrag || !isTap || !isDouble {
+			continue
+		}
+
+		c := &selectionCatcher{onMenu: onMenu, mouse: mouse, drag: drag, tap: tap, double: double}
+		c.ExtendBaseWidget(c)
+
+		return c
+	}
+
+	return nil
+}
+
+func (c *selectionCatcher) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
+
+// TappedSecondary is the whole point: the message's menu, not the overlay's.
+func (c *selectionCatcher) TappedSecondary(event *fyne.PointEvent) { c.onMenu(event) }
+
+func (c *selectionCatcher) Tapped(event *fyne.PointEvent)       { c.tap.Tapped(event) }
+func (c *selectionCatcher) DoubleTapped(event *fyne.PointEvent) { c.double.DoubleTapped(event) }
+func (c *selectionCatcher) Dragged(event *fyne.DragEvent)       { c.drag.Dragged(event) }
+func (c *selectionCatcher) DragEnd()                            { c.drag.DragEnd() }
+func (c *selectionCatcher) MouseUp(event *desktop.MouseEvent)   { c.mouse.MouseUp(event) }
+
+// MouseDown withholds the secondary button. The overlay takes keyboard focus on
+// any press, and a right-click that only opens a menu has no business pulling
+// focus out of the composer.
+func (c *selectionCatcher) MouseDown(event *desktop.MouseEvent) {
+	if event.Button == desktop.MouseButtonSecondary {
+		return
+	}
+
+	c.mouse.MouseDown(event)
+}
+
+// Cursor keeps the I-beam the selection overlay would have shown.
+func (c *selectionCatcher) Cursor() desktop.Cursor { return desktop.TextCursor }
 
 // flatBody is a whole message body flattened to one uniform style — everything
 // a selectable Label can express.

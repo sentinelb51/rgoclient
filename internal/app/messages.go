@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -96,7 +97,9 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.channelGlyph = container.NewStack(ui.ChannelGlyph(a.currentChannel()))
-	header := container.NewPadded(container.NewHBox(a.channelGlyph, a.channelHeader))
+	title := container.NewHBox(a.channelGlyph, a.channelHeader)
+	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
+	header := container.NewPadded(container.NewBorder(nil, nil, title, members))
 
 	layout := container.NewBorder(header, container.NewPadded(dock), nil, nil, a.messageScroll)
 	return container.NewStack(background, layout)

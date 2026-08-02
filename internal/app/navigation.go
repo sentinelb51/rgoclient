@@ -21,13 +21,21 @@ import (
 // buildUI assembles the four-column layout: servers | channels | messages |
 // members. The fill row keeps the sections flush for the flat look; only the
 // message area (index 2) stretches, the rest stay at their fixed widths.
+//
+// Two layers sit over the whole row: notices, which appear in its top-right
+// corner whatever column is there, and the tooltip, since a server icon's name
+// has to be able to overhang the narrow column it is anchored in. Neither
+// carries anything that matches a pointer event bar a notice card itself, so the
+// row underneath keeps receiving every click and hover.
 func (a *App) buildUI() fyne.CanvasObject {
-	return ui.NewFillRow(2,
+	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
 		a.buildChannelList(),
 		a.buildMessageArea(),
 		a.buildMemberList(),
 	)
+
+	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer)
 }
 
 /* Server sidebar */
@@ -60,9 +68,12 @@ func (a *App) buildServerList() fyne.CanvasObject {
 	return ui.NewFixedWidthContainer(theme.Sizes.ServerSidebarWidth, background, content)
 }
 
-// refreshServerList rebuilds the server icons from the current server list.
+// refreshServerList rebuilds the server icons from the current server list. Any
+// tooltip is taken down first: the icon that raised it is about to be replaced,
+// so it will never report the pointer leaving.
 func (a *App) refreshServerList() {
 	a.serverList.Objects = nil
+	a.tooltip.Hide()
 
 	for _, serverID := range a.serverIDs {
 		server := a.session.State.Server(serverID)
@@ -72,6 +83,14 @@ func (a *App) refreshServerList() {
 
 		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
 		w.SetSelected(serverID == a.currentServerID)
+		w.OnHover = func(hovering bool) {
+			if hovering {
+				a.tooltip.Show(server.Name, w)
+				return
+			}
+			a.tooltip.Hide()
+		}
+		w.Menu = func() []*fyne.MenuItem { return a.serverMenu(serverID) }
 
 		// Added bare, not wrapped in a Center: ServerWidget already centres its own
 		// icon, and keeping the widget at the top level lets syncServerSelection
@@ -210,8 +229,145 @@ func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 
 	w := ui.NewChannelWidget(a.deps(), channel, func() { a.selectChannel(channelID) })
 	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+	w.Menu = func() []*fyne.MenuItem { return a.channelMenu(channelID) }
 
 	return w
+}
+
+/* Context menus */
+
+// serverMenu builds the items a server icon offers on right-click. Built per
+// click rather than per row, so what it offers reflects the state now.
+func (a *App) serverMenu(serverID string) []*fyne.MenuItem {
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Copy server ID", fynetheme.ContentCopyIcon(), func() {
+			ui.CopyToClipboard(serverID)
+		}),
+	}
+
+	// Anything irreversible goes below a separator and asks first, so no single
+	// misclick in a menu can act.
+	if a.canLeaveServer(serverID) {
+		items = append(items,
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItemWithIcon("Leave server", fynetheme.LogoutIcon(), func() { a.confirmLeaveServer(serverID) }),
+		)
+	}
+
+	if a.serverUnread(serverID) {
+		items = append([]*fyne.MenuItem{
+			fyne.NewMenuItemWithIcon("Mark as read", fynetheme.ConfirmIcon(), func() { a.markServerRead(serverID) }),
+			fyne.NewMenuItemSeparator(),
+		}, items...)
+	}
+
+	return items
+}
+
+// channelMenu builds the items a channel row offers on right-click. A DM row is
+// a channel like any other here, so the home view needs no special case.
+func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Copy channel ID", fynetheme.ContentCopyIcon(), func() {
+			ui.CopyToClipboard(channelID)
+		}),
+	}
+
+	// Only a conversation can be closed; a server's channels are not the user's
+	// to remove from their own sidebar.
+	if a.isConversation(channelID) {
+		items = append(items,
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItemWithIcon(a.closeChannelLabel(channelID), fynetheme.LogoutIcon(),
+				func() { a.confirmCloseChannel(channelID) }),
+		)
+	}
+
+	if a.unreadChannels[channelID] {
+		items = append([]*fyne.MenuItem{
+			fyne.NewMenuItemWithIcon("Mark as read", fynetheme.ConfirmIcon(), func() { a.markChannelRead(channelID) }),
+			fyne.NewMenuItemSeparator(),
+		}, items...)
+	}
+
+	return items
+}
+
+// closeChannelLabel names what closing a conversation means for its kind: a
+// group is left, a direct message merely leaves the sidebar.
+func (a *App) closeChannelLabel(channelID string) string {
+	if channel := a.stateChannel(channelID); channel != nil && channel.ChannelType == revoltgo.ChannelTypeGroup {
+		return "Leave group"
+	}
+
+	return "Close conversation"
+}
+
+// memberMenu builds the items a member row offers on right-click. Removing
+// someone is only offered to a user who can actually do it — see canKickMember —
+// so the menu never presents an action the server will refuse.
+func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Copy user ID", fynetheme.ContentCopyIcon(), func() {
+			ui.CopyToClipboard(userID)
+		}),
+	}
+
+	if a.canKickMember(serverID, userID) {
+		items = append(items,
+			fyne.NewMenuItemSeparator(),
+			fyne.NewMenuItemWithIcon("Remove from server", fynetheme.ContentRemoveIcon(),
+				func() { a.confirmKickMember(serverID, userID) }),
+		)
+	}
+
+	return items
+}
+
+// serverUnread reports whether any of a server's channels is marked unread.
+func (a *App) serverUnread(serverID string) bool {
+	server := a.stateServer(serverID)
+	if server == nil {
+		return false
+	}
+
+	return slices.ContainsFunc(server.Channels, func(channelID string) bool {
+		return a.unreadChannels[channelID]
+	})
+}
+
+// markChannelRead clears a channel's unread mark and acknowledges its newest
+// message, through the same coalescing path selecting the channel would use.
+func (a *App) markChannelRead(channelID string) {
+	channel := a.stateChannel(channelID)
+	if channel == nil || channel.LastMessageID == nil {
+		return
+	}
+
+	delete(a.unreadChannels, channelID)
+	a.refreshChannelRow(channelID)
+	a.scheduleAck(channelID, *channel.LastMessageID)
+}
+
+// markServerRead clears the unread marks of every channel in a server. The
+// server-wide ack is a single request covering all of them, so this one doesn't
+// go through the per-channel coalescing in events.go.
+func (a *App) markServerRead(serverID string) {
+	session, server := a.session, a.stateServer(serverID)
+	if session == nil || server == nil {
+		return
+	}
+
+	for _, channelID := range server.Channels {
+		delete(a.unreadChannels, channelID)
+	}
+	a.syncChannelList()
+
+	go func() {
+		if err := session.ServerAck(serverID); err != nil {
+			log.Printf("ack server %s: %v", serverID, err)
+		}
+	}()
 }
 
 /* Selection */

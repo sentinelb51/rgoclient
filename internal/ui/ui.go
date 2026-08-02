@@ -11,9 +11,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 )
 
 /* Dependencies */
@@ -21,7 +21,7 @@ import (
 // Deps bundles everything a widget needs from the rest of the app. The
 // controller is its only producer (App.deps), so every field is always set.
 type Deps struct {
-	Session *revoltgo.Session // resolves users, members, and system messages
+	Store   domain.Store      // resolves IDs into names, avatars and permissions
 	Images  *cache.ImageCache // avatars, icons, attachments
 	Texts   *cache.TextCache  // text-attachment previews
 	Actions MessageActions    // user-interaction callbacks
@@ -33,13 +33,13 @@ type MessageActions interface {
 	// OnUserTapped opens someone's profile. anchor is the widget that was clicked
 	// — a message avatar, a member row — which the compact card is placed beside.
 	OnUserTapped(userID string, anchor fyne.CanvasObject)
-	OnAttachmentTapped(attachment *revoltgo.File)
-	OnReply(message *revoltgo.Message)
-	OnEdit(message *revoltgo.Message)
-	OnDelete(message *revoltgo.Message)
+	OnAttachmentTapped(attachment *domain.File)
+	OnReply(message *domain.Message)
+	OnEdit(message *domain.Message)
+	OnDelete(message *domain.Message)
 
 	// ResolveMessage looks a message up in the local cache, never the network.
-	ResolveMessage(channelID, messageID string) *revoltgo.Message
+	ResolveMessage(channelID, messageID string) *domain.Message
 }
 
 /* UI thread */

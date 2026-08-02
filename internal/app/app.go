@@ -1,5 +1,6 @@
-// Package app wires the Revolt session, the caches, and the UI into a running
-// client. It owns every piece of mutable state; widgets receive what they need
+// Package app wires the Revolt client, the image caches, and the UI into a
+// running application. It owns the view state and the widgets; everything that
+// talks to Revolt lives in internal/client, and widgets receive what they need
 // through ui.Deps.
 package app
 
@@ -12,10 +13,11 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
+	"RGOClient/internal/client"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -24,28 +26,27 @@ import (
 const (
 	windowTitle = "Revoltgo Client"
 
-	messagesPerChannel = 500 // cached messages per channel
-	cachedChannels     = 5   // channels kept in the message cache
-	cachedPreviews     = 100 // text-attachment previews kept in memory
+	cachedPreviews = 100 // text-attachment previews kept in memory
 
 	// deletePreviewRunes is how much of a message the delete confirmation quotes
 	// back: enough to recognise it, short enough to keep the card one question.
 	deletePreviewRunes = 120
 )
 
-// App holds the session, the caches, and all mutable UI state. It also
-// implements ui.MessageActions, so widgets can call back into it.
+// App holds the view state and the mounted widgets. It also implements
+// ui.MessageActions, so widgets can call back into it.
 //
 // Everything here is UI-thread confined unless a field says otherwise. Worker
-// goroutines reach it through doOnUI.
+// goroutines reach it through doOnUI, and reach Revolt through client, which is
+// safe from anywhere.
 type App struct {
 	fyne   fyne.App
 	window fyne.Window
 
-	session  *revoltgo.Session
-	images   *cache.ImageCache
-	messages *cache.MessageCache
-	texts    *cache.TextCache
+	client *client.Client
+	store  domain.Store      // client.Store(), held for how often it is read
+	images *cache.ImageCache // avatars, icons, attachments
+	texts  *cache.TextCache  // text-attachment previews
 
 	/* View state */
 
@@ -53,10 +54,10 @@ type App struct {
 	currentServerID  string
 	currentChannelID string
 
-	// The home view (directmessages.go). homeSelected is what "home is open"
-	// means: home has no server, so an empty currentServerID alone can't tell it
-	// apart from nothing being selected. dmChannels holds only the sidebar order —
-	// the conversations themselves live in State.
+	// The home view (navigation.go). homeSelected is what "home is open" means:
+	// home has no server, so an empty currentServerID alone can't tell it apart
+	// from nothing being selected. dmChannels holds only the sidebar order — the
+	// conversations themselves live in the store.
 	homeSelected bool
 	dmChannels   []string
 	loadingDMs   bool
@@ -91,7 +92,7 @@ type App struct {
 	/* Lazy author resolution, see members.go */
 
 	fetchedAuthors map[string]bool
-	pendingAuthors []author
+	pendingAuthors []client.AuthorRef
 	authorTimer    *time.Timer
 
 	/* Read-ack coalescing, see events.go */
@@ -100,8 +101,13 @@ type App struct {
 	ackChannelID string
 	ackMessageID string
 
+	// epoch counts logins. A worker captures it before it leaves the UI thread and
+	// checks it on the way back, so a response that outlived a logout is dropped
+	// instead of painting the previous account's data into the new one's view.
+	epoch uint64
+
 	pendingToken   string // stashed by a credential login until Ready names the user
-	pendingJoin    bool   // a join is in flight, so its ServerCreate should select
+	pendingJoin    bool   // a join is in flight, so its ServerJoined should select
 	loadingHistory bool
 }
 
@@ -113,11 +119,14 @@ func New(fyneApp fyne.App) *App {
 	window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 	window.SetIcon(assets.AppIcon)
 
+	revolt := client.New()
+
 	return &App{
 		fyne:                fyneApp,
 		window:              window,
+		client:              revolt,
+		store:               revolt.Store(),
 		images:              cache.NewImageCache(),
-		messages:            cache.NewMessageCache(messagesPerChannel, cachedChannels),
 		texts:               cache.NewTextCache(cachedPreviews),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelList:         container.NewVBox(),
@@ -131,22 +140,41 @@ func New(fyneApp fyne.App) *App {
 	}
 }
 
-// Run shows the login window and starts the Fyne event loop.
+// Run shows the login window, starts the event pump, and enters the Fyne event
+// loop.
 func (a *App) Run() {
+	go a.pumpEvents()
+
 	a.showLogin()
 	a.styleNativeChrome(a.window)
 	a.window.ShowAndRun()
 }
 
 // doOnUI runs fn on the UI thread, blocking until it returns when wait is set.
-// Every gateway handler and worker goroutine reaches the UI through here.
+// Every worker goroutine and the event pump reach the UI through here.
 func (a *App) doOnUI(fn func(), wait bool) {
 	a.fyne.Driver().DoFromGoroutine(fn, wait)
 }
 
+// background runs fn off the UI thread and, when it fails, posts onFail on the
+// UI thread. It is the shape every action here takes: the request goes to the
+// client, the outcome comes back as a notice, and the UI itself is updated by
+// the gateway event that follows.
+func (a *App) background(fn func() error, onFail func(err error)) {
+	go func() {
+		if err := fn(); err != nil {
+			a.doOnUI(func() { onFail(err) }, false)
+		}
+	}()
+}
+
+// stale reports whether epoch — captured before a worker left the UI thread — is
+// from a session that has since been replaced. Call on the UI thread.
+func (a *App) stale(epoch uint64) bool { return a.epoch != epoch }
+
 // deps returns the dependency bundle handed to widgets.
 func (a *App) deps() ui.Deps {
-	return ui.Deps{Session: a.session, Images: a.images, Texts: a.texts, Actions: a}
+	return ui.Deps{Store: a.store, Images: a.images, Texts: a.texts, Actions: a}
 }
 
 // showMainUI swaps the window to the main layout and wires up shutdown.
@@ -157,9 +185,7 @@ func (a *App) showMainUI() {
 
 	a.window.SetOnClosed(func() {
 		a.images.Shutdown()
-		if a.session != nil {
-			_ = a.session.Close()
-		}
+		a.client.Shutdown()
 	})
 }
 
@@ -182,42 +208,21 @@ func (a *App) styleNativeChrome(window fyne.Window) {
 
 /* State accessors */
 
-// stateChannel returns a channel from State, or nil when logged out or unknown.
-// It centralises the session nil-check for the channel helpers below. DMs and
-// groups need no special case: DirectMessages() feeds its result into State, so
-// a conversation the Ready snapshot didn't carry is known here from the moment
-// the home view loads it.
-func (a *App) stateChannel(channelID string) *revoltgo.Channel {
-	if a.session == nil || channelID == "" {
-		return nil
-	}
-
-	return a.session.State.Channel(channelID)
+// currentServer returns the selected server, or false when none is.
+func (a *App) currentServer() (domain.Server, bool) {
+	return a.store.Server(a.currentServerID)
 }
 
-// stateServer returns a server from State, or nil when logged out or unknown.
-func (a *App) stateServer(serverID string) *revoltgo.Server {
-	if a.session == nil || serverID == "" {
-		return nil
-	}
-
-	return a.session.State.Server(serverID)
+// currentChannel returns the selected channel, or false when none is.
+func (a *App) currentChannel() (domain.Channel, bool) {
+	return a.store.Channel(a.currentChannelID)
 }
 
-// currentServer returns the selected server, or nil.
-func (a *App) currentServer() *revoltgo.Server {
-	return a.stateServer(a.currentServerID)
-}
-
-// currentChannel returns the selected channel, or nil.
-func (a *App) currentChannel() *revoltgo.Channel {
-	return a.stateChannel(a.currentChannelID)
-}
-
-// channelServerID returns the server a channel belongs to, or "" for DMs.
+// channelServerID returns the server a channel belongs to, or "" for a
+// conversation.
 func (a *App) channelServerID(channelID string) string {
-	if channel := a.stateChannel(channelID); channel != nil && channel.Server != nil {
-		return *channel.Server
+	if channel, ok := a.store.Channel(channelID); ok {
+		return channel.ServerID
 	}
 
 	return ""
@@ -233,12 +238,12 @@ func (a *App) focusInput() {
 /* ui.MessageActions */
 
 // ResolveMessage looks a message up in the local cache.
-func (a *App) ResolveMessage(channelID, messageID string) *revoltgo.Message {
-	return a.messages.Find(channelID, messageID)
+func (a *App) ResolveMessage(channelID, messageID string) *domain.Message {
+	return a.client.Messages().Find(channelID, messageID)
 }
 
 // OnReply focuses the composer with the given message queued as a reply.
-func (a *App) OnReply(message *revoltgo.Message) {
+func (a *App) OnReply(message *domain.Message) {
 	if a.currentChannelID == "" || a.input == nil || message == nil {
 		return
 	}
@@ -248,7 +253,7 @@ func (a *App) OnReply(message *revoltgo.Message) {
 }
 
 // OnAttachmentTapped opens an attachment in the viewer.
-func (a *App) OnAttachmentTapped(attachment *revoltgo.File) {
+func (a *App) OnAttachmentTapped(attachment *domain.File) {
 	a.showAttachmentViewer(attachment)
 }
 
@@ -257,7 +262,7 @@ func (a *App) OnAttachmentTapped(attachment *revoltgo.File) {
 // OnDelete asks before deleting a message. Whether the action is offered at all
 // is decided by the widget; the confirmation is here because deleting is
 // irreversible and the quick actions put it one click from the pointer.
-func (a *App) OnDelete(message *revoltgo.Message) {
+func (a *App) OnDelete(message *domain.Message) {
 	if message == nil {
 		return
 	}
@@ -274,7 +279,7 @@ func (a *App) OnDelete(message *revoltgo.Message) {
 // deletePrompt quotes what is about to go, so a misaimed delete shows itself
 // before it happens rather than after. The quoted text is flattened onto one
 // line: the card asks a question, it isn't a second copy of the message.
-func deletePrompt(message *revoltgo.Message) string {
+func deletePrompt(message *domain.Message) string {
 	content := strings.Join(strings.Fields(message.Content), " ")
 	if content == "" {
 		return "This message will be deleted for everyone."
@@ -284,26 +289,22 @@ func deletePrompt(message *revoltgo.Message) string {
 }
 
 // deleteMessage deletes without waiting: the message leaves the view through the
-// MessageDelete gateway event. The server is the final authority, so a rejected
-// delete leaves it where it is and says so.
-func (a *App) deleteMessage(message *revoltgo.Message) {
-	session := a.session
-	if session == nil {
-		return
-	}
-
-	go func() {
-		if err := session.ChannelMessageDelete(message.Channel, message.ID); err != nil {
+// MessageDeleted event. The server is the final authority, so a rejected delete
+// leaves it where it is and says so.
+func (a *App) deleteMessage(message *domain.Message) {
+	a.background(
+		func() error { return a.client.DeleteMessage(message.ChannelID, message.ID) },
+		func(err error) {
 			log.Printf("delete message %s: %v", message.ID, err)
-			a.doOnUI(func() { a.notify(ui.ToneDanger, "Could not delete that message.") }, false)
-		}
-	}()
+			a.notify(ui.ToneDanger, "Could not delete that message.")
+		},
+	)
 }
 
 // OnEdit opens the in-place editor on the message's mounted widget. Only one edit
 // is active at a time; starting another cancels the previous one.
-func (a *App) OnEdit(message *revoltgo.Message) {
-	if message == nil || message.Channel != a.currentChannelID {
+func (a *App) OnEdit(message *domain.Message) {
+	if message == nil || message.ChannelID != a.currentChannelID {
 		return
 	}
 
@@ -320,12 +321,11 @@ func (a *App) OnEdit(message *revoltgo.Message) {
 
 // startEditing puts a mounted message widget into edit mode and focuses its
 // entry. Saving sends the edit request; the authoritative content comes back
-// through the MessageUpdate gateway event, which refreshes the widget.
+// through the MessageUpdated event, which refreshes the widget.
 func (a *App) startEditing(w *ui.MessageWidget) {
 	a.cancelActiveEdit()
 
-	session := a.session
-	if session == nil {
+	if !a.client.Connected() {
 		return
 	}
 	message := w.Message()
@@ -339,20 +339,18 @@ func (a *App) startEditing(w *ui.MessageWidget) {
 		// version, and a failed request reverts to the original.
 		updated := *message
 		updated.Content = newContent
-		a.messages.Replace(message.Channel, &updated)
-		a.refreshMessage(message.Channel, message.ID)
+		a.client.Messages().Replace(message.ChannelID, &updated)
+		a.refreshMessage(message.ChannelID, message.ID)
 
-		go func() {
-			params := revoltgo.MessageEditParams{Content: newContent}
-			if _, err := session.ChannelMessageEdit(message.Channel, message.ID, params); err != nil {
+		a.background(
+			func() error { return a.client.EditMessage(message.ChannelID, message.ID, newContent) },
+			func(err error) {
 				log.Printf("edit message %s: %v", message.ID, err)
-				a.doOnUI(func() {
-					a.messages.Replace(message.Channel, message)
-					a.refreshMessage(message.Channel, message.ID)
-					a.notify(ui.ToneDanger, "Could not save your edit.")
-				}, false)
-			}
-		}()
+				a.client.Messages().Replace(message.ChannelID, message)
+				a.refreshMessage(message.ChannelID, message.ID)
+				a.notify(ui.ToneDanger, "Could not save your edit.")
+			},
+		)
 	}
 
 	entry := w.StartEdit(save, func() {

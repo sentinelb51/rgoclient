@@ -26,7 +26,7 @@ func newTestComposer(t *testing.T) (*MessageInput, fyne.Window, *fyne.Container)
 	window := test.NewWindow(nil)
 	t.Cleanup(window.Close)
 
-	input := NewMessageInput(Deps{}, window)
+	input := NewMessageInput(testDeps(), window)
 	input.SetPlaceHolder("Send a message...")
 
 	background := canvas.NewRectangle(theme.Colors.ComposerBg)
@@ -143,7 +143,7 @@ func TestMentionQuery(t *testing.T) {
 	}
 	for _, tc := range cases {
 		input.SetText(tc.text)
-		input.CursorRow, input.CursorColumn = cursorPosition(tc.text, len([]rune(tc.text)))
+		input.CursorRow, input.CursorColumn = cursorPosition(tc.text, len(tc.text))
 
 		start, query, ok := input.mentionQuery()
 		if ok != tc.ok || (ok && (start != tc.start || query != tc.query)) {
@@ -203,8 +203,8 @@ func TestAcceptMentionInsertsToken(t *testing.T) {
 	if want := "hey <@01ELYNN> "; input.Text != want {
 		t.Errorf("text = %q, want %q", input.Text, want)
 	}
-	if input.cursorIndex() != len([]rune(input.Text)) {
-		t.Errorf("caret at %d, want end of text (%d)", input.cursorIndex(), len([]rune(input.Text)))
+	if input.cursorOffset() != len(input.Text) {
+		t.Errorf("caret at %d, want end of text (%d)", input.cursorOffset(), len(input.Text))
 	}
 	if input.Mentions.Visible() {
 		t.Error("picker stayed open after accepting")
@@ -249,7 +249,7 @@ func TestRenderComposerPreview(t *testing.T) {
 	window := test.NewWindow(nil)
 	defer window.Close()
 
-	input := NewMessageInput(Deps{}, window)
+	input := NewMessageInput(testDeps(), window)
 	input.SetPlaceHolder("Send a message...")
 	input.Mentions.SetCandidates([]MentionCandidate{
 		NewMentionCandidate("01A", "Elynn", "elynn", "", nil),

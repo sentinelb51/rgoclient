@@ -592,14 +592,28 @@ func NewEllipsisText(text *canvas.Text) *fyne.Container {
 // vertically. Rewriting the text during Layout is safe because the reported
 // minimum size doesn't depend on the content — the width is fixed at zero and
 // the height is the font's — so a shortened string can't trigger another layout.
+//
+// Both derived values are held onto because Layout and MinSize run on every
+// pass, over every row of both sidebars, while the answers change only when the
+// column is resized: full is fixed at construction, and so are the text's size
+// and style.
 type ellipsisLayout struct {
 	text *canvas.Text
 	full string
+
+	width  float32 // the width fitted was derived for
+	fitted string
+	sized  bool // fitted is meaningful, rather than the zero value for a zero width
+	height float32
 }
 
 func (l *ellipsisLayout) Layout(_ []fyne.CanvasObject, size fyne.Size) {
-	if fitted := TruncateToWidth(l.full, size.Width, l.text.TextSize, l.text.TextStyle); fitted != l.text.Text {
-		l.text.Text = fitted
+	if !l.sized || l.width != size.Width {
+		l.fitted = TruncateToWidth(l.full, size.Width, l.text.TextSize, l.text.TextStyle)
+		l.width, l.sized = size.Width, true
+	}
+	if l.fitted != l.text.Text {
+		l.text.Text = l.fitted
 		l.text.Refresh()
 	}
 
@@ -615,7 +629,11 @@ func (l *ellipsisLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 // lineHeight measures a sample glyph rather than the text itself, so a row is
 // the same height whether its name is long, short, or not yet resolved.
 func (l *ellipsisLayout) lineHeight() float32 {
-	return fyne.MeasureText("W", l.text.TextSize, l.text.TextStyle).Height
+	if l.height == 0 {
+		l.height = fyne.MeasureText("W", l.text.TextSize, l.text.TextStyle).Height
+	}
+
+	return l.height
 }
 
 // TruncateToWidth shortens text until it fits inside width when rendered at the

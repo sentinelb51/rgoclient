@@ -11,8 +11,8 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -129,7 +129,7 @@ func (s *tapSink) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 //
 // The card carries its own chrome — there is no native window here, so nothing
 // has to be recoloured to match the palette.
-func NewAttachmentViewer(deps Deps, attachment *revoltgo.File, bounds fyne.Size, onClose func()) fyne.CanvasObject {
+func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, onClose func()) fyne.CanvasObject {
 	// The body gets what is left of bounds once the card's own chrome is paid for:
 	// NewPadded insets all four sides, and the Border layout puts one more gap
 	// between the header and the body.
@@ -144,9 +144,9 @@ func NewAttachmentViewer(deps Deps, attachment *revoltgo.File, bounds fyne.Size,
 		detail  string
 	)
 	switch {
-	case util.IsImageAttachment(attachment):
+	case attachment.Kind == domain.FileImage:
 		content, detail = viewerImage(deps, attachment, body)
-	case util.Filetype(attachment.Filename) == util.FileTypeText:
+	case attachment.Kind == domain.FileText:
 		content = viewerText(attachment, body)
 	default:
 		content = viewerUnsupported(body)
@@ -166,8 +166,8 @@ func NewAttachmentViewer(deps Deps, attachment *revoltgo.File, bounds fyne.Size,
 
 // viewerHeader is the card's title strip: filename on the left, then the file
 // size (and, for images, their pixel dimensions), a browser button, and close.
-func viewerHeader(attachment *revoltgo.File, detail string, onClose func()) fyne.CanvasObject {
-	name := canvas.NewText(attachment.Filename, theme.Colors.TextPrimary)
+func viewerHeader(attachment *domain.File, detail string, onClose func()) fyne.CanvasObject {
+	name := canvas.NewText(attachment.Name, theme.Colors.TextPrimary)
 	name.TextSize = theme.Sizes.ViewerTitleSize
 	name.TextStyle = fyne.TextStyle{Bold: true}
 
@@ -179,7 +179,7 @@ func viewerHeader(attachment *revoltgo.File, detail string, onClose func()) fyne
 	info.TextSize = theme.Sizes.ViewerTitleSize
 
 	actions := container.NewHBox(info, HorizontalSpacer(theme.Sizes.ViewerPadding))
-	if link := attachment.URL(""); link != "" {
+	if link := attachment.URL; link != "" {
 		actions.Add(NewIconButton(fynetheme.ComputerIcon(), func() {
 			if u, err := url.Parse(link); err == nil {
 				_ = fyne.CurrentApp().OpenURL(u)
@@ -196,8 +196,8 @@ func viewerHeader(attachment *revoltgo.File, detail string, onClose func()) fyne
 
 // viewerImage renders the attachment scaled to fit within bounds and reports its
 // real pixel dimensions for the header.
-func viewerImage(deps Deps, attachment *revoltgo.File, bounds fyne.Size) (fyne.CanvasObject, string) {
-	pixelWidth, pixelHeight := util.AttachmentDimensions(attachment)
+func viewerImage(deps Deps, attachment *domain.File, bounds fyne.Size) (fyne.CanvasObject, string) {
+	pixelWidth, pixelHeight := attachment.Width, attachment.Height
 
 	size := fitWithin(pixelWidth, pixelHeight, bounds.Width, bounds.Height)
 	if size.IsZero() {
@@ -206,7 +206,7 @@ func viewerImage(deps Deps, attachment *revoltgo.File, bounds fyne.Size) (fyne.C
 	size = fyne.NewSize(max(size.Width, theme.Sizes.ViewerMinWidth), max(size.Height, theme.Sizes.ViewerMinHeight))
 
 	frame := container.NewStack()
-	if link := attachment.URL(""); link != "" && attachment.ID != "" {
+	if link := attachment.URL; link != "" && attachment.ID != "" {
 		deps.Images.LoadIntoContainer(attachment.ID, link, size, frame, false, nil)
 	}
 
@@ -220,14 +220,14 @@ func viewerImage(deps Deps, attachment *revoltgo.File, bounds fyne.Size) (fyne.C
 
 // viewerText shows a text attachment in full — the message preview only pulls
 // the first few hundred characters — as selectable monospace text.
-func viewerText(attachment *revoltgo.File, bounds fyne.Size) fyne.CanvasObject {
+func viewerText(attachment *domain.File, bounds fyne.Size) fyne.CanvasObject {
 	body := widget.NewLabel("Loading...")
 	body.TextStyle = fyne.TextStyle{Monospace: true}
 	body.Wrapping = fyne.TextWrapWord
 	body.Selectable = true
 
 	go func() {
-		text, err := fetchText(attachment.URL(""), attachmentViewerRead)
+		text, err := fetchText(attachment.URL, attachmentViewerRead)
 		DoOnUI(func() {
 			if err != nil {
 				body.SetText("Could not load this file.")

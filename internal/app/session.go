@@ -12,8 +12,8 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/client"
 	"RGOClient/internal/ui"
 )
 
@@ -26,64 +26,33 @@ var loginWindowSize = fyne.NewSize(300, 280)
 
 // startWithToken opens a session using an existing token.
 func (a *App) startWithToken(token string) error {
-	return a.openSession(revoltgo.New(token))
+	a.doOnUI(a.resetSessionState, true)
+
+	return a.client.Open(token)
 }
 
 // startWithLogin opens a session using credentials. The new token is stashed in
 // pendingToken before the gateway opens — onReady persists it, and Ready can
 // arrive before this goroutine would otherwise get back onto the UI thread.
 func (a *App) startWithLogin(email, password string) error {
-	session, resp, err := revoltgo.NewWithLogin(revoltgo.LoginParams{Email: email, Password: password})
-	if err != nil {
-		return fmt.Errorf("create session: %w", err)
-	}
+	a.doOnUI(a.resetSessionState, true)
 
-	a.doOnUI(func() { a.pendingToken = resp.Token }, true)
-	if err := a.openSession(session); err != nil {
-		a.doOnUI(func() { a.pendingToken = "" }, true)
+	token, err := a.client.Login(email, password)
+	if err != nil {
 		return err
 	}
+	a.doOnUI(func() { a.pendingToken = token }, true)
 
 	return nil
 }
 
-// openSession registers the gateway handlers and opens the websocket. It runs on
-// a login goroutine, so the a.session write goes through the UI thread — the only
-// place that field is ever written, apart from onError's teardown, which keeps
-// every UI-thread read race-free.
-func (a *App) openSession(session *revoltgo.Session) error {
-	a.doOnUI(func() {
-		a.resetSessionState()
-		a.session = session
-	}, true)
-
-	revoltgo.AddHandler(session, a.onReady)
-	revoltgo.AddHandler(session, a.onMessage)
-	revoltgo.AddHandler(session, a.onMessageUpdate)
-	revoltgo.AddHandler(session, a.onMessageDelete)
-	revoltgo.AddHandler(session, a.onBulkMessageDelete)
-	revoltgo.AddHandler(session, a.onServerCreate)
-	revoltgo.AddHandler(session, a.onServerDelete)
-	revoltgo.AddHandler(session, a.onChannelDelete)
-	revoltgo.AddHandler(session, a.onServerMemberJoin)
-	revoltgo.AddHandler(session, a.onServerMemberLeave)
-	revoltgo.AddHandler(session, a.onServerMemberUpdate)
-	revoltgo.AddHandler(session, a.onError)
-
-	if err := session.Open(); err != nil {
-		a.doOnUI(func() { a.session = nil }, true)
-		return fmt.Errorf("open session: %w", err)
-	}
-
-	return nil
-}
-
-// resetSessionState clears the per-account caches and view state, so a re-login
-// (possibly as another account) starts clean instead of carrying the previous
-// account's messages, unread marks, and author-fetch guards. Call on the UI
-// thread.
+// resetSessionState clears the per-account view state, so a re-login (possibly as
+// another account) starts clean instead of carrying the previous account's
+// unread marks, collapsed categories and author-fetch guards. The client clears
+// its own half — the message cache — when the session is replaced. Call on the
+// UI thread.
 func (a *App) resetSessionState() {
-	a.messages.Clear()
+	a.epoch++         // anything still in flight for the old session is now stale
 	a.notices.Clear() // a failure from the last account has nothing to say to this one
 
 	if a.authorTimer != nil {
@@ -93,7 +62,17 @@ func (a *App) resetSessionState() {
 	a.pendingAuthors = nil
 	a.fetchedAuthors = make(map[string]bool)
 
+	// A pending ack fires against whatever session is current when it fires, not
+	// the one that scheduled it, so one left running across a re-login would
+	// acknowledge the previous account's channel through the new account's session.
+	if a.ackTimer != nil {
+		a.ackTimer.Stop()
+		a.ackTimer = nil
+	}
+	a.ackChannelID, a.ackMessageID = "", ""
+
 	a.unreadChannels = make(map[string]bool)
+	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise
 	a.serverIDs = nil
 	a.currentServerID = ""
 	a.currentChannelID = ""
@@ -133,7 +112,7 @@ func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 
 	cards := container.NewVBox()
 	for _, session := range sessions {
-		cards.Add(ui.NewSessionCard(a.images, session.Username, session.AvatarID,
+		cards.Add(ui.NewSessionCard(a.images, session.Username, session.avatarURL(),
 			func() { a.loginWithToken(session) },
 			func() {
 				_ = RemoveSession(session.UserID)
@@ -209,11 +188,25 @@ func (a *App) loginWithToken(session SavedSession) {
 /* Saved-session store */
 
 // SavedSession is a persisted login plus the metadata shown on its card.
+//
+// AvatarID is only read, never written: sessions saved before the client stopped
+// building CDN URLs outside internal/client still carry one, and a card with the
+// right face is worth the four lines that keep it working.
 type SavedSession struct {
-	Token    string `json:"token"`
-	UserID   string `json:"user_id"`
-	Username string `json:"username"`
-	AvatarID string `json:"avatar_id"`
+	Token     string `json:"token"`
+	UserID    string `json:"user_id"`
+	Username  string `json:"username"`
+	AvatarURL string `json:"avatar_url"`
+	AvatarID  string `json:"avatar_id,omitempty"`
+}
+
+// avatarURL is the picture the session's card shows.
+func (s SavedSession) avatarURL() string {
+	if s.AvatarURL != "" {
+		return s.AvatarURL
+	}
+
+	return client.AvatarURL(s.AvatarID)
 }
 
 // LoadSessions reads all saved sessions, returning nil when the file is absent.

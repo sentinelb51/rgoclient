@@ -8,9 +8,8 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
-	"github.com/sentinelb51/revoltgo"
 
-	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -19,22 +18,12 @@ import (
 // widgets tolerating a nil interface.
 type stubActions struct{}
 
-func (stubActions) OnUserTapped(string, fyne.CanvasObject)       {}
-func (stubActions) OnAttachmentTapped(*revoltgo.File)            {}
-func (stubActions) OnReply(*revoltgo.Message)                    {}
-func (stubActions) OnEdit(*revoltgo.Message)                     {}
-func (stubActions) OnDelete(*revoltgo.Message)                   {}
-func (stubActions) ResolveMessage(_, _ string) *revoltgo.Message { return nil }
-
-// viewerDeps is what a viewer card needs: an image cache to load from, plus the
-// stub actions every widget expects to be present.
-func viewerDeps() Deps {
-	return Deps{
-		Images:  cache.NewImageCache(),
-		Texts:   cache.NewTextCache(8),
-		Actions: stubActions{},
-	}
-}
+func (stubActions) OnUserTapped(string, fyne.CanvasObject)     {}
+func (stubActions) OnAttachmentTapped(*domain.File)            {}
+func (stubActions) OnReply(*domain.Message)                    {}
+func (stubActions) OnEdit(*domain.Message)                     {}
+func (stubActions) OnDelete(*domain.Message)                   {}
+func (stubActions) ResolveMessage(_, _ string) *domain.Message { return nil }
 
 // TestAttachmentViewerFits checks that every attachment kind builds a card that
 // stays inside the bounds it was given — the modal is centred at its MinSize, so
@@ -44,27 +33,27 @@ func TestAttachmentViewerFits(t *testing.T) {
 
 	cases := []struct {
 		name string
-		file *revoltgo.File
+		file *domain.File
 	}{
-		{"image", &revoltgo.File{
-			ID:       "img",
-			Filename: "shot.png",
-			Size:     2048,
-			Metadata: &revoltgo.AttachmentMetadata{Type: revoltgo.FileMetadataTypeImage, Width: 1920, Height: 1080},
+		{"image", &domain.File{
+			ID:   "img",
+			Name: "shot.png",
+			Size: 2048,
+			Kind: domain.FileImage, Width: 1920, Height: 1080,
 		}},
-		{"oversized image", &revoltgo.File{
-			ID:       "big",
-			Filename: "huge.png",
-			Metadata: &revoltgo.AttachmentMetadata{Type: revoltgo.FileMetadataTypeImage, Width: 6000, Height: 200},
+		{"oversized image", &domain.File{
+			ID:   "big",
+			Name: "huge.png",
+			Kind: domain.FileImage, Width: 6000, Height: 200,
 		}},
-		{"image without metadata", &revoltgo.File{ID: "raw", Filename: "mystery.png"}},
-		{"text", &revoltgo.File{ID: "txt", Filename: "notes.txt", Size: 40}},
-		{"unsupported", &revoltgo.File{ID: "bin", Filename: "archive.zip", Size: 90}},
+		{"image without metadata", &domain.File{ID: "raw", Name: "mystery.png", Kind: domain.FileImage}},
+		{"text", &domain.File{ID: "txt", Name: "notes.txt", Kind: domain.FileText, Size: 40}},
+		{"unsupported", &domain.File{ID: "bin", Name: "archive.zip", Kind: domain.FileArchive, Size: 90}},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			card := NewAttachmentViewer(viewerDeps(), tc.file, bounds, func() {})
+			card := NewAttachmentViewer(testDeps(), tc.file, bounds, func() {})
 
 			win := test.NewWindow(card)
 			t.Cleanup(win.Close)
@@ -119,7 +108,7 @@ func TestPopoverMountsBesideItsAnchor(t *testing.T) {
 	anchor.Resize(anchor.MinSize())
 	anchor.Move(fyne.NewPos(60, 300))
 
-	card := NewProfileCard(viewerDeps(), Profile{Name: "Someone"}, ProfileActions{})
+	card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 	win.Canvas().Overlays().Add(NewPopover(card.Content, anchor, func() {}))
 
 	driver := fyne.CurrentApp().Driver()

@@ -11,8 +11,8 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -33,7 +33,7 @@ const (
 type MessageWidget struct {
 	widget.BaseWidget
 	deps    Deps
-	message *revoltgo.Message
+	message *domain.Message
 
 	content    fyne.CanvasObject
 	background *canvas.Rectangle
@@ -92,7 +92,7 @@ var (
 //
 // A non-empty dayLabel means this message opens a new calendar day, and the
 // named day separator is drawn above it.
-func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, grouped, followedByGroup bool) *MessageWidget {
+func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, grouped, followedByGroup bool) *MessageWidget {
 	w := &MessageWidget{
 		deps:       deps,
 		message:    message,
@@ -101,7 +101,7 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 
 	text := message.Content
 	if message.System != nil {
-		text = util.FormatSystemMessage(deps.Session, message.System)
+		text = deps.Store.SystemText(message.System)
 	}
 
 	var shortTime, fullTime string
@@ -131,7 +131,7 @@ func NewMessageWidget(deps Deps, message *revoltgo.Message, dayLabel string, gro
 	} else {
 		name, nameColor, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
-			deps.Actions.OnUserTapped(message.Author, w.avatar)
+			deps.Actions.OnUserTapped(message.AuthorID, w.avatar)
 		})
 		w.avatar.onSecondaryTap = w.TappedSecondary
 		leftColumn = container.New(&columnLayout{
@@ -189,10 +189,10 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // Message returns the message this widget renders.
-func (w *MessageWidget) Message() *revoltgo.Message { return w.message }
+func (w *MessageWidget) Message() *domain.Message { return w.message }
 
 // Author returns the message author's user ID.
-func (w *MessageWidget) Author() string { return w.message.Author }
+func (w *MessageWidget) Author() string { return w.message.AuthorID }
 
 // SetFollowedByGroup tightens (or restores) the bottom margin when a same-author
 // continuation is appended directly beneath this message after it was mounted.
@@ -225,12 +225,9 @@ func (w *MessageWidget) RefreshAuthor() {
 
 // isOwnMessage reports whether the message was authored by the logged-in user.
 func (w *MessageWidget) isOwnMessage() bool {
-	if w.deps.Session == nil {
-		return false
-	}
+	self := w.deps.Store.SelfID()
 
-	self := w.deps.Session.State.Self()
-	return self != nil && self.ID == w.message.Author
+	return self != "" && self == w.message.AuthorID
 }
 
 // canEdit reports whether the edit action should be offered: only your own
@@ -240,23 +237,11 @@ func (w *MessageWidget) canEdit() bool {
 }
 
 // canDelete reports whether the delete action should be offered: your own
-// message, or any message in a channel where you hold ManageMessages.
+// message, or any message in a channel where you hold ManageMessages. Both
+// questions are asked lazily, on the first hover or right-click, so a mounted
+// page costs no permission checks at all.
 func (w *MessageWidget) canDelete() bool {
-	if w.isOwnMessage() {
-		return true
-	}
-	if w.deps.Session == nil {
-		return false
-	}
-
-	state := w.deps.Session.State
-	self, channel := state.Self(), state.Channel(w.message.Channel)
-	if self == nil || channel == nil {
-		return false
-	}
-
-	perms, err := state.ChannelPermissions(self, channel)
-	return err == nil && perms&revoltgo.PermissionManageMessages != 0
+	return w.isOwnMessage() || w.deps.Store.CanManageMessages(w.message.ChannelID)
 }
 
 /* Quick actions and context menu */
@@ -317,7 +302,7 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 			CopyToClipboard(w.message.ID)
 		}),
 		fyne.NewMenuItemWithIcon("Copy author ID", fynetheme.AccountIcon(), func() {
-			CopyToClipboard(w.message.Author)
+			CopyToClipboard(w.message.AuthorID)
 		}),
 	)
 
@@ -444,15 +429,19 @@ func (w *MessageWidget) updateHover() {
 	}
 	w.hideTimer = time.AfterFunc(hoverHideDelay, func() {
 		DoOnUI(func() {
+			// Cleared first: a timer that fires while the row is being edited used
+			// to return with the field still set, and the guard above then refused
+			// to arm another one — leaving that message's actions up for good.
+			w.hideTimer = nil
 			if w.overMessage || w.overActions || w.editing {
 				return
 			}
+
 			w.setHighlighted(false)
 			if w.actions != nil {
 				w.actions.Hide()
 			}
 			w.setGutterShown(false)
-			w.hideTimer = nil
 		})
 	})
 }
@@ -508,8 +497,8 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 // resolveAuthor resolves the display name, role colour, and avatar URL for a
 // message's author. Shared by construction and RefreshAuthor, so a lazily
 // fetched author renders identically either way.
-func resolveAuthor(deps Deps, message *revoltgo.Message) (name string, nameColor color.Color, avatarURL string) {
-	author := util.MessageAuthor(deps.Session, message)
+func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor color.Color, avatarURL string) {
+	author := deps.Store.MessageAuthor(message)
 
 	nameColor = theme.Colors.TextPrimary
 	if author.Color != nil {
@@ -552,7 +541,7 @@ func verticalPad(tight bool) float32 {
 }
 
 // buildMessageContent assembles the author header plus any attachments.
-func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+func buildMessageContent(deps Deps, message *domain.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	header := buildMessageHeader(author, timestamp, body)
 	if len(message.Attachments) == 0 {
 		return header
@@ -563,7 +552,7 @@ func buildMessageContent(deps Deps, message *revoltgo.Message, author *canvas.Te
 
 // buildGroupedContent renders a grouped continuation: just the body and any
 // attachments, with no author/timestamp header.
-func buildGroupedContent(deps Deps, message *revoltgo.Message, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+func buildGroupedContent(deps Deps, message *domain.Message, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	if len(message.Attachments) == 0 {
 		return body
 	}
@@ -649,10 +638,10 @@ func (l *daySeparatorLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 // buildReplyBlock stacks the quoted lines above the message answering them,
 // ending in the gap that separates the two.
-func buildReplyBlock(deps Deps, message *revoltgo.Message, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+func buildReplyBlock(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	quotes := make([]fyne.CanvasObject, 0, len(message.Replies)+1)
 	for _, replyID := range message.Replies {
-		quotes = append(quotes, buildReplyPreview(deps, message.Channel, replyID, onMenu))
+		quotes = append(quotes, buildReplyPreview(deps, message.ChannelID, replyID, onMenu))
 	}
 
 	return VBoxNoSpacing(append(quotes, VerticalSpacer(theme.Sizes.MessageReplyBlockGap))...)
@@ -743,7 +732,7 @@ func resolveReply(deps Deps, channelID, messageID string) (author, content, avat
 		return "", "Unknown message reference", "", nil
 	}
 
-	a := util.MessageAuthor(deps.Session, message)
+	a := deps.Store.MessageAuthor(message)
 	return util.Truncate(a.Name, maxReplyUsernameLength),
 		util.Truncate(message.Content, maxReplyPreviewLength),
 		a.AvatarURL, a.Color

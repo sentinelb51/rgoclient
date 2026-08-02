@@ -1,0 +1,362 @@
+// Package domain holds the value types the client is written in terms of, plus
+// the one interface at the boundary between talking to Revolt and drawing it.
+//
+// Nothing here imports revoltgo or fyne. internal/client converts the wire types
+// into these once, on the way in; internal/ui draws them without ever seeing
+// what they came from. That is the point of the package rather than a tidiness
+// exercise: revoltgo.State's caches are unexported and its constructor is
+// package-private, so nothing holding a Session can be built in a test. A value
+// can, and so can anything written against Store.
+package domain
+
+import (
+	"image/color"
+	"strings"
+	"time"
+)
+
+/* Files */
+
+// FileKind classifies an uploaded file by what the client can do with it.
+type FileKind uint8
+
+const (
+	FileUnknown FileKind = iota
+	FileImage
+	FileVideo
+	FileText
+	FileAudio
+	FileArchive
+	FilePDF
+)
+
+// FileKindOf classifies a filename by its extension, avoiding an allocation when
+// the extension is already lowercase (the common case for web content). It is
+// what a locally picked file is classified by; one that came from Revolt carries
+// the server's own answer, which the conversion prefers.
+func FileKindOf(filename string) FileKind {
+	dot := strings.LastIndexByte(filename, '.')
+	if dot == -1 || dot == len(filename)-1 {
+		return FileUnknown
+	}
+
+	ext := filename[dot+1:]
+	for i := range len(ext) {
+		if c := ext[i]; c >= 'A' && c <= 'Z' {
+			ext = strings.ToLower(ext)
+			break
+		}
+	}
+
+	switch ext {
+	case "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "heic", "tiff":
+		return FileImage
+	case "mp4", "webm", "mov", "mkv", "avi", "flv", "wmv", "m4v":
+		return FileVideo
+	case "mp3", "wav", "ogg", "flac", "m4a", "aac":
+		return FileAudio
+	case "zip", "rar", "7z", "tar", "gz", "bz2":
+		return FileArchive
+	case "pdf":
+		return FilePDF
+	case "txt", "md", "csv", "json", "xml", "html", "css", "js", "ts", "go", "py", "java", "c", "cpp", "h", "rs", "log":
+		return FileText
+	default:
+		return FileUnknown
+	}
+}
+
+// File is an uploaded file — an attachment, an avatar, an icon — already
+// resolved to the URL it is served from.
+//
+// Width and Height are zero when Revolt could not introspect the file: its
+// metadata is optional, and that is the whole of the difference here. Callers
+// test the dimensions rather than a pointer, which is what the old
+// AttachmentDimensions helper existed to spare them.
+type File struct {
+	ID   string
+	Name string
+	URL  string
+
+	Kind   FileKind
+	Size   int
+	Width  int
+	Height int
+}
+
+/* Messages */
+
+// Message is a chat message as the client renders one.
+type Message struct {
+	ID        string
+	ChannelID string
+	AuthorID  string
+
+	Content     string
+	Attachments []*File
+	Replies     []string // IDs of the messages this one answers
+
+	Edited *time.Time
+
+	// System is set when the server generated the message rather than anyone
+	// typing it, and Webhook when an integration posted it. Masquerade only
+	// records that the message carries one: the client does not render a
+	// masquerade, but a masqueraded message must never group under the account
+	// behind it.
+	System     *SystemMessage
+	Webhook    *Webhook
+	Masquerade bool
+}
+
+// Webhook is the identity an integration posted under.
+type Webhook struct {
+	Name      string
+	AvatarURL string
+}
+
+// SystemKind is Revolt's own vocabulary for what a system message announces,
+// carried verbatim so an event the platform adds later reads as unknown rather
+// than as something else.
+type SystemKind string
+
+const (
+	SystemUserAdded                 SystemKind = "user_added"
+	SystemUserRemove                SystemKind = "user_remove"
+	SystemUserJoined                SystemKind = "user_joined"
+	SystemUserLeft                  SystemKind = "user_left"
+	SystemUserKicked                SystemKind = "user_kicked"
+	SystemUserBanned                SystemKind = "user_banned"
+	SystemChannelRenamed            SystemKind = "channel_renamed"
+	SystemChannelDescriptionChanged SystemKind = "channel_description_changed"
+	SystemChannelIconChanged        SystemKind = "channel_icon_changed"
+	SystemChannelOwnershipChanged   SystemKind = "channel_ownership_changed"
+	SystemMessagePinned             SystemKind = "message_pinned"
+	SystemMessageUnpinned           SystemKind = "message_unpinned"
+	SystemCallStarted               SystemKind = "call_started"
+)
+
+// SystemMessage is a server-generated event. Target is whoever it is about,
+// where it is about someone.
+type SystemMessage struct {
+	Kind   SystemKind
+	Target string
+}
+
+// Text renders the event as a line of prose. who is Target's display name,
+// which the caller resolves — Store.SystemText is the one that does, and this
+// stays pure so the wording can be tested without one.
+func (s *SystemMessage) Text(who string) string {
+	if who == "" {
+		who = "Someone"
+	}
+
+	switch s.Kind {
+	case SystemUserAdded:
+		return who + " added to group"
+	case SystemUserRemove:
+		return who + " removed from group"
+	case SystemUserJoined:
+		return who + " joined"
+	case SystemUserLeft:
+		return who + " left"
+	case SystemUserKicked:
+		return who + " was kicked"
+	case SystemUserBanned:
+		return who + " banned"
+	case SystemChannelRenamed:
+		return "Channel renamed"
+	case SystemChannelDescriptionChanged:
+		return "Channel description changed"
+	case SystemChannelIconChanged:
+		return "Channel icon changed"
+	case SystemChannelOwnershipChanged:
+		return "Channel ownership changed"
+	case SystemMessagePinned:
+		return "Message pinned"
+	case SystemMessageUnpinned:
+		return "Message unpinned"
+	case SystemCallStarted:
+		return "Call started"
+	default:
+		return "System event"
+	}
+}
+
+/* Channels */
+
+// ChannelKind is what sort of channel this is.
+type ChannelKind uint8
+
+const (
+	ChannelText ChannelKind = iota
+	ChannelVoice
+	ChannelDM
+	ChannelGroup
+	ChannelSavedMessages
+)
+
+// IsConversation reports whether the channel is one of the user's own — a direct
+// message, a group, or their saved notes — as opposed to a channel belonging to
+// a server. Those are the home view's rows, they are the only ones that can be
+// closed, and they are drawn as taller cards led by a picture rather than a
+// glyph.
+func (k ChannelKind) IsConversation() bool {
+	return k == ChannelDM || k == ChannelGroup || k == ChannelSavedMessages
+}
+
+// Channel is a channel with everything a row or a header needs already
+// resolved. Name and AvatarURL are the resolution: a direct message has no name
+// of its own — it is titled after the other participant — and saved notes are
+// titled for what they are rather than after the account reading them.
+type Channel struct {
+	ID       string
+	ServerID string // "" for a conversation
+	Kind     ChannelKind
+
+	Name      string
+	AvatarURL string // the conversation's picture; "" for a server channel
+
+	Recipients    []string
+	LastMessageID string
+	Active        bool
+}
+
+/* Servers */
+
+// Server is a server and the shape of its channel list.
+type Server struct {
+	ID      string
+	Name    string
+	OwnerID string
+
+	IconID  string
+	IconURL string
+
+	Channels   []string
+	Categories []Category
+}
+
+// Category groups a server's channels in the sidebar.
+type Category struct {
+	ID       string
+	Title    string
+	Channels []string
+}
+
+/* People */
+
+// Presence is a user's availability, as the ring around their avatar reports it.
+type Presence uint8
+
+const (
+	PresenceOffline Presence = iota
+	PresenceOnline
+	PresenceIdle
+	PresenceFocus
+	PresenceBusy
+)
+
+// Label names the presence in words.
+func (p Presence) Label() string {
+	switch p {
+	case PresenceOnline:
+		return "Online"
+	case PresenceIdle:
+		return "Idle"
+	case PresenceFocus:
+		return "Focus"
+	case PresenceBusy:
+		return "Busy"
+	}
+
+	return "Offline"
+}
+
+// User is an account, resolved to what the client shows of one.
+type User struct {
+	ID       string
+	Name     string // display name, falling back to the username
+	Username string
+	Handle   string // "@username#0001" — what tells two identical display names apart
+
+	AvatarURL  string
+	Presence   Presence
+	StatusText string
+	Badges     []string
+
+	Online bool
+	Bot    bool
+}
+
+// Member is a user's membership of one server, resolved the way the sidebar and
+// a message header show them: the nickname, the per-server avatar and the
+// most-senior coloured role override the account's own.
+//
+// Roles are deliberately absent — only a profile draws them, and resolving every
+// member's roles to build a sidebar would allocate a slice per row. Ask
+// Store.MemberRoles for the one member whose profile is open.
+type Member struct {
+	ServerID string
+	UserID   string
+
+	Name      string
+	Username  string // the account handle behind the nickname, for mention matching
+	AvatarURL string
+	Color     color.Color // most-senior coloured role; nil when none applies
+
+	JoinedAt time.Time
+	Online   bool
+}
+
+// Role is a server role the way a profile card shows one: its name, in its own
+// colour.
+type Role struct {
+	Name  string
+	Color color.Color // nil when the role has no colour, or none that parses
+}
+
+// Author bundles the display fields for a message's author — the one-pass
+// channel to member to user walk, resolved.
+type Author struct {
+	Name      string
+	AvatarURL string
+	Color     color.Color // nil when no coloured role applies
+}
+
+// Profile is everything the two profile presentations draw, resolved in one
+// pass. Bio is the exception: it is a request of its own, so it arrives after
+// the card is already on screen.
+type Profile struct {
+	UserID string
+	Name   string // the server nickname where there is one, else the display name
+	Handle string
+	Status string // the user's own status line
+
+	AvatarURL  string
+	Accent     color.Color // most-senior coloured role; nil for the neutral banner
+	Presence   Presence
+	ServerName string // the open server, for the joined date; "" in a conversation
+
+	Badges []string
+	Roles  []Role
+
+	Created time.Time // account creation, from the ID
+	Joined  time.Time // joined ServerName; zero outside a server
+
+	Bot bool
+}
+
+/* Composing */
+
+// Attachment is a local file queued in the composer, before it is uploaded.
+type Attachment struct {
+	Path string
+	Name string
+}
+
+// Reply is a message the composer is answering, and whether sending it should
+// ping the author.
+type Reply struct {
+	ID      string
+	Mention bool
+}

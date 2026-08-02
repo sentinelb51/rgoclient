@@ -1,4 +1,4 @@
-package util
+package client
 
 import (
 	"image/color"
@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/sentinelb51/revoltgo"
+
+	"RGOClient/internal/domain"
 )
 
 func TestParseHexColor(t *testing.T) {
@@ -105,13 +107,12 @@ func TestServerRolesOrdersBySeniority(t *testing.T) {
 	}
 }
 
-func TestUserHandle(t *testing.T) {
+func TestHandle(t *testing.T) {
 	cases := []struct {
 		name string
 		user *revoltgo.User
 		want string
 	}{
-		{"unknown", nil, ""},
 		{"nameless", &revoltgo.User{}, ""},
 		{"full", &revoltgo.User{Username: "sentinel", Discriminator: "9147"}, "@sentinel#9147"},
 		{"no discriminator", &revoltgo.User{Username: "sentinel"}, "@sentinel"},
@@ -119,22 +120,54 @@ func TestUserHandle(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := UserHandle(tc.user); got != tc.want {
+			if got := handle(tc.user); got != tc.want {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
 	}
 }
 
-func TestUserBadges(t *testing.T) {
-	if got := UserBadges(&revoltgo.User{}); got != nil {
+func TestToBadges(t *testing.T) {
+	if got := toBadges(&revoltgo.User{}); got != nil {
 		t.Errorf("an account with no badges got %v", got)
 	}
 
 	// Developer (1) + Supporter (4) + a bit this client doesn't know (1 << 20).
-	got := UserBadges(&revoltgo.User{Badges: 1 | 4 | 1<<20})
+	got := toBadges(&revoltgo.User{Badges: 1 | 4 | 1<<20})
 	want := []string{"Developer", "Supporter"}
 	if !slices.Equal(got, want) {
 		t.Errorf("got %v, want %v with the unknown bit ignored", got, want)
+	}
+}
+
+// TestToPresence covers the two cases the mapping exists for: a user who isn't
+// connected is offline whatever they picked, and invisible is deliberately
+// indistinguishable from offline.
+func TestToPresence(t *testing.T) {
+	cases := []struct {
+		name string
+		user *revoltgo.User
+		want domain.Presence
+	}{
+		{"unknown", nil, domain.PresenceOffline},
+		{"disconnected", &revoltgo.User{}, domain.PresenceOffline},
+		{"connected", &revoltgo.User{Online: true}, domain.PresenceOnline},
+		{"busy", &revoltgo.User{Online: true, Status: &revoltgo.UserStatus{
+			Presence: revoltgo.UserStatusPresenceBusy,
+		}}, domain.PresenceBusy},
+		{"invisible", &revoltgo.User{Online: true, Status: &revoltgo.UserStatus{
+			Presence: revoltgo.UserStatusPresenceInvisible,
+		}}, domain.PresenceOffline},
+		{"idle but disconnected", &revoltgo.User{Status: &revoltgo.UserStatus{
+			Presence: revoltgo.UserStatusPresenceIdle,
+		}}, domain.PresenceOffline},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := toPresence(tc.user); got != tc.want {
+				t.Errorf("got %v, want %v", got.Label(), tc.want.Label())
+			}
+		})
 	}
 }

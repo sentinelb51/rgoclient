@@ -4,18 +4,16 @@ import (
 	"log"
 	"slices"
 	"strings"
-	"sync"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
 // buildUI assembles the four-column layout: servers | channels | messages |
@@ -76,8 +74,8 @@ func (a *App) refreshServerList() {
 	a.tooltip.Hide()
 
 	for _, serverID := range a.serverIDs {
-		server := a.session.State.Server(serverID)
-		if server == nil {
+		server, ok := a.store.Server(serverID)
+		if !ok {
 			continue
 		}
 
@@ -136,8 +134,8 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ChannelListBackground)
 
 	name := "Server"
-	if s := a.currentServer(); s != nil {
-		name = s.Name
+	if server, ok := a.currentServer(); ok {
+		name = server.Name
 	}
 	a.serverHeader = widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.serverHeader.Truncation = fyne.TextTruncateEllipsis
@@ -168,15 +166,15 @@ func (a *App) refreshChannelList() {
 		return
 	}
 
-	server := a.currentServer()
-	if server == nil {
+	server, ok := a.currentServer()
+	if !ok {
 		a.channelList.Refresh()
 		return
 	}
 
 	categorized := make(map[string]bool)
-	for _, cat := range server.Categories {
-		for _, id := range cat.Channels {
+	for _, category := range server.Categories {
+		for _, id := range category.Channels {
 			categorized[id] = true
 		}
 	}
@@ -191,28 +189,28 @@ func (a *App) refreshChannelList() {
 		}
 	}
 
-	for i, cat := range server.Categories {
-		key := server.ID + ":" + cat.ID
-		category := ui.NewCategoryWidget(cat.Title, func(collapsed bool) {
+	for i, category := range server.Categories {
+		key := server.ID + ":" + category.ID
+		header := ui.NewCategoryWidget(category.Title, func(collapsed bool) {
 			a.collapsedCategories[key] = collapsed
 		})
-		category.SetFirst(i == 0)
+		header.SetFirst(i == 0)
 
 		var rows []fyne.CanvasObject
-		for _, channelID := range cat.Channels {
+		for _, channelID := range category.Channels {
 			if w := a.newChannelRow(channelID); w != nil {
 				rows = append(rows, w)
 			}
 		}
 
-		a.channelList.Add(category)
+		a.channelList.Add(header)
 		for _, row := range rows {
 			a.channelList.Add(row)
 		}
 
-		category.SetChannels(rows, a.channelList)
+		header.SetChannels(rows, a.channelList)
 		if a.collapsedCategories[key] {
-			category.SetCollapsed(true)
+			header.SetCollapsed(true)
 		}
 	}
 
@@ -220,10 +218,10 @@ func (a *App) refreshChannelList() {
 }
 
 // newChannelRow builds a channel row reflecting its current state, or nil when
-// State doesn't know the channel.
+// the store doesn't know the channel.
 func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
-	channel := a.stateChannel(channelID)
-	if channel == nil {
+	channel, ok := a.store.Channel(channelID)
+	if !ok {
 		return nil
 	}
 
@@ -296,7 +294,7 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 // closeChannelLabel names what closing a conversation means for its kind: a
 // group is left, a direct message merely leaves the sidebar.
 func (a *App) closeChannelLabel(channelID string) string {
-	if channel := a.stateChannel(channelID); channel != nil && channel.ChannelType == revoltgo.ChannelTypeGroup {
+	if channel, ok := a.store.Channel(channelID); ok && channel.Kind == domain.ChannelGroup {
 		return "Leave group"
 	}
 
@@ -326,8 +324,8 @@ func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 
 // serverUnread reports whether any of a server's channels is marked unread.
 func (a *App) serverUnread(serverID string) bool {
-	server := a.stateServer(serverID)
-	if server == nil {
+	server, ok := a.store.Server(serverID)
+	if !ok {
 		return false
 	}
 
@@ -339,22 +337,22 @@ func (a *App) serverUnread(serverID string) bool {
 // markChannelRead clears a channel's unread mark and acknowledges its newest
 // message, through the same coalescing path selecting the channel would use.
 func (a *App) markChannelRead(channelID string) {
-	channel := a.stateChannel(channelID)
-	if channel == nil || channel.LastMessageID == nil {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.LastMessageID == "" {
 		return
 	}
 
 	delete(a.unreadChannels, channelID)
 	a.refreshChannelRow(channelID)
-	a.scheduleAck(channelID, *channel.LastMessageID)
+	a.scheduleAck(channelID, channel.LastMessageID)
 }
 
 // markServerRead clears the unread marks of every channel in a server. The
 // server-wide ack is a single request covering all of them, so this one doesn't
 // go through the per-channel coalescing in events.go.
 func (a *App) markServerRead(serverID string) {
-	session, server := a.session, a.stateServer(serverID)
-	if session == nil || server == nil {
+	server, ok := a.store.Server(serverID)
+	if !ok {
 		return
 	}
 
@@ -363,11 +361,10 @@ func (a *App) markServerRead(serverID string) {
 	}
 	a.syncChannelList()
 
-	go func() {
-		if err := session.ServerAck(serverID); err != nil {
-			log.Printf("ack server %s: %v", serverID, err)
-		}
-	}()
+	a.background(
+		func() error { return a.client.AckServer(serverID) },
+		func(err error) { log.Printf("ack server %s: %v", serverID, err) },
+	)
 }
 
 /* Selection */
@@ -382,8 +379,8 @@ func (a *App) selectServer(serverID string) {
 
 	a.homeSelected = false
 	a.currentServerID = serverID
-	server := a.currentServer()
-	if server == nil {
+	server, ok := a.currentServer()
+	if !ok {
 		return
 	}
 
@@ -409,13 +406,12 @@ func (a *App) selectChannel(channelID string) {
 	unread := a.unreadChannels[channelID]
 	a.currentChannelID = channelID
 
-	channel := a.currentChannel()
-	a.setChannelGlyph(channel)
-	if channel != nil {
-		a.setHeader(a.channelHeader, util.ChannelName(a.session, channel))
-		if unread && channel.LastMessageID != nil {
+	a.setChannelGlyph()
+	if channel, ok := a.currentChannel(); ok {
+		a.setHeader(a.channelHeader, channel.Name)
+		if unread && channel.LastMessageID != "" {
 			delete(a.unreadChannels, channelID)
-			a.scheduleAck(channelID, *channel.LastMessageID)
+			a.scheduleAck(channelID, channel.LastMessageID)
 		}
 	}
 
@@ -423,7 +419,7 @@ func (a *App) selectChannel(channelID string) {
 	a.refreshMentionCandidates()
 	a.focusInput() // so the user can type straight away
 
-	if cached := a.messages.Get(channelID); len(cached) > 0 {
+	if cached := a.client.Messages().Get(channelID); len(cached) > 0 {
 		a.displayMessages(cached)
 		return
 	}
@@ -437,7 +433,7 @@ func (a *App) clearChannelSelection() {
 	a.currentChannelID = ""
 	a.clearMessages()
 	a.setHeader(a.channelHeader, "")
-	a.setChannelGlyph(nil)
+	a.setChannelGlyph()
 	a.syncChannelList()
 }
 
@@ -485,8 +481,8 @@ func (a *App) setHeader(label *widget.Label, text string) {
 
 // channelName returns the current channel's display name, or a fallback.
 func (a *App) channelName() string {
-	if channel := a.currentChannel(); channel != nil {
-		return util.ChannelName(a.session, channel)
+	if channel, ok := a.currentChannel(); ok {
+		return channel.Name
 	}
 
 	return "channel"
@@ -531,37 +527,36 @@ func (a *App) selectHome() {
 // missing from State are resolved in the same pass, because a DM has no name of
 // its own — the row is titled after the other participant.
 func (a *App) loadDirectMessages() {
-	session := a.session
-	if session == nil || a.loadingDMs {
+	if a.loadingDMs || !a.client.Connected() {
 		return
 	}
 
 	a.loadingDMs = true
+	epoch := a.epoch
 
 	go func() {
-		// Every hop back to the UI thread re-checks that this is still the open
+		// Every hop back to the UI thread re-checks that this is still the same
 		// session: a logout and re-login can land mid-request, and the previous
 		// account's conversations must not be painted into the new one's sidebar.
 		defer a.doOnUI(func() {
-			if a.session == session {
+			if !a.stale(epoch) {
 				a.loadingDMs = false
 			}
 		}, false)
 
-		channels, err := session.DirectMessages()
+		channels, err := a.client.Conversations()
 		if err != nil {
 			log.Printf("fetch direct messages: %v", err)
 			a.doOnUI(func() {
-				if a.session == session && a.homeSelected && len(a.dmChannels) == 0 {
+				if !a.stale(epoch) && a.homeSelected && len(a.dmChannels) == 0 {
 					a.showStatus("Failed to load direct messages")
 				}
 			}, false)
 			return
 		}
 
-		resolveRecipients(session, channels)
 		a.doOnUI(func() {
-			if a.session == session {
+			if !a.stale(epoch) {
 				a.setDirectMessages(channels)
 			}
 		}, false)
@@ -570,7 +565,7 @@ func (a *App) loadDirectMessages() {
 
 // setDirectMessages records the sidebar order and repaints the home view when
 // it's open, selecting the first conversation if none is. Call on the UI thread.
-func (a *App) setDirectMessages(channels []*revoltgo.Channel) {
+func (a *App) setDirectMessages(channels []domain.Channel) {
 	a.dmChannels = sortConversations(channels)
 
 	if !a.homeSelected {
@@ -596,12 +591,12 @@ func (a *App) setDirectMessages(channels []*revoltgo.Channel) {
 // compared directly, ULIDs sorting chronologically as strings. The order is a
 // snapshot — a new message marks its row unread but doesn't re-sort the sidebar
 // under the user mid-read; the next refresh picks the new order up.
-func sortConversations(channels []*revoltgo.Channel) []string {
-	channels = slices.DeleteFunc(channels, func(channel *revoltgo.Channel) bool {
-		return channel == nil || (channel.ChannelType == revoltgo.ChannelTypeDM && !channel.Active)
+func sortConversations(channels []domain.Channel) []string {
+	channels = slices.DeleteFunc(channels, func(channel domain.Channel) bool {
+		return channel.Kind == domain.ChannelDM && !channel.Active
 	})
-	slices.SortStableFunc(channels, func(x, y *revoltgo.Channel) int {
-		return strings.Compare(lastActivity(y), lastActivity(x))
+	slices.SortStableFunc(channels, func(x, y domain.Channel) int {
+		return strings.Compare(y.LastMessageID, x.LastMessageID)
 	})
 
 	ids := make([]string, len(channels))
@@ -610,49 +605,4 @@ func sortConversations(channels []*revoltgo.Channel) []string {
 	}
 
 	return ids
-}
-
-// lastActivity returns a channel's newest message ID, or "" when it has none —
-// which sorts an empty conversation to the bottom.
-func lastActivity(channel *revoltgo.Channel) string {
-	if channel.LastMessageID != nil {
-		return *channel.LastMessageID
-	}
-
-	return ""
-}
-
-// resolveRecipients pulls the users behind a DM list into State so each row can
-// be titled. Runs off the UI thread, bounded by authorFetchWorkers so a long DM
-// list doesn't open a connection per conversation. Failures are logged and left
-// alone: the row falls back to a generic title rather than going missing.
-func resolveRecipients(session *revoltgo.Session, channels []*revoltgo.Channel) {
-	var missing []string
-	queued := make(map[string]bool)
-	for _, channel := range channels {
-		if channel == nil || channel.ChannelType != revoltgo.ChannelTypeDM {
-			continue
-		}
-		for _, id := range channel.Recipients {
-			if queued[id] || session.State.User(id) != nil {
-				continue
-			}
-			queued[id] = true
-			missing = append(missing, id)
-		}
-	}
-
-	var wg sync.WaitGroup
-	slots := make(chan struct{}, authorFetchWorkers)
-	for _, id := range missing {
-		wg.Add(1)
-		slots <- struct{}{}
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			if _, err := session.User(id); err != nil {
-				log.Printf("fetch dm recipient %s: %v", id, err)
-			}
-		}()
-	}
-	wg.Wait()
 }

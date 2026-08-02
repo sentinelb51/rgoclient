@@ -6,8 +6,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -35,7 +35,7 @@ func TestConversationRowIsAnAvatarCard(t *testing.T) {
 	test.NewTempApp(t)
 
 	t.Run("direct message", func(t *testing.T) {
-		row := NewChannelWidget(Deps{}, &revoltgo.Channel{ID: "01DM", ChannelType: revoltgo.ChannelTypeDM}, nil)
+		row := NewChannelWidget(testDeps(), domain.Channel{ID: "01DM", Kind: domain.ChannelDM}, nil)
 		row.Resize(row.MinSize())
 
 		if got, want := row.MinSize().Height, theme.Sizes.ConversationItemHeight; got != want {
@@ -55,7 +55,7 @@ func TestConversationRowIsAnAvatarCard(t *testing.T) {
 	})
 
 	t.Run("server channel", func(t *testing.T) {
-		row := NewChannelWidget(Deps{}, &revoltgo.Channel{ID: "01TEXT", ChannelType: revoltgo.ChannelTypeText}, nil)
+		row := NewChannelWidget(testDeps(), domain.Channel{ID: "01TEXT", Kind: domain.ChannelText}, nil)
 		row.Resize(row.MinSize())
 
 		if got, want := row.MinSize().Height, theme.Sizes.ChannelItemHeight; got != want {

@@ -15,7 +15,7 @@ import (
 // out canvas objects, so tests can assert on their positions and sizes.
 func layoutMessage(t *testing.T, body string, width float32) []fyne.CanvasObject {
 	t.Helper()
-	rt, ok := renderMessageBody(Deps{}, body, nil).(fyne.Widget)
+	rt, ok := renderMessageBody(testDeps(), body, nil).(fyne.Widget)
 	if !ok {
 		t.Fatalf("%q: rendered body is not a widget", body)
 	}
@@ -45,7 +45,7 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 func TestUniformBodySelectable(t *testing.T) {
 	label := func(body string) *widget.Label {
 		t.Helper()
-		b, ok := renderMessageBody(Deps{}, body, nil).(*bodyText)
+		b, ok := renderMessageBody(testDeps(), body, nil).(*bodyText)
 		if !ok || !b.Selectable {
 			t.Fatalf("%q did not render as a selectable label", body)
 		}
@@ -66,7 +66,7 @@ func TestUniformBodySelectable(t *testing.T) {
 	label("snake_case_name stays plain")
 
 	for _, body := range []string{"", "**bold** mixed", "~~struck~~", "> quoted"} {
-		if _, ok := renderMessageBody(Deps{}, body, nil).(*widget.RichText); !ok {
+		if _, ok := renderMessageBody(testDeps(), body, nil).(*widget.RichText); !ok {
 			t.Errorf("%q should render as RichText", body)
 		}
 	}
@@ -77,7 +77,7 @@ func TestUniformBodySelectable(t *testing.T) {
 func bodyCatcher(t *testing.T, onMenu func(*fyne.PointEvent)) (*bodyText, *selectionCatcher) {
 	t.Helper()
 
-	body, ok := renderMessageBody(Deps{}, "hello world", onMenu).(*bodyText)
+	body, ok := renderMessageBody(testDeps(), "hello world", onMenu).(*bodyText)
 	if !ok {
 		t.Fatal("plain body did not render as a selectable label")
 	}
@@ -130,7 +130,7 @@ func TestSelectableBodyCatchesRightClick(t *testing.T) {
 func TestSelectableBodyWithoutMenu(t *testing.T) {
 	test.NewTempApp(t)
 
-	body, ok := renderMessageBody(Deps{}, "hello world", nil).(*bodyText)
+	body, ok := renderMessageBody(testDeps(), "hello world", nil).(*bodyText)
 	if !ok {
 		t.Fatal("plain body did not render as a selectable label")
 	}

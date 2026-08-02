@@ -15,7 +15,6 @@ import (
 
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
 // renderMessageBody renders a message's body. A body whose whole content shares
@@ -503,7 +502,7 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 // pill needs a custom segment, and RichText gives those no way to bleed a
 // background behind the row's line spacing without colliding on wrapped lines.
 func (b *mdBuilder) mention(n *markdown.Mention, em emphasis, base widget.RichTextStyle) {
-	name := util.UserName(b.deps.Session, n.UserID)
+	name := b.deps.Store.UserName(n.UserID)
 	if name == "" {
 		name = "unknown"
 	}

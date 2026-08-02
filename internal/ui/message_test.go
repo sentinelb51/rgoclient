@@ -8,8 +8,8 @@ import (
 	"fyne.io/fyne/v2/test"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -69,11 +69,11 @@ func styledApp(t *testing.T) Deps {
 
 	test.NewTempApp(t).Settings().SetTheme(theme.NewAppTheme(fynetheme.DefaultTheme()))
 
-	return viewerDeps()
+	return testDeps()
 }
 
-func testMessage(id, content string) *revoltgo.Message {
-	return &revoltgo.Message{ID: id, Channel: "01TESTCHANNEL0000000000000", Author: "01TESTAUTHOR00000000000000", Content: content}
+func testMessage(id, content string) *domain.Message {
+	return &domain.Message{ID: id, ChannelID: "01TESTCHANNEL0000000000000", AuthorID: "01TESTAUTHOR00000000000000", Content: content}
 }
 
 // firstLineTop returns where the body's first line of ink starts. The body is a

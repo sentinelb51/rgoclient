@@ -4,20 +4,20 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/sentinelb51/revoltgo"
+	"RGOClient/internal/domain"
 )
 
 // page builds an API-order (newest first) page of messages with the given IDs.
-func page(ids ...string) []*revoltgo.Message {
-	messages := make([]*revoltgo.Message, len(ids))
+func page(ids ...string) []*domain.Message {
+	messages := make([]*domain.Message, len(ids))
 	for i, id := range ids {
-		messages[i] = &revoltgo.Message{ID: id}
+		messages[i] = &domain.Message{ID: id}
 	}
 	return messages
 }
 
 // ids extracts message IDs for easy comparison.
-func ids(messages []*revoltgo.Message) []string {
+func ids(messages []*domain.Message) []string {
 	out := make([]string, len(messages))
 	for i, m := range messages {
 		out[i] = m.ID
@@ -25,7 +25,7 @@ func ids(messages []*revoltgo.Message) []string {
 	return out
 }
 
-func assertIDs(t *testing.T, got []*revoltgo.Message, want ...string) {
+func assertIDs(t *testing.T, got []*domain.Message, want ...string) {
 	t.Helper()
 	gotIDs := ids(got)
 	if len(gotIDs) != len(want) {
@@ -49,14 +49,14 @@ func TestSetReversesAndCaps(t *testing.T) {
 func TestAppendTrimsAndReturnsPrev(t *testing.T) {
 	c := NewMessageCache(3, 5)
 
-	if prev := c.Append("ch", &revoltgo.Message{ID: "a"}); prev != nil {
+	if prev := c.Append("ch", &domain.Message{ID: "a"}); prev != nil {
 		t.Fatalf("first append: prev = %v, want nil", prev.ID)
 	}
-	if prev := c.Append("ch", &revoltgo.Message{ID: "b"}); prev == nil || prev.ID != "a" {
+	if prev := c.Append("ch", &domain.Message{ID: "b"}); prev == nil || prev.ID != "a" {
 		t.Fatalf("second append: prev = %v, want a", prev)
 	}
-	c.Append("ch", &revoltgo.Message{ID: "c"})
-	if prev := c.Append("ch", &revoltgo.Message{ID: "d"}); prev == nil || prev.ID != "c" {
+	c.Append("ch", &domain.Message{ID: "c"})
+	if prev := c.Append("ch", &domain.Message{ID: "d"}); prev == nil || prev.ID != "c" {
 		t.Fatalf("append at cap: prev = %v, want c", prev)
 	}
 	assertIDs(t, c.Get("ch"), "b", "c", "d") // oldest trimmed
@@ -119,13 +119,13 @@ func TestFindRemoveReplace(t *testing.T) {
 		t.Fatalf("Find in unknown channel = %v, want nil", got.ID)
 	}
 
-	if !c.Replace("ch", &revoltgo.Message{ID: "c", Content: "edited"}) {
+	if !c.Replace("ch", &domain.Message{ID: "c", Content: "edited"}) {
 		t.Fatal("Replace(c) = false, want true")
 	}
 	if got := c.Find("ch", "c"); got == nil || got.Content != "edited" {
 		t.Fatalf("Find after Replace = %v, want edited content", got)
 	}
-	if c.Replace("ch", &revoltgo.Message{ID: "x"}) {
+	if c.Replace("ch", &domain.Message{ID: "x"}) {
 		t.Fatal("Replace of uncached message should report false")
 	}
 

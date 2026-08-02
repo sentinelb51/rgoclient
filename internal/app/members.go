@@ -2,60 +2,45 @@ package app
 
 import (
 	"fmt"
-	"log"
-	"slices"
-	"strings"
-	"sync"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/client"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
-const (
-	// authorFetchDelay is how long author resolution waits for more authors before
-	// going to the network. Mounting a page calls ensureAuthor once per widget, so
-	// a short window turns that burst into one batch.
-	authorFetchDelay = 50 * time.Millisecond
-
-	// authorFetchWorkers bounds how many authors are fetched at once, so a channel
-	// full of unseen people doesn't open dozens of connections.
-	authorFetchWorkers = 4
-)
-
-// author identifies one author to resolve: the user, plus the server whose member
-// record carries their nickname and role colour ("" in a DM or group).
-type author struct {
-	serverID string
-	userID   string
-}
+// authorFetchDelay is how long author resolution waits for more authors before
+// going to the network. Mounting a page calls ensureAuthor once per widget, so a
+// short window turns that burst into one batch.
+const authorFetchDelay = 50 * time.Millisecond
 
 /* Lazy author resolution */
 
 // ensureAuthor makes a message author renderable. Messages carry only the
 // author's ID, so a user we haven't seen renders as a raw ID until resolved. This
-// queues both gaps when missing from State — the user (name, avatar) and, in a
-// server channel, the member (nickname, role colour) — guarded by fetchedAuthors
-// so each pair is queued at most once. The fetching itself happens a moment later
-// in flushAuthors.
+// queues both gaps when missing from the store — the user (name, avatar) and, in
+// a server channel, the member (nickname, role colour) — guarded by
+// fetchedAuthors so each pair is queued at most once. The fetching itself happens
+// a moment later in flushAuthors.
 //
 // This is the lazy counterpart to a bulk member fetch: Revolt's members endpoint
 // has no pagination, so pulling every member of a large server floods memory.
 //
-// Call on the UI thread: it reads State and touches the maps without locking.
+// Call on the UI thread: it touches the maps without locking. The two store
+// lookups are the reason HasUser and HasMember exist — it runs once per mounted
+// message, so it must not allocate.
 func (a *App) ensureAuthor(serverID, userID string) {
-	if a.session == nil || userID == "" {
+	if userID == "" {
 		return
 	}
 
-	needUser := a.session.State.User(userID) == nil
-	needMember := serverID != "" && a.session.State.Member(serverID, userID) == nil
+	needUser := !a.store.HasUser(userID)
+	needMember := serverID != "" && !a.store.HasMember(serverID, userID)
 
 	key := serverID + ":" + userID
 	if (!needUser && !needMember) || a.fetchedAuthors[key] {
@@ -63,7 +48,7 @@ func (a *App) ensureAuthor(serverID, userID string) {
 	}
 
 	a.fetchedAuthors[key] = true
-	a.pendingAuthors = append(a.pendingAuthors, author{serverID: serverID, userID: userID})
+	a.pendingAuthors = append(a.pendingAuthors, client.AuthorRef{ServerID: serverID, UserID: userID})
 
 	if a.authorTimer == nil {
 		a.authorTimer = time.AfterFunc(authorFetchDelay, func() {
@@ -72,101 +57,67 @@ func (a *App) ensureAuthor(serverID, userID string) {
 	}
 }
 
-// flushAuthors resolves everything ensureAuthor has queued. Each author's own
-// messages refresh in place as they land, so names fill in progressively, while
-// the member sidebar — a full rebuild — is refreshed once for the whole batch.
-// Authors that fail lose their guard, so a later message can retry. Call on the
-// UI thread.
+// flushAuthors resolves everything ensureAuthor has queued and repaints once for
+// the whole batch. Authors that fail lose their guard, so a later message can
+// retry. Call on the UI thread.
+//
+// The repaint is deliberately one hop rather than one per author as it lands:
+// each refresh scans every mounted widget, so a page of unseen people used to
+// walk the column dozens of times and repaint after each — and the names still
+// arrived one flicker at a time. They now settle together.
 func (a *App) flushAuthors() {
 	a.authorTimer = nil
 
-	pending, session := a.pendingAuthors, a.session
+	pending := a.pendingAuthors
 	a.pendingAuthors = nil
-	if len(pending) == 0 || session == nil {
+	if len(pending) == 0 {
 		return
 	}
+	epoch := a.epoch
 
 	go func() {
-		var (
-			mu     sync.Mutex
-			failed []string // fetchedAuthors keys to release
-			member bool     // a member record was fetched, so the sidebar changed
-			wg     sync.WaitGroup
-		)
-
-		slots := make(chan struct{}, authorFetchWorkers)
-		for _, target := range pending {
-			wg.Add(1)
-			slots <- struct{}{}
-
-			go func() {
-				defer func() { <-slots; wg.Done() }()
-
-				ok, fetchedMember := resolveAuthor(session, target)
-
-				mu.Lock()
-				if !ok {
-					failed = append(failed, target.serverID+":"+target.userID)
-				}
-				member = member || fetchedMember
-				mu.Unlock()
-
-				if ok {
-					a.doOnUI(func() { a.refreshAuthorMessages(target.userID) }, false)
-				}
-			}()
-		}
-		wg.Wait()
+		result := a.client.ResolveAuthors(pending)
 
 		a.doOnUI(func() {
-			for _, key := range failed {
-				delete(a.fetchedAuthors, key)
+			if a.stale(epoch) {
+				return
 			}
+
+			for _, ref := range result.Failed {
+				delete(a.fetchedAuthors, ref.ServerID+":"+ref.UserID)
+			}
+			a.refreshAuthorMessages(result.Resolved...)
+
 			// Only a member fetch changes the sidebar; pure user fetches leave it be.
-			// The mention picker is refreshed either way — a resolved user is a new
+			// Rebuilding it also re-derives the mention candidates, so the picker is
+			// only refreshed separately when it doesn't — a resolved user is a new
 			// candidate in a DM even when no member record was involved.
-			if member {
+			if result.Member {
 				a.refreshMemberList()
+				return
 			}
 			a.refreshMentionCandidates()
 		}, false)
 	}()
 }
 
-// resolveAuthor fetches the user and, in a server, the member record behind one
-// author, pulling both into State. It reports whether the author is now
-// resolvable and whether a member record was actually fetched.
-func resolveAuthor(session *revoltgo.Session, target author) (ok, fetchedMember bool) {
-	if session.State.User(target.userID) == nil {
-		if _, err := session.User(target.userID); err != nil {
-			log.Printf("fetch user %s: %v", target.userID, err)
-			return false, false
+// refreshAuthorMessages updates the mounted message widgets authored by any of
+// userIDs in place — name, role colour, avatar — after a lazy fetch resolves,
+// avoiding a full re-render of the open channel. A whole batch is passed at once
+// so the column is scanned once rather than once per author.
+func (a *App) refreshAuthorMessages(userIDs ...string) {
+	authors := make(map[string]bool, len(userIDs))
+	for _, userID := range userIDs {
+		if userID != "" {
+			authors[userID] = true
 		}
 	}
-
-	// A missing member is only worth asking for in a server channel.
-	if target.serverID == "" || session.State.Member(target.serverID, target.userID) != nil {
-		return true, false
-	}
-
-	if _, err := session.ServerMember(target.serverID, target.userID); err != nil {
-		log.Printf("fetch member %s in server %s: %v", target.userID, target.serverID, err)
-		return false, false
-	}
-
-	return true, true
-}
-
-// refreshAuthorMessages updates the mounted message widgets authored by userID in
-// place — name, role colour, avatar — after a lazy fetch resolves, avoiding a
-// full re-render of the open channel.
-func (a *App) refreshAuthorMessages(userID string) {
-	if userID == "" {
+	if len(authors) == 0 {
 		return
 	}
 
 	for _, obj := range a.messageList.Objects {
-		if w, ok := obj.(*ui.MessageWidget); ok && w.Author() == userID {
+		if w, ok := obj.(*ui.MessageWidget); ok && authors[w.Author()] {
 			w.RefreshAuthor()
 		}
 	}
@@ -203,55 +154,50 @@ func (a *App) toggleMemberList() {
 }
 
 // refreshMemberList rebuilds the member rows for the current server, grouped into
-// Online and Offline sections and sorted by display name.
+// Online and Offline sections. The store hands them back resolved and ordered by
+// display name, and the mention candidates come off that same walk: they are the
+// same people under the same names, and deriving them separately meant a second
+// walk, a second round of name resolution and a second sort on every member
+// event.
 func (a *App) refreshMemberList() {
 	a.memberList.Objects = nil
-	if a.session == nil || a.currentServerID == "" {
+	if a.currentServerID == "" {
 		a.memberList.Refresh()
 		return
 	}
 
-	var online, offline []*revoltgo.ServerMember
-	for _, member := range a.session.State.Members(a.currentServerID) {
-		if util.MemberOnline(a.session, member) {
-			online = append(online, member)
-		} else {
-			offline = append(offline, member)
-		}
-	}
+	members := a.store.Members(a.currentServerID)
 
 	deps := a.deps()
-	a.addMemberSection("Online", online, true, deps)
-	a.addMemberSection("Offline", offline, false, deps)
+	a.addMemberSection("Online", members, true, deps)
+	a.addMemberSection("Offline", members, false, deps)
 	a.memberList.Refresh()
-	a.refreshMentionCandidates()
+
+	a.setMentionCandidates(memberCandidates(members))
 }
 
-// addMemberSection appends a titled section of member rows when non-empty,
-// sorting by display name.
-func (a *App) addMemberSection(title string, members []*revoltgo.ServerMember, online bool, deps ui.Deps) {
-	if len(members) == 0 {
+// addMemberSection appends a titled section holding the members whose presence
+// matches, keeping the order they arrived in.
+func (a *App) addMemberSection(title string, members []domain.Member, online bool, deps ui.Deps) {
+	var count int
+	for i := range members {
+		if members[i].Online == online {
+			count++
+		}
+	}
+	if count == 0 {
 		return
 	}
 
-	// Sort on a precomputed key: resolving the display name inside the comparator
-	// would re-hit State O(n log n) times on large servers.
-	type entry struct {
-		member *revoltgo.ServerMember
-		key    string
-	}
-
-	entries := make([]entry, len(members))
-	for i, member := range members {
-		entries[i] = entry{member, strings.ToLower(util.MemberName(a.session, member))}
-	}
-	slices.SortFunc(entries, func(x, y entry) int { return strings.Compare(x.key, y.key) })
-
 	serverID := a.currentServerID
-	a.memberList.Add(ui.NewMemberSection(fmt.Sprintf("%s — %d", title, len(members))))
-	for _, e := range entries {
-		w := ui.NewMemberWidget(deps, e.member, online)
-		userID := e.member.ID.User
+	a.memberList.Add(ui.NewMemberSection(fmt.Sprintf("%s — %d", title, count)))
+	for i := range members {
+		if members[i].Online != online {
+			continue
+		}
+
+		userID := members[i].UserID
+		w := ui.NewMemberWidget(deps, members[i], online)
 		w.Menu = func() []*fyne.MenuItem { return a.memberMenu(serverID, userID) }
 		a.memberList.Add(w)
 	}
@@ -261,117 +207,73 @@ func (a *App) addMemberSection(title string, members []*revoltgo.ServerMember, o
 
 // refreshMentionCandidates hands the composer's @picker the people mentionable
 // in the open channel. The picker snapshots the list and filters that snapshot
-// on every keystroke, so this is where the (comparatively expensive) State walk
-// and name resolution happen — once per membership change, not once per key.
+// on every keystroke, so this is where the (comparatively expensive) walk and
+// name resolution happen — once per membership change, not once per key.
 //
 // Call on the UI thread, whenever the open channel or its membership changes.
 func (a *App) refreshMentionCandidates() {
+	a.setMentionCandidates(a.mentionCandidates())
+}
+
+// setMentionCandidates hands the picker a list somebody else has already
+// resolved, which is how refreshMemberList shares its own walk with it.
+func (a *App) setMentionCandidates(candidates []ui.MentionCandidate) {
 	if a.input == nil {
 		return
 	}
 
-	a.input.Mentions.SetCandidates(a.mentionCandidates())
+	a.input.Mentions.SetCandidates(candidates)
 }
 
 // mentionCandidates resolves the mentionable people in the open channel from
-// State alone — no network, the same rule the member sidebar follows. In a
-// server that means whoever State knows: the gateway's members plus the ones
-// lazy author resolution has pulled in (see ensureAuthor), which is exactly the
-// set of people already visible in the channel. In a DM or group it is the
-// channel's recipients.
+// what the client already knows — no network, the same rule the member sidebar
+// follows. In a server that means whoever the store knows: the gateway's members
+// plus the ones lazy author resolution has pulled in (see ensureAuthor), which is
+// exactly the set of people already visible in the channel. In a DM or group it
+// is the channel's recipients.
 func (a *App) mentionCandidates() []ui.MentionCandidate {
-	if a.session == nil || a.currentChannelID == "" {
+	if a.currentChannelID == "" {
 		return nil
 	}
 
-	if serverID := a.channelServerID(a.currentChannelID); serverID != "" {
-		members := a.session.State.Members(serverID)
-		candidates := make([]ui.MentionCandidate, 0, len(members))
-		for _, member := range members {
-			if candidate, ok := a.memberCandidate(member); ok {
-				candidates = append(candidates, candidate)
-			}
-		}
-
-		return sortCandidates(candidates)
-	}
-
-	channel := a.currentChannel()
-	if channel == nil {
+	channel, ok := a.currentChannel()
+	if !ok {
 		return nil
+	}
+	if channel.ServerID != "" {
+		return memberCandidates(a.store.Members(channel.ServerID))
 	}
 
 	candidates := make([]ui.MentionCandidate, 0, len(channel.Recipients))
 	for _, userID := range channel.Recipients {
-		if candidate, ok := a.userCandidate(userID); ok {
-			candidates = append(candidates, candidate)
+		user, ok := a.store.User(userID)
+		if !ok {
+			continue
 		}
+		candidates = append(candidates,
+			ui.NewMentionCandidate(user.ID, user.Name, user.Username, user.AvatarURL, nil))
 	}
+	ui.SortCandidates(candidates)
 
-	return sortCandidates(candidates)
+	return candidates
 }
 
-// memberCandidate builds a candidate from a server member, carrying the same
-// nickname, per-server avatar and role colour the member sidebar shows, so the
-// picker looks like the list the user is picking from. It reports false for a
-// member whose user State hasn't resolved and who has no nickname either —
-// there would be nothing to display or match against.
-func (a *App) memberCandidate(member *revoltgo.ServerMember) (ui.MentionCandidate, bool) {
-	userID := member.ID.User
-	user := a.session.State.User(userID)
-	if user == nil && (member.Nickname == nil || *member.Nickname == "") {
-		return ui.MentionCandidate{}, false
-	}
+// memberCandidates turns resolved members into mention candidates, which arrive
+// already ordered. They carry the same nickname, per-server avatar and role
+// colour the member sidebar shows, so the picker looks like the list the user is
+// picking from. A member whose account the store hasn't resolved and who has no
+// nickname either is dropped: there would be nothing to display or match against.
+func memberCandidates(members []domain.Member) []ui.MentionCandidate {
+	candidates := make([]ui.MentionCandidate, 0, len(members))
 
-	var username string
-	if user != nil {
-		username = user.Username
-	}
-
-	return ui.NewMentionCandidate(
-		userID,
-		util.MemberName(a.session, member),
-		username,
-		util.MemberAvatarURL(a.session, member),
-		util.MemberColor(a.session, member),
-	), true
-}
-
-// userCandidate builds a candidate for a DM or group recipient, who has no
-// member record and so no nickname or role colour.
-func (a *App) userCandidate(userID string) (ui.MentionCandidate, bool) {
-	user := a.session.State.User(userID)
-	if user == nil {
-		return ui.MentionCandidate{}, false
-	}
-
-	return ui.NewMentionCandidate(
-		userID,
-		util.UserName(a.session, userID),
-		user.Username,
-		user.AvatarURL("256"),
-		nil,
-	), true
-}
-
-// sortCandidates orders the list by display name, case-insensitively. State
-// hands members back in map order, so without this the picker's suggestions
-// would shuffle every time the list was rebuilt.
-func sortCandidates(candidates []ui.MentionCandidate) []ui.MentionCandidate {
-	// Sort on a precomputed key: lowering the name inside the comparator would
-	// redo that work O(n log n) times on a large server.
-	type entry struct {
-		candidate ui.MentionCandidate
-		key       string
-	}
-	entries := make([]entry, len(candidates))
-	for i, candidate := range candidates {
-		entries[i] = entry{candidate, strings.ToLower(candidate.Name)}
-	}
-	slices.SortFunc(entries, func(x, y entry) int { return strings.Compare(x.key, y.key) })
-
-	for i, e := range entries {
-		candidates[i] = e.candidate
+	for i := range members {
+		member := &members[i]
+		if member.Username == "" && member.Name == "Unknown user" {
+			continue
+		}
+		candidates = append(candidates, ui.NewMentionCandidate(
+			member.UserID, member.Name, member.Username, member.AvatarURL, member.Color,
+		))
 	}
 
 	return candidates

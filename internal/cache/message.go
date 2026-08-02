@@ -5,7 +5,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/sentinelb51/revoltgo"
+	"RGOClient/internal/domain"
 )
 
 // MessageCache holds recently viewed messages per channel, oldest to newest, for
@@ -18,7 +18,7 @@ import (
 // — it only writes past the end of what an earlier reader can see.
 type MessageCache struct {
 	mu        sync.RWMutex // guards byChannel, depleted and recency
-	byChannel map[string][]*revoltgo.Message
+	byChannel map[string][]*domain.Message
 	depleted  map[string]bool // channels whose full history has been loaded
 	recency   *LRU            // channel IDs by recency
 
@@ -30,7 +30,7 @@ type MessageCache struct {
 // at most maxChannels channels.
 func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 	return &MessageCache{
-		byChannel:   make(map[string][]*revoltgo.Message),
+		byChannel:   make(map[string][]*domain.Message),
 		depleted:    make(map[string]bool),
 		recency:     NewLRU(),
 		maxMessages: maxMessages,
@@ -41,7 +41,7 @@ func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 // CompareMessageID orders a message against an ID. Message IDs are ULIDs, whose
 // lexical order is chronological — the order the cache keeps per channel — so
 // this backs the binary searches here and in the app's message mounting.
-func CompareMessageID(m *revoltgo.Message, id string) int {
+func CompareMessageID(m *domain.Message, id string) int {
 	return strings.Compare(m.ID, id)
 }
 
@@ -58,7 +58,7 @@ func (c *MessageCache) touch(channelID string) {
 }
 
 // Get returns a channel's cached messages, oldest to newest, or nil.
-func (c *MessageCache) Get(channelID string) []*revoltgo.Message {
+func (c *MessageCache) Get(channelID string) []*domain.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -66,7 +66,7 @@ func (c *MessageCache) Get(channelID string) []*revoltgo.Message {
 }
 
 // Find returns the cached message with the given ID, or nil.
-func (c *MessageCache) Find(channelID, messageID string) *revoltgo.Message {
+func (c *MessageCache) Find(channelID, messageID string) *domain.Message {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -81,7 +81,7 @@ func (c *MessageCache) Find(channelID, messageID string) *revoltgo.Message {
 
 // Set replaces a channel's messages with an API page (newest first) and returns
 // the stored, chronologically ordered slice.
-func (c *MessageCache) Set(channelID string, page []*revoltgo.Message) []*revoltgo.Message {
+func (c *MessageCache) Set(channelID string, page []*domain.Message) []*domain.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -101,7 +101,7 @@ func (c *MessageCache) Set(channelID string, page []*revoltgo.Message) []*revolt
 // is served from the network, anchored on the caller's oldest mounted message,
 // so trimming here cannot cause refetch loops. The page comes back in
 // chronological order for mounting.
-func (c *MessageCache) Prepend(channelID string, page []*revoltgo.Message) []*revoltgo.Message {
+func (c *MessageCache) Prepend(channelID string, page []*domain.Message) []*domain.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -120,11 +120,11 @@ func (c *MessageCache) Prepend(channelID string, page []*revoltgo.Message) []*re
 // Append adds a newly received message to the end of a channel, trimming the
 // oldest at capacity. It returns the message that preceded the new one, captured
 // under the same lock so bursts still see their true predecessor for grouping.
-func (c *MessageCache) Append(channelID string, message *revoltgo.Message) *revoltgo.Message {
+func (c *MessageCache) Append(channelID string, message *domain.Message) *domain.Message {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	var prev *revoltgo.Message
+	var prev *domain.Message
 	if existing := c.byChannel[channelID]; len(existing) > 0 {
 		prev = existing[len(existing)-1]
 	}
@@ -159,7 +159,7 @@ func (c *MessageCache) Remove(channelID, messageID string) bool {
 
 // Replace swaps the cached message sharing updated's ID for updated, reporting
 // whether it was present. Like Remove it writes into a fresh slice.
-func (c *MessageCache) Replace(channelID string, updated *revoltgo.Message) bool {
+func (c *MessageCache) Replace(channelID string, updated *domain.Message) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -197,15 +197,15 @@ func (c *MessageCache) Clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.byChannel = make(map[string][]*revoltgo.Message)
+	c.byChannel = make(map[string][]*domain.Message)
 	c.depleted = make(map[string]bool)
 	c.recency = NewLRU()
 }
 
 // chronological reverses an API page (newest first) into a new oldest-first
 // slice, leaving the input untouched.
-func chronological(page []*revoltgo.Message) []*revoltgo.Message {
-	messages := make([]*revoltgo.Message, len(page))
+func chronological(page []*domain.Message) []*domain.Message {
+	messages := make([]*domain.Message, len(page))
 	for i, m := range page {
 		messages[len(page)-1-i] = m
 	}

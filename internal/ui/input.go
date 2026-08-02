@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -17,11 +18,11 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 	"golang.design/x/clipboard"
 
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -43,13 +44,9 @@ const (
 
 var _ desktop.Keyable = (*MessageInput)(nil)
 
-// Attachment is a local file queued to be sent with the next message.
-type Attachment struct {
-	Path string
-	Name string
-}
-
-// Reply is a pending reply to an existing message.
+// Reply is a reply queued in the composer. It is domain.Reply plus the channel
+// the quoted message lives in, which is bookkeeping of the composer's own: it is
+// what the preview is resolved against and is not part of what gets sent.
 type Reply struct {
 	ID        string
 	ChannelID string
@@ -78,7 +75,7 @@ type MessageInput struct {
 	Mentions     *MentionPicker
 	mentionStart int
 
-	Attachments         []Attachment
+	Attachments         []domain.Attachment
 	AttachmentContainer *fyne.Container
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
@@ -294,25 +291,29 @@ func (m *MessageInput) hideMentions() {
 	m.Mentions.Hide()
 }
 
-// mentionQuery finds the @mention the caret sits in: the rune index of its '@'
+// mentionQuery finds the @mention the caret sits in: the byte offset of its '@'
 // and the text typed since. A mention only opens at the start of the message or
 // after whitespace, so an email address — or any other "foo@bar" in running
 // text — never summons the picker.
 func (m *MessageInput) mentionQuery() (start int, query string, ok bool) {
-	runes := []rune(m.Text)
-	cursor := min(m.cursorIndex(), len(runes))
+	cursor := m.cursorOffset()
 
 	// Walking back from the caret stops at the first space, so the query can
-	// never span words and the scan is bounded by the current word's length.
-	for i := cursor - 1; i >= 0; i-- {
+	// never span words and the scan is bounded by the current word's length. It
+	// walks the string itself rather than a []rune copy of it: this runs on every
+	// keystroke, before any early-out, and a message is not short.
+	for i := cursor; i > 0; {
+		r, size := utf8.DecodeLastRuneInString(m.Text[:i])
+		i -= size
+
 		switch {
-		case unicode.IsSpace(runes[i]):
+		case unicode.IsSpace(r):
 			return 0, "", false
-		case runes[i] == '@':
-			if i > 0 && !unicode.IsSpace(runes[i-1]) {
+		case r == '@':
+			if before, _ := utf8.DecodeLastRuneInString(m.Text[:i]); i > 0 && !unicode.IsSpace(before) {
 				return 0, "", false
 			}
-			return i, string(runes[i+1 : cursor]), true
+			return i, m.Text[i+1 : cursor], true
 		}
 	}
 
@@ -331,16 +332,15 @@ func (m *MessageInput) acceptMention(candidate MentionCandidate) {
 		return
 	}
 
-	runes := []rune(m.Text)
-	cursor := min(m.cursorIndex(), len(runes))
+	cursor := m.cursorOffset()
 	token := "<@" + candidate.UserID + "> "
-	text := string(runes[:start]) + token + string(runes[cursor:])
+	text := m.Text[:start] + token + m.Text[cursor:]
 
 	m.mentionStart = -1
 	m.hideMentions()
 
 	m.SetText(text)
-	m.CursorRow, m.CursorColumn = cursorPosition(text, start+len([]rune(token)))
+	m.CursorRow, m.CursorColumn = cursorPosition(text, start+len(token))
 	m.Refresh()
 
 	if m.window != nil {
@@ -348,32 +348,55 @@ func (m *MessageInput) acceptMention(candidate MentionCandidate) {
 	}
 }
 
-// cursorIndex returns the caret as a rune index into Text. Fyne tracks it as a
-// row/column pair, which is what drawing the caret needs but not what editing
-// the text around it does.
-func (m *MessageInput) cursorIndex() int {
-	lines := strings.Split(m.Text, "\n")
-	index := 0
-	for i := 0; i < m.CursorRow && i < len(lines); i++ {
-		index += len([]rune(lines[i])) + 1 // + the newline itself
+// cursorOffset returns the caret as a byte offset into Text. Fyne tracks it as a
+// row/column pair — what drawing the caret needs, not what slicing the text
+// around it does. A byte offset is what the mention helpers actually want, and
+// finding one walks the string in place: splitting Text into lines on every
+// keystroke allocated the whole message twice over for one number.
+func (m *MessageInput) cursorOffset() int {
+	var offset int
+	for range m.CursorRow {
+		i := strings.IndexByte(m.Text[offset:], '\n')
+		if i < 0 {
+			return len(m.Text)
+		}
+		offset += i + 1
 	}
 
-	return index + m.CursorColumn
+	line := m.Text[offset:]
+	if i := strings.IndexByte(line, '\n'); i >= 0 {
+		line = line[:i]
+	}
+
+	// The column is counted in runes, so step the line one rune at a time; ranging
+	// a string yields exactly the byte index each rune starts at.
+	var col int
+	for i := range line {
+		if col == m.CursorColumn {
+			return offset + i
+		}
+		col++
+	}
+
+	return offset + len(line)
 }
 
-// cursorPosition is cursorIndex's inverse, turning a rune index back into the
-// row/column pair the entry draws from.
-func cursorPosition(text string, index int) (row, col int) {
-	lines := strings.Split(text, "\n")
-	for i, line := range lines {
-		n := len([]rune(line))
-		if index <= n || i == len(lines)-1 {
-			return i, min(max(index, 0), n)
+// cursorPosition is cursorOffset's inverse, turning a byte offset back into the
+// row and rune column the entry draws from.
+func cursorPosition(text string, offset int) (row, col int) {
+	offset = min(max(offset, 0), len(text))
+
+	var start int
+	for {
+		i := strings.IndexByte(text[start:], '\n')
+		if i < 0 || start+i >= offset {
+			break
 		}
-		index -= n + 1
+		start += i + 1
+		row++
 	}
 
-	return 0, 0
+	return row, utf8.RuneCountInString(text[start:offset])
 }
 
 // pasteAsAttachment attaches an image or file path from the clipboard, reporting
@@ -413,13 +436,13 @@ func (m *MessageInput) RegisterDropHandler() {
 
 // AddAttachment queues a file and rebuilds the attachment previews.
 func (m *MessageInput) AddAttachment(path string) {
-	m.Attachments = append(m.Attachments, Attachment{Path: path, Name: filepath.Base(path)})
+	m.Attachments = append(m.Attachments, domain.Attachment{Path: path, Name: filepath.Base(path)})
 	m.rebuildAttachments()
 }
 
 // RemoveAttachment removes a queued file by path.
 func (m *MessageInput) RemoveAttachment(path string) {
-	i := slices.IndexFunc(m.Attachments, func(a Attachment) bool { return a.Path == path })
+	i := slices.IndexFunc(m.Attachments, func(a domain.Attachment) bool { return a.Path == path })
 	if i < 0 {
 		return
 	}
@@ -462,7 +485,7 @@ func (m *MessageInput) rebuildAttachments() {
 }
 
 func attachmentPreview(path string) fyne.CanvasObject {
-	if util.Filetype(path) == util.FileTypeImage {
+	if domain.FileKindOf(path) == domain.FileImage {
 		img := canvas.NewImageFromFile(path)
 		img.FillMode = canvas.ImageFillContain
 		img.ScaleMode = canvas.ImageScaleFastest
@@ -479,7 +502,7 @@ func attachmentPreview(path string) fyne.CanvasObject {
 /* Replies */
 
 // AddReply adds a reply target, ignoring duplicates and respecting maxReplies.
-func (m *MessageInput) AddReply(message *revoltgo.Message) {
+func (m *MessageInput) AddReply(message *domain.Message) {
 	if len(m.Replies) >= maxReplies {
 		return
 	}
@@ -487,7 +510,7 @@ func (m *MessageInput) AddReply(message *revoltgo.Message) {
 		return
 	}
 
-	m.Replies = append(m.Replies, Reply{ID: message.ID, ChannelID: message.Channel})
+	m.Replies = append(m.Replies, Reply{ID: message.ID, ChannelID: message.ChannelID})
 	m.rebuildReplies()
 }
 
@@ -701,11 +724,26 @@ func NewMentionCandidate(userID, name, username, avatarURL string, roleColor col
 	}
 }
 
+// SortCandidates orders a list by display name, case-insensitively, in place.
+// The server's members already arrive sorted; this is for the ones assembled a
+// recipient at a time, which would otherwise shuffle every time the list was
+// rebuilt. It sorts on the key the candidate already carries, so nothing is
+// lowered twice.
+func SortCandidates(candidates []MentionCandidate) {
+	slices.SortFunc(candidates, func(x, y MentionCandidate) int {
+		return strings.Compare(x.nameKey, y.nameKey)
+	})
+}
+
 // rank scores a candidate against an already-lowercased query: 0 when the
 // display name or handle starts with it, 1 when either merely contains it, -1
 // for no match. An empty query (the bare "@") matches everyone at rank 0, so
 // typing @ alone opens the picker on the full list.
-func (c MentionCandidate) rank(query string) int {
+//
+// The receiver is a pointer only because filter calls this twice per candidate
+// per keystroke, and a MentionCandidate is wide enough that copying one that
+// many times is the bulk of the work on a large server.
+func (c *MentionCandidate) rank(query string) int {
 	switch {
 	case query == "",
 		strings.HasPrefix(c.nameKey, query), strings.HasPrefix(c.userKey, query):
@@ -734,6 +772,12 @@ type MentionPicker struct {
 	matches  []MentionCandidate
 	overflow int // matches beyond mentionMaxRows, reported by the footer
 	selected int
+
+	// The query the rows currently show, and whether they still reflect it. A
+	// keystroke that leaves the query alone — a caret move inside the same
+	// mention, a Refresh — then costs nothing at all.
+	query string
+	fresh bool
 
 	rows      []*mentionRow
 	footer    *canvas.Text
@@ -780,13 +824,27 @@ func (p *MentionPicker) CreateRenderer() fyne.WidgetRenderer {
 // never goes to the network itself.
 func (p *MentionPicker) SetCandidates(candidates []MentionCandidate) {
 	p.all = candidates
+	p.fresh = false
+
+	// The rows recognise a candidate by ID and skip rebuilding for one they
+	// already show. The same person can arrive here under a new nickname, colour
+	// or avatar, so a new list is what un-teaches them.
+	for _, row := range p.rows {
+		row.invalidate()
+	}
 }
 
 // Update refilters against query — the text between the "@" and the caret — and
 // reports whether anything matched. A false result means the caller should hide
 // the picker: there is nobody to offer.
 func (p *MentionPicker) Update(query string) bool {
-	p.filter(strings.ToLower(query))
+	query = strings.ToLower(query)
+	if p.fresh && query == p.query {
+		return len(p.matches) > 0
+	}
+
+	p.filter(query)
+	p.query, p.fresh = query, true
 	if len(p.matches) == 0 {
 		return false
 	}
@@ -821,12 +879,13 @@ func (p *MentionPicker) Update(query string) bool {
 func (p *MentionPicker) filter(query string) {
 	p.matches, p.overflow = p.matches[:0], 0
 	for pass := range 2 {
-		for _, candidate := range p.all {
+		for i := range p.all {
+			candidate := &p.all[i]
 			if candidate.rank(query) != pass {
 				continue
 			}
 			if len(p.matches) < mentionMaxRows {
-				p.matches = append(p.matches, candidate)
+				p.matches = append(p.matches, *candidate)
 			} else {
 				p.overflow++
 			}
@@ -865,11 +924,14 @@ func (p *MentionPicker) Accept() {
 }
 
 // Reset clears the highlight so the next mention starts at the top of its list.
+// The rows no longer reflect their query afterwards — the new first row has to be
+// highlighted — so the next Update refilters even if nothing was typed.
 func (p *MentionPicker) Reset() {
 	if p.selected != 0 && p.selected < len(p.rows) {
 		p.rows[p.selected].setSelected(false)
 	}
 	p.selected = 0
+	p.fresh = false
 }
 
 // mentionRow is one pooled row of the picker: avatar, display name in the
@@ -888,6 +950,12 @@ type mentionRow struct {
 	// generation guards a reused row against a slow avatar load: by the time an
 	// image arrives the row may already show somebody else.
 	generation int
+
+	// Who the row currently shows and how it is drawn, so a keystroke that leaves
+	// a row on the same person doesn't rebuild it. Filtering re-sets all eight rows
+	// on every character typed, and most of them hold still.
+	userID   string
+	selected bool
 
 	onHover func()
 }
@@ -952,6 +1020,12 @@ func (r *mentionRow) MouseOut() {}
 // fetched through the shared cache, so a row that scrolls past under a fast
 // typist costs one map lookup.
 func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
+	if r.userID != "" && r.userID == candidate.UserID {
+		r.setSelected(selected)
+		return
+	}
+	r.userID = candidate.UserID
+
 	r.generation++
 	generation := r.generation
 
@@ -987,7 +1061,16 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	})
 }
 
+// invalidate forgets who the row shows, so the next set rebuilds it even for the
+// same person.
+func (r *mentionRow) invalidate() { r.userID = "" }
+
 func (r *mentionRow) setSelected(selected bool) {
+	if r.selected == selected {
+		return
+	}
+	r.selected = selected
+
 	r.background.FillColor = color.Transparent
 	if selected {
 		r.background.FillColor = theme.Colors.MentionRowSelectedBg

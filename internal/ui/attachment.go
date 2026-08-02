@@ -12,9 +12,9 @@ import (
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -34,7 +34,7 @@ const (
 // onMenu is the owning message's right-click handler, which each attachment
 // takes over: an attachment fills most of the row it belongs to, and being the
 // innermost object under the pointer it would otherwise swallow the click.
-func buildAttachments(deps Deps, attachments []*revoltgo.File, onMenu func(*fyne.PointEvent)) *fyne.Container {
+func buildAttachments(deps Deps, attachments []*domain.File, onMenu func(*fyne.PointEvent)) *fyne.Container {
 	box := container.NewVBox()
 
 	for i, attachment := range attachments {
@@ -53,10 +53,10 @@ func buildAttachments(deps Deps, attachments []*revoltgo.File, onMenu func(*fyne
 // generic file card, with a name/size bar beneath it. Images and text files open
 // in the viewer when tapped — the inline render of both is deliberately small,
 // so the full thing has to be reachable from somewhere.
-func buildAttachment(deps Deps, attachment *revoltgo.File, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	isImage := util.IsImageAttachment(attachment)
-	isText := util.Filetype(attachment.Filename) == util.FileTypeText
-	bar := attachmentBar(attachment.Filename, attachment.Size, nil)
+func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+	isImage := attachment.Kind == domain.FileImage
+	isText := attachment.Kind == domain.FileText
+	bar := attachmentBar(attachment.Name, attachment.Size, nil)
 
 	var content *fyne.Container
 	switch {
@@ -79,8 +79,8 @@ func buildAttachment(deps Deps, attachment *revoltgo.File, onMenu func(*fyne.Poi
 	return stack
 }
 
-func buildImageAttachment(images *cache.ImageCache, attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {
-	width, height := util.AttachmentDimensions(attachment)
+func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
+	width, height := attachment.Width, attachment.Height
 	size := fitWithin(width, height, theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
 	if size.Width == 0 || size.Height == 0 {
 		// No usable metadata: reserve a wide, half-height box so the row doesn't
@@ -92,14 +92,14 @@ func buildImageAttachment(images *cache.ImageCache, attachment *revoltgo.File, b
 	placeholder.SetMinSize(size)
 	image := container.NewStack(placeholder)
 
-	if url := attachment.URL(""); url != "" && attachment.ID != "" {
+	if url := attachment.URL; url != "" && attachment.ID != "" {
 		images.LoadIntoContainer(attachment.ID, url, size, image, false, nil)
 	}
 
 	return container.NewBorder(nil, bar, nil, nil, image)
 }
 
-func buildTextAttachment(texts *cache.TextCache, attachment *revoltgo.File, bar fyne.CanvasObject) *fyne.Container {
+func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
 	preview := widget.NewRichTextFromMarkdown("Loading preview...")
 	preview.Wrapping = fyne.TextWrapWord
 
@@ -107,7 +107,7 @@ func buildTextAttachment(texts *cache.TextCache, attachment *revoltgo.File, bar 
 	background.SetMinSize(fyne.NewSize(attachmentCardWidth, attachmentTextHeight))
 
 	content := container.NewStack(background, container.NewPadded(preview))
-	go fetchTextPreview(texts, attachment.URL(""), preview)
+	go fetchTextPreview(texts, attachment.URL, preview)
 
 	return container.NewBorder(nil, bar, nil, nil, content)
 }

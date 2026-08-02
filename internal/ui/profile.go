@@ -13,14 +13,13 @@ import (
 	"fmt"
 	"image/color"
 	"strings"
-	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -46,99 +45,25 @@ const (
 
 /* Presence */
 
-// Presence is a user's availability, as the ring around their avatar reports it.
-type Presence int
-
-const (
-	PresenceOffline Presence = iota
-	PresenceOnline
-	PresenceIdle
-	PresenceFocus
-	PresenceBusy
-)
-
-// PresenceOf reads a user's presence. Someone who isn't connected is Offline
-// whatever presence they picked, and someone connected without a status of their
-// own is plainly Online. Invisible is deliberately indistinguishable from
-// Offline — that is what it is for.
-func PresenceOf(user *revoltgo.User) Presence {
-	if user == nil || !user.Online {
-		return PresenceOffline
-	}
-	if user.Status == nil {
-		return PresenceOnline
-	}
-
-	switch user.Status.Presence {
-	case revoltgo.UserStatusPresenceIdle:
-		return PresenceIdle
-	case revoltgo.UserStatusPresenceFocus:
-		return PresenceFocus
-	case revoltgo.UserStatusPresenceBusy:
-		return PresenceBusy
-	case revoltgo.UserStatusPresenceInvisible:
-		return PresenceOffline
-	}
-
-	return PresenceOnline
-}
-
-// Color fills the presence ring.
-func (p Presence) Color() color.Color {
-	switch p {
-	case PresenceOnline:
+// presenceColor fills the presence ring. The vocabulary itself is
+// domain.Presence — what each state is *called* belongs to the domain, what
+// colour it is drawn in belongs here.
+func presenceColor(presence domain.Presence) color.Color {
+	switch presence {
+	case domain.PresenceOnline:
 		return theme.Colors.PresenceOnline
-	case PresenceIdle:
+	case domain.PresenceIdle:
 		return theme.Colors.PresenceIdle
-	case PresenceFocus:
+	case domain.PresenceFocus:
 		return theme.Colors.PresenceFocus
-	case PresenceBusy:
+	case domain.PresenceBusy:
 		return theme.Colors.PresenceBusy
 	}
 
 	return theme.Colors.PresenceOffline
 }
 
-// Label names the presence in words, for the dialog's identity line.
-func (p Presence) Label() string {
-	switch p {
-	case PresenceOnline:
-		return "Online"
-	case PresenceIdle:
-		return "Idle"
-	case PresenceFocus:
-		return "Focus"
-	case PresenceBusy:
-		return "Busy"
-	}
-
-	return "Offline"
-}
-
 /* Profile data */
-
-// Profile is everything the two presentations draw, resolved once by the
-// controller. Bio is the exception: it is a request of its own, so it arrives
-// through SetBio after the card is already on screen.
-type Profile struct {
-	UserID string
-	Name   string // the server nickname where there is one, else the display name
-	Handle string // "@username#0001"
-	Status string // the user's own status line
-
-	AvatarURL  string
-	Accent     color.Color // most-senior coloured role; nil for the neutral banner
-	Presence   Presence
-	ServerName string // the open server, for the joined date; "" in a conversation
-
-	Badges []string
-	Roles  []util.Role
-
-	Created time.Time // account creation, from the ID
-	Joined  time.Time // joined ServerName; zero outside a server
-
-	Bot bool
-}
 
 // ProfileActions are the buttons a presentation offers. A nil field leaves its
 // button out, which is how the card drops "Message" for the account's own user
@@ -163,16 +88,16 @@ type ProfileCard struct {
 
 // NewProfileCard builds the compact card, to be anchored beside whatever was
 // clicked.
-func NewProfileCard(deps Deps, profile Profile, actions ProfileActions) *ProfileCard {
+func NewProfileCard(deps Deps, profile domain.Profile, actions ProfileActions) *ProfileCard {
 	return newProfileCard(deps, profile, actions, false)
 }
 
 // NewProfileDialog builds the full profile, to be centred on the modal layer.
-func NewProfileDialog(deps Deps, profile Profile, actions ProfileActions) *ProfileCard {
+func NewProfileDialog(deps Deps, profile domain.Profile, actions ProfileActions) *ProfileCard {
 	return newProfileCard(deps, profile, actions, true)
 }
 
-func newProfileCard(deps Deps, profile Profile, actions ProfileActions, full bool) *ProfileCard {
+func newProfileCard(deps Deps, profile domain.Profile, actions ProfileActions, full bool) *ProfileCard {
 	c := &ProfileCard{deps: deps, about: container.NewStack(), full: full}
 	c.about.Hide()
 
@@ -234,7 +159,7 @@ func (c *ProfileCard) bio(bio string) fyne.CanvasObject {
 /* Header */
 
 // header is the colour banner with the avatar overhanging it.
-func (c *ProfileCard) header(profile Profile, actions ProfileActions) fyne.CanvasObject {
+func (c *ProfileCard) header(profile domain.Profile, actions ProfileActions) fyne.CanvasObject {
 	side, height := theme.Sizes.ProfileAvatarSize, theme.Sizes.ProfileBannerHeight
 	if c.full {
 		side, height = theme.Sizes.ProfileDialogAvatarSize, theme.Sizes.ProfileDialogBannerHeight
@@ -278,7 +203,7 @@ func profileBanner(accent color.Color, height float32) fyne.CanvasObject {
 // block is the same size whatever the presence is — an offline user simply has
 // the ring's width in card colour, so nothing around the avatar moves when
 // someone goes online.
-func (c *ProfileCard) avatar(profile Profile, side float32) fyne.CanvasObject {
+func (c *ProfileCard) avatar(profile domain.Profile, side float32) fyne.CanvasObject {
 	cut, ring := theme.Sizes.ProfileAvatarRing, theme.Sizes.ProfilePresenceRing
 	inner := side + 2*ring
 	outer := inner + 2*cut
@@ -301,12 +226,12 @@ func (c *ProfileCard) avatar(profile Profile, side float32) fyne.CanvasObject {
 // presenceRing is the coloured band the avatar sits in, at diameter side. Offline
 // gets nothing at all rather than a grey ring: absence is what "offline" looks
 // like, and it is the one presence invisible has to be indistinguishable from.
-func presenceRing(presence Presence, side float32) fyne.CanvasObject {
-	if presence == PresenceOffline {
+func presenceRing(presence domain.Presence, side float32) fyne.CanvasObject {
+	if presence == domain.PresenceOffline {
 		return nil
 	}
 
-	band := canvas.NewCircle(presence.Color())
+	band := canvas.NewCircle(presenceColor(presence))
 
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), band))
 }
@@ -315,7 +240,7 @@ func presenceRing(presence Presence, side float32) fyne.CanvasObject {
 
 // details is everything under the header. width is the room the rows have, which
 // the chip flow needs given rather than measured — see NewFlow.
-func (c *ProfileCard) details(profile Profile, actions ProfileActions, width float32) fyne.CanvasObject {
+func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, width float32) fyne.CanvasObject {
 	rows := []fyne.CanvasObject{c.identity(profile, width)}
 
 	if profile.Status != "" {
@@ -350,7 +275,7 @@ func (c *ProfileCard) details(profile Profile, actions ProfileActions, width flo
 // line the second reads as qualifying the first. The name carries the role
 // colour, as it does on a message, and gives up its width first, so neither can
 // widen the card.
-func (c *ProfileCard) identity(profile Profile, width float32) fyne.CanvasObject {
+func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.CanvasObject {
 	size := theme.Sizes.ProfileNameSize
 	if c.full {
 		size = theme.Sizes.ProfileDialogNameSize
@@ -397,7 +322,7 @@ func (c *ProfileCard) identity(profile Profile, width float32) fyne.CanvasObject
 
 	// The dialog has the room to spell the presence out; on the card the ring
 	// around the avatar is the whole of it.
-	presence := canvas.NewText(profile.Presence.Label(), profile.Presence.Color())
+	presence := canvas.NewText(profile.Presence.Label(), presenceColor(profile.Presence))
 	presence.TextSize = theme.Sizes.ProfileHandleSize
 
 	return VBoxNoSpacing(line, VerticalSpacer(theme.Sizes.ProfileTightGap), NewEllipsisText(presence))
@@ -451,7 +376,7 @@ func profileDetail(text string) fyne.CanvasObject {
 // profileHistory is the dates block: when they joined the open server, and when
 // the account itself was made. Nil when neither is known — a conversation has no
 // server to have been joined, and an ID that isn't a ULID carries no date.
-func profileHistory(profile Profile) fyne.CanvasObject {
+func profileHistory(profile domain.Profile) fyne.CanvasObject {
 	var lines []fyne.CanvasObject
 
 	if !profile.Joined.IsZero() {
@@ -492,7 +417,7 @@ func profileChip(text string, tint color.Color) fyne.CanvasObject {
 // profileRoles draws the role chips, most senior first. The card shows the first
 // few and counts the rest into a final chip: something that only names a person
 // should not turn into a list of their roles.
-func profileRoles(roles []util.Role, full bool, width float32) fyne.CanvasObject {
+func profileRoles(roles []domain.Role, full bool, width float32) fyne.CanvasObject {
 	shown, overflow := roles, 0
 	if !full && len(roles) > profileRoleLimit {
 		shown, overflow = roles[:profileRoleLimit], len(roles)-profileRoleLimit
@@ -528,7 +453,7 @@ func profileBadges(names []string, width float32) fyne.CanvasObject {
 // buttons is the row along the bottom. They share the width evenly, so the pair
 // reads as one control however many there are; nil when there is nothing to
 // offer, so the card doesn't reserve the gap above a row it never draws.
-func (c *ProfileCard) buttons(profile Profile, actions ProfileActions) fyne.CanvasObject {
+func (c *ProfileCard) buttons(profile domain.Profile, actions ProfileActions) fyne.CanvasObject {
 	var buttons []fyne.CanvasObject
 
 	if actions.OnMessage != nil {

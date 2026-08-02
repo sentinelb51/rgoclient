@@ -9,11 +9,10 @@ import (
 	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
-	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
 /* Server icons */
@@ -25,7 +24,7 @@ const serverHoverGrowth = 1.1
 // or selected.
 type ServerWidget struct {
 	widget.BaseWidget
-	Server *revoltgo.Server
+	Server domain.Server
 
 	// OnHover reports the pointer entering and leaving, so the sidebar can name
 	// the server in a Tooltip. Menu supplies the right-click items.
@@ -53,7 +52,7 @@ var (
 )
 
 // NewServerWidget creates a server icon widget.
-func NewServerWidget(images *cache.ImageCache, server *revoltgo.Server, onTap func()) *ServerWidget {
+func NewServerWidget(images *cache.ImageCache, server domain.Server, onTap func()) *ServerWidget {
 	w := &ServerWidget{
 		Server:     server,
 		images:     images,
@@ -88,8 +87,8 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	label.Alignment = fyne.TextAlignCenter
 
 	icon := container.NewStack(w.background, container.NewCenter(label))
-	if w.Server.Icon != nil {
-		w.images.LoadIntoContainer(w.Server.Icon.ID, w.Server.Icon.URL("64"), iconSize, icon, true, w.background)
+	if w.Server.IconURL != "" {
+		w.images.LoadIntoContainer(w.Server.IconID, w.Server.IconURL, iconSize, icon, true, w.background)
 	}
 
 	grown := theme.Sizes.ServerIconSize * serverHoverGrowth
@@ -159,7 +158,7 @@ func (w *ServerWidget) notifyHover(hovering bool) {
 // ChannelWidget is a selectable channel row carrying selection and unread state.
 type ChannelWidget struct {
 	widget.BaseWidget
-	Channel *revoltgo.Channel
+	Channel domain.Channel
 
 	// Menu supplies the items right-clicking the row offers.
 	Menu func() []*fyne.MenuItem
@@ -185,16 +184,16 @@ var (
 	_ desktop.Hoverable      = (*ChannelWidget)(nil)
 )
 
-// NewChannelWidget creates a channel row. Both the label and what precedes it
-// come from the channel's type rather than its raw name: a DM has no name of its
-// own, so deps.Session is what turns it into the other participant.
-func NewChannelWidget(deps Deps, channel *revoltgo.Channel, onTap func()) *ChannelWidget {
-	label := canvas.NewText(util.ChannelName(deps.Session, channel), theme.Colors.CategoryText)
+// NewChannelWidget creates a channel row. The name and what precedes it are
+// already resolved on the channel — a DM has no name of its own, and the store
+// is what turned it into the other participant.
+func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelWidget {
+	label := canvas.NewText(channel.Name, theme.Colors.CategoryText)
 	label.TextSize = theme.Sizes.ChannelLabelSize
 	label.Alignment = fyne.TextAlignLeading
 
 	height := theme.Sizes.ChannelItemHeight
-	if isConversation(channel) {
+	if channel.Kind.IsConversation() {
 		height = theme.Sizes.ConversationItemHeight
 	}
 
@@ -465,50 +464,30 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
-// isConversation reports whether a channel is a conversation — a direct message,
-// a group, or the account's saved notes — rather than a channel belonging to a
-// server. Those are the home view's rows, and they are drawn as taller cards led
-// by a picture instead of a glyph.
-func isConversation(channel *revoltgo.Channel) bool {
-	if channel == nil {
-		return false
-	}
-
-	switch channel.ChannelType {
-	case revoltgo.ChannelTypeDM, revoltgo.ChannelTypeGroup, revoltgo.ChannelTypeSavedMessages:
-		return true
-	}
-
-	return false
-}
-
 // channelLeading returns what precedes a channel's name in its sidebar row: a
 // conversation is led by its avatar, everything else by its type glyph. Centred,
 // because the row is taller than either.
-func channelLeading(deps Deps, channel *revoltgo.Channel) fyne.CanvasObject {
-	if !isConversation(channel) {
-		return ChannelGlyph(channel)
+func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
+	if !channel.Kind.IsConversation() {
+		return ChannelGlyph(channel.Kind)
 	}
 
 	side := theme.Sizes.ConversationAvatarSize
-	avatar := circularAvatar(deps.Images, util.ChannelAvatarURL(deps.Session, channel), fyne.NewSize(side, side))
+	avatar := circularAvatar(deps.Images, channel.AvatarURL, fyne.NewSize(side, side))
 
 	return container.NewCenter(avatar)
 }
 
 // ChannelGlyph returns the glyph that prefixes a channel's name, both in the
 // sidebar row and in the message-area header: "#" for a server text channel,
-// "@" for a direct message, and a two-head mark for a group. A nil channel (no
-// selection yet) falls back to the hashtag.
-func ChannelGlyph(channel *revoltgo.Channel) fyne.CanvasObject {
-	if channel == nil {
-		return HashtagIcon()
-	}
-
-	switch channel.ChannelType {
-	case revoltgo.ChannelTypeDM, revoltgo.ChannelTypeSavedMessages:
+// "@" for a direct message, and a two-head mark for a group. Anything else —
+// including the zero value, meaning nothing is selected yet — falls back to the
+// hashtag.
+func ChannelGlyph(kind domain.ChannelKind) fyne.CanvasObject {
+	switch kind {
+	case domain.ChannelDM, domain.ChannelSavedMessages:
 		return AtIcon()
-	case revoltgo.ChannelTypeGroup:
+	case domain.ChannelGroup:
 		return GroupIcon()
 	}
 
@@ -580,17 +559,17 @@ func GroupIcon() fyne.CanvasObject {
 // name, the whole row tappable. Offline members get dimmed name text. The row is
 // returned as its TappableContainer so the controller can fill in the Menu hook,
 // as it does for the server and channel rows.
-func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) *TappableContainer {
+func NewMemberWidget(deps Deps, member domain.Member, online bool) *TappableContainer {
 	textColor := theme.Colors.TextPrimary
 	if !online {
 		textColor = theme.Colors.CategoryText
 	}
 
-	label := canvas.NewText(util.MemberName(deps.Session, member), textColor)
+	label := canvas.NewText(member.Name, textColor)
 	label.TextSize = theme.Sizes.MemberNameSize
 
 	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
-	avatar := circularAvatar(deps.Images, util.MemberAvatarURL(deps.Session, member), avatarSize)
+	avatar := circularAvatar(deps.Images, member.AvatarURL, avatarSize)
 
 	// As in the channel row, the name fills the leftover width and is shortened to
 	// fit rather than being allowed to widen the member column.
@@ -603,7 +582,7 @@ func NewMemberWidget(deps Deps, member *revoltgo.ServerMember, online bool) *Tap
 		NewEllipsisText(label),
 	)
 
-	userID := member.ID.User
+	userID := member.UserID
 	content := NewMinHeightContainer(theme.Sizes.MemberRowHeight, row)
 
 	// The row is its own anchor, so the profile card opens beside the name that
@@ -636,19 +615,15 @@ type SessionCard struct {
 }
 
 // NewSessionCard creates a saved-session card, loading the avatar if available.
-func NewSessionCard(images *cache.ImageCache, username, avatarID string, onTap, onRemove func()) *SessionCard {
+func NewSessionCard(images *cache.ImageCache, username, avatarURL string, onTap, onRemove func()) *SessionCard {
 	background := canvas.NewRectangle(theme.Colors.SessionCardBg)
 	background.CornerRadius = 4
 
 	side := theme.Sizes.SessionCardAvatarSize
-	var url string
-	if avatarID != "" {
-		url = revoltgo.EndpointAutumnFile("avatars", avatarID, "64")
-	}
 
 	c := &SessionCard{
 		background: background,
-		avatar:     circularAvatar(images, url, fyne.NewSize(side, side)),
+		avatar:     circularAvatar(images, avatarURL, fyne.NewSize(side, side)),
 		username:   username,
 		onTap:      onTap,
 		onRemove:   onRemove,

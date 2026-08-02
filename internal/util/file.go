@@ -3,58 +3,9 @@ package util
 import (
 	"fmt"
 	"strings"
-
-	"github.com/sentinelb51/revoltgo"
 )
 
-/* Classification */
-
-// FileType categorises a file by its extension.
-type FileType uint8
-
-const (
-	FileTypeUnknown FileType = iota
-	FileTypeImage
-	FileTypeVideo
-	FileTypeText
-	FileTypeAudio
-	FileTypeArchive
-	FileTypePDF
-)
-
-// Filetype classifies a filename by its extension, avoiding an allocation when
-// the extension is already lowercase (the common case for web content).
-func Filetype(filename string) FileType {
-	dot := strings.LastIndexByte(filename, '.')
-	if dot == -1 || dot == len(filename)-1 {
-		return FileTypeUnknown
-	}
-
-	ext := filename[dot+1:]
-	for i := range len(ext) {
-		if c := ext[i]; c >= 'A' && c <= 'Z' {
-			ext = strings.ToLower(ext)
-			break
-		}
-	}
-
-	switch ext {
-	case "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico", "heic", "tiff":
-		return FileTypeImage
-	case "mp4", "webm", "mov", "mkv", "avi", "flv", "wmv", "m4v":
-		return FileTypeVideo
-	case "mp3", "wav", "ogg", "flac", "m4a", "aac":
-		return FileTypeAudio
-	case "zip", "rar", "7z", "tar", "gz", "bz2":
-		return FileTypeArchive
-	case "pdf":
-		return FileTypePDF
-	case "txt", "md", "csv", "json", "xml", "html", "css", "js", "ts", "go", "py", "java", "c", "cpp", "h", "rs", "log":
-		return FileTypeText
-	default:
-		return FileTypeUnknown
-	}
-}
+/* Sizes */
 
 // FormatFileSize renders a byte count in binary units.
 func FormatFileSize(bytes int) string {
@@ -76,26 +27,7 @@ func FormatFileSize(bytes int) string {
 	}
 }
 
-/* Attachments */
-
-// Attachment metadata is optional — the API omits it for files it could not
-// introspect — so both accessors below tolerate a nil Metadata rather than
-// making every call site nil-check.
-
-// IsImageAttachment reports whether an attachment is an image.
-func IsImageAttachment(file *revoltgo.File) bool {
-	return file.Metadata != nil && file.Metadata.Type == revoltgo.FileMetadataTypeImage
-}
-
-// AttachmentDimensions returns an attachment's pixel dimensions, or zeroes when
-// it carries no metadata.
-func AttachmentDimensions(file *revoltgo.File) (width, height int) {
-	if file.Metadata == nil {
-		return 0, 0
-	}
-
-	return file.Metadata.Width, file.Metadata.Height
-}
+/* Attachment URLs */
 
 // autumnPathSegments is how many "/"-separated parts precede the file ID in an
 // Autumn CDN URL: "https:", "", "<host>", "<bucket>", then the ID.

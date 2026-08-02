@@ -12,8 +12,8 @@ import (
 	"log"
 
 	"fyne.io/fyne/v2"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 )
@@ -78,7 +78,7 @@ func (a *App) closeOverlay() {
 /* Attachment viewer */
 
 // showAttachmentViewer opens an attachment in the modal lightbox.
-func (a *App) showAttachmentViewer(attachment *revoltgo.File) {
+func (a *App) showAttachmentViewer(attachment *domain.File) {
 	a.showOverlay(ui.NewAttachmentViewer(a.deps(), attachment, a.viewerBounds(), a.closeOverlay))
 }
 
@@ -98,7 +98,7 @@ func (a *App) viewerBounds() fyne.Size {
 
 // showJoinServer opens the join-by-invite modal.
 func (a *App) showJoinServer() {
-	if a.session == nil {
+	if !a.client.Connected() {
 		return
 	}
 
@@ -110,20 +110,15 @@ func (a *App) showJoinServer() {
 
 // joinServer redeems an invite code, closing the dialog once the server is in.
 //
-// The joined server reaches the sidebar through the ServerCreate gateway event
-// rather than this response: the join payload carries the server as an object,
-// and revoltgo decodes it into an Invite whose ServerID comes from a "server_id"
-// field that payload never sets. pendingJoin therefore marks the request, so
-// onServerCreate knows this is the server to switch to.
+// The joined server reaches the sidebar through the ServerJoined event rather
+// than this response — see Client.JoinInvite for why the response cannot name it
+// — so pendingJoin marks the request, telling onServerJoined this is the server
+// to switch to.
 func (a *App) joinServer(code string) {
-	session := a.session
-	if session == nil {
-		return
-	}
 	a.pendingJoin = true
 
 	go func() {
-		_, err := session.InviteJoin(code)
+		err := a.client.JoinInvite(code)
 
 		a.doOnUI(func() {
 			if err == nil {

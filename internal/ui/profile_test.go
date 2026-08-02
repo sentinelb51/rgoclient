@@ -8,24 +8,23 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
-	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
 // crowdedProfile is a profile with everything filled in and nothing short: it is
 // what a card has to survive without growing.
-func crowdedProfile() Profile {
-	return Profile{
+func crowdedProfile() domain.Profile {
+	return domain.Profile{
 		UserID:     "01AVATAR",
 		Name:       strings.Repeat("Extremely Long Display Name ", 4),
 		Handle:     "@" + strings.Repeat("username", 8) + "#9147",
 		Status:     strings.Repeat("a status nobody could read in one line ", 3),
-		Presence:   PresenceOnline,
+		Presence:   domain.PresenceOnline,
 		ServerName: "A Server",
 		Badges:     []string{"Developer", "Early Adopter", "Responsible Disclosure"},
-		Roles: []util.Role{
+		Roles: []domain.Role{
 			{Name: "Maintainer", Color: color.NRGBA{R: 200, G: 90, B: 90, A: 255}},
 			{Name: "Reviewer"},
 			{Name: "Triage"},
@@ -45,7 +44,7 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 
 	cases := []struct {
 		name  string
-		build func(Deps, Profile, ProfileActions) *ProfileCard
+		build func(Deps, domain.Profile, ProfileActions) *ProfileCard
 		width float32
 	}{
 		{"card", NewProfileCard, theme.Sizes.ProfileCardWidth},
@@ -54,7 +53,7 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			card := tc.build(viewerDeps(), crowdedProfile(), ProfileActions{
+			card := tc.build(testDeps(), crowdedProfile(), ProfileActions{
 				OnMessage: func() {},
 				OnClose:   func() {},
 			})
@@ -73,7 +72,7 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 func TestProfileAvatarOverhangsTheBanner(t *testing.T) {
 	test.NewTempApp(t)
 
-	card := NewProfileCard(viewerDeps(), Profile{Name: "Someone"}, ProfileActions{})
+	card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 	card.Content.Resize(card.Content.MinSize())
 
 	// The placeholder circle is the avatar until an image lands over it, and the
@@ -106,14 +105,14 @@ func TestProfileAvatarOverhangsTheBanner(t *testing.T) {
 func TestPresenceRingSurroundsTheAvatar(t *testing.T) {
 	test.NewTempApp(t)
 
-	ringOf := func(presence Presence) *canvas.Circle {
-		card := NewProfileCard(viewerDeps(), Profile{Name: "Someone", Presence: presence}, ProfileActions{})
+	ringOf := func(presence domain.Presence) *canvas.Circle {
+		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone", Presence: presence}, ProfileActions{})
 		card.Content.Resize(card.Content.MinSize())
 
 		var ring *canvas.Circle
 		walkTree(card.Content, func(obj fyne.CanvasObject, _ fyne.Position) {
 			circle, ok := obj.(*canvas.Circle)
-			if ok && ring == nil && circle.FillColor == presence.Color() {
+			if ok && ring == nil && circle.FillColor == presenceColor(presence) {
 				ring = circle
 			}
 		})
@@ -121,7 +120,7 @@ func TestPresenceRingSurroundsTheAvatar(t *testing.T) {
 		return ring
 	}
 
-	for _, presence := range []Presence{PresenceOnline, PresenceIdle, PresenceFocus, PresenceBusy} {
+	for _, presence := range []domain.Presence{domain.PresenceOnline, domain.PresenceIdle, domain.PresenceFocus, domain.PresenceBusy} {
 		ring := ringOf(presence)
 		if ring == nil {
 			t.Fatalf("%s drew no ring", presence.Label())
@@ -132,7 +131,7 @@ func TestPresenceRingSurroundsTheAvatar(t *testing.T) {
 		}
 	}
 
-	if ringOf(PresenceOffline) != nil {
+	if ringOf(domain.PresenceOffline) != nil {
 		t.Error("an offline user was given a presence ring")
 	}
 }
@@ -143,7 +142,7 @@ func TestPresenceRingSurroundsTheAvatar(t *testing.T) {
 func TestProfileHandleSitsBesideTheName(t *testing.T) {
 	test.NewTempApp(t)
 
-	card := NewProfileCard(viewerDeps(), Profile{
+	card := NewProfileCard(testDeps(), domain.Profile{
 		Name:   "Someone",
 		Handle: "@someone#9147",
 	}, ProfileActions{})
@@ -187,7 +186,7 @@ func TestProfileBioArrivesAfterTheCard(t *testing.T) {
 	test.NewTempApp(t)
 
 	t.Run("filled in", func(t *testing.T) {
-		card := NewProfileCard(viewerDeps(), Profile{Name: "Someone"}, ProfileActions{})
+		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 		before := card.Content.MinSize().Height
 
 		card.SetBio("Developer at Team Eidolonic")
@@ -197,7 +196,7 @@ func TestProfileBioArrivesAfterTheCard(t *testing.T) {
 	})
 
 	t.Run("empty", func(t *testing.T) {
-		card := NewProfileCard(viewerDeps(), Profile{Name: "Someone"}, ProfileActions{})
+		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 		before := card.Content.MinSize().Height
 
 		card.SetBio("   ")
@@ -205,36 +204,4 @@ func TestProfileBioArrivesAfterTheCard(t *testing.T) {
 			t.Errorf("an empty bio changed the card's height from %v to %v", before, after)
 		}
 	})
-}
-
-// TestPresenceOfReadsTheUser covers the two cases the mapping is there for: a
-// user who is not connected is offline whatever they picked, and invisible is
-// indistinguishable from offline.
-func TestPresenceOfReadsTheUser(t *testing.T) {
-	cases := []struct {
-		name string
-		user *revoltgo.User
-		want Presence
-	}{
-		{"unknown", nil, PresenceOffline},
-		{"disconnected", &revoltgo.User{}, PresenceOffline},
-		{"connected", &revoltgo.User{Online: true}, PresenceOnline},
-		{"busy", &revoltgo.User{Online: true, Status: &revoltgo.UserStatus{
-			Presence: revoltgo.UserStatusPresenceBusy,
-		}}, PresenceBusy},
-		{"invisible", &revoltgo.User{Online: true, Status: &revoltgo.UserStatus{
-			Presence: revoltgo.UserStatusPresenceInvisible,
-		}}, PresenceOffline},
-		{"idle but disconnected", &revoltgo.User{Status: &revoltgo.UserStatus{
-			Presence: revoltgo.UserStatusPresenceIdle,
-		}}, PresenceOffline},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := PresenceOf(tc.user); got != tc.want {
-				t.Errorf("presence is %v, want %v", got, tc.want)
-			}
-		})
-	}
 }

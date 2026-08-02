@@ -2,8 +2,8 @@ package app
 
 // User profiles. Clicking a message avatar or a member row opens the compact
 // card beside it, and the card expands into the full dialog on the modal layer.
-// Both are drawn from one ui.Profile resolved out of State here, so the widgets
-// never look anything up themselves.
+// Both are drawn from one domain.Profile resolved out of the store here, so the
+// widgets never look anything up themselves.
 //
 // The bio is the exception. It is not part of the user record the client already
 // holds, so it is fetched after the card is up and filled in when it lands —
@@ -15,6 +15,7 @@ import (
 
 	"fyne.io/fyne/v2"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/util"
 )
@@ -23,7 +24,7 @@ import (
 
 // OnUserTapped opens the compact profile card beside whatever was clicked.
 func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
-	if a.session == nil || userID == "" || anchor == nil {
+	if userID == "" || anchor == nil {
 		return
 	}
 
@@ -39,10 +40,6 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 // showProfileDialog opens the full profile, centred on the modal layer. It
 // replaces the card it was expanded from, so the two are never up together.
 func (a *App) showProfileDialog(userID string) {
-	if a.session == nil {
-		return
-	}
-
 	dialog := ui.NewProfileDialog(a.deps(), a.profileOf(userID), ui.ProfileActions{
 		OnMessage: a.messageAction(userID),
 		OnClose:   a.closeOverlay,
@@ -56,7 +53,7 @@ func (a *App) showProfileDialog(userID string) {
 // for it to do — the account's own profile, where it would open a conversation
 // with yourself.
 func (a *App) messageAction(userID string) func() {
-	if self := a.session.State.Self(); self != nil && self.ID == userID {
+	if a.store.SelfID() == userID {
 		return nil
 	}
 
@@ -68,44 +65,42 @@ func (a *App) messageAction(userID string) func() {
 
 /* Resolving one */
 
-// profileOf assembles a profile from State alone. A user State has never heard
-// of still gets a card — with what little is known, and their resolution queued
-// so a second look shows the real thing — because a click that does nothing is
-// worse than a card that is thin.
-func (a *App) profileOf(userID string) ui.Profile {
-	profile := ui.Profile{UserID: userID, Name: "Unknown user"}
+// profileOf assembles a profile from what the client already knows. A user the
+// store has never heard of still gets a card — with what little is known, and
+// their resolution queued so a second look shows the real thing — because a click
+// that does nothing is worse than a card that is thin.
+func (a *App) profileOf(userID string) domain.Profile {
+	profile := domain.Profile{UserID: userID, Name: "Unknown user"}
 	if created, err := util.Timestamp(userID); err == nil {
 		profile.Created = created
 	}
 
-	user := a.session.State.User(userID)
-	if user == nil {
+	user, ok := a.store.User(userID)
+	if !ok {
 		a.ensureAuthor(a.currentServerID, userID)
 		return profile
 	}
 
-	profile.Name = util.UserName(a.session, userID)
-	profile.Handle = util.UserHandle(user)
-	profile.AvatarURL = user.AvatarURL("256")
-	profile.Presence = ui.PresenceOf(user)
-	profile.Badges = util.UserBadges(user)
-	profile.Bot = user.Bot != nil
-	if user.Status != nil {
-		profile.Status = user.Status.Text
-	}
+	profile.Name = user.Name
+	profile.Handle = user.Handle
+	profile.AvatarURL = user.AvatarURL
+	profile.Presence = user.Presence
+	profile.Status = user.StatusText
+	profile.Badges = user.Badges
+	profile.Bot = user.Bot
 
 	// The server the profile was opened in is what makes them a member: the
 	// nickname, the per-server avatar, the role colour and the join date all
 	// belong to that membership, and none of them exists in a conversation.
-	server := a.currentServer()
-	if server == nil {
+	server, ok := a.currentServer()
+	if !ok {
 		return profile
 	}
-	if member := a.session.State.Member(server.ID, userID); member != nil {
-		profile.Name = util.MemberName(a.session, member)
-		profile.AvatarURL = util.MemberAvatarURL(a.session, member)
-		profile.Accent = util.MemberColor(a.session, member)
-		profile.Roles = util.MemberRoles(a.session, member)
+	if member, ok := a.store.Member(server.ID, userID); ok {
+		profile.Name = member.Name
+		profile.AvatarURL = member.AvatarURL
+		profile.Accent = member.Color
+		profile.Roles = a.store.MemberRoles(server.ID, userID)
 		profile.ServerName = server.Name
 		profile.Joined = member.JoinedAt
 	}
@@ -117,29 +112,26 @@ func (a *App) profileOf(userID string) ui.Profile {
 // screen, so nothing waits on the network to appear. A card the user has since
 // dismissed is detached, and updating it draws nothing.
 func (a *App) loadBio(userID string, card *ui.ProfileCard) {
-	session := a.session
-	if session == nil {
-		return
-	}
+	epoch := a.epoch
 
 	go func() {
-		profile, err := session.UserProfile(userID)
+		bio, err := a.client.UserBio(userID)
 		if err != nil {
 			// A profile reads perfectly well without a bio, and a notice over the card
 			// would be louder than the miss is worth — so this only reaches the log.
 			log.Printf("fetch profile %s: %v", userID, err)
 			return
 		}
-		if profile == nil || profile.Content == "" {
+		if bio == "" {
 			return
 		}
 
 		a.doOnUI(func() {
-			if a.session != session {
+			if a.stale(epoch) {
 				return
 			}
 
-			card.SetBio(profile.Content)
+			card.SetBio(bio)
 			a.repositionOverlay() // the card just grew
 		}, false)
 	}()
@@ -150,31 +142,19 @@ func (a *App) loadBio(userID string, card *ui.ProfileCard) {
 // openConversation switches to the direct message with a user, asking the server
 // to open one when there isn't one yet.
 func (a *App) openConversation(userID string) {
-	session := a.session
-	if session == nil {
-		return
-	}
+	epoch := a.epoch
 
 	go func() {
-		channel, err := session.DirectMessageCreate(userID)
+		channelID, err := a.client.OpenConversation(userID)
 		if err != nil {
 			log.Printf("open conversation with %s: %v", userID, err)
 			a.doOnUI(func() { a.notify(ui.ToneDanger, "Could not open a conversation.") }, false)
 			return
 		}
 
-		// Unlike DirectMessages, DirectMessageCreate does not feed its channel into
-		// State, and every channel-keyed path downstream looks a channel up there.
-		// Asking for it once is what puts it in.
-		if session.State.Channel(channel.ID) == nil {
-			if _, err := session.Channel(channel.ID); err != nil {
-				log.Printf("fetch channel %s: %v", channel.ID, err)
-			}
-		}
-
 		a.doOnUI(func() {
-			if a.session == session {
-				a.showConversation(channel.ID)
+			if !a.stale(epoch) {
+				a.showConversation(channelID)
 			}
 		}, false)
 	}()

@@ -17,6 +17,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 
+	xdraw "golang.org/x/image/draw"
 	_ "golang.org/x/image/webp"
 
 	"fyne.io/fyne/v2"
@@ -24,29 +25,48 @@ import (
 )
 
 const (
-	maxDiskBytes    int64 = 5 * 1024 * 1024 * 1024 // on-disk budget
-	maxMemoryImages       = 200                    // decoded images kept in memory
-	flushInterval         = 2 * time.Minute        // how often pending images hit disk
+	maxDiskBytes   int64 = 512 * 1024 * 1024 // on-disk budget
+	maxMemoryBytes int64 = 192 * 1024 * 1024 // decoded images kept in memory
+	flushInterval        = 30 * time.Second  // how often pending images hit disk
+	trimInterval         = 5 * time.Minute   // how often the on-disk budget is enforced
+
+	// maxImageEdge caps the longest side of a decoded image, in pixels. Revolt
+	// serves attachments at their original resolution and the client never draws
+	// one larger than the window, so a phone photo arrives as ~48 MiB of pixels to
+	// be shown 400px wide. Capping the decode is what stops a handful of them
+	// dwarfing everything else in the cache.
+	//
+	// It is one fixed bound rather than the size each call site draws at, because
+	// entries are keyed by file ID alone: the same avatar is asked for at four
+	// different sizes through one key, so a per-call-site cap would let the
+	// smallest requester decide what every larger one gets.
+	maxImageEdge = 1600
 
 	// diskHeadroomDivisor sets how far under budget a trim goes: 1/8th, so the
-	// next few sessions don't immediately re-trim.
+	// next few trims don't immediately re-run.
 	diskHeadroomDivisor = 8
 )
 
 // ImageCache stores decoded images in memory and persists them to disk in the
 // background. Safe for concurrent use.
+//
+// Memory is bounded in bytes rather than entries: a 32px avatar and a 12
+// megapixel photo are one slot each, so a count is not a ceiling on anything.
 type ImageCache struct {
-	mu       sync.RWMutex // guards every map below plus recency
+	mu       sync.RWMutex // guards every map below plus recency and bytes
 	memory   map[string]image.Image
 	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
+	sizes    map[string]int64       // resident bytes per id: its image plus its crop
 	recency  *LRU                   // decoded-image ids by recency
+	bytes    int64                  // sum of sizes; what maxMemoryBytes bounds
 
-	dir    string
-	client *http.Client
-	ticker *time.Ticker
-	stop   chan struct{}
+	dir      string
+	client   *http.Client
+	ticker   *time.Ticker
+	flushNow chan struct{} // nudged when unwritten images are blocking eviction
+	stop     chan struct{}
 }
 
 // imageLoad tracks an in-flight load so concurrent callers for the same id share
@@ -56,8 +76,8 @@ type imageLoad struct {
 	img  image.Image
 }
 
-// NewImageCache creates a cache rooted at the user's cache directory, trims it
-// back under budget, and starts the periodic disk flush.
+// NewImageCache creates a cache rooted at the user's cache directory and starts
+// the background flush, which also trims the directory back under budget.
 func NewImageCache() *ImageCache {
 	dir := cacheDir()
 	c := &ImageCache{
@@ -65,16 +85,17 @@ func NewImageCache() *ImageCache {
 		circular: make(map[string]image.Image),
 		pending:  make(map[string]image.Image),
 		inflight: make(map[string]*imageLoad),
+		sizes:    make(map[string]int64),
 		recency:  NewLRU(),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
+		flushNow: make(chan struct{}, 1),
 		stop:     make(chan struct{}),
 	}
 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("image cache: create dir: %v", err)
 	}
-	c.trimDiskCache()
 
 	c.ticker = time.NewTicker(flushInterval)
 	go c.flushLoop()
@@ -111,6 +132,13 @@ func (c *ImageCache) Get(id string) image.Image {
 
 	c.mu.Lock()
 	img, ok := c.memory[id]
+	if !ok {
+		// Evicted from memory but not yet written to disk — still right here, and
+		// being asked for again is what makes it resident again.
+		if img, ok = c.pending[id]; ok {
+			c.storeLocked(id, img, false)
+		}
+	}
 	if ok {
 		c.touchLocked(id)
 	}
@@ -132,9 +160,19 @@ func (c *ImageCache) Get(id string) image.Image {
 		_ = os.Remove(path) // a corrupt file would fail every future load of this id
 		return nil
 	}
+	// Files written before the decode cap existed are still oversized on disk.
+	img = downscale(img)
+
+	// Disk eviction is oldest-first by mtime, which is only ever set at write —
+	// insertion order, not recency. Stamping it on a hit is what makes the two
+	// agree, so a picture the user keeps scrolling past outlives one seen once.
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		log.Printf("image cache: touch %s: %v", id, err)
+	}
 
 	c.mu.Lock()
-	c.memory[id] = img
+	c.storeLocked(id, img, false)
 	c.touchLocked(id)
 	c.mu.Unlock()
 
@@ -150,7 +188,7 @@ func (c *ImageCache) Set(id string, img image.Image) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.memory[id] = img
+	c.storeLocked(id, img, false)
 	c.pending[id] = img
 	c.touchLocked(id)
 }
@@ -207,17 +245,93 @@ func (c *ImageCache) LoadIntoContainer(id, url string, size fyne.Size, target *f
 /* Internals */
 
 // touchLocked marks id most recently used and evicts the least recently used
-// decoded images, both plain and circular. Eviction never touches pending, so
-// queued disk writes still happen and Get reloads evicted images from disk.
-// Callers must hold the write lock.
+// decoded images until the cache is back inside its byte budget. The entry just
+// touched is never a candidate, so a single image larger than the whole budget
+// still resolves rather than evicting itself. Callers must hold the write lock.
 func (c *ImageCache) touchLocked(id string) {
 	c.recency.Touch(id)
 
-	for c.recency.Len() > maxMemoryImages {
-		evicted := c.recency.EvictOldest()
-		delete(c.memory, evicted)
-		delete(c.circular, evicted)
+	for c.bytes > maxMemoryBytes && c.recency.Len() > 1 {
+		c.releaseLocked(c.recency.EvictOldest())
 	}
+}
+
+// releaseLocked drops an id's decoded images, plain and circular, and uncharges
+// them. An image still queued for its disk write keeps that reference — dropping
+// it would lose the image outright — so the flusher is nudged instead: once it
+// has been written the reference goes with the queue, and until then the budget
+// is short by that much. Callers must hold the write lock.
+func (c *ImageCache) releaseLocked(id string) {
+	delete(c.memory, id)
+	delete(c.circular, id)
+
+	c.bytes -= c.sizes[id]
+	delete(c.sizes, id)
+
+	if _, queued := c.pending[id]; queued {
+		select {
+		case c.flushNow <- struct{}{}:
+		default: // a flush is already asked for; one is enough
+		}
+	}
+}
+
+// storeLocked puts a decoded image — the plain one, or the circular crop of it —
+// in memory under id and charges what it costs, replacing whatever was there.
+// Callers must hold the write lock.
+func (c *ImageCache) storeLocked(id string, img image.Image, circular bool) {
+	into := c.memory
+	if circular {
+		into = c.circular
+	}
+
+	if old, ok := into[id]; ok {
+		c.chargeLocked(id, -imageBytes(old))
+	}
+	into[id] = img
+	c.chargeLocked(id, imageBytes(img))
+}
+
+// chargeLocked moves an id's resident total and the cache's by n bytes. Callers
+// must hold the write lock.
+func (c *ImageCache) chargeLocked(id string, n int64) {
+	c.sizes[id] += n
+	c.bytes += n
+
+	if c.sizes[id] == 0 {
+		delete(c.sizes, id)
+	}
+}
+
+// imageBytes is what a decoded image costs resident, at four bytes a pixel. That
+// is exact for the RGBA images downscaling and circleClip produce, and an
+// over-estimate for the subsampled or paletted ones that arrive small enough to
+// be kept as decoded — erring high is what keeps the budget a ceiling.
+func imageBytes(img image.Image) int64 {
+	bounds := img.Bounds()
+
+	return int64(bounds.Dx()) * int64(bounds.Dy()) * 4
+}
+
+// downscale shrinks img so its longest side is at most maxImageEdge, returning it
+// untouched when it already fits. It runs once per image, off the UI thread, and
+// its result is what every later draw is scaled from — so it is worth a good
+// filter rather than a cheap one.
+func downscale(img image.Image) image.Image {
+	bounds := img.Bounds()
+	width, height := bounds.Dx(), bounds.Dy()
+	if width <= maxImageEdge && height <= maxImageEdge {
+		return img
+	}
+
+	scale := float64(maxImageEdge) / float64(max(width, height))
+	dst := image.NewRGBA(image.Rect(0, 0,
+		max(int(float64(width)*scale), 1),
+		max(int(float64(height)*scale), 1),
+	))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, bounds, draw.Src, nil)
+
+	return dst
 }
 
 // cachedVariant returns the in-memory image for id, the circular crop when
@@ -290,6 +404,7 @@ func (c *ImageCache) load(id, url string) image.Image {
 	if err != nil {
 		return nil
 	}
+	img = downscale(img)
 	c.Set(id, img)
 
 	return img
@@ -310,7 +425,7 @@ func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.circular[id] = clipped
+	c.storeLocked(id, clipped, true)
 	c.touchLocked(id)
 
 	return clipped
@@ -318,12 +433,27 @@ func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
 
 /* Disk */
 
-// flushLoop writes pending images to disk until Shutdown is called.
+// flushLoop writes pending images to disk and keeps the directory inside its
+// budget, until Shutdown is called. Both jobs live on this one goroutine so
+// nothing races the directory: a trim removing a file a flush is writing would
+// only lose an image the client can fetch again, but there is no reason to allow
+// it.
 func (c *ImageCache) flushLoop() {
+	trim := time.NewTicker(trimInterval)
+	defer trim.Stop()
+
+	// The first trim runs here rather than in the constructor, where it read the
+	// whole cache directory and sorted it before the window could appear.
+	c.trimDiskCache()
+
 	for {
 		select {
 		case <-c.ticker.C:
 			c.flush()
+		case <-c.flushNow:
+			c.flush()
+		case <-trim.C:
+			c.trimDiskCache()
 		case <-c.stop:
 			c.ticker.Stop()
 			return
@@ -373,9 +503,12 @@ func (c *ImageCache) writeToDisk(id string, img image.Image) {
 	}
 }
 
-// trimDiskCache evicts the least recently modified files until the on-disk cache
-// fits inside the budget, leaving headroom so the next start isn't immediately
-// over again. Evicting oldest-first keeps the images the user actually sees.
+// trimDiskCache evicts the least recently used files until the on-disk cache
+// fits inside the budget, leaving headroom so the next trim isn't immediately due
+// again. Recency is the file's mtime, which Get stamps on every hit — so what
+// survives is what the user keeps seeing, not merely what arrived last.
+//
+// Call from flushLoop only: it reads and sorts the whole directory.
 func (c *ImageCache) trimDiskCache() {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {

@@ -246,9 +246,19 @@ func NewFloatingDock(body, card fyne.CanvasObject) *fyne.Container {
 }
 
 // DockReserve is the room a floating card takes out of the column it hangs over:
-// its own height plus the gutter above and below it.
+// the part of the card standing above where the column already stops, plus the
+// gutter the last message comes to rest in.
+//
+// The column is laid out to a corner radius short of the card's *bottom* edge,
+// not to its top — so the card only obscures its own height less that radius.
+// Reserving the full height and a gutter at each end counted the overlap a second
+// time and left the newest message hanging a margin and a radius clear of the
+// card. Whatever rides on top of the card — the slowmode chip — is part of the
+// height measured here, so the message clears that too.
 func DockReserve(card fyne.CanvasObject) float32 {
-	return card.MinSize().Height + theme.Sizes.ComposerDockMargin*2
+	margin, radius := theme.Sizes.ComposerDockMargin, theme.Sizes.ComposerRadius
+
+	return max(card.MinSize().Height+margin-radius, 0)
 }
 
 // NewDockReserve wraps a scroller's content so the bottom of it can still be

@@ -10,6 +10,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -119,35 +120,86 @@ func candidates() []MentionCandidate {
 	}
 }
 
-// TestMentionQuery covers when the picker may open: after whitespace or at the
-// start of the message, never inside a word (an email address must stay an
-// email address).
+func channelCandidates() []MentionCandidate {
+	return []MentionCandidate{
+		NewChannelCandidate(domain.Channel{ID: "01GENERAL", Name: "general"}),
+		NewChannelCandidate(domain.Channel{ID: "01VOICE", Name: "lounge", Kind: domain.ChannelVoice}),
+	}
+}
+
+// TestMentionQuery covers when the picker may open and on which pool: after
+// whitespace or at the start of the message, never inside a word (an email
+// address must stay an email address), with '@' naming people and '#' channels.
 func TestMentionQuery(t *testing.T) {
 	input, _, _ := newTestComposer(t)
 
 	cases := []struct {
 		text  string
 		start int
+		kind  MentionKind
 		query string
 		ok    bool
 	}{
-		{"@", 0, "", true},
-		{"@el", 0, "el", true},
-		{"hey @sar", 4, "sar", true},
-		{"hey @", 4, "", true},
-		{"mail@example", 0, "", false},
-		{"hey @sar there", 0, "", false}, // caret is past the mention
-		{"plain text", 0, "", false},
+		{"@", 0, MentionUser, "", true},
+		{"@el", 0, MentionUser, "el", true},
+		{"hey @sar", 4, MentionUser, "sar", true},
+		{"hey @", 4, MentionUser, "", true},
+		{"#", 0, MentionChannel, "", true},
+		{"see #gen", 4, MentionChannel, "gen", true},
+		{"mail@example", 0, MentionUser, "", false},
+		{"c#sharp", 0, MentionUser, "", false},        // a marker mid-word is a character
+		{"hey @sar there", 0, MentionUser, "", false}, // caret is past the mention
+		{"plain text", 0, MentionUser, "", false},
 	}
 	for _, tc := range cases {
 		input.SetText(tc.text)
 		input.CursorRow, input.CursorColumn = cursorPosition(tc.text, len(tc.text))
 
-		start, query, ok := input.mentionQuery()
-		if ok != tc.ok || (ok && (start != tc.start || query != tc.query)) {
-			t.Errorf("mentionQuery(%q) = (%d, %q, %v), want (%d, %q, %v)",
-				tc.text, start, query, ok, tc.start, tc.query, tc.ok)
+		start, kind, query, ok := input.mentionQuery()
+		if ok != tc.ok || (ok && (start != tc.start || kind != tc.kind || query != tc.query)) {
+			t.Errorf("mentionQuery(%q) = (%d, %d, %q, %v), want (%d, %d, %q, %v)",
+				tc.text, start, kind, query, ok, tc.start, tc.kind, tc.query, tc.ok)
 		}
+	}
+}
+
+// TestMentionPoolsAreSeparate: the two markers filter two lists. A '#' must
+// never offer a person, nor '@' a channel, however well the query matches the
+// other pool.
+func TestMentionPoolsAreSeparate(t *testing.T) {
+	picker := NewMentionPicker(nil, nil)
+	picker.SetCandidates(MentionUser, candidates())
+	picker.SetCandidates(MentionChannel, channelCandidates())
+
+	if picker.Update(MentionChannel, "el") {
+		t.Error("a channel query matched a person (\"Elynn\")")
+	}
+	if picker.Update(MentionUser, "gen") {
+		t.Error("a user query matched a channel (\"general\")")
+	}
+	if !picker.Update(MentionChannel, "gen") || picker.matches[0].Name != "general" {
+		t.Errorf("channel query = %v, want [general]", picker.matches)
+	}
+}
+
+// TestAcceptChannelInsertsToken pins the wire form of the other mention: a
+// channel is <#id>, not <@id>, and inserting one leaves the same trailing space
+// a person's does.
+func TestAcceptChannelInsertsToken(t *testing.T) {
+	input, _, _ := newTestComposer(t)
+	input.Mentions.SetCandidates(MentionChannel, channelCandidates())
+
+	input.SetText("see #gen")
+	input.CursorRow, input.CursorColumn = cursorPosition(input.Text, 8)
+	input.syncMentions()
+
+	if !input.Mentions.Visible() {
+		t.Fatal("picker did not open on a matching channel")
+	}
+	input.Mentions.Accept()
+
+	if want := "see <#01GENERAL> "; input.Text != want {
+		t.Errorf("text = %q, want %q", input.Text, want)
 	}
 }
 
@@ -155,9 +207,9 @@ func TestMentionQuery(t *testing.T) {
 // and that either the display name or the handle can find someone.
 func TestMentionPickerRanking(t *testing.T) {
 	picker := NewMentionPicker(nil, nil)
-	picker.SetCandidates(candidates())
+	picker.SetCandidates(MentionUser, candidates())
 
-	if !picker.Update("sar") {
+	if !picker.Update(MentionUser, "sar") {
 		t.Fatal("query \"sar\" matched nobody")
 	}
 	var got []string
@@ -170,14 +222,14 @@ func TestMentionPickerRanking(t *testing.T) {
 		t.Errorf("ranking = %v, want [moonlit Saren Caesar]", got)
 	}
 
-	if !picker.Update("lyn") { // substring of "Elynn" only
+	if !picker.Update(MentionUser, "lyn") { // substring of "Elynn" only
 		t.Fatal("substring query matched nobody")
 	}
 	if len(picker.matches) != 1 || picker.matches[0].Name != "Elynn" {
 		t.Errorf("substring query = %v, want [Elynn]", picker.matches)
 	}
 
-	if picker.Update("zzz") {
+	if picker.Update(MentionUser, "zzz") {
 		t.Error("an unmatched query should report no candidates")
 	}
 }
@@ -187,7 +239,7 @@ func TestMentionPickerRanking(t *testing.T) {
 // the next word, and the caret ends up after it.
 func TestAcceptMentionInsertsToken(t *testing.T) {
 	input, _, _ := newTestComposer(t)
-	input.Mentions.SetCandidates(candidates())
+	input.Mentions.SetCandidates(MentionUser, candidates())
 
 	input.SetText("hey @el")
 	input.CursorRow, input.CursorColumn = cursorPosition(input.Text, 7)
@@ -209,13 +261,62 @@ func TestAcceptMentionInsertsToken(t *testing.T) {
 	}
 }
 
+// TestPickerSurvivesBlur pins the rule the whole mouse path rests on. Fyne
+// unfocuses on the mouse *press* and only decides where the tap lands by
+// hit-testing again on the release, so a picker that closed itself on blur
+// resized the composer out from under the click: the first click on anything —
+// a picker row included — was spent dismissing the picker and never arrived.
+func TestPickerSurvivesBlur(t *testing.T) {
+	input, _, _ := newTestComposer(t)
+	input.Mentions.SetCandidates(MentionUser, candidates())
+
+	input.SetText("hey @el")
+	input.CursorRow, input.CursorColumn = cursorPosition(input.Text, 7)
+	input.syncMentions()
+	if !input.Mentions.Visible() {
+		t.Fatal("picker did not open on a matching mention")
+	}
+
+	input.FocusLost()
+	if !input.Mentions.Visible() {
+		t.Fatal("blurring the composer closed the picker")
+	}
+
+	// The blur left the caret alone, so the row tapped after it still resolves.
+	input.Mentions.Accept()
+	if want := "hey <@01ELYNN> "; input.Text != want {
+		t.Errorf("text after a tap that blurred the entry = %q, want %q", input.Text, want)
+	}
+}
+
+// TestPickerRefiltersOnNewCandidates: an open picker now outlives the entry's
+// focus, so it can outlive the channel it was opened in. Replacing the pool has
+// to re-run the query rather than leave rows offering people who are no longer
+// in the list.
+func TestPickerRefiltersOnNewCandidates(t *testing.T) {
+	input, _, _ := newTestComposer(t)
+	input.Mentions.SetCandidates(MentionUser, candidates())
+
+	input.SetText("@el")
+	input.CursorRow, input.CursorColumn = cursorPosition(input.Text, 3)
+	input.syncMentions()
+	if !input.Mentions.Visible() {
+		t.Fatal("picker did not open on a matching mention")
+	}
+
+	input.Mentions.SetCandidates(MentionUser, nil)
+	if input.Mentions.Visible() {
+		t.Error("picker stayed open over a candidate list that matches nobody")
+	}
+}
+
 // TestPickerGrowsComposer confirms the picker is actually laid out when it
 // opens. It lives inside the composer card, so showing it has to push the card
 // taller — if the surrounding layout didn't re-measure, the picker would be
 // present but zero-height, which looks exactly like it never opened.
 func TestPickerGrowsComposer(t *testing.T) {
 	input, window, composer := newTestComposer(t)
-	input.Mentions.SetCandidates(candidates())
+	input.Mentions.SetCandidates(MentionUser, candidates())
 
 	closed := composer.MinSize().Height
 

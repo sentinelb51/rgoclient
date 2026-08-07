@@ -587,6 +587,8 @@ var styleGroups = []styleGroup{
 			{"MemberSidebarWidth", "Member list width"},
 			{"ServerIconSize", "Server icon"},
 			{"ServerItemHeight", "Server row"},
+			{"ServerMarkerHeight", "Server selection bar"},
+			{"SelectionMarkerWidth", "Selection bar width"},
 			{"ChannelItemHeight", "Channel row"},
 			{"ChannelLabelSize", "Channel name text"},
 			{"CategoryHeight", "Category row"},

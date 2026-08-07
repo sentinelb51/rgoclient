@@ -19,6 +19,7 @@ import (
 type stubActions struct{}
 
 func (stubActions) OnUserTapped(string, fyne.CanvasObject)     {}
+func (stubActions) OnChannelTapped(string)                     {}
 func (stubActions) OnAttachmentTapped(*domain.File)            {}
 func (stubActions) OnReply(*domain.Message)                    {}
 func (stubActions) OnEdit(*domain.Message)                     {}

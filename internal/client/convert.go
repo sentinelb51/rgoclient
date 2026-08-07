@@ -88,24 +88,40 @@ func toFiles(files []*revoltgo.File) []*domain.File {
 
 /* Messages */
 
-// toMessage converts a message. Reactions, flags and the masquerade's contents
-// are dropped: nothing renders them, and carrying them would mean holding a
-// second copy of every cached message's payload.
+// Revolt's message flags are a bitfield, and revoltgo numbers them 1, 2, 3 —
+// positions rather than bits, so its MentionsOnline collides with
+// SuppressNotifications|MentionsEveryone and can never be read for what it is.
+// The two the client cares about are named here instead.
+const (
+	flagMentionsEveryone uint32 = 1 << 1
+	flagMentionsOnline   uint32 = 1 << 2
+)
+
+// toMessage converts a message. Reactions and the masquerade's contents are
+// dropped: nothing renders them, and carrying them would mean holding a second
+// copy of every cached message's payload.
+//
+// What warms a row is kept. Mentions shares the decoder's slice rather than
+// copying it, the wire message being discarded here; the channel-wide pings are
+// a flag with nobody named in Mentions, and @everyone and @online collapse to one
+// answer because the reader is addressed either way.
 func toMessage(message *revoltgo.Message) *domain.Message {
 	if message == nil {
 		return nil
 	}
 
 	out := &domain.Message{
-		ID:          message.ID,
-		ChannelID:   message.Channel,
-		AuthorID:    message.Author,
-		Content:     message.Content,
-		Attachments: toFiles(message.Attachments),
-		Embeds:      toEmbeds(message.Embeds),
-		Replies:     message.Replies,
-		Edited:      message.Edited,
-		Masquerade:  message.Masquerade != nil,
+		ID:               message.ID,
+		ChannelID:        message.Channel,
+		AuthorID:         message.Author,
+		Content:          message.Content,
+		Attachments:      toFiles(message.Attachments),
+		Embeds:           toEmbeds(message.Embeds),
+		Replies:          message.Replies,
+		Mentions:         message.Mentions,
+		MentionsEveryone: uint32(message.Flags)&(flagMentionsEveryone|flagMentionsOnline) != 0,
+		Edited:           message.Edited,
+		Masquerade:       message.Masquerade != nil,
 	}
 
 	if message.System != nil {

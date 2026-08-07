@@ -91,19 +91,22 @@ type (
 		URL      string
 	}
 
-	// Mention is a <@id> user reference. The node carries only the ID: turning
-	// it into a name needs the session, which this package deliberately has no
-	// access to, so the renderer resolves it.
-	Mention struct{ UserID string }
+	// UserMention is a <@id> user reference, ChannelMention a <#id> channel one.
+	// Both carry only the ID: turning one into a name needs the session, which
+	// this package deliberately has no access to, so the renderer resolves it.
+	UserMention struct{ UserID string }
+
+	ChannelMention struct{ ChannelID string }
 )
 
-func (*Text) isInline()      {}
-func (*LineBreak) isInline() {}
-func (*Strong) isInline()    {}
-func (*Emphasis) isInline()  {}
-func (*Underline) isInline() {}
-func (*Strike) isInline()    {}
-func (*Spoiler) isInline()   {}
-func (*Code) isInline()      {}
-func (*Link) isInline()      {}
-func (*Mention) isInline()   {}
+func (*Text) isInline()           {}
+func (*LineBreak) isInline()      {}
+func (*Strong) isInline()         {}
+func (*Emphasis) isInline()       {}
+func (*Underline) isInline()      {}
+func (*Strike) isInline()         {}
+func (*Spoiler) isInline()        {}
+func (*Code) isInline()           {}
+func (*Link) isInline()           {}
+func (*UserMention) isInline()    {}
+func (*ChannelMention) isInline() {}

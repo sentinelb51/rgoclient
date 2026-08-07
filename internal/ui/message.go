@@ -50,10 +50,13 @@ type MessageWidget struct {
 	// in place of the avatar, revealed on hover. nil for a full message.
 	gutterTimestamp *canvas.Text
 
-	// systemText is the sentence a system message is, and systemLine the row it
-	// shares with the time beside it — kept so a target resolving after the widget
-	// is mounted can be written in place, which moves what follows it. Both are nil
-	// for a message somebody wrote.
+	// systemName is the person a system message is about, drawn as a mention, and
+	// systemText the rest of the sentence; systemLine is the row they share with
+	// the time beside them. All three are kept so a target resolving after the
+	// widget is mounted can be written in place, which moves what follows it.
+	// systemName is nil for an event about the channel rather than about somebody,
+	// and all three are nil for a message somebody wrote.
+	systemName *mentionText
 	systemText *canvas.Text
 	systemLine *fyne.Container
 
@@ -77,6 +80,11 @@ type MessageWidget struct {
 	// does not touch. actionsOverlay is empty until then.
 	actionsOverlay *fyne.Container
 	actions        *fyne.Container
+
+	// mentioned marks a message that names the logged-in account, which is what
+	// warms the row's background. Decided once at construction: it is a fact about
+	// the message, and every path that re-evaluates one rebuilds the widget.
+	mentioned bool
 
 	editing     bool
 	emptyBody   bool // the message says nothing, so the slot stays hidden outside an edit
@@ -105,8 +113,10 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 	w := &MessageWidget{
 		deps:       deps,
 		message:    message,
+		mentioned:  message.MentionsUser(deps.Store.SelfID()),
 		background: canvas.NewRectangle(color.Transparent),
 	}
+	w.background.FillColor = w.fill(false)
 
 	var shortTime, fullTime string
 	if t, err := util.Timestamp(message.ID); err == nil {
@@ -186,7 +196,11 @@ func (w *MessageWidget) SetFollowedByGroup(followed bool) {
 // of fixed extent doesn't need.
 func (w *MessageWidget) RefreshAuthor() {
 	if w.systemText != nil {
-		w.systemText.Text = w.deps.Store.SystemText(w.message.System)
+		name, rest := w.deps.Store.SystemTextParts(w.message.System)
+		if w.systemName != nil {
+			w.systemName.SetText(name)
+		}
+		w.systemText.Text = rest
 		w.systemText.Refresh()
 		Relayout(w.systemLine)
 
@@ -471,13 +485,25 @@ func (w *MessageWidget) ensureActions() {
 
 // setHighlighted paints (or clears) the row's hover background.
 func (w *MessageWidget) setHighlighted(on bool) {
-	fill := color.Color(color.Transparent)
-	if on {
-		fill = theme.Colors.MessageHoverBackground
+	w.background.FillColor = w.fill(on)
+	w.background.Refresh()
+}
+
+// fill is the row's background at rest and under the pointer. A message that
+// names the account keeps its warm wash either way — it is what tells the reader
+// they were addressed, and it has to survive being read past — so hovering one
+// lifts that colour rather than replacing it with the ordinary hover.
+func (w *MessageWidget) fill(hovered bool) color.Color {
+	switch {
+	case w.mentioned && hovered:
+		return theme.Colors.MessageMentionHoverBackground
+	case w.mentioned:
+		return theme.Colors.MessageMentionBackground
+	case hovered:
+		return theme.Colors.MessageHoverBackground
 	}
 
-	w.background.FillColor = fill
-	w.background.Refresh()
+	return color.Transparent
 }
 
 // setGutterShown reveals or hides a grouped continuation's gutter timestamp by
@@ -587,11 +613,15 @@ func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor c
 // is no name for it to follow here, and a line that reads "Someone left" with
 // nothing to say when is the one case where the timestamp is most of the content.
 //
-// Nothing in here accepts a pointer. The row itself carries the hover and the
-// context menu, and the innermost object always wins, so a widget standing in this
-// line would be a hole in it.
+// The name it announces is the one thing here that accepts a pointer: it opens
+// that person's profile, as their name does anywhere else in the client. It
+// carries the row's context menu for the reason mentionText documents, and it is
+// deliberately not hoverable, so the row keeps the hover the whole line lights up
+// with. Nothing else in here answers anything.
 func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
-	w.systemText = canvas.NewText(w.deps.Store.SystemText(w.message.System), theme.Colors.SystemMessageText)
+	name, rest := w.deps.Store.SystemTextParts(w.message.System)
+
+	w.systemText = canvas.NewText(rest, theme.Colors.SystemMessageText)
 	w.systemText.TextSize = theme.Sizes.SystemMessageTextSize
 
 	time := canvas.NewText(timestamp, theme.Colors.TimestampText)
@@ -604,9 +634,17 @@ func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
 		topOffset: systemIconTopOffset(),
 	}, icon)
 
-	// Both texts are siblings in the one row, so the smaller time centres itself
-	// against the line rather than needing an offset of its own.
-	w.systemLine = HBoxNoSpacing(w.systemText, HorizontalSpacer(theme.Sizes.MessageContentPadding), time)
+	// Every text here is a sibling in the one row, so the smaller time centres
+	// itself against the line rather than needing an offset of its own.
+	line := make([]fyne.CanvasObject, 0, 4)
+	if name != "" {
+		target := w.message.System.Target
+		w.systemName = newMentionText(name, theme.Sizes.SystemMessageTextSize, fyne.TextStyle{Bold: true},
+			func(anchor fyne.CanvasObject) { w.deps.Actions.OnUserTapped(target, anchor) },
+			w.TappedSecondary)
+		line = append(line, w.systemName)
+	}
+	w.systemLine = HBoxNoSpacing(append(line, w.systemText, HorizontalSpacer(theme.Sizes.MessageContentPadding), time)...)
 
 	return NewFillRow(2, gutter, HorizontalSpacer(theme.Sizes.MessageContentPadding), w.systemLine)
 }

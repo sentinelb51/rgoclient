@@ -138,6 +138,11 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 // refreshChannelList rebuilds the channel rows for the current server, grouping
 // channels under their categories — or, in the home view, the flat list of
 // cached direct messages and groups, which has no categories to group under.
+//
+// The composer's #mention candidates come off this same walk, as the member
+// sidebar's @mentions come off its own: they are the same channels under the
+// same names, in the order the sidebar lists them. The home view contributes
+// none — a conversation is not something a message can link to.
 func (a *App) refreshChannelList() {
 	a.channelList.Objects = nil
 
@@ -148,12 +153,14 @@ func (a *App) refreshChannelList() {
 			}
 		}
 		a.channelList.Refresh()
+		a.setMentionCandidates(ui.MentionChannel, nil)
 		return
 	}
 
 	server, ok := a.currentServer()
 	if !ok {
 		a.channelList.Refresh()
+		a.setMentionCandidates(ui.MentionChannel, nil)
 		return
 	}
 
@@ -164,12 +171,15 @@ func (a *App) refreshChannelList() {
 		}
 	}
 
+	var candidates []ui.MentionCandidate
+
 	// Uncategorized channels come first.
 	for _, channelID := range server.Channels {
 		if categorized[channelID] {
 			continue
 		}
 		if w := a.newChannelRow(channelID); w != nil {
+			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 			a.channelList.Add(w)
 		}
 	}
@@ -184,6 +194,7 @@ func (a *App) refreshChannelList() {
 		var rows []fyne.CanvasObject
 		for _, channelID := range category.Channels {
 			if w := a.newChannelRow(channelID); w != nil {
+				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 				rows = append(rows, w)
 			}
 		}
@@ -200,6 +211,7 @@ func (a *App) refreshChannelList() {
 	}
 
 	a.channelList.Refresh()
+	a.setMentionCandidates(ui.MentionChannel, candidates)
 }
 
 // newChannelRow builds a channel row reflecting its current state, or nil when
@@ -362,23 +374,64 @@ func (a *App) selectServer(serverID string) {
 		return
 	}
 
-	a.homeSelected = false
-	a.currentServerID = serverID
-	server, ok := a.currentServer()
+	server, ok := a.enterServer(serverID)
 	if !ok {
 		return
 	}
-
-	a.syncServerSelection(serverID)
-	a.setHeader(a.serverHeader, server.Name)
-	a.refreshChannelList()
-	a.refreshMemberList()
 
 	if len(server.Channels) > 0 {
 		a.selectChannel(server.Channels[0])
 		return
 	}
 	a.clearChannelSelection()
+}
+
+// enterServer switches both sidebars to a server without choosing a channel in
+// it. Selecting one lands on the first; following a #mention lands on the one it
+// names, and going through selectServer to get there would load the first
+// channel's history on the way past.
+func (a *App) enterServer(serverID string) (domain.Server, bool) {
+	server, ok := a.store.Server(serverID)
+	if !ok {
+		return domain.Server{}, false
+	}
+
+	a.homeSelected = false
+	a.currentServerID = serverID
+
+	a.syncServerSelection(serverID)
+	a.setHeader(a.serverHeader, server.Name)
+	a.refreshChannelList()
+	a.refreshMemberList()
+
+	return server, true
+}
+
+// OnChannelTapped follows a rendered #mention. What it names need not be in the
+// open server — or in a server at all — so the sidebars are moved to wherever it
+// lives first, and only then is it selected. A channel the account cannot see
+// never resolves, and saying so is better than a click that does nothing.
+func (a *App) OnChannelTapped(channelID string) {
+	channel, ok := a.store.Channel(channelID)
+	if !ok {
+		a.notify(ui.ToneWarning, "That channel isn't available.")
+		return
+	}
+
+	// A conversation lives in the home view, which already knows how to open one
+	// that its list hasn't caught up with.
+	if channel.ServerID == "" {
+		a.showConversation(channelID)
+		return
+	}
+
+	if a.homeSelected || a.currentServerID != channel.ServerID {
+		if _, ok := a.enterServer(channel.ServerID); !ok {
+			a.notify(ui.ToneWarning, "That channel isn't available.")
+			return
+		}
+	}
+	a.selectChannel(channelID)
 }
 
 // selectChannel switches to a channel, acknowledging unreads and showing its

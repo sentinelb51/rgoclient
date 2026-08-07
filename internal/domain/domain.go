@@ -11,6 +11,7 @@ package domain
 
 import (
 	"image/color"
+	"slices"
 	"strings"
 	"time"
 )
@@ -163,6 +164,16 @@ type Message struct {
 	Embeds      []*Embed
 	Replies     []string // IDs of the messages this one answers
 
+	// Mentions is who this message pings, as Revolt resolved it — a reply with its
+	// mention toggle on lands here too, and a <@id> the author typed for somebody
+	// who cannot see the channel does not. So the client asks this rather than
+	// re-reading the content.
+	//
+	// MentionsEveryone is the channel-wide ping — Revolt's @everyone and @online,
+	// which arrive as a flag with nobody named in Mentions at all.
+	Mentions         []string
+	MentionsEveryone bool
+
 	Edited *time.Time
 
 	// System is set when the server generated the message rather than anyone
@@ -173,6 +184,18 @@ type Message struct {
 	System     *SystemMessage
 	Webhook    *Webhook
 	Masquerade bool
+}
+
+// MentionsUser reports whether the message pings userID, by name or by pinging
+// everyone who can see the channel. Logged out — no self ID — is nobody, not
+// everybody, which is why the guard comes first: an @everyone addresses every
+// reader, and with no account there is no reader to address.
+func (m *Message) MentionsUser(userID string) bool {
+	if userID == "" {
+		return false
+	}
+
+	return m.MentionsEveryone || slices.Contains(m.Mentions, userID)
 }
 
 // Webhook is the identity an integration posted under.
@@ -209,43 +232,48 @@ type SystemMessage struct {
 	Target string
 }
 
-// Text renders the event as a line of prose. who is Target's display name,
-// which the caller resolves — Store.SystemText is the one that does, and this
-// stays pure so the wording can be tested without one.
-func (s *SystemMessage) Text(who string) string {
+// TextParts renders the event as a line of prose, in the two pieces the client
+// draws it in: the name it opens with, and the rest of the sentence. The name is
+// kept apart because it is tappable, exactly as a mention in a message body is.
+//
+// who is Target's display name, which the caller resolves —
+// Store.SystemTextParts is the one that does, and this stays pure so the wording
+// can be tested without one. An event about the channel rather than about
+// somebody names nobody: the name is empty and the whole sentence is the rest.
+func (s *SystemMessage) TextParts(who string) (name, rest string) {
 	if who == "" {
 		who = "Someone"
 	}
 
 	switch s.Kind {
 	case SystemUserAdded:
-		return who + " added to group"
+		return who, " added to group"
 	case SystemUserRemove:
-		return who + " removed from group"
+		return who, " removed from group"
 	case SystemUserJoined:
-		return who + " joined"
+		return who, " joined"
 	case SystemUserLeft:
-		return who + " left"
+		return who, " left"
 	case SystemUserKicked:
-		return who + " was kicked"
+		return who, " was kicked"
 	case SystemUserBanned:
-		return who + " banned"
+		return who, " banned"
 	case SystemChannelRenamed:
-		return "Channel renamed"
+		return "", "Channel renamed"
 	case SystemChannelDescriptionChanged:
-		return "Channel description changed"
+		return "", "Channel description changed"
 	case SystemChannelIconChanged:
-		return "Channel icon changed"
+		return "", "Channel icon changed"
 	case SystemChannelOwnershipChanged:
-		return "Channel ownership changed"
+		return "", "Channel ownership changed"
 	case SystemMessagePinned:
-		return "Message pinned"
+		return "", "Message pinned"
 	case SystemMessageUnpinned:
-		return "Message unpinned"
+		return "", "Message unpinned"
 	case SystemCallStarted:
-		return "Call started"
+		return "", "Call started"
 	default:
-		return "System event"
+		return "", "System event"
 	}
 }
 

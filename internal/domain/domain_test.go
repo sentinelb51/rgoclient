@@ -30,23 +30,28 @@ func TestFileKindOf(t *testing.T) {
 	}
 }
 
-func TestSystemMessageText(t *testing.T) {
+// The name comes back apart from the sentence because the client draws it as a
+// mention, so what matters is both that the two halves read as one line and that
+// an event naming nobody yields no name to make tappable.
+func TestSystemMessageTextParts(t *testing.T) {
 	cases := []struct {
 		kind SystemKind
 		who  string
-		want string
+		name string
+		rest string
 	}{
-		{SystemUserJoined, "Elynn", "Elynn joined"},
-		{SystemUserKicked, "Saren", "Saren was kicked"},
-		{SystemUserLeft, "", "Someone left"}, // unresolved target
-		{SystemChannelRenamed, "", "Channel renamed"},
-		{SystemKind("teleported"), "", "System event"}, // a kind added after this client
+		{SystemUserJoined, "Elynn", "Elynn", " joined"},
+		{SystemUserKicked, "Saren", "Saren", " was kicked"},
+		{SystemUserLeft, "", "Someone", " left"},           // unresolved target
+		{SystemChannelRenamed, "", "", "Channel renamed"},  // about the channel, nobody to name
+		{SystemKind("teleported"), "", "", "System event"}, // a kind added after this client
 	}
 
 	for _, tc := range cases {
 		system := &SystemMessage{Kind: tc.kind, Target: "01USER"}
-		if got := system.Text(tc.who); got != tc.want {
-			t.Errorf("%q.Text(%q) = %q, want %q", tc.kind, tc.who, got, tc.want)
+		name, rest := system.TextParts(tc.who)
+		if name != tc.name || rest != tc.rest {
+			t.Errorf("%q.TextParts(%q) = %q + %q, want %q + %q", tc.kind, tc.who, name, rest, tc.name, tc.rest)
 		}
 	}
 }

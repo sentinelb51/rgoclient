@@ -21,6 +21,10 @@ var Colors = struct {
 	MemberListBackground   color.Color
 	MessageAreaBackground  color.Color
 	MessageHoverBackground color.Color
+
+	MessageMentionBackground      color.Color
+	MessageMentionHoverBackground color.Color
+
 	ChannelHoverBackground color.Color
 	ChannelSelectedBg      color.Color
 	ServerDefaultBg        color.Color
@@ -109,11 +113,20 @@ var Colors = struct {
 	NoticeDanger  color.Color
 }{
 	// Cool blue-slate ramp, darkest to lightest.
-	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255},   // #13151C
-	ChannelListBackground:  color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
-	MemberListBackground:   color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
-	MessageAreaBackground:  color.RGBA{R: 24, G: 27, B: 36, A: 255},   // #181B24
-	MessageHoverBackground: color.RGBA{R: 28, G: 31, B: 42, A: 255},   // #1C1F2A, a small lift off the area
+	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255}, // #13151C
+	ChannelListBackground:  color.RGBA{R: 31, G: 35, B: 48, A: 255}, // #1F2330
+	MemberListBackground:   color.RGBA{R: 31, G: 35, B: 48, A: 255}, // #1F2330
+	MessageAreaBackground:  color.RGBA{R: 24, G: 27, B: 36, A: 255}, // #181B24
+	MessageHoverBackground: color.RGBA{R: 28, G: 31, B: 42, A: 255}, // #1C1F2A, a small lift off the area
+
+	// A message that names the account is washed warm, the one place the client
+	// leaves the cool ramp. It is a *rest* colour, not a state: the row still has
+	// to lift under the pointer, so the pair moves together the way the area and
+	// its hover do — and both stay dark enough that the body text over them, and
+	// the hairline of any card inside them, read exactly as they do elsewhere.
+	MessageMentionBackground:      color.RGBA{R: 53, G: 38, B: 15, A: 255}, // #35260F
+	MessageMentionHoverBackground: color.RGBA{R: 68, G: 48, B: 20, A: 255}, // #443014
+
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},   // #262B3A
 	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
 	ServerDefaultBg:        color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
@@ -257,6 +270,7 @@ var Sizes = struct {
 	ChannelSidebarPadding float32
 	ChannelLeftPadding    float32
 	UnreadIndicatorWidth  float32
+	SelectionMarkerWidth  float32
 	ChannelLabelSize      float32
 
 	/* Member list */
@@ -269,6 +283,7 @@ var Sizes = struct {
 
 	ServerIconSize          float32
 	ServerItemHeight        float32
+	ServerMarkerHeight      float32
 	HashtagIconSize         float32
 	CategoryHeight          float32
 	ChannelItemHeight       float32
@@ -481,6 +496,7 @@ var Sizes = struct {
 	ChannelSidebarPadding: 6,
 	ChannelLeftPadding:    8,
 	UnreadIndicatorWidth:  1,
+	SelectionMarkerWidth:  3,
 	ChannelLabelSize:      14,
 
 	MemberAvatarSize: 28,
@@ -489,6 +505,7 @@ var Sizes = struct {
 
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
+	ServerMarkerHeight:      24,
 	HashtagIconSize:         20,
 	CategoryHeight:          32,
 	ChannelItemHeight:       32,
@@ -608,7 +625,7 @@ var Sizes = struct {
 	ProfilePresenceRing:       3,
 	ProfileNameSize:           17,
 	ProfileDialogNameSize:     21,
-	ProfileHandleSize:         12,
+	ProfileHandleSize:         14,
 	ProfileHandleRadius:       5,
 	ProfileHandlePaddingV:     2,
 	ProfileHandlePaddingH:     6,
@@ -717,11 +734,6 @@ var Sizes = struct {
 	SettingsPreviewGap:   10,
 }
 
-// ColorNameMention is an app-specific theme colour name. A RichText segment can
-// only carry a *named* colour, so drawing an @mention in the accent needs a name
-// of our own for AppTheme.Color to answer.
-const ColorNameMention fyne.ThemeColorName = "rgoMention"
-
 // selectionTint is the accent used for text selection, alpha'd so the glyphs
 // underneath stay legible. Apply recomputes it from the palette, so it follows a
 // changed accent rather than staying on the one compiled in here.
@@ -767,8 +779,6 @@ func (t *AppTheme) Font(style fyne.TextStyle) fyne.Resource {
 // Color maps Fyne's semantic colour names onto the palette.
 func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
-	case ColorNameMention:
-		return Colors.MentionText
 	case theme.ColorNameScrollBar:
 		return color.Transparent
 	case theme.ColorNamePrimary, theme.ColorNameFocus:

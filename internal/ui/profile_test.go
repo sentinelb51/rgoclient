@@ -70,29 +70,40 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 	}
 }
 
-// TestProfileBioArrivesAfterTheCard covers the late half of a profile: the bio is
-// a request of its own, so the card is built without one and grows when it lands.
-// An empty bio leaves the section out rather than showing an empty well.
-func TestProfileBioArrivesAfterTheCard(t *testing.T) {
+// TestProfileBioArrivesAfterTheDialog covers the late half of a profile: the bio
+// is a request of its own, so the dialog is built without one and grows when it
+// lands. An empty bio leaves the section out rather than showing an empty well,
+// and the compact card leaves it out however full it is.
+func TestProfileBioArrivesAfterTheDialog(t *testing.T) {
 	test.NewTempApp(t)
 
 	t.Run("filled in", func(t *testing.T) {
-		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
-		before := card.Content.MinSize().Height
+		dialog := NewProfileDialog(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
+		before := dialog.Content.MinSize().Height
 
-		card.SetProfile(domain.UserProfile{Bio: "Developer at Team Eidolonic"})
-		if after := card.Content.MinSize().Height; after <= before {
-			t.Errorf("card is %vpx tall with a bio, want more than the %v without one", after, before)
+		dialog.SetProfile(domain.UserProfile{Bio: "Developer at Team Eidolonic"})
+		if after := dialog.Content.MinSize().Height; after <= before {
+			t.Errorf("dialog is %vpx tall with a bio, want more than the %v without one", after, before)
 		}
 	})
 
 	t.Run("empty", func(t *testing.T) {
+		dialog := NewProfileDialog(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
+		before := dialog.Content.MinSize().Height
+
+		dialog.SetProfile(domain.UserProfile{Bio: "   "})
+		if after := dialog.Content.MinSize().Height; after != before {
+			t.Errorf("an empty bio changed the dialog's height from %v to %v", before, after)
+		}
+	})
+
+	t.Run("never on the card", func(t *testing.T) {
 		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 		before := card.Content.MinSize().Height
 
-		card.SetProfile(domain.UserProfile{Bio: "   "})
+		card.SetProfile(domain.UserProfile{Bio: "Developer at Team Eidolonic"})
 		if after := card.Content.MinSize().Height; after != before {
-			t.Errorf("an empty bio changed the card's height from %v to %v", before, after)
+			t.Errorf("a bio changed the compact card's height from %v to %v", before, after)
 		}
 	})
 }

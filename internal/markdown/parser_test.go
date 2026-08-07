@@ -30,6 +30,10 @@ func inlineString(nodes []Inline) string {
 			fmt.Fprintf(&b, "c(%s)", v.Text)
 		case *Link:
 			fmt.Fprintf(&b, "a(%s|%s)", inlineString(v.Children), v.URL)
+		case *UserMention:
+			fmt.Fprintf(&b, "@(%s)", v.UserID)
+		case *ChannelMention:
+			fmt.Fprintf(&b, "#(%s)", v.ChannelID)
 		}
 	}
 	return b.String()
@@ -67,6 +71,16 @@ func TestParseInline(t *testing.T) {
 		"5 * 3 * 4":          "5 * 3 * 4",         // space-edged content stays literal
 		"2*3*4":              "2i(3)4",            // * needs no word boundary
 		"__init__ is dunder": "u(init) is dunder", // __ keeps matching intraword
+
+		// Mentions. The two forms differ only in the marker, and both need a
+		// non-empty run of alphanumerics — so prose that happens to open with one
+		// of the delimiters stays literal.
+		"hi <@01ABC>":       "hi @(01ABC)",
+		"see <#01XYZ> for":  "see #(01XYZ) for",
+		"<@01A> and <#01B>": "@(01A) and #(01B)",
+		"<@>":               "<@>",         // no ID
+		"<# general>":       "<# general>", // not an ID
+		"a < b # c":         "a < b # c",
 	}
 
 	for input, want := range cases {

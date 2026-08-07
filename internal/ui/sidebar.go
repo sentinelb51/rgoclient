@@ -21,7 +21,8 @@ import (
 const serverHoverGrowth = 1.1
 
 // ServerWidget is a circular server icon that grows and recolours when hovered
-// or selected.
+// or selected, and wears the same selection bar on its left edge as the channel
+// row does when it is the open server.
 type ServerWidget struct {
 	widget.BaseWidget
 	Server domain.Server
@@ -34,6 +35,7 @@ type ServerWidget struct {
 	images      *cache.ImageCache
 	onTap       func()
 	background  *canvas.Circle
+	marker      *canvas.Rectangle
 	iconWrapper *fyne.Container
 
 	// baseLayout and grownLayout size the icon at rest and when hovered or
@@ -58,6 +60,7 @@ func NewServerWidget(images *cache.ImageCache, server domain.Server, onTap func(
 		images:     images,
 		onTap:      onTap,
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
+		marker:     canvas.NewRectangle(color.Transparent),
 	}
 	w.ExtendBaseWidget(w)
 
@@ -96,16 +99,27 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	w.grownLayout = layout.NewGridWrapLayout(fyne.NewSize(grown, grown))
 	w.iconWrapper = container.New(w.baseLayout, icon)
 
-	return widget.NewSimpleRenderer(container.NewCenter(w.iconWrapper))
+	w.marker.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, theme.Sizes.ServerMarkerHeight))
+	w.refreshAppearance()
+
+	// The bar is flush with the rail's left edge, so it is laid out apart from the
+	// icon rather than beside it: an HBox pins it left and stretches it to the row,
+	// the Center inside gives it back its own height, centred on the icon.
+	markerRow := container.NewHBox(container.NewCenter(w.marker))
+
+	return widget.NewSimpleRenderer(container.NewStack(markerRow, container.NewCenter(w.iconWrapper)))
 }
 
 func (w *ServerWidget) refreshAppearance() {
 	if w.selected {
 		w.background.FillColor = theme.Colors.ServerSelectedBg
+		w.marker.FillColor = theme.Colors.TextPrimary
 	} else {
 		w.background.FillColor = theme.Colors.ServerDefaultBg
+		w.marker.FillColor = color.Transparent
 	}
 	w.background.Refresh()
+	w.marker.Refresh()
 
 	if w.iconWrapper == nil {
 		return
@@ -230,11 +244,11 @@ func (w *ChannelWidget) SetState(selected, unread bool) {
 }
 
 func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
-	w.selectionIndicator.SetMinSize(fyne.NewSize(3, 0))
+	w.selectionIndicator.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, 0))
 	w.unreadIndicator.SetMinSize(fyne.NewSize(theme.Sizes.UnreadIndicatorWidth, 0))
 
-	// Both indicators share the same 3px slot; the unread bar is wrapped in an
-	// HBox so it keeps its 1px width and stays left-aligned.
+	// Both indicators share the one marker slot; the unread bar is wrapped in an
+	// HBox so it keeps its own narrower width and stays left-aligned.
 	indicators := container.NewStack(w.selectionIndicator, container.NewHBox(w.unreadIndicator))
 
 	// The name takes the leftover width rather than its natural width: a long DM

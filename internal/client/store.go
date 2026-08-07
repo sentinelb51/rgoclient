@@ -403,6 +403,22 @@ func recipientID(state *revoltgo.State, channel *revoltgo.Channel) string {
 	return ""
 }
 
+// ChannelName resolves a channel ID to the name a rendered <#id> shows, or ""
+// when State has never heard of it. It reads through to the raw channel rather
+// than going via Channel, which would resolve a picture, a slowmode and a DM's
+// title from its recipients — none of which a mention draws.
+func (s *store) ChannelName(channelID string) string {
+	state := s.state()
+	if state == nil || channelID == "" {
+		return ""
+	}
+	if channel := state.Channel(channelID); channel != nil {
+		return channel.Name
+	}
+
+	return ""
+}
+
 // Server resolves a server.
 func (s *store) Server(serverID string) (domain.Server, bool) {
 	state := s.state()
@@ -460,9 +476,9 @@ func (s *store) MessageAuthor(message *domain.Message) domain.Author {
 	return domain.Author{Name: "Message author: " + message.AuthorID}
 }
 
-// SystemText renders a system message, resolving whoever it is about.
-func (s *store) SystemText(system *domain.SystemMessage) string {
-	return system.Text(s.UserName(system.Target))
+// SystemTextParts renders a system message, resolving whoever it is about.
+func (s *store) SystemTextParts(system *domain.SystemMessage) (name, rest string) {
+	return system.TextParts(s.UserName(system.Target))
 }
 
 /* Permissions */

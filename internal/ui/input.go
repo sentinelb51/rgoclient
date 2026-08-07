@@ -42,7 +42,10 @@ const (
 	replyIconSize   = 18
 )
 
-var _ desktop.Keyable = (*MessageInput)(nil)
+var (
+	_ desktop.Keyable   = (*MessageInput)(nil)
+	_ desktop.Mouseable = (*MessageInput)(nil)
+)
 
 // Reply is a reply queued in the composer. It is domain.Reply plus the channel
 // the quoted message lives in, which is bookkeeping of the composer's own: it is
@@ -68,12 +71,14 @@ type MessageInput struct {
 	// outline while the entry is live.
 	OnFocusChanged func(focused bool)
 
-	// Mentions is the @autocomplete list, mounted by the composer above the reply
+	// Mentions is the autocomplete list, mounted by the composer above the reply
 	// cards and hidden until the caret sits inside a mention. mentionStart is the
-	// rune index of the '@' being completed, or -1 — used only to notice when the
-	// caret has moved to a *different* mention, so the highlight restarts.
+	// byte offset of the marker being completed, or -1, and mentionKind what it
+	// opened — used only to notice when the caret has moved to a *different*
+	// mention, so the highlight restarts.
 	Mentions     *MentionPicker
 	mentionStart int
+	mentionKind  MentionKind
 
 	Attachments         []domain.Attachment
 	AttachmentContainer *fyne.Container
@@ -156,16 +161,33 @@ func (m *MessageInput) FocusGained() {
 	}
 }
 
+// FocusLost deliberately leaves the picker open. Fyne unfocuses on the mouse
+// *press* and then decides where the tap lands by hit-testing again on the
+// release, so closing the picker here resized the composer out from under the
+// click: the first click on anything — a picker row included — was spent
+// dismissing the picker and never reached its target. Visibility follows the
+// caret instead, which is also the truth of it: a half-typed mention is still in
+// the text whether or not the entry is live.
 func (m *MessageInput) FocusLost() {
 	m.shiftPressed = false
 	m.Entry.FocusLost()
-	// Hide the picker but leave the caret alone: acceptMention re-derives the
-	// mention span from the caret, so a click on a picker row still resolves
-	// even though that click blurred the entry on its way in.
-	m.hideMentions()
 	if m.OnFocusChanged != nil {
 		m.OnFocusChanged(false)
 	}
+}
+
+// MouseDown lets the embedded entry place the caret, then re-evaluates the
+// picker against where it landed. The caret moves on the press, so this is the
+// hook rather than Tapped — widget.Entry.Tapped does no positioning at all — and
+// clicking out of a half-typed mention has to close the picker now that blurring
+// no longer does.
+//
+// Hiding it here moves nothing under the pointer: the composer card is hung from
+// the bottom of the dock and the picker sits above the entry, so the card loses
+// that height off its top edge and the entry stays where it was pressed.
+func (m *MessageInput) MouseDown(e *desktop.MouseEvent) {
+	m.Entry.MouseDown(e)
+	m.syncMentions()
 }
 
 func (m *MessageInput) KeyDown(key *fyne.KeyEvent) {
@@ -287,13 +309,13 @@ func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
 // the picker also has to close when the caret merely *moves* out of a mention,
 // which changes no text at all.
 func (m *MessageInput) syncMentions() {
-	start, query, ok := m.mentionQuery()
+	start, kind, query, ok := m.mentionQuery()
 	if ok {
-		if start != m.mentionStart {
+		if start != m.mentionStart || kind != m.mentionKind {
 			m.Mentions.Reset() // a different mention starts at the top of its list
 		}
-		if m.Mentions.Update(query) {
-			m.mentionStart = start
+		if m.Mentions.Update(kind, query) {
+			m.mentionStart, m.mentionKind = start, kind
 			m.Mentions.Show()
 			return
 		}
@@ -312,11 +334,16 @@ func (m *MessageInput) hideMentions() {
 	m.Mentions.Hide()
 }
 
-// mentionQuery finds the @mention the caret sits in: the byte offset of its '@'
-// and the text typed since. A mention only opens at the start of the message or
-// after whitespace, so an email address — or any other "foo@bar" in running
-// text — never summons the picker.
-func (m *MessageInput) mentionQuery() (start int, query string, ok bool) {
+// mentionQuery finds the mention the caret sits in: the byte offset of its
+// marker, what that marker mentions, and the text typed since. A mention only
+// opens at the start of the message or after whitespace, so an email address —
+// or any other "foo@bar" in running text — never summons the picker, and a "#"
+// mid-word stays a "#".
+//
+// A heading's "# " opens the channel list for the one keystroke before the
+// space, which then closes it: the marker is the same character, and refusing
+// the picker at the start of a line would cost every mention typed there.
+func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string, ok bool) {
 	cursor := m.cursorOffset()
 
 	// Walking back from the caret stops at the first space, so the query can
@@ -327,34 +354,38 @@ func (m *MessageInput) mentionQuery() (start int, query string, ok bool) {
 		r, size := utf8.DecodeLastRuneInString(m.Text[:i])
 		i -= size
 
-		switch {
-		case unicode.IsSpace(r):
-			return 0, "", false
-		case r == '@':
-			if before, _ := utf8.DecodeLastRuneInString(m.Text[:i]); i > 0 && !unicode.IsSpace(before) {
-				return 0, "", false
-			}
-			return i, m.Text[i+1 : cursor], true
+		if unicode.IsSpace(r) {
+			return 0, 0, "", false
 		}
+
+		marked, isMarker := markerKind(r)
+		if !isMarker {
+			continue
+		}
+		if before, _ := utf8.DecodeLastRuneInString(m.Text[:i]); i > 0 && !unicode.IsSpace(before) {
+			return 0, 0, "", false
+		}
+
+		return i, marked, m.Text[i+1 : cursor], true
 	}
 
-	return 0, "", false
+	return 0, 0, "", false
 }
 
-// acceptMention swaps the "@query" under the caret for a Revolt mention token,
-// leaving the caret after it and a space ready for the next word.
+// acceptMention swaps the marked query under the caret for a Revolt mention
+// token, leaving the caret after it and a space ready for the next word.
 //
 // The span is re-derived here rather than taken from mentionStart: picking a
 // candidate with the mouse blurs the entry before the tap is delivered, so by
 // then the picker has already been hidden.
 func (m *MessageInput) acceptMention(candidate MentionCandidate) {
-	start, _, ok := m.mentionQuery()
+	start, _, _, ok := m.mentionQuery()
 	if !ok {
 		return
 	}
 
 	cursor := m.cursorOffset()
-	token := "<@" + candidate.UserID + "> "
+	token := candidate.token()
 	text := m.Text[:start] + token + m.Text[cursor:]
 
 	m.mentionStart = -1
@@ -868,15 +899,55 @@ const (
 	mentionRowGap   = 8 // between avatar, name and handle
 )
 
-// MentionCandidate is one person the mention picker can insert. Name and
-// Username are both matched against what the user has typed, so either the
-// nickname shown in chat or the underlying @handle finds someone.
+// MentionKind is what a mention names, which is both the marker that opens the
+// picker and the wire form it is accepted as: Revolt writes a user as <@id> and
+// a channel as <#id>.
+type MentionKind uint8
+
+const (
+	MentionUser MentionKind = iota
+	MentionChannel
+)
+
+// marker is the character that opens a mention of this kind.
+func (k MentionKind) marker() string {
+	if k == MentionChannel {
+		return "#"
+	}
+
+	return "@"
+}
+
+// markerKind reports what a rune opens a mention of, or ok=false when it opens
+// nothing. It is marker's inverse and the pair is the only place the two
+// characters are named.
+func markerKind(r rune) (MentionKind, bool) {
+	switch r {
+	case '@':
+		return MentionUser, true
+	case '#':
+		return MentionChannel, true
+	}
+
+	return 0, false
+}
+
+// MentionCandidate is one person or channel the mention picker can insert. Name
+// and Username are both matched against what the user has typed, so either the
+// nickname shown in chat or the underlying @handle finds someone; a channel has
+// only its name.
 type MentionCandidate struct {
-	UserID    string
-	Name      string // nickname / display name, as chat shows it
-	Username  string // the @handle, without the @
+	Kind MentionKind
+	ID   string
+
+	Name      string // nickname / display name / channel name, as the client shows it
+	Username  string // the @handle, without the @; "" for a channel
 	AvatarURL string
 	Color     color.Color // role colour; nil falls back to the standard text colour
+
+	// ChannelKind decides the glyph a channel candidate is led by, where a user is
+	// led by their avatar. Meaningless for a user.
+	ChannelKind domain.ChannelKind
 
 	// Lowercased match keys, computed once when the candidate is built. The
 	// picker filters the whole candidate set on every keystroke, so folding case
@@ -884,10 +955,12 @@ type MentionCandidate struct {
 	nameKey, userKey string
 }
 
-// NewMentionCandidate builds a candidate with its match keys precomputed.
+// NewMentionCandidate builds a candidate for a person, with its match keys
+// precomputed.
 func NewMentionCandidate(userID, name, username, avatarURL string, roleColor color.Color) MentionCandidate {
 	return MentionCandidate{
-		UserID:    userID,
+		Kind:      MentionUser,
+		ID:        userID,
 		Name:      name,
 		Username:  username,
 		AvatarURL: avatarURL,
@@ -895,6 +968,25 @@ func NewMentionCandidate(userID, name, username, avatarURL string, roleColor col
 		nameKey:   strings.ToLower(name),
 		userKey:   strings.ToLower(username),
 	}
+}
+
+// NewChannelCandidate builds a candidate for a channel. It takes the resolved
+// channel rather than its parts because that is what the sidebar already holds:
+// one Store.Channel walk builds the rows and the candidates alike.
+func NewChannelCandidate(channel domain.Channel) MentionCandidate {
+	return MentionCandidate{
+		Kind:        MentionChannel,
+		ID:          channel.ID,
+		Name:        channel.Name,
+		ChannelKind: channel.Kind,
+		nameKey:     strings.ToLower(channel.Name),
+	}
+}
+
+// token is the wire form the composer inserts for this candidate, with the space
+// that readies the next word.
+func (c *MentionCandidate) token() string {
+	return "<" + c.Kind.marker() + c.ID + "> "
 }
 
 // SortCandidates orders a list by display name, case-insensitively, in place.
@@ -928,7 +1020,7 @@ func (c *MentionCandidate) rank(query string) int {
 	return -1
 }
 
-// MentionPicker is the autocomplete list the composer shows while an @mention is
+// MentionPicker is the autocomplete list the composer shows while a mention is
 // being typed. It lives inside the composer card rather than floating over the
 // message area: a Fyne pop-up takes canvas focus, which would pull it away from
 // the entry and stop the typing that drives the picker in the first place.
@@ -941,14 +1033,19 @@ type MentionPicker struct {
 	images   *cache.ImageCache
 	onAccept func(MentionCandidate)
 
-	all      []MentionCandidate
+	// One pool per kind, replaced independently: a server's people change as the
+	// gateway resolves them, its channels only when the sidebar is rebuilt.
+	users    []MentionCandidate
+	channels []MentionCandidate
+
 	matches  []MentionCandidate
 	overflow int // matches beyond mentionMaxRows, reported by the footer
 	selected int
 
-	// The query the rows currently show, and whether they still reflect it. A
-	// keystroke that leaves the query alone — a caret move inside the same
+	// The kind and query the rows currently show, and whether they still reflect
+	// them. A keystroke that leaves both alone — a caret move inside the same
 	// mention, a Refresh — then costs nothing at all.
+	kind  MentionKind
 	query string
 	fresh bool
 
@@ -992,11 +1089,15 @@ func (p *MentionPicker) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(p.content)
 }
 
-// SetCandidates replaces the pool the picker filters. Call it when the open
-// channel changes or its membership does; the picker snapshots this list and
-// never goes to the network itself.
-func (p *MentionPicker) SetCandidates(candidates []MentionCandidate) {
-	p.all = candidates
+// SetCandidates replaces one of the pools the picker filters. Call it when the
+// open channel changes, its membership does, or the channel sidebar is rebuilt;
+// the picker snapshots the list and never goes to the network itself.
+func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCandidate) {
+	if kind == MentionChannel {
+		p.channels = candidates
+	} else {
+		p.users = candidates
+	}
 	p.fresh = false
 
 	// The rows recognise a candidate by ID and skip rebuilding for one they
@@ -1005,19 +1106,36 @@ func (p *MentionPicker) SetCandidates(candidates []MentionCandidate) {
 	for _, row := range p.rows {
 		row.invalidate()
 	}
+
+	// An open picker outlives the entry's focus, so it can outlive the channel it
+	// was opened in — re-run its query rather than leave it offering people from
+	// the list just replaced.
+	if p.Visible() && !p.Update(p.kind, p.query) {
+		p.Reset()
+		p.Hide()
+	}
 }
 
-// Update refilters against query — the text between the "@" and the caret — and
-// reports whether anything matched. A false result means the caller should hide
-// the picker: there is nobody to offer.
-func (p *MentionPicker) Update(query string) bool {
+// pool is the candidate list a kind filters against.
+func (p *MentionPicker) pool(kind MentionKind) []MentionCandidate {
+	if kind == MentionChannel {
+		return p.channels
+	}
+
+	return p.users
+}
+
+// Update refilters kind's pool against query — the text between the marker and
+// the caret — and reports whether anything matched. A false result means the
+// caller should hide the picker: there is nothing to offer.
+func (p *MentionPicker) Update(kind MentionKind, query string) bool {
 	query = strings.ToLower(query)
-	if p.fresh && query == p.query {
+	if p.fresh && kind == p.kind && query == p.query {
 		return len(p.matches) > 0
 	}
 
-	p.filter(query)
-	p.query, p.fresh = query, true
+	p.filter(kind, query)
+	p.kind, p.query, p.fresh = kind, query, true
 	if len(p.matches) == 0 {
 		return false
 	}
@@ -1049,11 +1167,13 @@ func (p *MentionPicker) Update(query string) bool {
 // hits. Two passes over the candidates beat one pass plus a sort: the set is
 // walked at most twice with a string comparison per entry and nothing is
 // allocated, which is what lets this run on every keystroke.
-func (p *MentionPicker) filter(query string) {
+func (p *MentionPicker) filter(kind MentionKind, query string) {
+	all := p.pool(kind)
+
 	p.matches, p.overflow = p.matches[:0], 0
 	for pass := range 2 {
-		for i := range p.all {
-			candidate := &p.all[i]
+		for i := range all {
+			candidate := &all[i]
 			if candidate.rank(query) != pass {
 				continue
 			}
@@ -1107,14 +1227,15 @@ func (p *MentionPicker) Reset() {
 	p.fresh = false
 }
 
-// mentionRow is one pooled row of the picker: avatar, display name in the
-// author's role colour, and the dim @handle.
+// mentionRow is one pooled row of the picker: a lead — a person's avatar or a
+// channel's type glyph — the name in the author's role colour, and the dim
+// @handle a channel leaves empty.
 type mentionRow struct {
 	tapBase
 	images *cache.ImageCache
 
 	background  *canvas.Rectangle
-	avatar      *fyne.Container
+	lead        *fyne.Container
 	placeholder *canvas.Circle
 	name        *canvas.Text
 	handle      *canvas.Text
@@ -1124,10 +1245,12 @@ type mentionRow struct {
 	// image arrives the row may already show somebody else.
 	generation int
 
-	// Who the row currently shows and how it is drawn, so a keystroke that leaves
-	// a row on the same person doesn't rebuild it. Filtering re-sets all eight rows
-	// on every character typed, and most of them hold still.
-	userID   string
+	// What the row currently shows and how it is drawn, so a keystroke that leaves
+	// a row on the same candidate doesn't rebuild it. Filtering re-sets all eight
+	// rows on every character typed, and most of them hold still. The kind is part
+	// of the identity: nothing stops the two pools sharing an ID.
+	kind     MentionKind
+	id       string
 	selected bool
 
 	onHover func()
@@ -1149,7 +1272,7 @@ func newMentionRow(images *cache.ImageCache, onHover, onTap func()) *mentionRow 
 		handle:      canvas.NewText("", theme.Colors.MentionHandleText),
 		onHover:     onHover,
 	}
-	r.avatar = container.NewGridWrap(size, r.placeholder)
+	r.lead = container.NewGridWrap(size, r.placeholder)
 	r.name.TextSize = theme.Sizes.MentionNameSize
 	r.name.TextStyle = fyne.TextStyle{Bold: true}
 	r.handle.TextSize = theme.Sizes.MentionHandleSize
@@ -1159,7 +1282,7 @@ func newMentionRow(images *cache.ImageCache, onHover, onTap func()) *mentionRow 
 	// gaps explicit rather than inheriting theme padding.
 	row := HBoxNoSpacing(
 		HorizontalSpacer(mentionRowInset),
-		container.NewCenter(r.avatar),
+		container.NewCenter(r.lead),
 		HorizontalSpacer(mentionRowGap),
 		container.NewCenter(r.name),
 		HorizontalSpacer(mentionRowGap),
@@ -1193,11 +1316,11 @@ func (r *mentionRow) MouseOut() {}
 // fetched through the shared cache, so a row that scrolls past under a fast
 // typist costs one map lookup.
 func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
-	if r.userID != "" && r.userID == candidate.UserID {
+	if r.id != "" && r.id == candidate.ID && r.kind == candidate.Kind {
 		r.setSelected(selected)
 		return
 	}
-	r.userID = candidate.UserID
+	r.kind, r.id = candidate.Kind, candidate.ID
 
 	r.generation++
 	generation := r.generation
@@ -1207,15 +1330,27 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	if candidate.Color != nil {
 		r.name.Color = solidColor(candidate.Color)
 	}
-	r.handle.Text = "@" + candidate.Username
+
+	// A channel has no handle behind its name; the marker it was found by is
+	// already in the glyph beside it, so the slot is simply left empty.
+	r.handle.Text = ""
+	if candidate.Kind == MentionUser {
+		r.handle.Text = "@" + candidate.Username
+	}
 	r.name.Refresh()
 	r.handle.Refresh()
 	r.setSelected(selected)
 
+	if candidate.Kind == MentionChannel {
+		r.lead.Objects = []fyne.CanvasObject{ChannelGlyph(candidate.ChannelKind)}
+		r.lead.Refresh()
+		return
+	}
+
 	// Back to the placeholder first: the row may be showing the previous
 	// candidate's face, and this one may have no avatar at all.
-	r.avatar.Objects = []fyne.CanvasObject{r.placeholder}
-	r.avatar.Refresh()
+	r.lead.Objects = []fyne.CanvasObject{r.placeholder}
+	r.lead.Refresh()
 	if candidate.AvatarURL == "" || r.images == nil {
 		return
 	}
@@ -1229,14 +1364,14 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 		face := canvas.NewImageFromImage(img)
 		face.FillMode = canvas.ImageFillContain
 		face.SetMinSize(size)
-		r.avatar.Objects = []fyne.CanvasObject{face}
-		r.avatar.Refresh()
+		r.lead.Objects = []fyne.CanvasObject{face}
+		r.lead.Refresh()
 	})
 }
 
-// invalidate forgets who the row shows, so the next set rebuilds it even for the
-// same person.
-func (r *mentionRow) invalidate() { r.userID = "" }
+// invalidate forgets what the row shows, so the next set rebuilds it even for
+// the same candidate.
+func (r *mentionRow) invalidate() { r.id = "" }
 
 func (r *mentionRow) setSelected(selected bool) {
 	if r.selected == selected {

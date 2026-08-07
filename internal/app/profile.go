@@ -133,7 +133,7 @@ func (a *App) loadProfile(userID string, card *ui.ProfileCard) {
 			}
 
 			card.SetProfile(profile)
-			a.repositionOverlay() // a bio grows the card
+			a.repositionOverlay() // a bio grows the dialog
 		}, false)
 	}()
 }

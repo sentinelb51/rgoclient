@@ -33,6 +33,11 @@ type Store interface {
 	Channel(channelID string) (Channel, bool)
 	Server(serverID string) (Server, bool)
 
+	// ChannelName is UserName's counterpart for a rendered <#id>: the name to show
+	// for a channel, or "" when it is unknown. Like UserName it allocates nothing,
+	// where Channel would resolve a picture and a slowmode nobody asked for.
+	ChannelName(channelID string) string
+
 	// HasUser and HasMember answer whether a record is already resolved, without
 	// resolving it. Lazy author resolution asks once per mounted message, so this
 	// pair is on the render hot path and must not allocate.
@@ -54,8 +59,10 @@ type Store interface {
 	// user — preferring the per-server member and falling back to the raw user.
 	MessageAuthor(message *Message) Author
 
-	// SystemText renders a system message, resolving whoever it is about.
-	SystemText(system *SystemMessage) string
+	// SystemTextParts renders a system message, resolving whoever it is about and
+	// handing the name back apart from the sentence around it — the client draws
+	// that name as a mention, so it cannot arrive already folded into prose.
+	SystemTextParts(system *SystemMessage) (name, rest string)
 
 	// CanManageMessages reports whether the account may delete other people's
 	// messages in a channel.

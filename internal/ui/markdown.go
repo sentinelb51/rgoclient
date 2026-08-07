@@ -31,8 +31,9 @@ import (
 // since RichText only breaks rows at text spaces, never between two custom
 // segments.
 //
-// A body carrying an @mention is never flattened: the mention has its own
-// colour, exactly the mixed-style case a Label cannot express.
+// A body carrying a mention — of a person or of a channel — is never flattened:
+// the mention has its own colour, exactly the mixed-style case a Label cannot
+// express.
 //
 // onMenu is the owning message's right-click handler, which a selectable body
 // has to be given explicitly — see bodyText.
@@ -53,14 +54,24 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 		return label
 	}
 
-	b := &mdBuilder{deps: deps}
+	b := &mdBuilder{deps: deps, onMenu: onMenu}
 	for _, block := range doc.Blocks {
 		b.block(block)
 	}
 
 	rt := widget.NewRichText(b.segs...)
 	rt.Wrapping = fyne.TextWrapWord
-	return rt
+	if b.reserve == 0 {
+		return rt
+	}
+
+	// RichText never breaks a row *before* a segment it cannot measure as text: a
+	// mention is appended to the row in hand however little of it is left, so one
+	// landing at a line end draws past the right edge and is cut off by the message
+	// column. Narrowing the text by the widest mention the body carries is what
+	// gives that overhang somewhere to land — the words wrap earlier, and the
+	// mention that follows them spills into the strip kept clear for it.
+	return NewFillRow(0, rt, HorizontalSpacer(b.reserve))
 }
 
 /* Selectable body */
@@ -313,7 +324,7 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			if !flattenInlines(b, n.Children, next, size, dim, merge) {
 				return false
 			}
-		default: // Underline, Strike, Spoiler, Link need custom visuals
+		default: // Underline, Strike, Spoiler, Link and both mentions need custom visuals
 			return false
 		}
 	}
@@ -332,10 +343,16 @@ func (e emphasis) textStyle() fyne.TextStyle {
 
 // mdBuilder accumulates RichText segments. It carries Deps because one inline
 // node — the mention — is only an ID in the AST and needs the session to resolve
-// a name.
+// a name, and onMenu because the segments that answer a tap have to answer a
+// right-click with the message's own menu (see mentionText).
 type mdBuilder struct {
-	deps Deps
-	segs []widget.RichTextSegment
+	deps   Deps
+	onMenu func(*fyne.PointEvent)
+	segs   []widget.RichTextSegment
+
+	// reserve is the width of the widest mention word emitted — the gutter
+	// renderMessageBody has to keep clear on the right. See mentionSegment.
+	reserve float32
 }
 
 // text appends styled, inline content. Plain runs become native TextSegments;
@@ -392,6 +409,7 @@ func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, 
 			strike:    em.strike,
 			underline: em.underline,
 			state:     sp,
+			onMenu:    b.onMenu,
 			bridge:    i+1 < len(toks) && toks[i+1].space,
 			solo:      words == 1,
 		})
@@ -488,30 +506,173 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Link:
 			u, _ := url.Parse(n.URL)
 			b.segs = append(b.segs, &widget.HyperlinkSegment{Text: markdown.PlainText(n.Children), URL: u})
-		case *markdown.Mention:
-			b.mention(n, em, base)
+		case *markdown.UserMention:
+			userID := n.UserID
+			b.mention("@"+mentionName(b.deps.Store.UserName(userID)), em, base, func(anchor fyne.CanvasObject) {
+				b.deps.Actions.OnUserTapped(userID, anchor)
+			})
+		case *markdown.ChannelMention:
+			channelID := n.ChannelID
+			b.mention("#"+mentionName(b.deps.Store.ChannelName(channelID)), em, base, func(fyne.CanvasObject) {
+				b.deps.Actions.OnChannelTapped(channelID)
+			})
 		}
 	}
 }
 
-// mention renders <@id> as a bold, accent-coloured "@Name". An author State
-// hasn't resolved yet falls back to "@unknown" rather than exposing the raw ID;
-// lazy author resolution fills State in shortly and re-renders the message.
+// mention renders an already-marked "@Name" or "#channel" as bold, accent-
+// coloured text that opens what it names when tapped.
 //
-// It is ordinary inline text rather than the tinted pill other clients use: a
-// pill needs a custom segment, and RichText gives those no way to bleed a
-// background behind the row's line spacing without colliding on wrapped lines.
-func (b *mdBuilder) mention(n *markdown.Mention, em emphasis, base widget.RichTextStyle) {
-	name := b.deps.Store.UserName(n.UserID)
-	if name == "" {
-		name = "unknown"
+// It is inline text rather than the tinted pill other clients use: a pill needs
+// a background bleeding behind the row's line spacing, and RichText gives a
+// segment no way to do that without colliding on wrapped lines.
+//
+// The words are emitted separately, as a decorated span's are: a segment is
+// atomic to RichText, which breaks a row only at a space *between* segments, so
+// a two-word name kept whole could not wrap. Each word carries the same tap.
+func (b *mdBuilder) mention(text string, em emphasis, base widget.RichTextStyle, onTap func(anchor fyne.CanvasObject)) {
+	style := fyne.TextStyle{Bold: true, Italic: em.italic, Monospace: base.TextStyle.Monospace}
+
+	size := mentionSize(base.SizeName)
+
+	for _, tok := range splitTokens(text) {
+		if tok.space {
+			spacer := base
+			spacer.Inline = true
+			spacer.TextStyle = style
+			b.segs = append(b.segs, &widget.TextSegment{Text: tok.text, Style: spacer})
+			continue
+		}
+
+		b.reserve = max(b.reserve, fyne.MeasureText(tok.text, size, style).Width)
+		b.segs = append(b.segs, &mentionSegment{
+			text:     tok.text,
+			style:    style,
+			sizeName: base.SizeName,
+			onTap:    onTap,
+			onMenu:   b.onMenu,
+		})
+	}
+}
+
+// mentionName is what a mention says for a target the store cannot resolve:
+// "unknown" rather than the raw ID, which is noise wherever it lands. Lazy
+// author resolution fills a user in shortly and re-renders the message; a
+// channel the account cannot see never resolves, and reads as one it cannot see.
+func mentionName(resolved string) string {
+	if resolved == "" {
+		return "unknown"
 	}
 
-	style := base
-	style.Inline = true
-	style.ColorName = theme.ColorNameMention
-	style.TextStyle = fyne.TextStyle{Bold: true, Italic: em.italic, Monospace: base.TextStyle.Monospace}
-	b.segs = append(b.segs, &widget.TextSegment{Text: "@" + name, Style: style})
+	return resolved
+}
+
+// mentionSegment is one word of a rendered mention. A native TextSegment can
+// carry the colour but not the tap, so the word is a widget — the same trade
+// decoratedSegment makes for a decoration RichText cannot draw, and it costs the
+// same thing: RichText measures a segment it cannot read as text only to subtract
+// it, so a word here can neither break nor be broken before. Splitting per word
+// is what lets a two-word name wrap at all, and mdBuilder.reserve is what keeps
+// the one that lands at a line end from being cut off.
+type mentionSegment struct {
+	text     string
+	style    fyne.TextStyle
+	sizeName fyne.ThemeSizeName // "" → standard text size
+	onTap    func(anchor fyne.CanvasObject)
+	onMenu   func(*fyne.PointEvent)
+}
+
+var _ widget.RichTextSegment = (*mentionSegment)(nil)
+
+func (s *mentionSegment) Inline() bool              { return true }
+func (s *mentionSegment) Textual() string           { return s.text }
+func (s *mentionSegment) Select(_, _ fyne.Position) {}
+func (s *mentionSegment) SelectedText() string      { return "" }
+func (s *mentionSegment) Unselect()                 {}
+
+func (s *mentionSegment) Visual() fyne.CanvasObject {
+	return newMentionText(s.text, mentionSize(s.sizeName), s.style, s.onTap, s.onMenu)
+}
+
+// mentionSize resolves the size a mention is drawn at, which is whatever the text
+// around it is drawn at — a mention inside a heading is a heading.
+func mentionSize(name fyne.ThemeSizeName) float32 {
+	if name == "" {
+		name = fynetheme.SizeNameText
+	}
+
+	return fynetheme.Size(name)
+}
+
+func (s *mentionSegment) Update(o fyne.CanvasObject) {
+	if v, ok := o.(*mentionText); ok {
+		v.SetText(s.text)
+	}
+}
+
+// mentionText is a rendered mention drawn as a widget: accent-coloured text that
+// opens the profile or the channel it names. A system line uses one for the name
+// it announces, which is why the size is given rather than read — that line is
+// drawn at its own.
+//
+// It answers a right-click with the menu of the message it sits in. The driver
+// hands a click to the innermost object accepting one and does not walk back up
+// when that object has no answer for the button, so a tappable word in a message
+// row that did not carry the menu would be a hole in it.
+type mentionText struct {
+	widget.BaseWidget
+	textObj *canvas.Text
+	onTap   func(anchor fyne.CanvasObject)
+	onMenu  func(*fyne.PointEvent)
+}
+
+var (
+	_ fyne.Widget            = (*mentionText)(nil)
+	_ fyne.Tappable          = (*mentionText)(nil)
+	_ fyne.SecondaryTappable = (*mentionText)(nil)
+	_ desktop.Cursorable     = (*mentionText)(nil)
+)
+
+func newMentionText(text string, size float32, style fyne.TextStyle, onTap func(anchor fyne.CanvasObject), onMenu func(*fyne.PointEvent)) *mentionText {
+	w := &mentionText{
+		textObj: canvas.NewText(text, theme.Colors.MentionText),
+		onTap:   onTap,
+		onMenu:  onMenu,
+	}
+	w.textObj.TextSize = size
+	w.textObj.TextStyle = style
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+// SetText rewrites the name, for a target that resolves after the line is
+// mounted. The word beside it moves, so the caller relayouts what holds them.
+func (w *mentionText) SetText(text string) {
+	if w.textObj.Text == text {
+		return
+	}
+
+	w.textObj.Text = text
+	w.Refresh()
+}
+
+func (w *mentionText) Tapped(*fyne.PointEvent) {
+	if w.onTap != nil {
+		w.onTap(w)
+	}
+}
+
+func (w *mentionText) TappedSecondary(event *fyne.PointEvent) {
+	if w.onMenu != nil {
+		w.onMenu(event)
+	}
+}
+
+func (w *mentionText) Cursor() desktop.Cursor { return desktop.PointerCursor }
+
+func (w *mentionText) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.textObj)
 }
 
 func (b *mdBuilder) list(n *markdown.List) {
@@ -600,8 +761,9 @@ type decoratedSegment struct {
 	strike    bool
 	underline bool
 	state     *spoilerState
-	bridge    bool // extend the decoration over the following space
-	solo      bool // the only word of its span (round the spoiler cover)
+	onMenu    func(*fyne.PointEvent) // the owning message's menu — see mentionText
+	bridge    bool                   // extend the decoration over the following space
+	solo      bool                   // the only word of its span (round the spoiler cover)
 }
 
 var _ widget.RichTextSegment = (*decoratedSegment)(nil)
@@ -629,6 +791,7 @@ type decoratedText struct {
 	sizeName   fyne.ThemeSizeName
 	bridge     bool
 	state      *spoilerState
+	onMenu     func(*fyne.PointEvent)
 	textObj    *canvas.Text
 	strikeLine *canvas.Line
 	underLine  *canvas.Line
@@ -636,15 +799,17 @@ type decoratedText struct {
 }
 
 var (
-	_ fyne.Widget        = (*decoratedText)(nil)
-	_ fyne.Tappable      = (*decoratedText)(nil)
-	_ desktop.Cursorable = (*decoratedText)(nil)
+	_ fyne.Widget            = (*decoratedText)(nil)
+	_ fyne.Tappable          = (*decoratedText)(nil)
+	_ fyne.SecondaryTappable = (*decoratedText)(nil)
+	_ desktop.Cursorable     = (*decoratedText)(nil)
 )
 
 func newDecoratedText(seg *decoratedSegment) *decoratedText {
 	w := &decoratedText{
 		textObj: canvas.NewText(seg.text, color.Transparent),
 		state:   seg.state,
+		onMenu:  seg.onMenu,
 	}
 	if seg.strike {
 		w.strikeLine = canvas.NewLine(color.Transparent)
@@ -703,6 +868,15 @@ func (w *decoratedText) MinSize() fyne.Size {
 func (w *decoratedText) Tapped(*fyne.PointEvent) {
 	if w.state != nil {
 		w.state.toggle()
+	}
+}
+
+// TappedSecondary hands the right-click to the message, for the same reason
+// mentionText does: a word that accepts a click and has no answer for this one
+// swallows it where it stands.
+func (w *decoratedText) TappedSecondary(event *fyne.PointEvent) {
+	if w.onMenu != nil {
+		w.onMenu(event)
 	}
 }
 

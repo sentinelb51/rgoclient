@@ -18,21 +18,19 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/domain"
-	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
 
 const (
-	// profileBioRunes is how much of a bio each presentation shows: the card
-	// previews a sentence of it, the dialog shows the text itself. The dialog's
-	// limit is a backstop rather than the fit — past ProfileBioMaxHeight the
-	// section scrolls, so what bounds the dialog's height is the section, not this.
-	profileBioRunes       = 220
+	// profileDialogBioRunes is a backstop rather than the fit — past
+	// ProfileBioMaxHeight the section scrolls, so what bounds the dialog's height
+	// is the section, not this.
 	profileDialogBioRunes = 2000
 
 	// profileRoleLimit is how many role chips the compact card draws before
@@ -132,16 +130,19 @@ func newProfileCard(deps Deps, profile domain.Profile, actions ProfileActions, f
 // SetProfile fills in the half of a profile that only the profile request
 // carries: the bio, and the background that replaces the accent banner. An empty
 // bio leaves the About section out altogether rather than showing an empty well.
-// The card grows by filling one in, so the caller re-places it
+// The dialog grows by filling one in, so the caller re-places it
 // (Overlay.Reposition). Call on the UI thread.
 func (c *ProfileCard) SetProfile(profile domain.UserProfile) {
 	c.setBackground(profile.BackgroundURL)
 	c.setBio(profile.Bio)
 }
 
+// setBio fills the About section, which only the dialog carries — the compact
+// card names someone rather than telling you about them, so it never mounts the
+// slot at all.
 func (c *ProfileCard) setBio(bio string) {
 	bio = strings.TrimSpace(bio)
-	if bio == "" {
+	if !c.full || bio == "" {
 		return
 	}
 
@@ -239,24 +240,13 @@ func coverCrop(img image.Image, size fyne.Size) image.Image {
 	return sub.SubImage(crop)
 }
 
-// bio renders the profile text inside a well of its own. It is the one block of
-// the card written by the person rather than about them, and at any length it
-// runs into the sections under it — the hairline is what says where it stops.
-//
-// The card previews it as plain text, since chasing a bio's formatting is not
-// what a card that only names someone is for; the dialog renders the markdown
-// itself, mentions and all.
+// bio renders the profile text inside a well of its own, markdown and mentions
+// and all. It is the one block of the dialog written by the person rather than
+// about them, and at any length it runs into the sections under it — the hairline
+// is what says where it stops.
 func (c *ProfileCard) bio(bio string) fyne.CanvasObject {
 	pad := theme.Sizes.ProfileBioPadding
 	inner := c.inner - 2*pad
-
-	if !c.full {
-		preview := widget.NewLabel(util.Truncate(markdown.DocumentText(markdown.Parse(bio)), profileBioRunes))
-		preview.Wrapping = fyne.TextWrapWord
-		preview.Importance = widget.LowImportance
-
-		return profileWell(newFlushContainer(preview), pad)
-	}
 
 	// No menu of its own: a bio is not a message, so a right-click has nothing to
 	// offer beyond the selection the flattened body already supports.
@@ -393,9 +383,12 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 		rows = append(rows, VerticalSpacer(theme.Sizes.ProfileTightGap), profileStatus(profile.Status))
 	}
 
-	// Empty and hidden: the bio is a separate request and lands after the card is
-	// already up (SetBio).
-	rows = append(rows, c.about)
+	// Empty and hidden: the bio is a separate request and lands after the dialog is
+	// already up (SetProfile). The compact card never carries one — it names
+	// someone, and what they wrote about themselves is what expanding it is for.
+	if c.full {
+		rows = append(rows, c.about)
+	}
 
 	if len(profile.Roles) > 0 {
 		rows = append(rows, profileSection("Roles", profileRoles(profile.Roles, c.full, width)))
@@ -459,35 +452,87 @@ func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.Canva
 	return HBoxNoSpacing(append([]fyne.CanvasObject{name}, trailing...)...)
 }
 
-// profileHandle is the "@username#0001" beside the display name, boxed in the
-// client's hairline: the name is chosen and the handle is issued, and a frame
-// around it is what says the second is a reference rather than more name. It is
+// profileHandle is the "@username#0001" beside the display name: the name is
+// chosen and the handle is issued, and the second reads as qualifying the first
+// by following it, so it is set bare and muted rather than framed — a second
+// outlined thing on the identity line competed with the name for the eye. It is
 // kept at its own text size rather than the name's, and given a width of its own
 // capped at a share of the row — a zero-minimum ellipsis in a fill row would be
 // handed no width at all, and an unbounded one would leave the name none.
 //
 // nameSize is what it sits beside. The row stretches every child to its own
 // height, which would centre the handle against the name rather than seat it on
-// the same line, so the box takes exactly its own height and is pushed down onto
+// the same line, so the tag takes exactly its own height and is pushed down onto
 // the name's baseline instead — less the padding above the text inside it.
 func profileHandle(handle string, limit, nameSize float32) fyne.CanvasObject {
+	tag := newHandleTag(handle, limit)
+
+	return VBoxNoSpacing(
+		VerticalSpacer(max(baselineOffset(nameSize, tag.text.TextSize)-theme.Sizes.ProfileHandlePaddingV, 0)),
+		tag,
+	)
+}
+
+// handleTag is that handle, and a click on it copies it. A widget rather than a
+// text object because only a widget is offered hover and taps, and the pill it
+// fills under the pointer is the whole affordance: with no border at rest,
+// nothing else says the handle answers a click.
+type handleTag struct {
+	tapBase
+
+	background *canvas.Rectangle
+	text       *canvas.Text
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*handleTag)(nil)
+	_ desktop.Hoverable = (*handleTag)(nil)
+)
+
+func newHandleTag(handle string, limit float32) *handleTag {
 	text := canvas.NewText(handle, theme.Colors.TimestampText)
 	text.TextSize = theme.Sizes.ProfileHandleSize
 
 	padV, padH := theme.Sizes.ProfileHandlePaddingV, theme.Sizes.ProfileHandlePaddingH
 	width := min(fyne.MeasureText(handle, text.TextSize, text.TextStyle).Width, max(limit-2*padH, 0))
 
-	frame := canvas.NewRectangle(color.Transparent)
-	frame.CornerRadius = theme.Sizes.ProfileHandleRadius
-	Outline(frame)
+	background := canvas.NewRectangle(color.Transparent)
+	background.CornerRadius = theme.Sizes.ProfileHandleRadius
 
-	box := container.NewStack(frame,
-		NewInset(NewFixedWidthContainer(width, NewEllipsisText(text)), padV, padV, padH, padH))
+	t := &handleTag{
+		background: background,
+		text:       text,
+		content:    NewInset(NewFixedWidthContainer(width, NewEllipsisText(text)), padV, padV, padH, padH),
+	}
+	t.onTap = func() { CopyToClipboard(handle) }
+	t.ExtendBaseWidget(t)
 
-	return VBoxNoSpacing(
-		VerticalSpacer(max(baselineOffset(nameSize, text.TextSize)-padV, 0)),
-		box,
-	)
+	return t
+}
+
+func (t *handleTag) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(t.background, t.content))
+}
+
+func (t *handleTag) MouseIn(*desktop.MouseEvent) { t.hover(true) }
+
+func (t *handleTag) MouseOut() { t.hover(false) }
+
+// hover lifts the text as well as filling behind it: the fill alone is faint
+// against the card, and the handle is muted enough at rest that brightening it
+// is what reads as the thing under the pointer.
+func (t *handleTag) hover(over bool) {
+	t.background.FillColor = color.Transparent
+	t.text.Color = theme.Colors.TimestampText
+
+	if over {
+		t.background.FillColor = theme.Colors.TappableHoverBg
+		t.text.Color = theme.Colors.TextPrimary
+	}
+
+	t.background.Refresh()
+	t.text.Refresh()
 }
 
 // profileStatus is the user's own status line.

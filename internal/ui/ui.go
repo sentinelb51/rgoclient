@@ -35,8 +35,15 @@ type Deps struct {
 // is implemented by the application controller.
 type MessageActions interface {
 	// OnUserTapped opens someone's profile. anchor is the widget that was clicked
-	// — a message avatar, a member row — which the compact card is placed beside.
+	// — a message avatar, a member row, a mention in a body — which the compact
+	// card is placed beside.
 	OnUserTapped(userID string, anchor fyne.CanvasObject)
+
+	// OnChannelTapped goes to a channel, as tapping a rendered #mention does. The
+	// channel need not be in the open server, or in one at all, so the controller
+	// decides what has to be switched to on the way.
+	OnChannelTapped(channelID string)
+
 	OnAttachmentTapped(attachment *domain.File)
 	OnReply(message *domain.Message)
 	OnEdit(message *domain.Message)
@@ -119,12 +126,97 @@ func ShowContextMenu(anchor fyne.CanvasObject, items []*fyne.MenuItem, pos fyne.
 		return
 	}
 
-	canvas := fyne.CurrentApp().Driver().CanvasForObject(anchor)
-	if canvas == nil {
+	c := fyne.CurrentApp().Driver().CanvasForObject(anchor)
+	if c == nil {
 		return
 	}
 
-	widget.NewPopUpMenu(fyne.NewMenu("", items...), canvas).ShowAtPosition(pos)
+	newContextMenu(fyne.NewMenu("", items...), c).ShowAtPosition(pos)
+}
+
+// contextMenu is Fyne's menu wearing the client's hairline.
+//
+// widget.PopUpMenu paints its background from inside the menu's own renderer,
+// which nothing outside can reach to add a stroke to — and the menu's
+// constructor pins its impl, so the renderer cannot be composed the way
+// ObservableScroll composes the scroll's. The menu therefore goes in a plain
+// PopUp with the border stacked over it, and what PopUpMenu did *around* the
+// menu is done here: keeping it inside the canvas, since a PopUp shows wherever
+// it is put, half off the edge included, and the key handling, which is exported
+// Menu calls throughout.
+type contextMenu struct {
+	widget.BaseWidget
+
+	menu   *widget.Menu
+	border *canvas.Rectangle
+
+	popUp  *widget.PopUp
+	canvas fyne.Canvas
+}
+
+var _ fyne.Focusable = (*contextMenu)(nil)
+
+func newContextMenu(menu *fyne.Menu, c fyne.Canvas) *contextMenu {
+	m := &contextMenu{
+		menu:   widget.NewMenu(menu),
+		border: canvas.NewRectangle(color.Transparent),
+		canvas: c,
+	}
+	Outline(m.border)
+	m.border.CornerRadius = fynetheme.Size(fynetheme.SizeNameMenuRadius)
+	m.ExtendBaseWidget(m)
+
+	m.popUp = widget.NewPopUp(m, c)
+	m.menu.OnDismiss = m.popUp.Hide
+
+	return m
+}
+
+// CreateRenderer lays the border over the menu. The rectangle is not a widget,
+// so the items underneath keep the pointer.
+func (m *contextMenu) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(m.menu, m.border))
+}
+
+// ShowAtPosition drops the menu at pos, pulled back inside the canvas where it
+// would otherwise hang off the right or bottom edge.
+func (m *contextMenu) ShowAtPosition(pos fyne.Position) {
+	size := m.MinSize()
+	_, area := m.canvas.InteractiveArea()
+
+	if pos.X+size.Width > area.Width {
+		pos.X = max(area.Width-size.Width, 0)
+	}
+	if pos.Y+size.Height > area.Height {
+		pos.Y = max(area.Height-size.Height, 0)
+	}
+
+	m.popUp.ShowAtPosition(pos)
+	m.canvas.Focus(m)
+}
+
+func (m *contextMenu) FocusGained()   {}
+func (m *contextMenu) FocusLost()     {}
+func (m *contextMenu) TypedRune(rune) {}
+
+// TypedKey drives the menu from the keyboard. The menu takes focus when it is
+// shown, so Escape closes it rather than reaching the handler App.bindKeys left
+// on the canvas for whatever is open behind it.
+func (m *contextMenu) TypedKey(event *fyne.KeyEvent) {
+	switch event.Name {
+	case fyne.KeyDown:
+		m.menu.ActivateNext()
+	case fyne.KeyUp:
+		m.menu.ActivatePrevious()
+	case fyne.KeyRight:
+		m.menu.ActivateLastSubmenu()
+	case fyne.KeyLeft:
+		m.menu.DeactivateLastSubmenu()
+	case fyne.KeyEnter, fyne.KeyReturn, fyne.KeySpace:
+		m.menu.TriggerLast()
+	case fyne.KeyEscape:
+		m.menu.Dismiss()
+	}
 }
 
 // AnchorBelow returns the canvas position directly below obj, dropping a menu

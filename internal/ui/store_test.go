@@ -62,6 +62,8 @@ func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 	return channel, ok
 }
 
+func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
+
 func (s *fakeStore) Server(serverID string) (domain.Server, bool) {
 	server, ok := s.servers[serverID]
 	return server, ok
@@ -88,8 +90,8 @@ func (s *fakeStore) MessageAuthor(message *domain.Message) domain.Author {
 	return domain.Author{Name: "Message author: " + message.AuthorID}
 }
 
-func (s *fakeStore) SystemText(system *domain.SystemMessage) string {
-	return system.Text(s.UserName(system.Target))
+func (s *fakeStore) SystemTextParts(system *domain.SystemMessage) (name, rest string) {
+	return system.TextParts(s.UserName(system.Target))
 }
 
 func (s *fakeStore) CanManageMessages(string) bool { return s.manageMessages }

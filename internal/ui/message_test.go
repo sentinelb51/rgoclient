@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image/color"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -107,5 +108,153 @@ func TestAvatarCentredOnFirstLine(t *testing.T) {
 				t.Errorf("avatar centred at y=%v, want the seam at %v", centre, seam)
 			}
 		})
+	}
+}
+
+// TestMentionHighlight covers the rule the warm background stands on: a row is
+// tinted because Revolt named *this* account in the message, and hovering one
+// lifts that colour rather than swapping it for the ordinary hover — the wash has
+// to survive being read past. A channel-wide ping names nobody at all and still
+// addresses the reader; logged out there is no reader to address, which is the
+// case a bare slices.Contains would get wrong.
+func TestMentionHighlight(t *testing.T) {
+	deps := styledApp(t)
+	self := "01TESTSELF0000000000000000"
+
+	mentioned := testMessage("01TESTMESSAGE0000000000M0", "hello")
+	mentioned.Mentions = []string{"01TESTOTHER000000000000000", self}
+	plain := testMessage("01TESTMESSAGE0000000000M1", "hello")
+	everyone := testMessage("01TESTMESSAGE0000000000M2", "hello")
+	everyone.MentionsEveryone = true
+
+	cases := []struct {
+		name    string
+		selfID  string
+		message *domain.Message
+		rest    color.Color
+		hovered color.Color
+	}{
+		{"named", self, mentioned, theme.Colors.MessageMentionBackground, theme.Colors.MessageMentionHoverBackground},
+		{"not named", self, plain, color.Transparent, theme.Colors.MessageHoverBackground},
+		{"the whole channel", self, everyone, theme.Colors.MessageMentionBackground, theme.Colors.MessageMentionHoverBackground},
+		{"logged out", "", mentioned, color.Transparent, theme.Colors.MessageHoverBackground},
+		{"logged out, whole channel", "", everyone, color.Transparent, theme.Colors.MessageHoverBackground},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			deps.Store = &fakeStore{self: domain.User{ID: c.selfID}}
+			w := NewMessageWidget(deps, c.message, "", false, false)
+
+			if got := w.background.FillColor; got != c.rest {
+				t.Errorf("resting fill = %v, want %v", got, c.rest)
+			}
+			w.setHighlighted(true)
+			if got := w.background.FillColor; got != c.hovered {
+				t.Errorf("hovered fill = %v, want %v", got, c.hovered)
+			}
+		})
+	}
+}
+
+/* Tapping a mention */
+
+// tapRecorder answers the two navigations a mention can make, recording what it
+// was asked to open.
+type tapRecorder struct {
+	stubActions
+	user    string
+	channel string
+}
+
+func (r *tapRecorder) OnUserTapped(userID string, _ fyne.CanvasObject) { r.user = userID }
+func (r *tapRecorder) OnChannelTapped(channelID string)                { r.channel = channelID }
+
+// mentionsIn collects the rendered mentions of a mounted row, in reading order.
+func mentionsIn(w *MessageWidget) []*mentionText {
+	w.Resize(fyne.NewSize(600, w.MinSize().Height))
+
+	var found []*mentionText
+	walkTree(w, func(obj fyne.CanvasObject, _ fyne.Position) {
+		if m, ok := obj.(*mentionText); ok {
+			found = append(found, m)
+		}
+	})
+
+	return found
+}
+
+// TestMentionsOpenWhatTheyName covers the wiring a rendered mention stands on:
+// the two markers reach two different actions, each carrying the ID of the one it
+// names — a body holding several is a loop, and the obvious way to write it hands
+// every mention the last ID. It also pins the right-click: the driver gives a
+// click to the innermost object accepting one and does not walk back up, so a
+// mention that did not carry the message's own menu would be a hole in it.
+func TestMentionsOpenWhatTheyName(t *testing.T) {
+	deps := styledApp(t)
+	recorder := &tapRecorder{}
+	deps.Actions = recorder
+
+	const userID, channelID = "01ELYNN", "01GENERAL"
+	deps.Store = &fakeStore{
+		users:    map[string]domain.User{userID: {ID: userID, Name: "Elynn"}},
+		channels: map[string]domain.Channel{channelID: {ID: channelID, Name: "general"}},
+	}
+
+	message := testMessage("01TESTMESSAGE0000000000M0", "ask <@"+userID+"> in <#"+channelID+">")
+	mentions := mentionsIn(NewMessageWidget(deps, message, "", false, false))
+	if len(mentions) != 2 {
+		t.Fatalf("the body drew %d mentions, want 2", len(mentions))
+	}
+
+	for _, m := range mentions {
+		if m.onMenu == nil {
+			t.Errorf("mention %q answers no right-click", m.textObj.Text)
+		}
+	}
+
+	mentions[0].Tapped(&fyne.PointEvent{})
+	if recorder.user != userID {
+		t.Errorf("tapping %q opened user %q, want %q", mentions[0].textObj.Text, recorder.user, userID)
+	}
+
+	mentions[1].Tapped(&fyne.PointEvent{})
+	if recorder.channel != channelID {
+		t.Errorf("tapping %q opened channel %q, want %q", mentions[1].textObj.Text, recorder.channel, channelID)
+	}
+}
+
+// TestSystemLineNamesAreMentions covers the one thing in a system line that
+// answers a pointer. The name is a mention of whoever the event is about — the
+// row has no author for the reader to click instead — and an event about the
+// channel names nobody, so there is nothing there to tap.
+func TestSystemLineNamesAreMentions(t *testing.T) {
+	deps := styledApp(t)
+	recorder := &tapRecorder{}
+	deps.Actions = recorder
+
+	const target = "01ELYNN"
+	deps.Store = &fakeStore{users: map[string]domain.User{target: {ID: target, Name: "Elynn"}}}
+
+	joined := testMessage("01TESTMESSAGE0000000000S0", "")
+	joined.System = &domain.SystemMessage{Kind: domain.SystemUserJoined, Target: target}
+
+	mentions := mentionsIn(NewMessageWidget(deps, joined, "", false, false))
+	if len(mentions) != 1 {
+		t.Fatalf("the system line drew %d mentions, want 1", len(mentions))
+	}
+	if got := mentions[0].textObj.Text; got != "Elynn" {
+		t.Errorf("the line names %q, want Elynn", got)
+	}
+
+	mentions[0].Tapped(&fyne.PointEvent{})
+	if recorder.user != target {
+		t.Errorf("tapping the name opened %q, want %q", recorder.user, target)
+	}
+
+	renamed := testMessage("01TESTMESSAGE0000000000S1", "")
+	renamed.System = &domain.SystemMessage{Kind: domain.SystemChannelRenamed}
+	if mentions := mentionsIn(NewMessageWidget(deps, renamed, "", false, false)); len(mentions) != 0 {
+		t.Errorf("an event about the channel drew %d mentions, want none", len(mentions))
 	}
 }

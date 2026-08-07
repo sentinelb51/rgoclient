@@ -192,7 +192,7 @@ func (a *App) refreshMemberList() {
 	}
 	a.memberList.Refresh()
 
-	a.setMentionCandidates(memberCandidates(members))
+	a.setMentionCandidates(ui.MentionUser, memberCandidates(members))
 }
 
 // addMembers appends every member as one ungrouped run, for when the presence
@@ -241,24 +241,28 @@ func (a *App) addMemberSection(title string, members []domain.Member, online boo
 
 /* Mention candidates */
 
-// refreshMentionCandidates hands the composer's @picker the people mentionable
-// in the open channel. The picker snapshots the list and filters that snapshot
-// on every keystroke, so this is where the (comparatively expensive) walk and
-// name resolution happen — once per membership change, not once per key.
+// refreshMentionCandidates hands the composer's picker the people mentionable in
+// the open channel. The picker snapshots the list and filters that snapshot on
+// every keystroke, so this is where the (comparatively expensive) walk and name
+// resolution happen — once per membership change, not once per key.
+//
+// Its channels are pushed separately, by refreshChannelList: they change only
+// when the sidebar itself is rebuilt.
 //
 // Call on the UI thread, whenever the open channel or its membership changes.
 func (a *App) refreshMentionCandidates() {
-	a.setMentionCandidates(a.mentionCandidates())
+	a.setMentionCandidates(ui.MentionUser, a.mentionCandidates())
 }
 
 // setMentionCandidates hands the picker a list somebody else has already
-// resolved, which is how refreshMemberList shares its own walk with it.
-func (a *App) setMentionCandidates(candidates []ui.MentionCandidate) {
+// resolved, which is how refreshMemberList and refreshChannelList share their
+// own walks with it.
+func (a *App) setMentionCandidates(kind ui.MentionKind, candidates []ui.MentionCandidate) {
 	if a.input == nil {
 		return
 	}
 
-	a.input.Mentions.SetCandidates(candidates)
+	a.input.Mentions.SetCandidates(kind, candidates)
 }
 
 // mentionCandidates resolves the mentionable people in the open channel from

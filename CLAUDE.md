@@ -10,12 +10,18 @@ wire types into `internal/domain` values on the way in; everything above is
 written against the domain. The dependency graph is a strict DAG:
 
 ```
-domain, util, markdown    no internal dependencies
+domain, markdown, config       no internal dependencies
+util       -> config
 cache      -> domain
-client     -> cache, domain          (+ revoltgo)
-ui         -> cache, domain, markdown, util
-app        -> cache, client, domain, ui, util
+client     -> cache, config, domain          (+ revoltgo)
+ui         -> cache, config, domain, markdown, util
+app        -> cache, client, config, domain, ui, util
 ```
+
+`internal/config` is a leaf so everything above can read a setting. `internal/cache`
+deliberately does *not* import it — its budgets and directory arrive as
+constructor arguments, so a cache can still be built in a test with no settings
+file anywhere.
 
 The seam is not tidiness: `revoltgo.State`'s caches are unexported and
 `newState()` is package-private, so nothing holding a `*revoltgo.Session` can be
@@ -57,6 +63,14 @@ captures its own, so events from a replaced session are dropped; `App.epoch` +
   Users/Members into State when the request *failed* (`if err != nil` where
   `err == nil` was meant). Hence the batched `ensureAuthor` path. When fixed, the
   batch simply finds nothing to do.
+- **Missing field:** Revolt carries `slowmode` (seconds) on a text channel and in
+  `ChannelUpdate`; revoltgo models neither, so the number never arrives with the
+  channel and nothing announces a change. `Client.FetchSlowmode` is the one action
+  that goes round the typed API — a raw `session.HTTP.Request` for
+  `EndpointChannel` decoded into a struct of its own — and records the result for
+  `store.Channel` to hand back. When revoltgo grows the field this collapses into
+  `store.go` and the request goes away. `BypassSlowmode` (`1 << 39`) is missing
+  from the permission constants for the same reason and is named in `client/store.go`.
 - **No `context.Context`.** revoltgo's REST layer takes none, so a superseded
   request can't be cancelled — only its result discarded. `Client.fetching`
   (per-channel in-flight dedup → `ErrBusy`) and the epoch counters do that
@@ -69,14 +83,34 @@ cmd/rgoclient/main.go        Entry point: app ID, the fyneDo migration flag, the
                              app.New(...).Run(). version/build are link-time vars
 
 assets/                      go:embed can't reach above its own file, hence the root
-  fonts.go / icons.go        Montserrat cuts; MentionIcon, MembersIcon, AppIcon.
-                             Everything else comes from Fyne's theme icon set
+  fonts.go / icons.go        Montserrat cuts; MentionIcon, MembersIcon, AppIcon,
+                             the eight settings-rail marks (account, interface,
+                             styles, behaviour, notify, cache, advanced, about),
+                             the system-*.svg event marks — one per SystemKind, plus
+                             SystemEventIcon for a kind Revolt adds later — and the
+                             action-*.svg marks a message's own buttons and menu
+                             wear. All of them are stroked outlines, which is what
+                             lets ui.tintedIcon colour one; Fyne's set is filled and
+                             arrives already themed, so it cannot be. Everything
+                             else still comes from Fyne's theme icon set
 
 internal/
+  config/                    Persisted settings: the only package below everything
+    config.go                Settings tree (Interface/Styles/Behaviour/Notifications/
+                             Cache), Default, Load/Save/Path, Current/Update. Styles
+                             holds *overrides* keyed by theme field name, so a newly
+                             named size arrives with its default intact. The current
+                             value is an atomic.Pointer snapshot, read off-thread by
+                             client/store.go; writes are debounced
+
   domain/                    The vocabulary: value types + one boundary interface
-    domain.go                File, Message, Embed, Channel, Server, User/Member/Role,
-                             Profile, composer Attachment/Reply. Embed is one shape
-                             for every kind, so renderers branch on what is filled in
+    domain.go                Gradient (a role colour of several stops; a color.Color
+                             in its own right, answering as their mean), File,
+                             Message, Embed, Channel (name, avatar, slowmode
+                             resolved), Server, User/Member/Role, Profile +
+                             UserProfile (the bio and banner fetched after it),
+                             composer Attachment/Reply. Embed is one shape for every
+                             kind, so renderers branch on what is filled in
     store.go                 Store — the read side of a session, returning resolved
                              values
 
@@ -84,14 +118,16 @@ internal/
     client.go                Client, New/Open/Login/Close/Shutdown, atomic session,
                              epoch, emit
     convert.go               revoltgo -> domain (once, on the way into the cache);
-                             parseHexColor, presence/badges, toEmbed (drops embeds
-                             nothing can draw)
+                             parseColor (every hex stop in a CSS value, so a gradient
+                             role survives as one), presence/badges, toEmbed (drops
+                             embeds nothing can draw)
     store.go                 domain.Store over revoltgo.State. Members() sorts, so
                              the sidebar and mention picker share one walk
     events.go                Event (closed sum type) + the gateway handlers. Each
                              updates the message cache and emits one value.
                              MessageAppend (a late link unfurl) lands as MessageUpdated
-    actions.go               Every blocking network action
+    actions.go               Every blocking network action, plus FetchSlowmode —
+                             the one that bypasses revoltgo's typed API
 
   app/                       Controller: view state, image caches, widgets
     app.go                   App, New/Run/lifecycle, doOnUI, background, stale, deps,
@@ -106,14 +142,19 @@ internal/
                              sidebars, settings window, selection, sidebar context
                              menus, and the home/DM view
     messages.go              The message area end to end: composer dock, submit,
-                             widget construction, load/render, and the mounted window
+                             slowmode (the gate + the badge's tick), widget
+                             construction, load/render, and the mounted window
     members.go               Lazy author resolution, the member sidebar, mention
                              candidates
     overlay.go               Modal layer: showOverlay/showPopover/closeOverlay,
                              attachment lightbox, join-server dialog
-    profile.go               Profile card + dialog, profileOf, loadBio,
+    profile.go               Profile card + dialog, profileOf, loadProfile (the bio
+                             and banner, fetched after the card is up),
                              openConversation
     notify.go                notify + confirm, and the destructive actions using them
+    settings.go              open/closeSettings, bindKeys (who owns Escape),
+                             updateSettings/applyStyles/restyle, the hooks handed to
+                             ui.SettingsPage, and the cache/account actions
   cache/
     cache.go                 LRU (shared recency tracker) + TextCache
     message.go               MessageCache — per-channel, oldest->newest, capped, LRU
@@ -129,7 +170,8 @@ internal/
     layouts.go               Spacers, fitWithin, Relayout, and the custom layouts:
                              noSpacingLayout (VBox/HBox/NewFillRow/NewFillColumn),
                              columnLayout,
-                             overlayLayout, minSizeLayout (NewFixedWidth pins exactly),
+                             overlayLayout, minSizeLayout (NewFixedWidth /
+                             NewFixedHeight pin exactly),
                              insetLayout (NewInset, negative insets allowed),
                              dockLayout + dockReserveLayout (NewFloatingDock /
                              NewDockReserve / DockReserve — the composer hangs over
@@ -138,14 +180,22 @@ internal/
     widgets.go               tapBase widgets (TappableContainer, HoverableStack,
                              IconButton, SidebarButton, CloseButton, roundedPanel),
                              the shared edge (Outline + NewColumnDivider) and the
-                             one lift (Elevate), Tooltip,
-                             the avatar loader, ObservableScroll, NewEllipsisText
+                             one lift (Elevate), Tooltip, the chips (NewChip and
+                             the RoleChip widget — a dot in the role's colour,
+                             right-click for name/ID), the avatar loader,
+                             ObservableScroll (and the position indicator it draws
+                             over Fyne's own renderer),
+                             AccentText (a name in a role colour,
+                             split per rune when that colour is a gradient),
+                             NewEllipsisText
     sidebar.go               ServerWidget, ChannelWidget + collapsible category, the
                              glyph set, member row/section, saved-session card
-    message.go               MessageWidget: construction, permissions, quick actions,
-                             edit mode, hover, content assembly, the day separator,
-                             reply previews + elbows, EditEntry, and the row's
-                             vertical rhythm
+    message.go               MessageWidget: construction, permissions, quick actions
+                             (actionMark tints the neutral ones), edit mode, hover,
+                             content assembly, the system line (buildSystemLine +
+                             systemMark, which decides glyph and colour together),
+                             the day separator, reply previews + elbows, EditEntry,
+                             and the row's vertical rhythm
     embed.go                 Embed cards: site line, embedLink title, description
                              (through renderMessageBody), picture, embedContentWidth
     markdown.go              AST -> RichText; strike/underline/spoiler custom
@@ -154,14 +204,32 @@ internal/
                              <@id> through Store.UserName
     attachment.go            Image / text preview / generic card, name+size bar,
                              fetchText (byte-capped)
-    input.go                 Composer + attachments + reply cards + the @mention half
-                             (mentionQuery/syncMentions/acceptMention, MentionPicker)
+    input.go                 Composer + attachments + reply cards + SlowmodeBadge +
+                             the @mention half (mentionQuery/syncMentions/
+                             acceptMention, MentionPicker)
     modal.go                 Overlay + tapSink, NewAttachmentViewer, JoinServerDialog
     profile.go               NewProfileCard + NewProfileDialog off one Profile value,
-                             presence rings, SetBio
-    notice.go                Tone (info/warning/danger), NoticeStack, NewConfirmDialog
+                             presence rings, SetProfile (the bio, and the banner
+                             cropped to cover the accent strip), profileWell (the
+                             hairline the handle and the bio are framed in).
+                             Role/badge rows are the shared chips from widgets.go
+    notice.go                Tone (info/warning/danger) + its title, Notice,
+                             NoticeStack (Push / PushNotice), noticeCard with its
+                             draining countdown, NewConfirmDialog
+    settings.go              SettingsPage (the layer, the rail, the pane, the popover
+                             slot), the row/group vocabulary, and the rows that reach
+                             the tables: sizeRow, colorRow + colorControl, textField
+    settings_controls.go     The controls, none of them a Fyne form widget: Toggle,
+                             Slider + numberBox (newNumberControl), optionControl +
+                             showDropdown, swatchButton + the palette card, the usage
+                             bar, the rail button, dismissSink
+    settings_sections.go     The eight sections, the curated styleGroups table, the
+                             density bundles, the usage meters and the live previews
     theme/theme.go           Colors, Sizes, AppTheme. ColorNameMention is the
                              app-specific colour a RichText segment can carry
+    theme/overrides.go       Apply (reflection over the two tables, defaults snapshot
+                             taken at init), SizeFields/ColorFields, AccentOverrides,
+                             Hex/ParseHex, SetFontSize
     titlebar_*.go            DWM title-bar recolouring (no-op off Windows)
   markdown/                  Pure parser -> AST (no UI)
     markdown.go / parser.go  Node types; block + inline parsing, PlainText,
@@ -204,6 +272,12 @@ internal/
    later; `flushAuthors` hands the whole batch to `Client.ResolveAuthors` and
    makes a **single** trip back to the UI thread. `fetchedAuthors` guards each
    (server, user) pair, released on failure so a later message retries.
+   A **system** message has no author to draw but does name a target, and reads
+   "Someone joined" until that user is known — so it queues `System.Target`
+   instead, and `MessageWidget.Author` answers with the target for the same
+   reason, which is what lets `refreshAuthorMessages` cover both in one pass.
+   `RefreshAuthor` then rewrites the sentence and relayouts the line, since the
+   name sits *inside* it and the time beside it has to move.
 6. The client caches an incoming message (the cache returns the predecessor under
    its own lock, so grouping survives bursts) and emits `MessageCreated` with
    both. If scrollback has detached the view from the tail, the append is skipped
@@ -233,17 +307,100 @@ internal/
     decodes it into an `Invite` whose `ServerID` is never populated. The
     `ServerJoined` event does, and `App.pendingJoin` tells that handler to select
     what it adds.
-11. **Notices and confirmations.** `App.confirm(ui.Confirm{...})` for anything
+11. **Slowmode.** `selectChannel` paints what is known and fires `loadSlowmode`,
+    which re-asks on *every* visit — see the revoltgo note above: entering the
+    channel is the only moment the client can learn the number, or that it moved.
+    `App.slowmodeOf` is the cooldown as it applies *to this account*, so
+    `CanBypassSlowmode` collapses it to zero and the badge never appears for a
+    moderator. `handleSubmit` refuses while `slowmodeRemaining` is non-zero and
+    keeps what was typed, saying nothing: the badge counting down over the
+    conversation is the answer, and a notice per keypress would bury it. The
+    badge sits *outside* the card, above its right edge — inside it, it was
+    furniture the entry had to make room for. `App.composerDock` is the chip's
+    row stacked over the card and that whole stack is what floats, so
+    `ui.DockReserve` holds room for the chip too and the entry spans the card in
+    every channel. The chip is bare text with nothing drawn behind it: a second
+    filled surface a few pixels above the card read as a bar growing out of it,
+    so it is set larger instead, which is what holds it apart from the messages
+    passing underneath. A relabelling moves only where the
+    chip starts (`SlowmodeBadge.OnResize` → that row's `ui.Relayout`); its
+    appearing or disappearing changes the stack's height, so `refreshSlowmode`
+    calls `App.resizeDock` to re-hang the dock and refresh the scroll — Fyne
+    reclaims nothing for a shrinking minimum. The
+    cooldown starts optimistically at submit — so a second Enter can't outrun the
+    request — and is given back when the send fails. `onMessageCreated` starts it
+    too, which is what covers a message the same account sent from another client;
+    `startSlowmode` won't restart a running one, so the echo of our own send is a
+    no-op. `refreshSlowmode` re-arms one timer a second at a time rather than
+    running a ticker for the life of the app.
+12. **Notices and confirmations.** `App.confirm(ui.Confirm{...})` for anything
     irreversible, `App.notify(tone, …)` for an outcome the user didn't ask about.
     Both take a `ui.Tone` — that is the *only* thing deciding colour, icon and
     button weight. Destructive actions all share one shape: a `can…` check decides
     whether to offer it, `confirm…` asks, the action fires through `App.background`
     and the **gateway event** updates the UI. Nothing is removed optimistically.
-12. **Profiles.** `Actions.OnUserTapped(userID, anchor)` opens the compact card
+13. **Settings.** `config.Load` runs in `main` *before* the first widget, because
+    `theme.Apply` writes the tables everything above is constructed from. The page
+    is `ui.SettingsPage`, a layer in the window's content stack beside
+    `notices.Layer` and `tooltip.Layer` — **not** a canvas overlay, because
+    `mountOverlay` closes whatever was there and a confirmation raised from
+    settings has to draw *over* it. `App.bindKeys` decides who owns Escape
+    (overlay, then settings, then nobody) and is called from all four of
+    mount/close overlay and open/close settings.
+    A change goes `SettingsPage.change` → `App.updateSettings` → `config.Update`,
+    which is all a Behaviour flag needs: they are read where they are used
+    (`store.Members`, `continuesGroup`, `messages.go`'s mount caps). A style goes
+    through `restyle` → `App.applyStyles`, which rebuilds the theme tables and then
+    **defers** the tree rebuild while the page is open: the page covers the client,
+    so nothing of the rebuild would be seen, and `SetContent` under a slider
+    mid-drag would take the slider with it. `App.stylesDirty` carries that to
+    `closeSettings`, which calls `restyle` — `SetTheme`, `SetContent(buildUI())`,
+    `displayCached`, `styleNativeChrome`. What answers a drag meanwhile is the
+    section's own preview, built from the real `MessageWidget`/`ChannelWidget`.
+    Styles are stored as *overrides* keyed by `theme.Sizes`/`Colors` field names and
+    applied by reflection, so the curated groups in `settings_sections.go` and the
+    generated Advanced list add up to the whole table — which `settings_test.go`
+    asserts.
+    **The controls are the client's own** (`settings_controls.go`): every Fyne form
+    widget arrives flat or invisible under `AppTheme`, so a `Toggle`, a `Slider`, a
+    dropdown and a colour swatch are each a few canvas objects and a layout. Each is
+    handed to a row inside `fixedControl`, so a row is the same height whichever it
+    holds — and `numberBox` swaps its number for a `widget.Entry` when clicked, which
+    is only free of a layout jump because the slot is pinned. That swap is also the
+    one place a stale focus can bite: focusing a second box makes the first report
+    `FocusLost` *after* the second has installed its field, so `numberBox.commit`
+    takes the entry that is reporting and ignores it unless it is still the open one.
+    The colour picker floats on `SettingsPage.popover`, a slot inside the page's own
+    layer — the modal layer is not an option for the same reason the page itself
+    isn't on it.
+14. **Profiles.** `Actions.OnUserTapped(userID, anchor)` opens the compact card
     beside the anchor; "Full profile" swaps it for the centred dialog. Both draw
     from one `domain.Profile` that `profileOf` resolves in a single pass. The bio
-    is fetched *after* the card is up and filled in through `SetBio`, which grows
-    the card — hence `repositionOverlay`.
+    and the banner are one request of their own, made *after* the card is up and
+    filled in through `SetProfile`; a bio grows the card — hence
+    `repositionOverlay`. The banner *replaces* the accent strip rather than
+    covering it, because what shows through the picture's rounded corners differs
+    top and bottom: a `canvas.Image` takes one radius for all four, so the card's
+    own corners are right at the top and the bottom band is laid over itself
+    squared off to meet the body flush.
+15. **Role colours.** A Revolt role colour is a CSS value, and the presets the
+    server itself offers are as often a gradient as a triple — which is why
+    `client.parseColor` reads *every* stop and `domain.Gradient` carries them.
+    A gradient is a `color.Color` answering as the mean of its stops, so a chip's
+    dot, a reply's accent bar and a picker row keep filling one shape without
+    knowing. Only `ui.AccentText` spreads one: a text object takes a single
+    colour, so a gradient name is one object per rune, each measured off the whole
+    name up to it (summing single glyphs drifts a fraction of a pixel each) and
+    filled where that glyph falls along the run.
+    **A gradient must never reach a `canvas.Text`.** Fyne keys its glyph-run
+    texture cache on the text object's own fields, colour included, so a fill that
+    can't be a map key panics the painter on the frame it is first drawn — off the
+    UI thread, in a `Load` no recover of ours is on. Every colour of unknown
+    origin therefore goes through `ui.solidColor` on the way into a text object
+    (`newChip`, `AccentText.newText`, `mentionRow.set`); a shape needs nothing,
+    since its texture is keyed by the object. `widgets_test.go` asserts the
+    invariant over the built tree, because the software painter used by a render
+    test takes a different path and would not notice.
 
 ## Conventions
 
@@ -272,7 +429,11 @@ internal/
   constraint, the reason an invariant holds. Do not narrate mechanics.
 - **Files.** Prefer fewer, larger files with `/* Label */` sectioning.
 - Colors and sizes come from `ui/theme`, never hardcoded. Don't express one size
-  as an offset from an unrelated one — add a named entry.
+  as an offset from an unrelated one — add a named entry. Adding one makes it
+  configurable the same day: the settings page reaches the table by reflection.
+- A tunable the user should be able to change is a field on `config.Settings` read
+  at its use site, not a `const`. Everything else stays a `const` — the settings
+  page is not a dumping ground for every number in the client.
 - Use the `log` package for diagnostics.
 - Keep this file current when adding files/packages, changing data flow, adding
   widgets, modifying `App` fields, or changing event handling.
@@ -379,6 +540,36 @@ the harness.
   preview) must move the whole row, so it sits *inside* the row's margins.
   A message with no text hides its body slot entirely — an empty body still
   renders one text line tall, which draws as a gap above an embed or attachment.
+- **A system message is not a message anybody wrote.** `NewMessageWidget` branches
+  on `Message.System` before building anything: no avatar, no name, no body slot,
+  no attachments, embeds or replies — one line of `canvas.Text` with the event's
+  mark centred in the gutter an avatar would fill, and the time drawn beside it
+  rather than revealed on hover (there is no name for it to follow, and "Someone
+  left" with no *when* is half a sentence). Nothing in that line accepts a
+  pointer: innermost wins, so a widget standing in it would be a hole in the row's
+  own hover and context menu. It keeps `SystemMessagePadding` whatever surrounds
+  it — `continuesGroup` refuses either side of one, so a run of joins is a block —
+  which is why `verticalPad` is a *method*: `SetFollowedByGroup` reaches it too.
+  Reply is offered nowhere on one (`canReply`), as edit already wasn't.
+  `systemMark` answers with the glyph **and** the colour, because the two say
+  different halves of one thing: the tone is the class of event — arrival,
+  departure, removal, a change to the channel, a call — which is what a column of
+  these is skimmed by, and the glyph is which event of that class it was. A kind
+  the client doesn't know takes the generic mark in the neutral grey, so an event
+  Revolt adds later still reads as an event.
+- **Tinting one of the client's own marks is a substitution, not a theme name.**
+  Fyne's `theme.NewColoredResource` rewrites an SVG's *fills* and leaves strokes
+  alone, and every mark in `assets/` is an outline — so a stroked icon comes back
+  white whatever colour name it is given. `ui.tintedIcon` replaces the source's
+  one stroke colour instead, and puts the colour in the resource's **name**:
+  Fyne caches the rasterised SVG under that name, so two resources sharing one
+  would share a raster and the second colour asked for would come back as the
+  first. That name is also the key of `ui.tintedIcons`, the memo that stops a
+  channel of system events rewriting the same seven files a hundred times — a
+  restyle changes the colour, hence the name, so it misses rather than handing
+  back what the palette used to say. This is also why a message's own buttons and
+  menu draw `action-*.svg` rather than Fyne's icons: a themed resource takes its
+  colour from a theme *name*, and delete reading as delete is the point.
 - **Repainting the message column.** `Container.Refresh` refreshes every child,
   and `RichText.Refresh` re-wraps its text — so `messageList.Refresh()` re-flowed
   every mounted body on every gateway message. Every mutation of the mounted
@@ -386,10 +577,42 @@ the harness.
   layout, don't walk the children). Use `Refresh` only when what a *mounted*
   widget says has changed. For the same reason nothing on the scroll path may call
   `MinSize` on the list — `BaseWidget.MinSize` is not memoised.
+- **Fyne's scrollbar is a widget over the content, so the client draws its own.**
+  The bar lives in a `scrollBarArea` laid across the right edge of the scroll's
+  content, and that area accepts hover: innermost wins, so it took the hover the
+  message row under it needed, and it swelled from `SizeNameScrollBarSmall * 2` to
+  `SizeNameScrollBar` once the pointer reached it — over the text, not beside it.
+  `AppTheme.Size` zeroes *both* (zeroing only the large one left an invisible
+  six-pixel strip still eating hover). What replaces it is
+  `ObservableScroll`'s own indicator: a `canvas.Rectangle` appended to Fyne's
+  renderer objects (they are set once at construction and never replaced, so
+  composing the slice once holds), which accepts nothing because it is not a
+  widget. It is placed from `Content.Size()` — never `MinSize`, see above — and
+  revealed from the *renderer's* `Refresh` by comparing the offset, since every
+  offset change ends there whoever caused it while an unrelated repaint must not
+  flash it. It lingers, then fades through a `fyne.Animation`, which the renderer's
+  `Destroy` stops so a restyle's rebuild doesn't leave one ticking.
+  `ScrollIndicatorWidth + ScrollIndicatorInset` must stay under
+  `MessageHorizontalPadding` or the bar is drawn over the text; a width of zero
+  turns it off. Only the message column has one — the sidebars, the settings pane
+  and the profile dialog are bounded content whose right edges carry rows and
+  controls a strip would obstruct.
 - **Tooltips and notices are layers over the main row, not canvas overlays.**
   Pushing an overlay routes the whole hit test into it, so the hovered widget
   would never see `MouseOut`. Confirmations *are* canvas overlays, on the modal
   layer with the lightbox.
+- **Fyne's form widgets do not survive `AppTheme`, and a scoped override only
+  buys so much.** `AppTheme.Size` zeroes `SizeNameInputBorder`, which is what a
+  `widget.Slider`'s track thickness is derived from (`trackWidth = inputBorder *
+  2`), and its track is filled with `ColorNameInputBackground`, which `AppTheme`
+  answers with the colour a settings group is a card of — so a slider drew as a
+  bare thumb on an invisible track. A `container.NewThemeOverride` (the `WithCaret`
+  shape) fixed both and still left the thumb swelling into a grey hover disc that
+  covered the track it is read against, because that is Fyne's own drag affordance
+  and no theme name reaches it. `ui.Slider` replaced it outright, and
+  `settings_controls.go` is the general answer: a control here is canvas objects
+  and a layout. Any Fyne widget mounted for the first time is worth rendering to a
+  PNG before believing it.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.
 
 ## Build / check
@@ -417,20 +640,43 @@ step, so a failing tree can't leave a tag behind. The exe is unsigned.
 
 ## Known gaps
 
-- Settings window is a placeholder. Reply-preview tap navigation is a TODO
-  (`ui/message.go`, `buildReplyPreview`). `App.createServer` only reports that
-  creation isn't built.
-- Profiles show what the client already knows plus the bio. The profile
-  *background* is fetched and deliberately not drawn (a `canvas.Image` takes no
-  corner radius, and masking a multi-megapixel image on every open buys little).
-  Mutual friends/servers, relationships, and acting on one are absent. Nothing
-  scrolls, so a long bio is trimmed (`profileBioRunes`). Neither presentation
-  refreshes while open.
+- Reply-preview tap navigation is a TODO (`ui/message.go`, `buildReplyPreview`).
+  `App.createServer` only reports that creation isn't built.
+- Settings: the three typing toggles are recorded and honoured by nothing —
+  typing itself is not implemented (revoltgo has `ChannelBeginTyping`/`EndTyping`
+  and `EventChannelStartTyping`/`StopTyping` ready). The colour picker offers a
+  grid of presets beside the hex field — there is no hue wheel, no alpha slider
+  and no eyedropper, so a colour outside the presets is still typed. The image
+  cache directory can be chosen now, but it and the message cache caps and the
+  text-preview count are read once while the caches are built, so they take a
+  restart, and each says so. The Account section can forget a saved login and log
+  out; presence/status is not settable, and there is no "log out everywhere" —
+  neither has a confirmed revoltgo action. The Advanced filter matches the field's
+  own name only, since that is what its rows are labelled with; the curated groups
+  in Styles are not searchable at all.
+- Profiles show what the client already knows plus the bio and the banner.
+  Mutual friends/servers, relationships, and acting on one are absent. Only the
+  dialog's About section scrolls, past `ProfileBioMaxHeight`; the card previews a
+  bio instead (`profileBioRunes`). Neither presentation refreshes while open. The
+  banner is drawn flat: Revolt's own client fades it out under the card body, and
+  a `canvas.Image` takes no gradient mask.
+- A gradient role colour is spread across a *name* only (`ui.AccentText`).
+  Everywhere else — a role chip's dot, a reply's accent bar, the mention picker's
+  row — it fills as the mean of its stops. `parseColor` reads hex stops only, so a
+  role written in `rgb()` or a CSS name still falls back to the default text
+  colour, as it did before gradients were read at all.
 - `markdown.CodeBlock.Language` is parsed but nothing highlights.
   `domain.FileKind` classifies video/audio/archive/PDF; only `FileImage` and
   `FileText` are branched on.
 - `domain.Message` drops what nothing renders: reactions, flags, mentions, pins,
   masquerade contents (only *that* it carries one survives, for grouping).
+- A system line names one person — `SystemMessage.Target`, resolved through
+  `Store.UserName`, so it is the account's display name and never the server
+  nickname — and says nothing about who did it: Revolt sends only the subject, so
+  a kick reads "Marceline was kicked" with no one named as having kicked her. The
+  name is not set apart from the sentence either; `Text` returns one string, and
+  bolding the name would take a split the domain does not offer. A channel rename
+  says only that it happened, not what to.
 - Embeds render the site line, title, description, colour and one picture. A bare
   **video** embed is dropped at the boundary (Revolt puts a video's dimensions
   beside the type, so revoltgo carries only the URL — and there is no player).
@@ -438,12 +684,21 @@ step, so a failing tree can't leave a tag behind. The exe is unsigned.
   embed has the same dimensions problem, so it draws against the placeholder box
   and settles once the picture lands. Preview/large image *size* is not read.
   Sending an embed isn't offered — the composer can't compose a card.
+- Slowmode is enforced from the client's own clock. The server's `InSlowmode`
+  rejection carries the authoritative `retry_after`, but revoltgo surfaces a
+  failed request as a formatted string, so it is not read back — a send refused
+  because the cooldown was started elsewhere reports the generic failure notice.
+  Nothing shows a cooldown outside the open channel: a channel row gives no hint
+  that opening it lands on a wait.
 - The composer has no attach or emoji button (files arrive by drag or paste) and
   no role/channel mentions. `EditEntry` has no mention picker. A composed mention
   stays a visible `<@id>` until sent: Fyne cannot draw a chip inside an entry, and
   mapping names back to IDs at send time breaks on duplicates.
   `markdown.PlainText` renders a mention as a bare `@` (it has no session), so a
   reply preview of a message opening with one starts with a lone `@`.
+- The scroll indicator only reports where the view is. It cannot be dragged and
+  has no track to click, so the wheel, the middle-button pan and the keyboard are
+  what move the column; nothing outside the message area has one at all.
 - Sidebar context menus stay small: an ID to copy, "Mark as read", and one
   destructive item below a separator (leave server — never for its owner, since
   the same endpoint would delete it; close conversation; remove member). Banning,
@@ -452,12 +707,16 @@ step, so a failing tree can't leave a tag behind. The exe is unsigned.
   Only servers show a hover tooltip.
 - Notices are transient and unlogged from the user's side — no history panel. The
   login screen has no notice layer (it isn't built until Ready), so `session.go`
-  reports a dead token through `dialog.ShowError`.
+  reports a dead token through `dialog.ShowError`. A notice carries a heading, but
+  most callers still take their tone's rather than writing one: `App.notify` is the
+  short form and `App.notifyNotice` the one that says something. Hovering does not
+  pause the countdown, and nothing stacks two identical notices into a count.
 - No `ChannelCreate` handler, so a DM opened while running only appears at the
   next DM-list refresh (its messages are still cached, its unread mark recorded).
 - `assets/` still carries unreferenced `close.svg`, `edit.svg`, `file.svg`,
-  `reply.svg`, `trash.svg`. Only `mention.svg`, `members.svg`, `rgo.png` are
-  embedded.
+  `reply.svg`, `trash.svg` — four of them now duplicated in the house style by an
+  `action-*.svg`, in a mix of fills and strokes that `ui.tintedIcon` could not
+  colour anyway. Nothing embeds them.
 - Markdown: strike/underline/spoiler share one `decoratedSegment` (Fyne renders
   neither strike nor underline natively), split per word since RichText only
   breaks rows at text spaces. The blockquote bar isn't drawn on wrapped

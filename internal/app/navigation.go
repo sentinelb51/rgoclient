@@ -20,11 +20,15 @@ import (
 // members. The fill row keeps the sections flush for the flat look; only the
 // message area (index 2) stretches, the rest stay at their fixed widths.
 //
-// Two layers sit over the whole row: notices, which appear in its top-right
-// corner whatever column is there, and the tooltip, since a server icon's name
-// has to be able to overhang the narrow column it is anchored in. Neither
-// carries anything that matches a pointer event bar a notice card itself, so the
-// row underneath keeps receiving every click and hover.
+// Three layers sit over the whole row: notices, which appear in its top-right
+// corner whatever column is there; the tooltip, since a server icon's name has
+// to be able to overhang the narrow column it is anchored in; and the settings
+// page. The first two carry nothing that matches a pointer event bar a notice
+// card itself, so the row underneath keeps receiving every click and hover.
+//
+// Settings is a layer here rather than an overlay because the modal layer holds
+// one thing at a time: a confirmation raised from the settings page has to be
+// able to draw over it. It is hidden until opened, and opaque when it is not.
 func (a *App) buildUI() fyne.CanvasObject {
 	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
@@ -33,7 +37,7 @@ func (a *App) buildUI() fyne.CanvasObject {
 		a.buildMemberList(),
 	)
 
-	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer)
+	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer, a.settings.Layer)
 }
 
 /* Server sidebar */
@@ -105,29 +109,6 @@ func (a *App) refreshServerList() {
 	// skips it because it isn't a ServerWidget.
 	a.serverList.Add(ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
 	a.serverList.Refresh()
-}
-
-// openSettings opens the settings window. A second open focuses the existing
-// window rather than spawning another.
-func (a *App) openSettings() {
-	if a.settingsWindow != nil {
-		a.settingsWindow.RequestFocus()
-		return
-	}
-
-	window := a.fyne.NewWindow("Settings")
-	a.settingsWindow = window
-	window.SetOnClosed(func() { a.settingsWindow = nil })
-
-	// todo: actual settings
-	heading := widget.NewLabelWithStyle("Settings", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	note := widget.NewLabelWithStyle("Work in progress.", fyne.TextAlignCenter, fyne.TextStyle{Italic: true})
-	window.SetContent(container.NewCenter(container.NewVBox(heading, note)))
-
-	window.Resize(fyne.NewSize(420, 320))
-	window.CenterOnScreen()
-	a.styleNativeChrome(window)
-	window.Show()
 }
 
 /* Channel sidebar */
@@ -421,6 +402,8 @@ func (a *App) selectChannel(channelID string) {
 
 	a.syncChannelList()
 	a.refreshMentionCandidates()
+	a.refreshSlowmode() // what is already known, before the request below lands
+	a.loadSlowmode(channelID)
 	a.focusInput() // so the user can type straight away
 
 	if cached := a.client.Messages().Get(channelID); len(cached) > 0 {
@@ -439,6 +422,7 @@ func (a *App) clearChannelSelection() {
 	a.setHeader(a.channelHeader, "")
 	a.setChannelGlyph()
 	a.syncChannelList()
+	a.refreshSlowmode()
 }
 
 // syncServerSelection updates the highlighted server icon. The home button is

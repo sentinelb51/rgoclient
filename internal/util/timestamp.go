@@ -5,14 +5,35 @@ import (
 	"time"
 
 	"github.com/oklog/ulid/v2"
+
+	"RGOClient/internal/config"
 )
 
 const (
-	timeLayout  = "3:04 PM"
 	dayLayout   = "January 2, 2006"
 	daysInMonth = 30
 	daysInYear  = 365
 )
+
+// timeLayout is the configured clock format. It is read per call rather than
+// resolved once: changing the format takes effect on the next repaint, and every
+// caller here is already formatting a string.
+func timeLayout() string {
+	settings := config.Current().Interface
+
+	twelveHour := settings.TimeFormat != config.TimeFormat24
+
+	switch {
+	case twelveHour && settings.ShowSeconds:
+		return "3:04:05 PM"
+	case twelveHour:
+		return "3:04 PM"
+	case settings.ShowSeconds:
+		return "15:04:05"
+	}
+
+	return "15:04"
+}
 
 // Timestamp parses a ULID to extract its embedded timestamp.
 func Timestamp(id string) (time.Time, error) {
@@ -59,7 +80,7 @@ func FullDate(t time.Time) string {
 // ShortTime formats just the local clock time, for the gutter timestamp on
 // grouped continuation messages.
 func ShortTime(t time.Time) string {
-	return t.Local().Format(timeLayout)
+	return t.Local().Format(timeLayout())
 }
 
 // NiceTime formats a message time the way a chat client reads it: the clock time
@@ -79,16 +100,42 @@ func NiceTime(t time.Time) string {
 
 	switch {
 	case days == 0:
-		return fmt.Sprintf("Today, %s", t.Format(timeLayout))
+		return fmt.Sprintf("Today, %s", t.Format(timeLayout()))
 	case days == 1:
-		return fmt.Sprintf("Yesterday, %s", t.Format(timeLayout))
+		return fmt.Sprintf("Yesterday, %s", t.Format(timeLayout()))
 	case days < daysInMonth:
-		return fmt.Sprintf("%d days ago, %s", days, t.Format(timeLayout))
+		return fmt.Sprintf("%d days ago, %s", days, t.Format(timeLayout()))
 	case days < daysInYear:
 		return plural(days/daysInMonth, "month")
 	default:
 		return plural(days/daysInYear, "year")
 	}
+}
+
+// ShortDuration names a span the way a countdown shows one: "5s", "1m 30s",
+// "2h". It rounds *up* to the next whole second, so a cooldown with a fraction
+// of a second left still reads "1s" rather than "0s" — the badge drawn from this
+// must not claim the wait is over before it is.
+func ShortDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	d = (d + time.Second - 1).Truncate(time.Second)
+
+	hours, minutes, seconds := int(d/time.Hour), int(d/time.Minute)%60, int(d/time.Second)%60
+
+	switch {
+	case hours > 0 && minutes > 0:
+		return fmt.Sprintf("%dh %dm", hours, minutes)
+	case hours > 0:
+		return fmt.Sprintf("%dh", hours)
+	case minutes > 0 && seconds > 0:
+		return fmt.Sprintf("%dm %ds", minutes, seconds)
+	case minutes > 0:
+		return fmt.Sprintf("%dm", minutes)
+	}
+
+	return fmt.Sprintf("%ds", seconds)
 }
 
 // plural renders "1 month ago" / "3 months ago".

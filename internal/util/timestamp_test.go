@@ -45,6 +45,30 @@ func TestSameDay(t *testing.T) {
 	}
 }
 
+func TestShortDuration(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"whole seconds", 5 * time.Second, "5s"},
+		{"a part second still has to be waited out", 1500 * time.Millisecond, "2s"},
+		{"the last sliver never reads as none left", time.Millisecond, "1s"},
+		{"nothing left", 0, "0s"},
+		{"a cooldown already over", -2 * time.Second, "0s"},
+		{"a round minute drops the seconds", time.Minute, "1m"},
+		{"a minute and change keeps them", 90 * time.Second, "1m 30s"},
+		{"an hour drops the seconds either way", time.Hour + 30*time.Second, "1h"},
+		{"an hour and change keeps the minutes", 90 * time.Minute, "1h 30m"},
+	}
+
+	for _, c := range cases {
+		if got := ShortDuration(c.d); got != c.want {
+			t.Errorf("ShortDuration(%v) = %q, want %q [%s]", c.d, got, c.want, c.name)
+		}
+	}
+}
+
 func TestDayLabel(t *testing.T) {
 	now := time.Now().Local()
 

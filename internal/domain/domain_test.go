@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"image/color"
+	"testing"
+)
 
 func TestFileKindOf(t *testing.T) {
 	cases := []struct {
@@ -60,5 +63,51 @@ func TestChannelKindIsConversation(t *testing.T) {
 		if kind.IsConversation() {
 			t.Errorf("kind %d is a server channel, not a conversation", kind)
 		}
+	}
+}
+
+// TestGradientAt covers the segment a sample falls in: the stops are evenly
+// spaced, so which pair is mixed and how far between them is arithmetic that can
+// be off by one at either end.
+func TestGradientAt(t *testing.T) {
+	first := color.NRGBA{R: 0xFF, A: 255}
+	middle := color.NRGBA{G: 0xFF, A: 255}
+	last := color.NRGBA{B: 0xFF, A: 255}
+	gradient := Gradient{first, middle, last}
+
+	cases := []struct {
+		at   float64
+		want color.Color
+	}{
+		{0, first},
+		{0.5, middle},
+		{1, last},
+		{-1, first}, // out of range clamps rather than wrapping
+		{2, last},
+		{0.25, color.RGBA{R: 0x7F, G: 0x7F, A: 255}}, // halfway into the first pair
+	}
+
+	for _, c := range cases {
+		got := gradient.At(c.at)
+
+		r, g, b, a := got.RGBA()
+		wantR, wantG, wantB, wantA := c.want.RGBA()
+		if r != wantR || g != wantG || b != wantB || a != wantA {
+			t.Errorf("At(%v) = %v, want %v", c.at, got, c.want)
+		}
+	}
+}
+
+// A gradient stands in for a single colour wherever one fill is all that can be
+// drawn, so it has to answer as the mean of its stops rather than as its first.
+func TestGradientAveragesItsStops(t *testing.T) {
+	gradient := Gradient{color.NRGBA{R: 0xFF, A: 255}, color.NRGBA{R: 0x00, A: 255}}
+
+	r, _, _, a := gradient.RGBA()
+	if want := uint32(0xFFFF / 2); r != want {
+		t.Errorf("red = %v, want %v", r, want)
+	}
+	if a != 0xFFFF {
+		t.Errorf("alpha = %v, want opaque", a)
 	}
 }

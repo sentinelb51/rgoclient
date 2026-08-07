@@ -30,6 +30,7 @@ func message(author string, t time.Time) *domain.Message {
 func TestContinuesGroup(t *testing.T) {
 	base := time.Date(2026, 7, 14, 12, 0, 0, 0, time.Local)
 	prev := message("01ELYNN", base)
+	window := messageGroupWindow()
 
 	cases := []struct {
 		name string
@@ -37,8 +38,8 @@ func TestContinuesGroup(t *testing.T) {
 		want bool
 	}{
 		{"same author, moments later", message("01ELYNN", base.Add(time.Minute)), true},
-		{"same author, at the window's edge", message("01ELYNN", base.Add(messageGroupWindow)), true},
-		{"same author, past the window", message("01ELYNN", base.Add(messageGroupWindow+time.Minute)), false},
+		{"same author, at the window's edge", message("01ELYNN", base.Add(window)), true},
+		{"same author, past the window", message("01ELYNN", base.Add(window+time.Minute)), false},
 		{"a different author", message("01SAREN", base.Add(time.Minute)), false},
 	}
 	for _, tc := range cases {

@@ -57,11 +57,27 @@ var Colors = struct {
 	TimestampText         color.Color
 	DaySeparatorText      color.Color
 	DaySeparatorLine      color.Color
+	SystemMessageText     color.Color
+	SystemMessageIcon     color.Color
+	SystemMessageJoin     color.Color
+	SystemMessageLeave    color.Color
+	SystemMessageDanger   color.Color
+	SystemMessageChange   color.Color
+	SystemMessageCall     color.Color
+	SwiftActionIcon       color.Color
+	SwiftActionConfirm    color.Color
+	SwiftActionDanger     color.Color
 	ReplyLine             color.Color
 	ReplyMentionActive    color.Color
 	MentionText           color.Color
 	MentionHandleText     color.Color
+	SlowmodeText          color.Color
+	SlowmodeWaiting       color.Color
 	ErrorText             color.Color
+
+	/* Scrolling */
+
+	ScrollIndicator color.Color
 
 	/* Message embeds */
 
@@ -73,7 +89,10 @@ var Colors = struct {
 	/* User profiles */
 
 	ProfileBannerBg color.Color
-	ProfileChipBg   color.Color
+
+	/* Chips */
+
+	ChipBg color.Color
 
 	/* Presence */
 
@@ -146,11 +165,49 @@ var Colors = struct {
 	TimestampText:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	DaySeparatorText:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	DaySeparatorLine:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142 hairline
-	ReplyLine:             color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274, reads over the hover fill too
-	ReplyMentionActive:    color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint
-	MentionText:           color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
-	MentionHandleText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
-	ErrorText:             color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
+
+	// A system line is the channel narrating itself, not someone speaking, so it
+	// is set in the same grey the day separator names its date in — legible, and
+	// plainly not a message. Its mark is the exception: two pixels of stroke
+	// against a body of text, where colour is what lets a run of them be read as
+	// arrivals and departures before a word of it is. The tone says what class of
+	// event happened and the glyph says which, so the grey is what a kind carrying
+	// no tone of its own falls back to — as an unknown kind does its generic mark.
+	SystemMessageText:   color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	SystemMessageIcon:   color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	SystemMessageJoin:   color.RGBA{R: 58, G: 191, B: 126, A: 255},  // #3ABF7E, someone arrived
+	SystemMessageLeave:  color.RGBA{R: 229, G: 166, B: 75, A: 255},  // #E5A64B, someone went
+	SystemMessageDanger: color.RGBA{R: 217, G: 92, B: 92, A: 255},   // #D95C5C, someone was made to go
+	SystemMessageChange: color.RGBA{R: 71, G: 153, B: 240, A: 255},  // #4799F0, the channel itself changed
+	SystemMessageCall:   color.RGBA{R: 155, G: 138, B: 240, A: 255}, // #9B8AF0, a call
+
+	// A message's own marks. They rest translucent and light under the pointer, so
+	// these are the lit colours. The ones that only move you somewhere are neutral;
+	// the two that commit something are coloured for what they commit, delete being
+	// the one button in the row that cannot be taken back.
+	SwiftActionIcon:    color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	SwiftActionConfirm: color.RGBA{R: 58, G: 191, B: 126, A: 255},  // #3ABF7E, save an edit
+	SwiftActionDanger:  color.RGBA{R: 217, G: 92, B: 92, A: 255},   // #D95C5C, delete
+
+	ReplyLine:          color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274, reads over the hover fill too
+	ReplyMentionActive: color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint
+	MentionText:        color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
+	MentionHandleText:  color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
+
+	// The composer's slowmode badge. At rest it states a rule and reads as
+	// furniture; once it is counting down it is the reason Enter did nothing, so
+	// it warms to the amber the palette already uses for a holding state.
+	SlowmodeText:    color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	SlowmodeWaiting: color.RGBA{R: 229, G: 166, B: 75, A: 255},  // #E5A64B
+
+	ErrorText: color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
+
+	// The position indicator drawn while a view moves. The same slate as the reply
+	// elbow, which is the palette's answer for a mark that has to read over the
+	// message area and over a hovered row alike. Opaque: it is only up for a
+	// moment, its own fade is what softens it, and an alpha here would be read
+	// premultiplied and come back lighter than it was written.
+	ScrollIndicator: color.RGBA{R: 90, G: 98, B: 116, A: 255}, // #5A6274
 
 	// An embed is a card lifted off the message area, not a panel: it carries the
 	// same fill the other cards do, and the stripe down its side is what the eye
@@ -166,7 +223,11 @@ var Colors = struct {
 	// slate the palette already uses rather than the accent, which would make every
 	// user without a coloured role look like the selected server.
 	ProfileBannerBg: color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142
-	ProfileChipBg:   color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142, lifted off the card
+
+	// A chip is a surface in its own right, so it takes the same slate the banner
+	// does and wears the shared hairline: its text is whatever colour the thing it
+	// names carries, and a coloured word alone on the card read as loose text.
+	ChipBg: color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142, lifted off the card
 
 	// Presence reads as a ring around an avatar, so these are saturated enough to
 	// carry a few pixels of stroke against the card behind them. Offline is never
@@ -233,6 +294,9 @@ var Sizes = struct {
 	MessageReplyLineThickness     float32
 	MessageReplyLineGap           float32
 	MessageTimestampSize          float32
+	SystemMessageTextSize         float32
+	SystemMessageIconSize         float32
+	SystemMessagePadding          float32
 	DaySeparatorTextSize          float32
 	DaySeparatorThickness         float32
 	DaySeparatorTopPadding        float32
@@ -244,6 +308,12 @@ var Sizes = struct {
 
 	OutlineWidth   float32
 	CardShadowBlur float32
+
+	/* Scrolling */
+
+	ScrollIndicatorWidth     float32
+	ScrollIndicatorInset     float32
+	ScrollIndicatorMinHeight float32
 
 	/* Message embeds */
 
@@ -270,10 +340,16 @@ var Sizes = struct {
 	ComposerGutterWidth float32
 	ComposerButtonSize  float32
 	ComposerIconSize    float32
+	ComposerMaxLines    float32 // lines the entry grows to before it scrolls
 	MentionRowHeight    float32
 	MentionAvatarSize   float32
 	MentionNameSize     float32
 	MentionHandleSize   float32
+	SlowmodeGlyphSize   float32
+	SlowmodeTextSize    float32
+	SlowmodeGap         float32
+	SlowmodeInsetH      float32
+	SlowmodeDockGap     float32
 
 	/* User profiles */
 
@@ -288,18 +364,29 @@ var Sizes = struct {
 	ProfileNameSize           float32
 	ProfileDialogNameSize     float32
 	ProfileHandleSize         float32
+	ProfileHandleRadius       float32
+	ProfileHandlePaddingV     float32
+	ProfileHandlePaddingH     float32
 	ProfileStatusSize         float32
 	ProfileDetailSize         float32
+	ProfileBioMaxHeight       float32
+	ProfileBioRadius          float32
+	ProfileBioPadding         float32
 	ProfileSectionSize        float32
 	ProfilePadding            float32
 	ProfileGap                float32
 	ProfileTightGap           float32
 	ProfileCornerRadius       float32
-	ProfileChipTextSize       float32
-	ProfileChipRadius         float32
-	ProfileChipPaddingV       float32
-	ProfileChipPaddingH       float32
-	ProfileChipSpacing        float32
+
+	/* Chips */
+
+	ChipTextSize float32
+	ChipRadius   float32
+	ChipPaddingV float32
+	ChipPaddingH float32
+	ChipSpacing  float32
+	ChipDotSize  float32
+	ChipDotGap   float32
 
 	/* Anchored popovers */
 
@@ -323,6 +410,11 @@ var Sizes = struct {
 	NoticePaddingV    float32
 	NoticePaddingH    float32
 	NoticeStackMargin float32
+	NoticeTitleSize   float32
+	NoticeBodySize    float32
+	NoticeTitleGap    float32
+	NoticeCountdown   float32
+	NoticeCardSpacing float32
 	ConfirmWidth      float32
 	ConfirmRadius     float32
 
@@ -349,6 +441,39 @@ var Sizes = struct {
 	JoinDialogWidth        float32
 	JoinDialogCornerRadius float32
 	JoinDialogTextSize     float32
+
+	/* Settings */
+
+	SettingsRailWidth     float32
+	SettingsRailRowHeight float32
+	SettingsRailTextSize  float32
+	SettingsPageWidth     float32
+	SettingsPagePadding   float32
+	SettingsHeaderSize    float32
+	SettingsCaptionSize   float32
+	SettingsRowHeight     float32
+	SettingsRowPaddingH   float32
+	SettingsRowPaddingV   float32
+	SettingsGroupRadius   float32
+	SettingsGroupGap      float32
+	SettingsLabelSize     float32
+	SettingsDetailSize    float32
+	SettingsIconSize      float32
+	SettingsControlWidth  float32
+	SettingsValueWidth    float32
+	SettingsInputHeight   float32
+	SettingsInputRadius   float32
+	SettingsToggleWidth   float32
+	SettingsToggleHeight  float32
+	SettingsToggleInset   float32
+	SettingsSwatchSize    float32
+	SettingsSliderHeight  float32
+	SettingsSliderTrack   float32
+	SettingsSliderKnob    float32
+	SettingsUsageHeight   float32
+	SettingsPaletteSize   float32
+	SettingsPaletteGap    float32
+	SettingsPreviewGap    float32
 }{
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
@@ -387,12 +512,19 @@ var Sizes = struct {
 	MessageReplyLineThickness:     2,
 	MessageReplyLineGap:           8,
 	MessageTimestampSize:          12,
-	DaySeparatorTextSize:          11,
-	DaySeparatorThickness:         1,
-	DaySeparatorTopPadding:        14,
-	DaySeparatorBottomPadding:     2,
-	DaySeparatorGap:               8,
-	SwiftActionSize:               32,
+	// A system line is one line whatever it says, so its margin is its own rather
+	// than the gap that separates two people speaking: a run of joins is a block,
+	// not a page. The mark is sized against that line, not against the avatar
+	// whose gutter it is centred in.
+	SystemMessageTextSize:     13,
+	SystemMessageIconSize:     16,
+	SystemMessagePadding:      5,
+	DaySeparatorTextSize:      11,
+	DaySeparatorThickness:     1,
+	DaySeparatorTopPadding:    14,
+	DaySeparatorBottomPadding: 2,
+	DaySeparatorGap:           8,
+	SwiftActionSize:           32,
 
 	// A hairline, everywhere: a card's outline and a column seam are the same
 	// stroke, so a card never reads as more framed than the column beside it.
@@ -403,6 +535,17 @@ var Sizes = struct {
 	// what a card sitting *in* a strip looks like.
 	OutlineWidth:   1,
 	CardShadowBlur: 14,
+
+	// The indicator has to fit inside the message row's own horizontal padding —
+	// width plus inset under MessageHorizontalPadding — or it is drawn over the
+	// text rather than beside it. A width of zero is how it is turned off.
+	//
+	// The minimum height is what keeps it findable in a long channel, where the
+	// viewport is a small enough fraction of the scrollback that an honest
+	// proportion would be a couple of pixels.
+	ScrollIndicatorWidth:     4,
+	ScrollIndicatorInset:     4,
+	ScrollIndicatorMinHeight: 28,
 
 	// EmbedMaxWidth is a ceiling on the text column, not the width every card is
 	// drawn at: an embed is measured against what it says and only capped here, so
@@ -430,6 +573,7 @@ var Sizes = struct {
 	// The padding *inside* the card is deliberately small by contrast: the entry
 	// already carries InnerPadding above and below its text, so the card only
 	// needs a couple of pixels more before it starts looking slack.
+	ComposerMaxLines:    8,
 	ComposerDockMargin:  8,
 	ComposerRadius:      8,
 	ComposerPaddingV:    3,
@@ -441,6 +585,16 @@ var Sizes = struct {
 	MentionAvatarSize:   20,
 	MentionNameSize:     13,
 	MentionHandleSize:   11,
+
+	// The chip is bare text over the message column, so it is set larger than the
+	// gutter type it sits near: with no pill behind it, size is all it has to hold
+	// itself apart from the conversation running underneath. The inset keeps it off
+	// the card's rounded top-right corner, which it would otherwise sit against.
+	SlowmodeGlyphSize: 15,
+	SlowmodeTextSize:  14,
+	SlowmodeGap:       6,
+	SlowmodeInsetH:    10,
+	SlowmodeDockGap:   6,
 
 	// The avatar overhangs the banner by half its height, so the banner is sized
 	// against it: too short and the avatar hangs off the card's top edge.
@@ -455,18 +609,30 @@ var Sizes = struct {
 	ProfileNameSize:           17,
 	ProfileDialogNameSize:     21,
 	ProfileHandleSize:         12,
+	ProfileHandleRadius:       5,
+	ProfileHandlePaddingV:     2,
+	ProfileHandlePaddingH:     6,
 	ProfileStatusSize:         12,
 	ProfileDetailSize:         12,
+	ProfileBioMaxHeight:       160,
+	ProfileBioRadius:          6,
+	ProfileBioPadding:         10,
 	ProfileSectionSize:        10,
 	ProfilePadding:            14,
 	ProfileGap:                10,
 	ProfileTightGap:           4,
 	ProfileCornerRadius:       8,
-	ProfileChipTextSize:       11,
-	ProfileChipRadius:         9,
-	ProfileChipPaddingV:       3,
-	ProfileChipPaddingH:       8,
-	ProfileChipSpacing:        4,
+
+	// The dot is what carries a role's colour once the chip has an edge of its own,
+	// so it is sized against the cap height of the text beside it rather than the
+	// chip: bigger and it reads as a bullet the name hangs off.
+	ChipTextSize: 11,
+	ChipRadius:   9,
+	ChipPaddingV: 3,
+	ChipPaddingH: 8,
+	ChipSpacing:  4,
+	ChipDotSize:  8,
+	ChipDotGap:   5,
 
 	PopoverGap:    10,
 	PopoverMargin: 12,
@@ -477,13 +643,20 @@ var Sizes = struct {
 	TooltipPaddingH: 9,
 	TooltipGap:      8,
 
-	NoticeWidth:       300,
-	NoticeRadius:      6,
+	NoticeWidth:       320,
+	NoticeRadius:      8,
 	NoticeEdgeWidth:   3,
-	NoticeIconSize:    16,
-	NoticePaddingV:    8,
-	NoticePaddingH:    10,
+	NoticeIconSize:    18,
+	NoticePaddingV:    10,
+	NoticePaddingH:    12,
 	NoticeStackMargin: 12,
+	NoticeTitleSize:   13,
+	NoticeBodySize:    12,
+	NoticeTitleGap:    3,
+	// The bar that drains along the bottom edge, so a notice says how long it has
+	// left rather than simply vanishing.
+	NoticeCountdown:   3,
+	NoticeCardSpacing: 8,
 	ConfirmWidth:      360,
 	ConfirmRadius:     6,
 
@@ -504,6 +677,44 @@ var Sizes = struct {
 	JoinDialogWidth:        320,
 	JoinDialogCornerRadius: 6,
 	JoinDialogTextSize:     12,
+
+	SettingsRailWidth:     210,
+	SettingsRailRowHeight: 34,
+	SettingsRailTextSize:  14,
+	// The pane is capped rather than filled: a row is a label at one end and one
+	// control at the other, and across a maximised window the two lose each other.
+	SettingsPageWidth:   620,
+	SettingsPagePadding: 24,
+	SettingsHeaderSize:  22,
+	SettingsCaptionSize: 11,
+	SettingsRowHeight:   44,
+	SettingsRowPaddingH: 14,
+	// Chosen against SettingsInputHeight: the two together are the row height, so
+	// a row holding a control is exactly as tall as one holding only text.
+	SettingsRowPaddingV:  4,
+	SettingsGroupRadius:  8,
+	SettingsGroupGap:     20,
+	SettingsLabelSize:    14,
+	SettingsDetailSize:   11,
+	SettingsIconSize:     18,
+	SettingsControlWidth: 190,
+	// The number beside a slider gets a slot of its own, so the slider does not
+	// shorten as the value gains a digit — and it is wide enough for the field
+	// that replaces it when the number is clicked.
+	SettingsValueWidth:   58,
+	SettingsInputHeight:  36,
+	SettingsInputRadius:  6,
+	SettingsToggleWidth:  40,
+	SettingsToggleHeight: 22,
+	SettingsToggleInset:  3,
+	SettingsSwatchSize:   20,
+	SettingsSliderHeight: 20,
+	SettingsSliderTrack:  4,
+	SettingsSliderKnob:   14,
+	SettingsUsageHeight:  8,
+	SettingsPaletteSize:  22,
+	SettingsPaletteGap:   6,
+	SettingsPreviewGap:   10,
 }
 
 // ColorNameMention is an app-specific theme colour name. A RichText segment can
@@ -512,8 +723,9 @@ var Sizes = struct {
 const ColorNameMention fyne.ThemeColorName = "rgoMention"
 
 // selectionTint is the accent used for text selection, alpha'd so the glyphs
-// underneath stay legible.
-var selectionTint = color.RGBA{R: 91, G: 124, B: 250, A: 90}
+// underneath stay legible. Apply recomputes it from the palette, so it follows a
+// changed accent rather than staying on the one compiled in here.
+var selectionTint color.Color = color.RGBA{R: 91, G: 124, B: 250, A: 90}
 
 // noShadow removes Fyne's only other edge treatment. A scroll paints this as a
 // gradient along whichever edge has more content past it — a wide smear across a
@@ -600,10 +812,22 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 // stroke, so an entry reads as a flat filled bar rather than an outlined box.
 // The zero border also collapses the caret, which Fyne draws InputBorder wide —
 // ui.WithCaret restores it per entry without bringing the outline back.
+//
+// Both scrollbar sizes are zeroed, not just the large one. Fyne's bar lives in a
+// scrollBarArea laid over the right edge of the content, and that area is a
+// hover-accepting widget sized SizeNameScrollBarSmall*2 at rest — so a
+// transparent bar still left a strip that, being the innermost object, took the
+// hover a message row underneath it needed. ui.ObservableScroll draws the
+// position indicator the client does want as an inert rectangle instead.
 func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
-	case theme.SizeNameScrollBar, theme.SizeNameInputRadius, theme.SizeNameInputBorder:
+	case theme.SizeNameScrollBar, theme.SizeNameScrollBarSmall,
+		theme.SizeNameInputRadius, theme.SizeNameInputBorder:
 		return 0
+	case theme.SizeNameText:
+		if fontSize > 0 {
+			return fontSize
+		}
 	}
 
 	return t.Theme.Size(name)

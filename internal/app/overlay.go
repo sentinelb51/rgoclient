@@ -38,17 +38,15 @@ func (a *App) showPopover(content, anchor fyne.CanvasObject) {
 }
 
 // mountOverlay replaces the modal layer with overlay and takes the keyboard.
+// Escape is claimed by whichever surface is topmost, which is what bindKeys
+// decides — the settings page is underneath this layer and gets it back when the
+// overlay goes.
 func (a *App) mountOverlay(overlay *ui.Overlay) {
 	a.closeOverlay()
 
-	canvas := a.window.Canvas()
 	a.overlay = overlay
-	canvas.Overlays().Add(a.overlay)
-	canvas.SetOnTypedKey(func(event *fyne.KeyEvent) {
-		if event.Name == fyne.KeyEscape {
-			a.closeOverlay()
-		}
-	})
+	a.window.Canvas().Overlays().Add(a.overlay)
+	a.bindKeys()
 }
 
 // repositionOverlay re-places what is on the modal layer after it changed size,
@@ -66,13 +64,17 @@ func (a *App) closeOverlay() {
 		return
 	}
 
-	canvas := a.window.Canvas()
-	canvas.Overlays().Remove(a.overlay)
-	canvas.SetOnTypedKey(nil)
+	a.window.Canvas().Overlays().Remove(a.overlay)
 
 	a.overlay = nil
 	a.joinDialog = nil
-	a.focusInput()
+	a.bindKeys()
+
+	// The settings page has its own focus to keep; only the client underneath
+	// wants the composer back.
+	if a.settings == nil || !a.settings.IsOpen() {
+		a.focusInput()
+	}
 }
 
 /* Attachment viewer */

@@ -81,7 +81,7 @@ func TestAvatarCentredOnFirstLine(t *testing.T) {
 					if v.Size().Height == theme.Sizes.MessageAvatarSize && avatar == nil {
 						avatar, avatarTop = v, pos.Y
 					}
-				case *canvas.Text:
+				case *AccentText:
 					if v == c.w.authorText {
 						nameTop = pos.Y
 					}

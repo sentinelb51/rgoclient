@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2/container"
 
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -17,7 +18,7 @@ import (
 // authorFetchDelay is how long author resolution waits for more authors before
 // going to the network. Mounting a page calls ensureAuthor once per widget, so a
 // short window turns that burst into one batch.
-const authorFetchDelay = 50 * time.Millisecond
+func authorFetchDelay() time.Duration { return config.Current().Behaviour.AuthorFetchDelay() }
 
 /* Lazy author resolution */
 
@@ -51,7 +52,7 @@ func (a *App) ensureAuthor(serverID, userID string) {
 	a.pendingAuthors = append(a.pendingAuthors, client.AuthorRef{ServerID: serverID, UserID: userID})
 
 	if a.authorTimer == nil {
-		a.authorTimer = time.AfterFunc(authorFetchDelay, func() {
+		a.authorTimer = time.AfterFunc(authorFetchDelay(), func() {
 			a.doOnUI(a.flushAuthors, false)
 		})
 	}
@@ -136,6 +137,10 @@ func (a *App) buildMemberList() fyne.CanvasObject {
 	a.memberSidebar = ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, background,
 		ui.NewFillRow(1, ui.NewColumnDivider(), container.NewVScroll(a.memberList)))
 
+	if !config.Current().Interface.ShowMemberSidebar {
+		a.memberSidebar.Hide()
+	}
+
 	return a.memberSidebar
 }
 
@@ -162,6 +167,9 @@ func (a *App) toggleMemberList() {
 // same people under the same names, and deriving them separately meant a second
 // walk, a second round of name resolution and a second sort on every member
 // event.
+//
+// The candidates are handed over whatever the sidebar was asked to show:
+// somebody hidden from the list is still somebody the composer can mention.
 func (a *App) refreshMemberList() {
 	a.memberList.Objects = nil
 	if a.currentServerID == "" {
@@ -170,13 +178,38 @@ func (a *App) refreshMemberList() {
 	}
 
 	members := a.store.Members(a.currentServerID)
+	settings := config.Current().Behaviour
 
 	deps := a.deps()
-	a.addMemberSection("Online", members, true, deps)
-	a.addMemberSection("Offline", members, false, deps)
+	switch {
+	case settings.GroupByPresence:
+		a.addMemberSection("Online", members, true, deps)
+		if !settings.HideOfflineMembers {
+			a.addMemberSection("Offline", members, false, deps)
+		}
+	default:
+		a.addMembers(members, settings.HideOfflineMembers, deps)
+	}
 	a.memberList.Refresh()
 
 	a.setMentionCandidates(memberCandidates(members))
+}
+
+// addMembers appends every member as one ungrouped run, for when the presence
+// split is switched off.
+func (a *App) addMembers(members []domain.Member, hideOffline bool, deps ui.Deps) {
+	serverID := a.currentServerID
+
+	for i := range members {
+		if hideOffline && !members[i].Online {
+			continue
+		}
+
+		userID := members[i].UserID
+		w := ui.NewMemberWidget(deps, members[i], members[i].Online)
+		w.Menu = func() []*fyne.MenuItem { return a.memberMenu(serverID, userID) }
+		a.memberList.Add(w)
+	}
 }
 
 // addMemberSection appends a titled section holding the members whose presence

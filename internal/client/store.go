@@ -15,6 +15,7 @@ import (
 
 	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 )
 
@@ -168,6 +169,12 @@ func (s *store) Member(serverID, userID string) (domain.Member, bool) {
 // name. Sorting here rather than at the call sites is what lets the member
 // sidebar and the mention picker share one walk: they are the same people under
 // the same names in the same order.
+//
+// The ordering can be turned off in the settings, which is the point of the
+// setting: this runs on every member event, and on a large server the walk that
+// lowers a name per member and then sorts them is the most expensive thing the
+// client does in response to somebody coming online. Unordered, the list is
+// whatever order State holds — stable enough to read, and free.
 func (s *store) Members(serverID string) []domain.Member {
 	state := s.state()
 	if state == nil || serverID == "" {
@@ -176,6 +183,15 @@ func (s *store) Members(serverID string) []domain.Member {
 
 	raw := state.Members(serverID)
 	server := state.Server(serverID)
+
+	if !config.Current().Behaviour.SortMembers {
+		members := make([]domain.Member, len(raw))
+		for i, member := range raw {
+			members[i] = toMember(state, member, server)
+		}
+
+		return members
+	}
 
 	// The sort key is resolved alongside the member rather than lowered inside the
 	// comparator, which would redo that work O(n log n) times on a large server.
@@ -261,19 +277,26 @@ func serverRoles(server *revoltgo.Server, roleIDs []string) []domain.Role {
 		return nil
 	}
 
-	known := make([]*revoltgo.ServerRole, 0, len(roleIDs))
+	// The ID is the map key rather than a field on the role, so it is paired with
+	// its definition here to survive the sort.
+	type known struct {
+		id   string
+		role *revoltgo.ServerRole
+	}
+
+	found := make([]known, 0, len(roleIDs))
 	for _, id := range roleIDs {
 		if role := server.Roles[id]; role != nil {
-			known = append(known, role)
+			found = append(found, known{id: id, role: role})
 		}
 	}
-	slices.SortFunc(known, func(x, y *revoltgo.ServerRole) int { return cmp.Compare(x.Rank, y.Rank) })
+	slices.SortFunc(found, func(x, y known) int { return cmp.Compare(x.role.Rank, y.role.Rank) })
 
-	roles := make([]domain.Role, len(known))
-	for i, role := range known {
-		roles[i] = domain.Role{Name: role.Name}
-		if role.Colour != nil {
-			if c, ok := parseHexColor(*role.Colour); ok {
+	roles := make([]domain.Role, len(found))
+	for i, k := range found {
+		roles[i] = domain.Role{ID: k.id, Name: k.role.Name}
+		if k.role.Colour != nil {
+			if c, ok := parseColor(*k.role.Colour); ok {
 				roles[i].Color = c
 			}
 		}
@@ -305,7 +328,7 @@ func roleColor(server *revoltgo.Server, roleIDs []string) (color.Color, bool) {
 		return nil, false
 	}
 
-	return parseHexColor(*best.Colour)
+	return parseColor(*best.Colour)
 }
 
 /* Channels and servers */
@@ -328,6 +351,7 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		ID:         channel.ID,
 		Kind:       toChannelKind(channel.ChannelType),
 		Name:       channel.Name,
+		Slowmode:   s.client.slowmodeOf(channel.ID),
 		Recipients: channel.Recipients,
 		Active:     channel.Active,
 	}
@@ -443,22 +467,44 @@ func (s *store) SystemText(system *domain.SystemMessage) string {
 
 /* Permissions */
 
+// permissionBypassSlowmode is Revolt's BypassSlowmode channel permission.
+// revoltgo's constants stop at MentionRoles, so the bit is named here rather
+// than imported. It falls inside PermissionGrantAllSafe, which is what a server
+// owner is granted, so ownership already carries it.
+const permissionBypassSlowmode int64 = 1 << 39
+
 // CanManageMessages reports whether the account may delete other people's
 // messages in a channel.
 func (s *store) CanManageMessages(channelID string) bool {
+	return s.channelPermissions(channelID)&revoltgo.PermissionManageMessages != 0
+}
+
+// CanBypassSlowmode reports whether the account may send in a channel without
+// waiting out its cooldown.
+func (s *store) CanBypassSlowmode(channelID string) bool {
+	return s.channelPermissions(channelID)&permissionBypassSlowmode != 0
+}
+
+// channelPermissions is the account's permission bitfield in a channel, or 0
+// when there is no session, no such channel, or the calculation fails — all of
+// which mean the same thing to a caller: assume nothing is allowed.
+func (s *store) channelPermissions(channelID string) int64 {
 	state := s.state()
 	if state == nil {
-		return false
+		return 0
 	}
 
 	self, channel := state.Self(), state.Channel(channelID)
 	if self == nil || channel == nil {
-		return false
+		return 0
 	}
 
 	permissions, err := state.ChannelPermissions(self, channel)
+	if err != nil {
+		return 0
+	}
 
-	return err == nil && permissions&revoltgo.PermissionManageMessages != 0
+	return permissions
 }
 
 // CanKickMembers reports whether the account may remove members from a server.

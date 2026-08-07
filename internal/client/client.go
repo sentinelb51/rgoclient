@@ -29,17 +29,16 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 )
 
 const (
-	messagesPerChannel = 500 // cached messages per channel
-	cachedChannels     = 5   // channels kept in the message cache
-
 	// eventBuffer is how far the gateway may run ahead of the reader. Emission
 	// blocks once it is full rather than dropping: a dropped MessageCreate is a
 	// message the user never sees, and the gateway reader stalling for a moment
@@ -68,19 +67,26 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
-	mu       sync.Mutex      // guards fetching
-	fetching map[string]bool // channelID -> a page request is already in flight
+	mu       sync.Mutex               // guards fetching and slowmode
+	fetching map[string]bool          // channelID -> a page request is already in flight
+	slowmode map[string]time.Duration // channelID -> its send cooldown, once asked for
 }
 
 // New returns a client with no session. Every read reports nothing known and
 // every action fails with ErrNoSession, which is what being logged out is —
 // so the controller can hand widgets a Store before anyone has logged in.
+//
+// The message cache is sized here and never resized, which is why the settings
+// page marks its two entries as needing a restart: a live change would mean
+// rebuilding the cache under readers who are holding slices out of it.
 func New() *Client {
+	settings := config.Current().Cache
 	c := &Client{
-		messages: cache.NewMessageCache(messagesPerChannel, cachedChannels),
+		messages: cache.NewMessageCache(settings.MessagesPerChannel, settings.CachedChannels),
 		events:   make(chan Event, eventBuffer),
 		done:     make(chan struct{}),
 		fetching: make(map[string]bool),
+		slowmode: make(map[string]time.Duration),
 	}
 	c.store = &store{client: c}
 
@@ -155,6 +161,7 @@ func (c *Client) Close() {
 
 	c.mu.Lock()
 	clear(c.fetching)
+	clear(c.slowmode)
 	c.mu.Unlock()
 
 	if session != nil {

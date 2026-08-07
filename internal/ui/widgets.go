@@ -3,7 +3,9 @@ package ui
 import (
 	"hash/fnv"
 	"image/color"
+	"slices"
 	"strconv"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -13,6 +15,8 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/config"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -113,6 +117,94 @@ func NewColumnDivider() fyne.CanvasObject {
 	divider.SetMinSize(fyne.NewSize(theme.Sizes.OutlineWidth, 0))
 
 	return divider
+}
+
+/* Chips */
+
+// NewChip is one small rounded label in its own colour — a badge, a count, the
+// bot mark.
+func NewChip(text string, tint color.Color) fyne.CanvasObject {
+	return newChip(nil, text, tint)
+}
+
+// RoleChip is a role drawn as a chip: a dot in the role's own colour beside its
+// name. The chip is what answers the right-click rather than the dot alone —
+// the dot is a few pixels across, and a menu nothing can reliably hit is not one.
+type RoleChip struct {
+	tapBase
+
+	content fyne.CanvasObject
+}
+
+var _ fyne.SecondaryTappable = (*RoleChip)(nil)
+
+// NewRoleChip draws role as a chip, right-clickable for its name and ID. Roles
+// without a colour fall back to the primary text colour, dot included, so the
+// shape stays the same wherever the chip is used.
+func NewRoleChip(role domain.Role) *RoleChip {
+	tint := theme.Colors.TextPrimary
+	if role.Color != nil {
+		tint = role.Color
+	}
+
+	w := &RoleChip{content: newChip(newChipDot(tint), role.Name, tint)}
+	w.onSecondaryTap = func(e *fyne.PointEvent) { ShowContextMenu(w, roleMenu(role), e.AbsolutePosition) }
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *RoleChip) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.content)
+}
+
+// roleMenu is what right-clicking a role offers. A role resolved from a server
+// always carries an ID; one built from a name alone leaves that item out rather
+// than offering an empty copy.
+func roleMenu(role domain.Role) []*fyne.MenuItem {
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Copy role name", func() { CopyToClipboard(role.Name) }),
+	}
+	if role.ID != "" {
+		items = append(items, fyne.NewMenuItem("Copy role ID", func() { CopyToClipboard(role.ID) }))
+	}
+
+	return items
+}
+
+// newChip assembles the chip: an optional leading mark, then the text, on a
+// rounded surface. The mark is centred rather than stretched — a row layout
+// would otherwise hand a circle the full height of the text beside it.
+func newChip(mark fyne.CanvasObject, text string, tint color.Color) fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.ChipBg)
+	background.CornerRadius = theme.Sizes.ChipRadius
+
+	label := canvas.NewText(text, solidColor(tint))
+	label.TextStyle = fyne.TextStyle{Bold: true}
+	label.TextSize = theme.Sizes.ChipTextSize
+
+	var content fyne.CanvasObject = container.NewCenter(label)
+	if mark != nil {
+		content = HBoxNoSpacing(mark, HorizontalSpacer(theme.Sizes.ChipDotGap), content)
+	}
+
+	padV, padH := theme.Sizes.ChipPaddingV, theme.Sizes.ChipPaddingH
+
+	return container.NewStack(background, NewInset(content, padV, padV, padH, padH))
+}
+
+// newChipDot is the leading dot: the one thing in a chip carrying the shared
+// hairline, which is what lifts a saturated colour off the surface behind it.
+// The circle is pinned to its own square and centred twice over — a row layout
+// stretches what it is given, and a stretched circle is an ellipse.
+func newChipDot(fill color.Color) fyne.CanvasObject {
+	size := theme.Sizes.ChipDotSize
+
+	dot := canvas.NewCircle(fill)
+	dot.StrokeColor = theme.Colors.Outline
+	dot.StrokeWidth = theme.Sizes.OutlineWidth
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), dot))
 }
 
 /* Containers */
@@ -569,21 +661,42 @@ func avatarSize() fyne.Size {
 /* Scrolling */
 
 // scrollAmplify multiplies wheel deltas so scrolling feels message-by-message.
-const scrollAmplify = 4
+// Read per event rather than at construction: it is one map lookup against a
+// wheel notch, and it means the setting takes effect without a rebuild.
+func scrollAmplify() float32 {
+	return float32(config.Current().Behaviour.ScrollSpeed)
+}
 
-// ObservableScroll is a vertical scroll container that reports offset changes
-// and supports middle-mouse panning.
+const (
+	// scrollIndicatorLinger is how long the position indicator stays up after the
+	// last movement, and scrollIndicatorFade how long it takes to leave. Long
+	// enough to say where the view landed; gone before anything is read against it.
+	scrollIndicatorLinger = 700 * time.Millisecond
+	scrollIndicatorFade   = 350 * time.Millisecond
+)
+
+// ObservableScroll is a vertical scroll container that reports offset changes,
+// supports middle-mouse panning, and draws its own position indicator.
 type ObservableScroll struct {
 	container.Scroll
 	OnScroll func(offset fyne.Position)
-	panning  bool
+
+	/* The position indicator */
+
+	indicator  *canvas.Rectangle
+	lastOffset fyne.Position
+	linger     *time.Timer
+	fade       *fyne.Animation
+
+	panning bool
 }
 
 var _ fyne.Draggable = (*ObservableScroll)(nil)
 
 // NewObservableVScroll creates an observable vertical scroll container.
 func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
-	s := &ObservableScroll{}
+	s := &ObservableScroll{indicator: canvas.NewRectangle(theme.Colors.ScrollIndicator)}
+	s.indicator.Hide()
 	s.Direction = container.ScrollVerticalOnly
 	s.Content = content
 	s.ExtendBaseWidget(s)
@@ -591,11 +704,139 @@ func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
 	return s
 }
 
+// CreateRenderer adds the indicator to Fyne's own scroll renderer. It is a
+// canvas.Rectangle rather than Fyne's scroll bar because that bar comes wrapped
+// in a hover-accepting area over the right edge of the content, which — being
+// innermost — takes the hover the message row under it needs, and swells under
+// the pointer over the text it is meant to sit beside. AppTheme zeroes both of
+// its sizes; this draws what they used to.
+func (s *ObservableScroll) CreateRenderer() fyne.WidgetRenderer {
+	base := s.Scroll.CreateRenderer()
+
+	return &scrollRenderer{
+		WidgetRenderer: base,
+		scroll:         s,
+		objects:        slices.Concat(base.Objects(), []fyne.CanvasObject{s.indicator}),
+	}
+}
+
+// scrollRenderer is Fyne's scroll renderer with the indicator drawn last, over
+// the content. Composing the object list once holds because the renderer
+// underneath sets its own when it is built and never replaces it.
+type scrollRenderer struct {
+	fyne.WidgetRenderer
+
+	scroll  *ObservableScroll
+	objects []fyne.CanvasObject
+}
+
+func (r *scrollRenderer) Objects() []fyne.CanvasObject { return r.objects }
+
+func (r *scrollRenderer) Layout(size fyne.Size) {
+	r.WidgetRenderer.Layout(size)
+	r.scroll.placeIndicator()
+}
+
+// Refresh is where the indicator is revealed rather than in Scrolled: every
+// offset change ends here whoever asked for it, so a middle-button pan and the
+// jump to the newest message are covered by the same line. The offset is compared
+// rather than trusted, because a refresh for any other reason — a mounted widget
+// repainting, a theme change — must not flash the bar.
+func (r *scrollRenderer) Refresh() {
+	r.WidgetRenderer.Refresh()
+
+	moved := r.scroll.Offset != r.scroll.lastOffset
+	r.scroll.lastOffset = r.scroll.Offset
+
+	if r.scroll.placeIndicator() && moved {
+		r.scroll.revealIndicator()
+	}
+}
+
+// Destroy stops the fade with the widget. A rebuild of the tree — restyling does
+// one — drops the scroll while an animation could still be running against it.
+func (r *scrollRenderer) Destroy() {
+	r.scroll.stopFade()
+	if r.scroll.linger != nil {
+		r.scroll.linger.Stop()
+	}
+
+	r.WidgetRenderer.Destroy()
+}
+
+// placeIndicator sizes the bar to the fraction of the content in view and moves
+// it to where that fraction sits, reporting whether there is anything to
+// indicate. The extent comes from Content.Size(), which the scroll's own layout
+// has already resized to it — MinSize on the message list is a walk of every
+// mounted row, and this runs on the scroll path.
+func (s *ObservableScroll) placeIndicator() bool {
+	if s.indicator == nil || s.Content == nil {
+		return false
+	}
+
+	view := s.Size()
+	content := s.Content.Size().Height
+	if view.Height <= 0 || content <= view.Height {
+		s.indicator.Hide()
+		return false
+	}
+
+	width := theme.Sizes.ScrollIndicatorWidth
+	inset := theme.Sizes.ScrollIndicatorInset
+	track := view.Height - inset*2
+
+	height := fyne.Min(fyne.Max(track*view.Height/content, theme.Sizes.ScrollIndicatorMinHeight), track)
+	progress := fyne.Min(fyne.Max(s.Offset.Y/(content-view.Height), 0), 1)
+
+	s.indicator.CornerRadius = width / 2
+	s.indicator.Resize(fyne.NewSize(width, height))
+	s.indicator.Move(fyne.NewPos(view.Width-width-inset, inset+progress*(track-height)))
+
+	return true
+}
+
+// revealIndicator brings the bar back to full strength and re-arms its exit.
+func (s *ObservableScroll) revealIndicator() {
+	s.stopFade()
+
+	s.indicator.FillColor = theme.Colors.ScrollIndicator
+	s.indicator.Show()
+	canvas.Refresh(s.indicator)
+
+	if s.linger == nil {
+		s.linger = time.AfterFunc(scrollIndicatorLinger, func() { DoOnUI(s.fadeIndicator) })
+		return
+	}
+	s.linger.Reset(scrollIndicatorLinger)
+}
+
+// fadeIndicator takes the bar out over scrollIndicatorFade. Only the linger timer
+// calls it, so a movement arriving mid-fade stops it through revealIndicator.
+func (s *ObservableScroll) fadeIndicator() {
+	s.stopFade()
+
+	s.fade = fyne.NewAnimation(scrollIndicatorFade, func(done float32) {
+		s.indicator.FillColor = theme.Fade(theme.Colors.ScrollIndicator, 1-done)
+		canvas.Refresh(s.indicator)
+	})
+	s.fade.Start()
+}
+
+func (s *ObservableScroll) stopFade() {
+	if s.fade == nil {
+		return
+	}
+
+	s.fade.Stop()
+	s.fade = nil
+}
+
 // Scrolled amplifies the wheel delta and notifies listeners.
 func (s *ObservableScroll) Scrolled(ev *fyne.ScrollEvent) {
 	amplified := *ev
-	amplified.Scrolled.DX *= scrollAmplify
-	amplified.Scrolled.DY *= scrollAmplify
+	speed := scrollAmplify()
+	amplified.Scrolled.DX *= speed
+	amplified.Scrolled.DY *= speed
 
 	s.Scroll.Scrolled(&amplified)
 	s.notify()
@@ -635,6 +876,218 @@ func (s *ObservableScroll) notify() {
 	if s.OnScroll != nil {
 		s.OnScroll(s.Offset)
 	}
+}
+
+/* Text metrics */
+
+// textAscentRatio is how much of a line of text sits above its baseline. Fyne
+// measures a line but exposes none of the metrics behind it, so the split is
+// taken as fixed — the client draws one font throughout, and only the difference
+// between two line heights is ever scaled by it.
+const textAscentRatio = 0.8
+
+// baselineOffset is how far down text at size small must start to share a
+// baseline with text at size large beside it. Two sizes handed the same height
+// centre against each other instead, which leaves the smaller one riding high.
+func baselineOffset(large, small float32) float32 {
+	return textAscentRatio * (lineHeight(large) - lineHeight(small))
+}
+
+/* Accented text */
+
+// AccentText is a name drawn in a role's colour. Fyne fills a text object with
+// one colour, so a gradient across a word can only be a gradient across its
+// letters: a flat colour mounts a single canvas.Text, a gradient one per rune,
+// each filled where that rune sits along the run.
+//
+// The split is the whole reason it is a widget rather than a bare canvas.Text.
+// A name whose role carries no gradient — nearly every one — still mounts exactly
+// one text object, so the message list pays nothing for the ones that do.
+type AccentText struct {
+	widget.BaseWidget
+
+	content *fyne.Container
+	layout  *accentLayout
+
+	text  string
+	fill  color.Color
+	size  float32
+	style fyne.TextStyle
+}
+
+// NewAccentText draws text in fill, which may be a domain.Gradient. A zero size
+// is the theme's own, as canvas.NewText takes it.
+func NewAccentText(text string, fill color.Color, size float32, style fyne.TextStyle) *AccentText {
+	if size == 0 {
+		size = fynetheme.TextSize()
+	}
+
+	t := &AccentText{layout: &accentLayout{}, text: text, fill: fill, size: size, style: style}
+	t.content = container.New(t.layout)
+	t.build()
+	t.ExtendBaseWidget(t)
+
+	return t
+}
+
+func (t *AccentText) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(t.content)
+}
+
+// Text is what the widget currently draws, which is what Fit left of it.
+func (t *AccentText) Text() string { return t.text }
+
+// Set re-labels the text, for an author who resolved after the widget was
+// mounted. Nothing is rebuilt when neither the name nor the colour has moved.
+func (t *AccentText) Set(text string, fill color.Color) {
+	if t.text == text && sameColor(t.fill, fill) {
+		return
+	}
+
+	t.text, t.fill = text, fill
+	t.build()
+	t.content.Refresh()
+	t.Refresh()
+}
+
+// Fit shortens the text to width, ending it in an ellipsis, so a long name
+// cannot widen the line it shares. Call before mounting: it shortens the string
+// itself rather than re-fitting to whatever width it is later given.
+func (t *AccentText) Fit(width float32) {
+	fitted := TruncateToWidth(t.text, width, t.size, t.style)
+	if fitted == t.text {
+		return
+	}
+
+	t.text = fitted
+	t.build()
+}
+
+// build lays out the text objects the current name and fill need: one, or one
+// per rune, each filled where its own glyph falls along the run.
+//
+// Every offset is measured off the *whole* name up to that rune rather than
+// accumulated from the runes themselves, so the split run is laid out exactly
+// where the unsplit one would be — summing single glyphs drifts by a fraction of
+// a pixel each, which is enough to move the timestamp beside a name. The centres
+// are then stretched over the whole gradient: a text object takes one colour, so
+// the outermost letters would otherwise stop short of the stops they exist to
+// show.
+func (t *AccentText) build() {
+	t.layout.size = fyne.MeasureText(t.text, t.size, t.style)
+
+	stops, gradient := t.fill.(domain.Gradient)
+	if !gradient || len(stops) < 2 || t.text == "" {
+		t.layout.offsets = []float32{0}
+		t.content.Objects = []fyne.CanvasObject{t.newText(t.text, t.fill)}
+
+		return
+	}
+
+	runes := []rune(t.text)
+	t.layout.offsets = make([]float32, len(runes))
+	for i := range runes {
+		t.layout.offsets[i] = fyne.MeasureText(string(runes[:i]), t.size, t.style).Width
+	}
+
+	centre := func(i int) float32 {
+		end := t.layout.size.Width
+		if i+1 < len(runes) {
+			end = t.layout.offsets[i+1]
+		}
+
+		return (t.layout.offsets[i] + end) / 2
+	}
+	span := centre(len(runes)-1) - centre(0)
+
+	objects := make([]fyne.CanvasObject, len(runes))
+	for i, r := range runes {
+		at := 0.5 // one glyph has no run to spread over, so it takes the middle
+		if span > 0 {
+			at = float64((centre(i) - centre(0)) / span)
+		}
+		objects[i] = t.newText(string(r), stops.At(at))
+	}
+
+	t.content.Objects = objects
+}
+
+// accentLayout places each of AccentText's glyphs at the offset the name
+// measures up to it, and reports the name's own measurement whatever it was split
+// into.
+type accentLayout struct {
+	offsets []float32
+	size    fyne.Size
+}
+
+func (l *accentLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for i, child := range objects {
+		if i >= len(l.offsets) {
+			return
+		}
+
+		end := l.size.Width
+		if i+1 < len(l.offsets) {
+			end = l.offsets[i+1]
+		}
+
+		child.Resize(fyne.NewSize(end-l.offsets[i], size.Height))
+		child.Move(fyne.NewPos(l.offsets[i], 0))
+	}
+}
+
+func (l *accentLayout) MinSize([]fyne.CanvasObject) fyne.Size { return l.size }
+
+func (t *AccentText) newText(text string, fill color.Color) *canvas.Text {
+	if fill == nil {
+		fill = theme.Colors.TextPrimary
+	}
+
+	obj := canvas.NewText(text, solidColor(fill))
+	obj.TextSize = t.size
+	obj.TextStyle = t.style
+
+	return obj
+}
+
+// solidColor flattens fill to something a canvas.Text can be drawn in. Fyne
+// caches a rendered glyph run in a map keyed by the text object's own fields,
+// colour included, so a fill that cannot be a map key — a domain.Gradient is a
+// slice — panics the painter mid-frame rather than drawing. A shape is safe: its
+// texture is keyed by the object, not by what fills it.
+//
+// The flattening is the gradient's own mean, which is what it answers as
+// anywhere it is used as a plain colour. Only ui.AccentText spreads one across
+// text, and it does that by giving each rune a stop of its own — so every fill
+// reaching a text object here is already meant to be flat.
+func solidColor(fill color.Color) color.Color {
+	if _, gradient := fill.(domain.Gradient); !gradient {
+		return fill
+	}
+
+	// Premultiplied, as RGBA reports: RGBA64 holds it exactly, where NRGBA would
+	// have to divide the alpha back out.
+	r, g, b, a := fill.RGBA()
+
+	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
+}
+
+// sameColor compares two fills without assuming either can be compared with ==,
+// which a domain.Gradient — a slice — panics on.
+func sameColor(first, second color.Color) bool {
+	firstStops, firstGradient := first.(domain.Gradient)
+	secondStops, secondGradient := second.(domain.Gradient)
+	if firstGradient || secondGradient {
+		return firstGradient && secondGradient && slices.EqualFunc(firstStops, secondStops, sameColor)
+	}
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+
+	firstR, firstG, firstB, firstA := first.RGBA()
+	secondR, secondG, secondB, secondA := second.RGBA()
+
+	return firstR == secondR && firstG == secondG && firstB == secondB && firstA == secondA
 }
 
 /* Shortened text */

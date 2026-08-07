@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
@@ -70,6 +71,14 @@ func (a *App) resetSessionState() {
 		a.ackTimer = nil
 	}
 	a.ackChannelID, a.ackMessageID = "", ""
+
+	// The cooldowns belong to the account that earned them, not to whoever logs
+	// in next; the badge's tick has nothing left to count either way.
+	if a.slowmodeTimer != nil {
+		a.slowmodeTimer.Stop()
+		a.slowmodeTimer = nil
+	}
+	a.slowmodeUntil = make(map[string]time.Time)
 
 	a.unreadChannels = make(map[string]bool)
 	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise

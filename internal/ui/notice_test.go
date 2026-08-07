@@ -6,6 +6,8 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 	"fyne.io/fyne/v2/widget"
+
+	"RGOClient/internal/config"
 )
 
 // walk visits obj and everything it contains, descending through both plain
@@ -109,29 +111,23 @@ func TestNoticeStackBounded(t *testing.T) {
 		t.Fatal("an empty notice was posted")
 	}
 
-	for range noticeCap + 2 {
+	cap := config.Current().Notifications.MaxStacked
+	for range cap + 2 {
 		stack.Push(ToneDanger, "something went wrong")
 	}
-	if got := len(stack.list.Objects); got != noticeCap {
-		t.Fatalf("%d notices are up, want the cap of %d", got, noticeCap)
+	if got := len(stack.list.Objects); got != cap {
+		t.Fatalf("%d notices are up, want the cap of %d", got, cap)
 	}
 
-	// Tapping any part of a card dismisses it; the card the user sees is the
-	// TappableContainer inside the fixed-width slot.
-	newest := stack.list.Objects[len(stack.list.Objects)-1]
-	var card *TappableContainer
-	walk(newest, func(obj fyne.CanvasObject) {
-		if tappable, ok := obj.(*TappableContainer); ok {
-			card = tappable
-		}
-	})
-	if card == nil {
+	// Tapping any part of a card dismisses it.
+	card, ok := stack.list.Objects[len(stack.list.Objects)-1].(*noticeCard)
+	if !ok {
 		t.Fatal("a notice card is not tappable, so it cannot be dismissed")
 	}
 
 	card.Tapped(&fyne.PointEvent{})
-	if got := len(stack.list.Objects); got != noticeCap-1 {
-		t.Fatalf("%d notices are up after dismissing one, want %d", got, noticeCap-1)
+	if got := len(stack.list.Objects); got != cap-1 {
+		t.Fatalf("%d notices are up after dismissing one, want %d", got, cap-1)
 	}
 
 	stack.Clear()

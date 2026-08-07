@@ -21,7 +21,13 @@ func crowdedProfile() domain.Profile {
 		Status:     strings.Repeat("a status nobody could read in one line ", 3),
 		Presence:   domain.PresenceOnline,
 		ServerName: "A Server",
-		Badges:     []string{"Developer", "Early Adopter", "Responsible Disclosure"},
+		// A gradient accent, so the name is a run of one text object per rune rather
+		// than one for the whole name — the case that still has to shorten.
+		Accent: domain.Gradient{
+			color.NRGBA{R: 0xD5, G: 0x2D, B: 0x00, A: 255},
+			color.NRGBA{R: 0xA3, G: 0x02, B: 0x62, A: 255},
+		},
+		Badges: []string{"Developer", "Early Adopter", "Responsible Disclosure"},
 		Roles: []domain.Role{
 			{Name: "Maintainer", Color: color.NRGBA{R: 200, G: 90, B: 90, A: 255}},
 			{Name: "Reviewer"},
@@ -55,7 +61,7 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 				OnMessage: func() {},
 				OnClose:   func() {},
 			})
-			card.SetBio(strings.Repeat("a bio that goes on and on and on. ", 40))
+			card.SetProfile(domain.UserProfile{Bio: strings.Repeat("a bio that goes on and on and on. ", 40)})
 
 			if got := card.Content.MinSize().Width; got != tc.width {
 				t.Errorf("card is %vpx wide, want %v", got, tc.width)
@@ -74,7 +80,7 @@ func TestProfileBioArrivesAfterTheCard(t *testing.T) {
 		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 		before := card.Content.MinSize().Height
 
-		card.SetBio("Developer at Team Eidolonic")
+		card.SetProfile(domain.UserProfile{Bio: "Developer at Team Eidolonic"})
 		if after := card.Content.MinSize().Height; after <= before {
 			t.Errorf("card is %vpx tall with a bio, want more than the %v without one", after, before)
 		}
@@ -84,7 +90,7 @@ func TestProfileBioArrivesAfterTheCard(t *testing.T) {
 		card := NewProfileCard(testDeps(), domain.Profile{Name: "Someone"}, ProfileActions{})
 		before := card.Content.MinSize().Height
 
-		card.SetBio("   ")
+		card.SetProfile(domain.UserProfile{Bio: "   "})
 		if after := card.Content.MinSize().Height; after != before {
 			t.Errorf("an empty bio changed the card's height from %v to %v", before, after)
 		}

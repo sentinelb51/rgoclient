@@ -14,6 +14,7 @@ import (
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -22,27 +23,38 @@ import (
 
 const (
 	initialPageSize = 30 // messages fetched when first opening a channel
-	historyPageSize = 50 // older messages fetched (or re-mounted) per scroll-up
-
-	// initialMountCount is how many messages a channel switch mounts. Far fewer
-	// than the cache holds: only ~20 fit on screen, scrollback re-mounts the rest
-	// from cache instantly, and every mounted widget is real work — rapid channel
-	// switching churns widgets the renderer cache then holds for up to a minute,
-	// so this directly bounds how fast memory can ratchet up.
-	initialMountCount = 50
-
-	// renderedCap is the ceiling on widgets kept mounted by live appends, and
-	// mountedCap the ceiling during scrollback: prepends past it trim widgets off
-	// the bottom and vice versa, so scrolling through any amount of history keeps
-	// a constant number mounted.
-	renderedCap = 200
-	mountedCap  = renderedCap + historyPageSize
 
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
 	remountThreshold  = 200 // px from the bottom before trimmed newer rows re-mount
-
-	messageGroupWindow = 7 * time.Minute // max gap for a message to group under the previous
 )
+
+// The mounting budget, all four settings. They are read per use rather than
+// captured, so changing one in the settings applies to the next scroll instead
+// of the next launch.
+
+// historyPageSize is how many older messages are fetched, or re-mounted from
+// cache, per scroll-up.
+func historyPageSize() int { return config.Current().Behaviour.HistoryPageSize }
+
+// initialMountCount is how many messages a channel switch mounts. Far fewer than
+// the cache holds: only ~20 fit on screen, scrollback re-mounts the rest from
+// cache instantly, and every mounted widget is real work — rapid channel
+// switching churns widgets the renderer cache then holds for up to a minute, so
+// this directly bounds how fast memory can ratchet up.
+func initialMountCount() int { return config.Current().Behaviour.InitialMountCount }
+
+// mountedCap is the ceiling on mounted widgets during scrollback: prepends past
+// it trim widgets off the bottom and vice versa, so scrolling through any amount
+// of history keeps a constant number mounted.
+func mountedCap() int { return config.Current().Behaviour.MountedCap }
+
+// renderedCap is the same ceiling for live appends, one page lower so a channel
+// that is being talked in does not sit permanently at the trim threshold.
+func renderedCap() int { return max(mountedCap()-historyPageSize(), 1) }
+
+// messageGroupWindow is the largest gap a message may follow the previous one by
+// and still group under it.
+func messageGroupWindow() time.Duration { return config.Current().Behaviour.GroupWindow() }
 
 /* The message area */
 
@@ -91,7 +103,18 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		ui.WithCaret(a.input),
 	)
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
-	a.composerDock = container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
+	card := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
+
+	// The slowmode chip rides above the card rather than inside it, flush with its
+	// right edge: what floats over the message column is the whole stack, so
+	// NewDockReserve holds room for the chip too and the newest message still comes
+	// to rest clear of it. A zero-width spacer takes the row's fill, which is what
+	// pins the chip to the trailing edge at its own minimum — and that row's layout
+	// is the one it re-runs each time it is relabelled.
+	a.slowmodeBadge = ui.NewSlowmodeBadge()
+	badgeRow := ui.NewFillRow(0, ui.HorizontalSpacer(0), a.slowmodeBadge)
+	a.slowmodeBadge.OnResize = func() { ui.Relayout(badgeRow) }
+	a.composerDock = ui.VBoxNoSpacing(badgeRow, card)
 
 	a.messageScroll = ui.NewObservableVScroll(ui.NewDockReserve(a.messageList, a.composerDock))
 	a.messageScroll.OnScroll = func(pos fyne.Position) {
@@ -111,8 +134,22 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
 	header := container.NewPadded(container.NewBorder(nil, nil, title, members))
 
-	layout := ui.NewFillColumn(1, header, ui.NewFloatingDock(a.messageScroll, a.composerDock))
+	a.floatingDock = ui.NewFloatingDock(a.messageScroll, a.composerDock)
+	layout := ui.NewFillColumn(1, header, a.floatingDock)
 	return container.NewStack(background, layout)
+}
+
+// resizeDock re-hangs the floating stack after something in it appeared or
+// disappeared — today only the slowmode chip. Fyne re-lays out for a growing
+// minimum on its own but leaves a shrinking one reserved, and here the stack
+// stands on its own height twice over: the card is placed from the bottom up, and
+// ui.DockReserve is how much of the message column it costs. Laying out the
+// floating dock resizes the stack, which re-runs the stack's own layout in turn;
+// the scroll is refreshed because the room it holds for the dock is part of the
+// height it scrolls through. Call on the UI thread.
+func (a *App) resizeDock() {
+	ui.Relayout(a.floatingDock)
+	a.messageScroll.Refresh()
 }
 
 /* Composing */
@@ -126,6 +163,14 @@ func (a *App) handleSubmit(text string) {
 	}
 
 	channelID := a.currentChannelID
+
+	// A channel in slowmode refuses the send and keeps what was typed. Nothing is
+	// said about it: the badge counting down beside the caret is already the
+	// answer, and a notice per keypress would bury it.
+	if a.slowmodeRemaining(channelID) > 0 {
+		return
+	}
+
 	attachments := slices.Clone(a.input.Attachments)
 	replies := toReplies(a.input.Replies)
 
@@ -133,11 +178,129 @@ func (a *App) handleSubmit(text string) {
 	a.input.ClearAttachments()
 	a.input.ClearReplies()
 	a.jumpToLatest()
+	a.startSlowmode(channelID)
 
+	// The cooldown starts optimistically, so a second Enter cannot outrun the
+	// request — and is given back when the message never landed.
+	onFail := a.notifyFailure("send message", "Could not send that message.")
 	a.background(
 		func() error { return a.client.SendMessage(channelID, text, attachments, replies) },
-		a.notifyFailure("send message", "Could not send that message."),
+		func(err error) {
+			a.clearSlowmode(channelID)
+			onFail(err)
+		},
 	)
+}
+
+/* Slowmode */
+
+// slowmodeTick is how often the badge re-reads a running cooldown. It only ever
+// draws whole seconds, so anything finer would repaint the same text.
+const slowmodeTick = time.Second
+
+// slowmodeOf is the cooldown a channel imposes *on this account* — zero when the
+// channel has none, and zero for anyone holding BypassSlowmode, for whom the
+// rule exists but does not apply.
+func (a *App) slowmodeOf(channelID string) time.Duration {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.Slowmode == 0 || a.store.CanBypassSlowmode(channelID) {
+		return 0
+	}
+
+	return channel.Slowmode
+}
+
+// slowmodeRemaining is how much of a channel's cooldown is left to wait.
+func (a *App) slowmodeRemaining(channelID string) time.Duration {
+	if a.slowmodeOf(channelID) == 0 {
+		return 0
+	}
+
+	return max(time.Until(a.slowmodeUntil[channelID]), 0)
+}
+
+// startSlowmode begins a channel's cooldown, unless one is already running: the
+// gateway echo of a message this client just sent must not extend the wait the
+// send itself started. That the echo calls this at all is what covers a message
+// the same account sent from somewhere else. Call on the UI thread.
+func (a *App) startSlowmode(channelID string) {
+	cooldown := a.slowmodeOf(channelID)
+	if cooldown == 0 || time.Now().Before(a.slowmodeUntil[channelID]) {
+		return
+	}
+
+	a.slowmodeUntil[channelID] = time.Now().Add(cooldown)
+	a.refreshSlowmode()
+}
+
+// clearSlowmode gives a cooldown back, for a send that never landed. Call on the
+// UI thread.
+func (a *App) clearSlowmode(channelID string) {
+	delete(a.slowmodeUntil, channelID)
+	a.refreshSlowmode()
+}
+
+// refreshSlowmode repaints the badge for the open channel and keeps a running
+// cooldown ticking. The tick is one timer re-armed a second at a time rather
+// than a ticker for the life of the app: outside a channel that is counting down
+// there is nothing to count. Call on the UI thread.
+func (a *App) refreshSlowmode() {
+	if a.slowmodeBadge == nil {
+		return
+	}
+	if a.slowmodeTimer != nil {
+		a.slowmodeTimer.Stop()
+		a.slowmodeTimer = nil
+	}
+
+	channelID := a.currentChannelID
+	remaining := a.slowmodeRemaining(channelID)
+
+	shown := a.slowmodeBadge.Visible()
+	a.slowmodeBadge.Set(a.slowmodeOf(channelID), remaining)
+	if a.slowmodeBadge.Visible() != shown {
+		a.resizeDock()
+	}
+
+	if remaining == 0 {
+		return
+	}
+
+	epoch := a.epoch
+	a.slowmodeTimer = time.AfterFunc(slowmodeTick, func() {
+		a.doOnUI(func() {
+			if !a.stale(epoch) {
+				a.refreshSlowmode()
+			}
+		}, false)
+	})
+}
+
+// loadSlowmode re-reads a channel's cooldown in the background and repaints the
+// badge if it is still the open one.
+//
+// It asks on every visit rather than once. Revolt announces a changed slowmode
+// through ChannelUpdate and revoltgo models neither that field nor the one on
+// the channel itself, so opening the channel is the only moment the client can
+// learn the number — or learn that it moved. It is one small request alongside
+// the message page the same switch already fetches.
+func (a *App) loadSlowmode(channelID string) {
+	epoch := a.epoch
+
+	go func() {
+		if _, err := a.client.FetchSlowmode(channelID); err != nil {
+			if !errors.Is(err, client.ErrNoSession) {
+				log.Printf("fetch slowmode for %s: %v", channelID, err)
+			}
+			return
+		}
+
+		a.doOnUI(func() {
+			if !a.stale(epoch) && a.currentChannelID == channelID {
+				a.refreshSlowmode()
+			}
+		}, false)
+	}()
 }
 
 // toReplies drops the composer's own bookkeeping — which channel each quoted
@@ -163,8 +326,16 @@ func toReplies(pending []ui.Reply) []domain.Reply {
 // page, or scrollback, the widget can't render a name until State knows the user.
 // ensureAuthor is a no-op once it does, so this costs two map lookups per widget
 // in the common case.
+//
+// A system event names whoever it is about rather than an author, and reads
+// "Someone joined" until that user is known — so it is the target that gets
+// chased. ui.MessageWidget.Author answers with it for the same reason, which is
+// what lets one refresh pass cover both.
 func (a *App) newMessageWidget(prev, curr, next *domain.Message) *ui.MessageWidget {
-	if curr.System == nil && curr.Webhook == nil {
+	switch {
+	case curr.System != nil:
+		a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.System.Target)
+	case curr.Webhook == nil:
 		a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.AuthorID)
 	}
 
@@ -199,6 +370,9 @@ func dayLabel(prev, curr *domain.Message) string {
 // the group, or a pair minutes apart across midnight would render as one
 // headerless block.
 func continuesGroup(prev, curr *domain.Message) bool {
+	if !config.Current().Interface.GroupMessages {
+		return false
+	}
 	if prev == nil || curr == nil || curr.AuthorID == "" || prev.AuthorID != curr.AuthorID {
 		return false
 	}
@@ -218,7 +392,7 @@ func continuesGroup(prev, curr *domain.Message) bool {
 	}
 
 	gap := ct.Sub(pt)
-	return gap >= 0 && gap <= messageGroupWindow
+	return gap >= 0 && gap <= messageGroupWindow()
 }
 
 // channelKind is the open channel's type, or the zero value — which draws the
@@ -290,8 +464,8 @@ func (a *App) displayCached() {
 // by loadMoreHistory's cache tier. Call on the UI thread.
 func (a *App) displayMessages(messages []*domain.Message) {
 	a.cancelActiveEdit()
-	if len(messages) > initialMountCount {
-		messages = messages[len(messages)-initialMountCount:]
+	if mount := initialMountCount(); len(messages) > mount {
+		messages = messages[len(messages)-mount:]
 	}
 
 	widgets := make([]fyne.CanvasObject, len(messages))
@@ -546,7 +720,7 @@ func (a *App) appendMessage(message, prev *domain.Message) {
 	}
 	a.messageList.Add(a.newMessageWidget(prev, message, nil))
 
-	if over := len(a.messageList.Objects) - renderedCap; over > 0 {
+	if over := len(a.messageList.Objects) - renderedCap(); over > 0 {
 		a.trimMountedTop(over, atBottom)
 	}
 
@@ -576,7 +750,7 @@ func (a *App) loadMoreHistory() {
 	messages := a.client.Messages()
 	cached := messages.Get(channelID)
 	if i, ok := slices.BinarySearchFunc(cached, top.ID, cache.CompareMessageID); ok && i > 0 {
-		a.prependMessages(cached[max(0, i-historyPageSize):i])
+		a.prependMessages(cached[max(0, i-historyPageSize()):i])
 		return
 	}
 
@@ -588,7 +762,7 @@ func (a *App) loadMoreHistory() {
 	go func() {
 		defer a.doOnUI(func() { a.loadingHistory = false }, true)
 
-		older, err := a.client.HistoryBefore(channelID, top.ID, historyPageSize)
+		older, err := a.client.HistoryBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
 			if !errors.Is(err, client.ErrBusy) {
 				log.Printf("load history for %s: %v", channelID, err)
@@ -673,7 +847,7 @@ func (a *App) mountNewerFromCache() {
 		return // bottom is the live tail, or no longer cached
 	}
 
-	a.appendMessages(cached[i+1:min(i+1+historyPageSize, len(cached))], bottom)
+	a.appendMessages(cached[i+1:min(i+1+historyPageSize(), len(cached))], bottom)
 }
 
 // appendMessages mounts newer messages below the current view, preserving the
@@ -699,7 +873,7 @@ func (a *App) appendMessages(page []*domain.Message, bottom *domain.Message) {
 		prev = msg
 	}
 
-	if over := len(a.messageList.Objects) - mountedCap; over > 0 {
+	if over := len(a.messageList.Objects) - mountedCap(); over > 0 {
 		a.trimMountedTop(over, false)
 	}
 
@@ -734,7 +908,7 @@ func (a *App) trimMountedTop(n int, atBottom bool) {
 // so once scrollback runs past its cap the downward remount could not re-serve
 // trimmed rows, and the window is allowed to grow instead.
 func (a *App) trimMountedBottom() {
-	over := len(a.messageList.Objects) - mountedCap
+	over := len(a.messageList.Objects) - mountedCap()
 	if over <= 0 {
 		return
 	}

@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image/color"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
+
+	"RGOClient/internal/domain"
 )
 
 // widthOf measures a string the same way TruncateToWidth does, so the tests can
@@ -136,4 +139,95 @@ func TestTruncateToWidth(t *testing.T) {
 			t.Fatalf("empty text yielded %q", got)
 		}
 	})
+}
+
+// TestGradientNameKeepsItsWidth covers the per-rune split AccentText makes for a
+// gradient: the letters are drawn one object at a time, and the run has to
+// measure exactly what the same name measures as one — anything else would move
+// the timestamp beside it — while still reaching both ends of the gradient.
+func TestGradientNameKeepsItsWidth(t *testing.T) {
+	test.NewTempApp(t)
+
+	stops := domain.Gradient{
+		color.NRGBA{R: 0xD5, G: 0x2D, B: 0x00, A: 255},
+		color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 255},
+		color.NRGBA{R: 0xA3, G: 0x02, B: 0x62, A: 255},
+	}
+	style := fyne.TextStyle{Bold: true}
+
+	for _, name := range []string{"Amelia", "Wu", "someone with a much longer name"} {
+		flat := NewAccentText(name, color.White, 0, style)
+		gradient := NewAccentText(name, stops, 0, style)
+
+		if flat.MinSize() != gradient.MinSize() {
+			t.Errorf("%q measures %v as a gradient and %v flat", name, gradient.MinSize(), flat.MinSize())
+		}
+
+		runes := gradient.content.Objects
+		if len(runes) != len([]rune(name)) {
+			t.Fatalf("%q drew %d objects, want one per rune", name, len(runes))
+		}
+
+		first := runes[0].(*canvas.Text)
+		last := runes[len(runes)-1].(*canvas.Text)
+		if !sameColor(first.Color, stops[0]) {
+			t.Errorf("%q opens in %v, want the first stop %v", name, first.Color, stops[0])
+		}
+		if !sameColor(last.Color, stops[len(stops)-1]) {
+			t.Errorf("%q ends in %v, want the last stop %v", name, last.Color, stops[len(stops)-1])
+		}
+	}
+}
+
+// TestNoGradientReachesATextObject covers the one thing a role colour may not do.
+// Fyne caches a rendered glyph run in a map keyed by the text object's own
+// fields, colour among them, so a canvas.Text filled with a domain.Gradient — a
+// slice, and so not a valid map key — panics the painter on the frame it is first
+// drawn, in a goroutine no recover of ours is on. Nothing short of painting it
+// notices, and the software painter used by the render tests takes a different
+// path, so the invariant is asserted over the tree instead.
+func TestNoGradientReachesATextObject(t *testing.T) {
+	test.NewTempApp(t)
+
+	stops := domain.Gradient{
+		color.NRGBA{R: 0xD5, G: 0x2D, B: 0x00, A: 255},
+		color.NRGBA{R: 0xA3, G: 0x02, B: 0x62, A: 255},
+	}
+
+	profile := crowdedProfile()
+	profile.Accent = stops
+	profile.Roles = append(profile.Roles, domain.Role{Name: "Ops", Color: stops})
+
+	dialog := NewProfileDialog(testDeps(), profile, ProfileActions{OnMessage: func() {}, OnClose: func() {}})
+	dialog.SetProfile(domain.UserProfile{Bio: "a bio of no particular length"})
+
+	picker := NewMentionPicker(testDeps().Images, func(MentionCandidate) {})
+	picker.SetCandidates([]MentionCandidate{NewMentionCandidate("01U", "Amelia", "amelia", "", stops)})
+	if !picker.Update("am") {
+		t.Fatal("the picker matched nobody, so no row was ever filled in")
+	}
+
+	cases := []struct {
+		name string
+		root fyne.CanvasObject
+	}{
+		{"profile dialog", dialog.Content},
+		{"role chip", NewRoleChip(domain.Role{Name: "Ops", Color: stops})},
+		{"mention picker", picker},
+		// A gradient of one stop has no run to spread over, so AccentText draws it
+		// as a single object — the path where the fill goes through untouched.
+		{"single-stop accent text", NewAccentText("Amelia", domain.Gradient{stops[0]}, 0, fyne.TextStyle{})},
+	}
+
+	for _, tc := range cases {
+		walkTree(tc.root, func(obj fyne.CanvasObject, _ fyne.Position) {
+			text, ok := obj.(*canvas.Text)
+			if !ok || text.Color == nil {
+				return
+			}
+			if !reflect.TypeOf(text.Color).Comparable() {
+				t.Errorf("%s: %q is filled with %T, which cannot be a map key", tc.name, text.Text, text.Color)
+			}
+		})
+	}
 }

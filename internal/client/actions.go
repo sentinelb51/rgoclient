@@ -8,8 +8,10 @@ package client
 import (
 	"errors"
 	"log"
+	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -134,6 +136,47 @@ func (c *Client) AckServer(serverID string) error {
 	}
 
 	return session.ServerAck(serverID)
+}
+
+/* Slowmode */
+
+// FetchSlowmode reads a channel's send cooldown and records it, so the store can
+// answer for it afterwards without going back to the network.
+//
+// It is the one action that goes round revoltgo's typed API. Revolt carries
+// slowmode on a text channel and announces a changed one through ChannelUpdate,
+// but revoltgo models neither field — so the number never arrives with the
+// channel and nothing ever says it moved. Asking for the raw channel is the only
+// route to it. When revoltgo grows the field this becomes a line in store.go and
+// the request goes away.
+func (c *Client) FetchSlowmode(channelID string) (time.Duration, error) {
+	session := c.session.Load()
+	if session == nil {
+		return 0, ErrNoSession
+	}
+
+	var channel struct {
+		Slowmode int `json:"slowmode"`
+	}
+	if err := session.HTTP.Request(http.MethodGet, revoltgo.EndpointChannel(channelID), nil, &channel); err != nil {
+		return 0, err
+	}
+	slowmode := time.Duration(channel.Slowmode) * time.Second
+
+	c.mu.Lock()
+	c.slowmode[channelID] = slowmode
+	c.mu.Unlock()
+
+	return slowmode, nil
+}
+
+// slowmodeOf is a channel's recorded cooldown, or 0 when it has none or has not
+// been asked about. Safe from any goroutine — the store reads it.
+func (c *Client) slowmodeOf(channelID string) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.slowmode[channelID]
 }
 
 /* History */
@@ -453,22 +496,27 @@ func (c *Client) KickMember(serverID, userID string) error {
 
 /* Profiles */
 
-// UserBio fetches the profile text behind a user. It is the one thing a profile
-// shows that the client does not already hold, which is why it is a request of
-// its own made after the card is already up.
-func (c *Client) UserBio(userID string) (string, error) {
+// UserProfile fetches the bio and the banner behind a user. They are the two
+// things a profile shows that the client does not already hold, which is why
+// they are a request of their own made after the card is already up.
+func (c *Client) UserProfile(userID string) (domain.UserProfile, error) {
 	session := c.session.Load()
 	if session == nil {
-		return "", ErrNoSession
+		return domain.UserProfile{}, ErrNoSession
 	}
 
 	profile, err := session.UserProfile(userID)
 	if err != nil {
-		return "", err
+		return domain.UserProfile{}, err
 	}
 	if profile == nil {
-		return "", nil
+		return domain.UserProfile{}, nil
 	}
 
-	return profile.Content, nil
+	out := domain.UserProfile{Bio: profile.Content}
+	if profile.Background != nil {
+		out.BackgroundURL = profile.Background.URL(bannerSize)
+	}
+
+	return out, nil
 }

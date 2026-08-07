@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	// Image format decoders.
@@ -25,27 +26,51 @@ import (
 )
 
 const (
-	maxDiskBytes   int64 = 512 * 1024 * 1024 // on-disk budget
-	maxMemoryBytes int64 = 192 * 1024 * 1024 // decoded images kept in memory
-	flushInterval        = 30 * time.Second  // how often pending images hit disk
-	trimInterval         = 5 * time.Minute   // how often the on-disk budget is enforced
-
-	// maxImageEdge caps the longest side of a decoded image, in pixels. Revolt
-	// serves attachments at their original resolution and the client never draws
-	// one larger than the window, so a phone photo arrives as ~48 MiB of pixels to
-	// be shown 400px wide. Capping the decode is what stops a handful of them
-	// dwarfing everything else in the cache.
-	//
-	// It is one fixed bound rather than the size each call site draws at, because
-	// entries are keyed by file ID alone: the same avatar is asked for at four
-	// different sizes through one key, so a per-call-site cap would let the
-	// smallest requester decide what every larger one gets.
-	maxImageEdge = 1600
+	flushInterval = 30 * time.Second // how often pending images hit disk
+	trimInterval  = 5 * time.Minute  // how often the on-disk budget is enforced
 
 	// diskHeadroomDivisor sets how far under budget a trim goes: 1/8th, so the
 	// next few trims don't immediately re-run.
 	diskHeadroomDivisor = 8
 )
+
+// ImageLimits is what the cache is allowed to occupy. The settings page edits
+// them; the cache holds them atomically because the trimmer reads them on its own
+// goroutine while the UI thread sets them.
+type ImageLimits struct {
+	DiskBytes   int64
+	MemoryBytes int64
+
+	// MaxEdge caps the longest side of a decoded image, in pixels. Revolt serves
+	// attachments at their original resolution and the client never draws one
+	// larger than the window, so a phone photo arrives as ~48 MiB of pixels to be
+	// shown 400px wide. Capping the decode is what stops a handful of them
+	// dwarfing everything else in the cache.
+	//
+	// It is one bound rather than the size each call site draws at, because entries
+	// are keyed by file ID alone: the same avatar is asked for at four different
+	// sizes through one key, so a per-call-site cap would let the smallest
+	// requester decide what every larger one gets.
+	MaxEdge int64
+}
+
+// DefaultImageLimits are what the client ran with before the budgets became
+// configurable.
+func DefaultImageLimits() ImageLimits {
+	return ImageLimits{
+		DiskBytes:   512 * 1024 * 1024,
+		MemoryBytes: 192 * 1024 * 1024,
+		MaxEdge:     1600,
+	}
+}
+
+// ImageStats is what the cache currently occupies, for the settings page to
+// report.
+type ImageStats struct {
+	Files       int
+	DiskBytes   int64
+	MemoryBytes int64
+}
 
 // ImageCache stores decoded images in memory and persists them to disk in the
 // background. Safe for concurrent use.
@@ -60,7 +85,12 @@ type ImageCache struct {
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
 	sizes    map[string]int64       // resident bytes per id: its image plus its crop
 	recency  *LRU                   // decoded-image ids by recency
-	bytes    int64                  // sum of sizes; what maxMemoryBytes bounds
+	bytes    int64                  // sum of sizes; what maxMemory bounds
+
+	// The budgets, read by the trimmer and by every decode without the lock.
+	maxDisk   atomic.Int64
+	maxMemory atomic.Int64
+	maxEdge   atomic.Int64
 
 	dir      string
 	client   *http.Client
@@ -76,10 +106,14 @@ type imageLoad struct {
 	img  image.Image
 }
 
-// NewImageCache creates a cache rooted at the user's cache directory and starts
-// the background flush, which also trims the directory back under budget.
-func NewImageCache() *ImageCache {
-	dir := cacheDir()
+// NewImageCache creates a cache rooted at dir — empty for the user's cache
+// directory — and starts the background flush, which also trims the directory
+// back under budget.
+func NewImageCache(dir string, limits ImageLimits) *ImageCache {
+	if dir == "" {
+		dir = DefaultCacheDir()
+	}
+
 	c := &ImageCache{
 		memory:   make(map[string]image.Image),
 		circular: make(map[string]image.Image),
@@ -93,6 +127,8 @@ func NewImageCache() *ImageCache {
 		stop:     make(chan struct{}),
 	}
 
+	c.SetLimits(limits)
+
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		log.Printf("image cache: create dir: %v", err)
 	}
@@ -103,8 +139,75 @@ func NewImageCache() *ImageCache {
 	return c
 }
 
-// cacheDir returns the directory used to persist images.
-func cacheDir() string {
+// SetLimits changes what the cache may occupy. The memory budget is enforced on
+// the next touch and the disk budget on the next trim, so nothing is discarded
+// at the moment of the change. Safe from any goroutine.
+func (c *ImageCache) SetLimits(limits ImageLimits) {
+	c.maxDisk.Store(limits.DiskBytes)
+	c.maxMemory.Store(limits.MemoryBytes)
+	c.maxEdge.Store(limits.MaxEdge)
+}
+
+// Dir is where the cache persists images.
+func (c *ImageCache) Dir() string { return c.dir }
+
+// Stats reports what the cache occupies. It reads the directory, so keep it off
+// the UI thread.
+func (c *ImageCache) Stats() ImageStats {
+	c.mu.RLock()
+	stats := ImageStats{MemoryBytes: c.bytes}
+	c.mu.RUnlock()
+
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		return stats
+	}
+
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil || info.IsDir() {
+			continue
+		}
+
+		stats.Files++
+		stats.DiskBytes += info.Size()
+	}
+
+	return stats
+}
+
+// Clear drops everything the cache holds, in memory and on disk. Images queued
+// for a write are dropped with the rest: they came off the network and will come
+// off it again. It touches disk, so keep it off the UI thread.
+func (c *ImageCache) Clear() {
+	c.mu.Lock()
+	c.memory = make(map[string]image.Image)
+	c.circular = make(map[string]image.Image)
+	c.pending = make(map[string]image.Image)
+	c.sizes = make(map[string]int64)
+	c.recency = NewLRU()
+	c.bytes = 0
+	c.mu.Unlock()
+
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		log.Printf("image cache: read dir: %v", err)
+		return
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if err := os.Remove(filepath.Join(c.dir, entry.Name())); err != nil {
+			log.Printf("image cache: remove %s: %v", entry.Name(), err)
+		}
+	}
+}
+
+// DefaultCacheDir returns the directory used to persist images when none is
+// configured.
+func DefaultCacheDir() string {
 	if dir, err := os.UserCacheDir(); err == nil {
 		return filepath.Join(dir, "RGOClient", "assets", "images")
 	}
@@ -160,8 +263,9 @@ func (c *ImageCache) Get(id string) image.Image {
 		_ = os.Remove(path) // a corrupt file would fail every future load of this id
 		return nil
 	}
-	// Files written before the decode cap existed are still oversized on disk.
-	img = downscale(img)
+	// Files written under a larger cap than the current one are still oversized on
+	// disk.
+	img = downscale(img, int(c.maxEdge.Load()))
 
 	// Disk eviction is oldest-first by mtime, which is only ever set at write —
 	// insertion order, not recency. Stamping it on a hit is what makes the two
@@ -251,7 +355,7 @@ func (c *ImageCache) LoadIntoContainer(id, url string, size fyne.Size, target *f
 func (c *ImageCache) touchLocked(id string) {
 	c.recency.Touch(id)
 
-	for c.bytes > maxMemoryBytes && c.recency.Len() > 1 {
+	for c.bytes > c.maxMemory.Load() && c.recency.Len() > 1 {
 		c.releaseLocked(c.recency.EvictOldest())
 	}
 }
@@ -313,18 +417,18 @@ func imageBytes(img image.Image) int64 {
 	return int64(bounds.Dx()) * int64(bounds.Dy()) * 4
 }
 
-// downscale shrinks img so its longest side is at most maxImageEdge, returning it
+// downscale shrinks img so its longest side is at most edge, returning it
 // untouched when it already fits. It runs once per image, off the UI thread, and
 // its result is what every later draw is scaled from — so it is worth a good
 // filter rather than a cheap one.
-func downscale(img image.Image) image.Image {
+func downscale(img image.Image, edge int) image.Image {
 	bounds := img.Bounds()
 	width, height := bounds.Dx(), bounds.Dy()
-	if width <= maxImageEdge && height <= maxImageEdge {
+	if width <= edge && height <= edge {
 		return img
 	}
 
-	scale := float64(maxImageEdge) / float64(max(width, height))
+	scale := float64(edge) / float64(max(width, height))
 	dst := image.NewRGBA(image.Rect(0, 0,
 		max(int(float64(width)*scale), 1),
 		max(int(float64(height)*scale), 1),
@@ -404,7 +508,7 @@ func (c *ImageCache) load(id, url string) image.Image {
 	if err != nil {
 		return nil
 	}
-	img = downscale(img)
+	img = downscale(img, int(c.maxEdge.Load()))
 	c.Set(id, img)
 
 	return img
@@ -533,14 +637,15 @@ func (c *ImageCache) trimDiskCache() {
 		total += info.Size()
 	}
 
-	if total <= maxDiskBytes {
+	budget := c.maxDisk.Load()
+	if total <= budget {
 		return
 	}
 	slices.SortFunc(files, func(x, y diskFile) int { return x.modified.Compare(y.modified) })
 
-	target := maxDiskBytes - maxDiskBytes/diskHeadroomDivisor
+	target := budget - budget/diskHeadroomDivisor
 	log.Printf("image cache: %d MiB over budget, trimming to %d MiB",
-		(total-maxDiskBytes)/(1024*1024), target/(1024*1024))
+		(total-budget)/(1024*1024), target/(1024*1024))
 
 	for _, file := range files {
 		if total <= target {

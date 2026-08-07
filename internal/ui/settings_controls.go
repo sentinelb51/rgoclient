@@ -1,0 +1,928 @@
+package ui
+
+// The settings page's controls.
+//
+// None of them is a Fyne form widget. AppTheme zeroes SizeNameInputBorder and
+// answers SizeNameInputBackground with the very colour a settings group is a
+// card of, so widget.Check, widget.Select and widget.Slider all arrive flat,
+// invisible, or — in the slider's case — as a bare thumb that swells into a grey
+// disc the moment the pointer touches it. Rather than override the theme once
+// per widget, each control here is a few canvas objects and a layout, drawn from
+// the client's own palette.
+//
+// Every one of them is the same shape: a fixed-height box the row hands to its
+// control slot, so a row holding a switch, a dropdown and a slider is the same
+// height in all three cases.
+
+import (
+	"image/color"
+	"math"
+	"strconv"
+	"strings"
+
+	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
+	fynetheme "fyne.io/fyne/v2/theme"
+	"fyne.io/fyne/v2/widget"
+
+	"RGOClient/internal/ui/theme"
+)
+
+// paletteColumns is how many swatches a row of the colour picker holds. The
+// preset list below is a multiple of it, so the grid comes out square-edged.
+const paletteColumns = 8
+
+/* Shared surfaces */
+
+// newFieldBackground is the surface every control that holds a *value* is drawn
+// on: the composer's own input fill, the shared hairline, and the corner radius
+// the rest of the page uses. It is what makes a dropdown read as something to
+// open rather than as a label that happens to sit on the right.
+func newFieldBackground() *canvas.Rectangle {
+	field := canvas.NewRectangle(theme.Colors.ComposerBg)
+	field.CornerRadius = theme.Sizes.SettingsInputRadius
+	Outline(field)
+
+	return field
+}
+
+// fixedControl pins a control to the standard slot, so every row's trailing edge
+// lines up and nothing moves when a control grows on interaction.
+func fixedControl(width float32, content fyne.CanvasObject) fyne.CanvasObject {
+	return NewFixedWidthContainer(width,
+		NewFixedHeightContainer(theme.Sizes.SettingsInputHeight, content))
+}
+
+/* Toggle */
+
+// Toggle is the on/off switch every boolean setting uses: a pill that fills with
+// the accent and slides its knob across.
+//
+// It is a widget of its own rather than a widget.Check because the client has
+// never mounted one, and because a checkbox reads as part of a form while these
+// rows are a list of states.
+type Toggle struct {
+	tapBase
+
+	// OnChanged is called with the new state, on the UI thread.
+	OnChanged func(bool)
+
+	on      bool
+	track   *canvas.Rectangle
+	knob    *canvas.Circle
+	content *fyne.Container
+}
+
+var _ fyne.Tappable = (*Toggle)(nil)
+
+// NewToggle builds a switch in the given state.
+func NewToggle(on bool, onChanged func(bool)) *Toggle {
+	t := &Toggle{
+		OnChanged: onChanged,
+		on:        on,
+		track:     canvas.NewRectangle(nil),
+		knob:      canvas.NewCircle(theme.Colors.TextPrimary),
+	}
+	t.content = container.New(&toggleLayout{toggle: t}, t.track, t.knob)
+	t.onTap = t.flip
+	t.paint()
+	t.ExtendBaseWidget(t)
+
+	return t
+}
+
+func (t *Toggle) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(t.content)
+}
+
+// On reports the current state.
+func (t *Toggle) On() bool { return t.on }
+
+// Set moves the switch without calling back, for a state something else changed.
+func (t *Toggle) Set(on bool) {
+	if t.on == on {
+		return
+	}
+
+	t.on = on
+	t.paint()
+	Relayout(t.content)
+}
+
+// flip is the tap: the state changes, the knob moves, and only then is anyone
+// told — so a handler that rebuilds the section sees the switch already moved.
+func (t *Toggle) flip() {
+	t.on = !t.on
+	t.paint()
+	Relayout(t.content)
+
+	if t.OnChanged != nil {
+		t.OnChanged(t.on)
+	}
+}
+
+func (t *Toggle) paint() {
+	t.track.FillColor = theme.Colors.ChannelSelectedBg
+	if t.on {
+		t.track.FillColor = theme.Colors.ServerSelectedBg
+	}
+	t.track.CornerRadius = theme.Sizes.SettingsToggleHeight / 2
+	t.track.Refresh()
+}
+
+// toggleLayout places the knob at one end of the track or the other.
+type toggleLayout struct {
+	toggle *Toggle
+}
+
+func (l *toggleLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(theme.Sizes.SettingsToggleWidth, theme.Sizes.SettingsToggleHeight)
+}
+
+func (l *toggleLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 2 {
+		return
+	}
+
+	track, knob := objects[0], objects[1]
+	track.Resize(size)
+	track.Move(fyne.NewPos(0, 0))
+
+	inset := theme.Sizes.SettingsToggleInset
+	side := size.Height - inset*2
+
+	x := inset
+	if l.toggle.on {
+		x = size.Width - side - inset
+	}
+
+	knob.Resize(fyne.NewSize(side, side))
+	knob.Move(fyne.NewPos(x, inset))
+}
+
+/* Slider */
+
+// Slider is a value dragged along a track.
+//
+// Fyne's own was tried first and abandoned. Its track thickness is two
+// SizeNameInputBorders, which AppTheme zeroes so the client's inputs draw flat,
+// and its track fill is SizeNameInputBackground, which AppTheme answers with the
+// colour of the card the slider sits on — so it needed a scoped theme override
+// simply to be visible, and still grew a grey hover disc under the pointer that
+// swallowed the thumb. This is a track, a fill and a knob.
+type Slider struct {
+	tapBase
+
+	// OnChanged is called with each new value, on the UI thread. A drag calls it
+	// per frame, so it is the caller's business to keep the work small.
+	OnChanged func(float64)
+
+	low, high, step float64
+	value           float64
+
+	track   *canvas.Rectangle
+	fill    *canvas.Rectangle
+	knob    *canvas.Circle
+	content *fyne.Container
+}
+
+var (
+	_ fyne.Tappable     = (*Slider)(nil)
+	_ fyne.Draggable    = (*Slider)(nil)
+	_ desktop.Hoverable = (*Slider)(nil)
+)
+
+// NewSlider builds a slider over [low, high], quantised to step.
+func NewSlider(low, high, step, value float64, onChanged func(float64)) *Slider {
+	s := &Slider{
+		OnChanged: onChanged,
+		low:       low,
+		high:      high,
+		step:      step,
+		value:     clampValue(value, low, high),
+		track:     canvas.NewRectangle(theme.Colors.ChannelSelectedBg),
+		fill:      canvas.NewRectangle(theme.Colors.ServerSelectedBg),
+		knob:      canvas.NewCircle(theme.Colors.TextPrimary),
+	}
+
+	radius := theme.Sizes.SettingsSliderTrack / 2
+	s.track.CornerRadius = radius
+	s.fill.CornerRadius = radius
+	s.knob.StrokeColor = theme.Colors.Outline
+	s.knob.StrokeWidth = theme.Sizes.OutlineWidth
+
+	s.content = container.New(&sliderLayout{slider: s}, s.track, s.fill, s.knob)
+	s.ExtendBaseWidget(s)
+
+	return s
+}
+
+func (s *Slider) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(s.content)
+}
+
+// Value reports where the slider stands.
+func (s *Slider) Value() float64 { return s.value }
+
+// SetValue moves the slider without calling back, for a value something else
+// changed — the field beside it, or a section resetting a whole group.
+func (s *Slider) SetValue(value float64) {
+	value = clampValue(value, s.low, s.high)
+	if value == s.value {
+		return
+	}
+
+	s.value = value
+	Relayout(s.content)
+}
+
+func (s *Slider) Tapped(event *fyne.PointEvent) { s.moveTo(event.Position.X) }
+
+func (s *Slider) Dragged(event *fyne.DragEvent) { s.moveTo(event.Position.X) }
+
+// DragEnd completes fyne.Draggable. Without it the driver never recognises the
+// slider as draggable and Dragged is never called at all.
+func (s *Slider) DragEnd() {}
+
+// MouseIn lights the knob's edge with the accent. The knob itself keeps its size:
+// a control that grows under the pointer covers the track it is measured against.
+func (s *Slider) MouseIn(*desktop.MouseEvent) {
+	s.knob.StrokeColor = theme.Colors.ServerSelectedBg
+	s.knob.Refresh()
+}
+
+func (s *Slider) MouseOut() {
+	s.knob.StrokeColor = theme.Colors.Outline
+	s.knob.Refresh()
+}
+
+// moveTo sets the value from a pointer position along the widget. The travel is
+// the width less the knob, because the knob is placed by its left edge — without
+// that the two ends of the track would be unreachable.
+func (s *Slider) moveTo(x float32) {
+	knob := theme.Sizes.SettingsSliderKnob
+	travel := s.Size().Width - knob
+	if travel <= 0 || s.high <= s.low {
+		return
+	}
+
+	ratio := float64(clampWithin((x-knob/2)/travel, 0, 1))
+	value := s.low + ratio*(s.high-s.low)
+	if s.step > 0 {
+		value = math.Round(value/s.step) * s.step
+	}
+
+	value = clampValue(value, s.low, s.high)
+	if value == s.value {
+		return
+	}
+
+	s.value = value
+	Relayout(s.content)
+
+	if s.OnChanged != nil {
+		s.OnChanged(value)
+	}
+}
+
+// ratio is how far along the track the value stands.
+func (s *Slider) ratio() float32 {
+	if s.high <= s.low {
+		return 0
+	}
+
+	return float32((s.value - s.low) / (s.high - s.low))
+}
+
+// sliderLayout centres the track on the widget's height and places the knob
+// along it; objects are track, fill then knob.
+type sliderLayout struct{ slider *Slider }
+
+func (l *sliderLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 3 {
+		return
+	}
+
+	track, fill, knob := objects[0], objects[1], objects[2]
+	thickness := theme.Sizes.SettingsSliderTrack
+	side := theme.Sizes.SettingsSliderKnob
+
+	y := (size.Height - thickness) / 2
+	track.Resize(fyne.NewSize(size.Width, thickness))
+	track.Move(fyne.NewPos(0, y))
+
+	x := max(size.Width-side, 0) * l.slider.ratio()
+	fill.Resize(fyne.NewSize(x+side/2, thickness))
+	fill.Move(fyne.NewPos(0, y))
+
+	knob.Resize(fyne.NewSize(side, side))
+	knob.Move(fyne.NewPos(x, (size.Height-side)/2))
+}
+
+func (l *sliderLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(theme.Sizes.SettingsSliderKnob, theme.Sizes.SettingsSliderHeight)
+}
+
+// newNumberControl is a slider and the exact value beside it, each moving the
+// other. The value is a field once it is clicked: a slider is how a size is
+// *found*, and typing is how one already known is set.
+func newNumberControl(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
+	var slider *Slider
+
+	box := newNumberBox(value, low, high, unit, func(typed float64) {
+		slider.SetValue(typed)
+		onChanged(typed)
+	})
+	slider = NewSlider(low, high, step, value, func(dragged float64) {
+		box.SetValue(dragged)
+		onChanged(dragged)
+	})
+
+	return fixedControl(theme.Sizes.SettingsControlWidth,
+		NewFillRow(0,
+			slider,
+			HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
+			NewFixedWidthContainer(theme.Sizes.SettingsValueWidth, box),
+		))
+}
+
+/* The number beside a slider */
+
+// numberBox shows a slider's exact value and, when it is clicked, becomes the
+// field that value can be typed into. A slider alone cannot be aimed at a
+// particular number, and a slider whose range is thousands of pixels wide cannot
+// be aimed at all.
+//
+// The entry is built on demand rather than kept hidden: the Advanced section
+// mounts a hundred of these at once, and an unused widget.Entry each is a cost
+// nothing has asked for.
+type numberBox struct {
+	tapBase
+
+	unit      string
+	low, high float64
+	value     float64
+
+	// onCommit is called with a typed value, never with a value SetValue was
+	// given — the slider that drives this is already telling its own caller.
+	onCommit func(float64)
+
+	text       *canvas.Text
+	background *canvas.Rectangle
+	content    *fyne.Container
+	entry      *numberEntry
+}
+
+var (
+	_ fyne.Tappable     = (*numberBox)(nil)
+	_ desktop.Hoverable = (*numberBox)(nil)
+)
+
+func newNumberBox(value, low, high float64, unit string, onCommit func(float64)) *numberBox {
+	b := &numberBox{
+		unit:       unit,
+		low:        low,
+		high:       high,
+		value:      value,
+		onCommit:   onCommit,
+		background: canvas.NewRectangle(color.Transparent),
+	}
+	b.background.CornerRadius = theme.Sizes.SettingsInputRadius
+
+	b.text = canvas.NewText(b.valueText(), theme.Colors.TextPrimary)
+	b.text.TextSize = theme.Sizes.SettingsLabelSize
+
+	b.content = container.NewStack(b.background, container.NewCenter(b.text))
+	b.onTap = b.beginEdit
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+func (b *numberBox) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+// SetValue shows a different number without reporting it.
+func (b *numberBox) SetValue(value float64) {
+	if value == b.value {
+		return
+	}
+
+	b.value = value
+	if b.entry == nil {
+		b.text.Text = b.valueText()
+		b.text.Refresh()
+	}
+}
+
+func (b *numberBox) MouseIn(*desktop.MouseEvent) {
+	if b.entry != nil {
+		return
+	}
+
+	b.background.FillColor = theme.Colors.TappableHoverBg
+	b.background.Refresh()
+}
+
+func (b *numberBox) MouseOut() {
+	if b.entry != nil {
+		return
+	}
+
+	b.background.FillColor = color.Transparent
+	b.background.Refresh()
+}
+
+// beginEdit swaps the number for a field and puts the cursor in it.
+func (b *numberBox) beginEdit() {
+	if b.entry != nil {
+		return
+	}
+
+	b.entry = newNumberEntry(strconv.Itoa(int(b.value)), b)
+
+	b.background.FillColor = theme.Colors.ComposerBg
+	Outline(b.background)
+	b.content.Objects = []fyne.CanvasObject{b.background, WithCaret(b.entry)}
+	b.content.Refresh()
+
+	if canvas := fyne.CurrentApp().Driver().CanvasForObject(b); canvas != nil {
+		canvas.Focus(b.entry)
+	}
+}
+
+// submit answers Enter by giving the focus up; commit runs on the way out, so
+// there is one path that reads the field and one only.
+func (b *numberBox) submit() { b.unfocus() }
+
+// cancel answers Escape by putting the current value back before giving the
+// focus up, so the commit that follows is a no-op.
+func (b *numberBox) cancel() {
+	if b.entry == nil {
+		return
+	}
+
+	b.entry.SetText(strconv.Itoa(int(b.value)))
+	b.unfocus()
+}
+
+// commit reads the field, clamps what it says to the slider's range, and returns
+// the box to showing a number. Anything that will not parse is discarded — an
+// empty field is what half-finished typing looks like, not a request for zero.
+//
+// Only the field currently open is read. Focusing a second box makes the first
+// report its loss *after* the second has installed its own field, so an
+// unguarded commit would close the one the user had only just opened.
+func (b *numberBox) commit(entry *numberEntry) {
+	if entry == nil || b.entry != entry {
+		return
+	}
+	b.entry = nil
+
+	if value, err := strconv.ParseFloat(strings.TrimSpace(entry.Text), 64); err == nil {
+		value = clampValue(value, b.low, b.high)
+		if value != b.value {
+			b.value = value
+			if b.onCommit != nil {
+				b.onCommit(value)
+			}
+		}
+	}
+
+	b.text.Text = b.valueText()
+	b.text.Refresh()
+
+	b.background.FillColor = color.Transparent
+	b.background.StrokeWidth = 0
+	b.content.Objects = []fyne.CanvasObject{b.background, container.NewCenter(b.text)}
+	b.content.Refresh()
+}
+
+func (b *numberBox) unfocus() {
+	if canvas := fyne.CurrentApp().Driver().CanvasForObject(b); canvas != nil {
+		canvas.Unfocus()
+	}
+}
+
+func (b *numberBox) valueText() string {
+	if b.unit == "" {
+		return strconv.Itoa(int(b.value))
+	}
+
+	return strconv.Itoa(int(b.value)) + " " + b.unit
+}
+
+// numberEntry is the field a numberBox becomes. It exists for two things
+// widget.Entry offers no hook for: Escape, which it otherwise hands to the
+// canvas — where the settings page would read it as "close" — and losing the
+// focus, which is the one place the typed value is read.
+type numberEntry struct {
+	widget.Entry
+
+	box *numberBox
+}
+
+var _ fyne.Focusable = (*numberEntry)(nil)
+
+func newNumberEntry(text string, box *numberBox) *numberEntry {
+	e := &numberEntry{box: box}
+	e.ExtendBaseWidget(e)
+	e.OnSubmitted = func(string) { box.submit() }
+	e.SetText(text)
+
+	return e
+}
+
+func (e *numberEntry) FocusLost() {
+	e.Entry.FocusLost()
+	e.box.commit(e)
+}
+
+func (e *numberEntry) TypedKey(key *fyne.KeyEvent) {
+	if key.Name == fyne.KeyEscape {
+		e.box.cancel()
+		return
+	}
+
+	e.Entry.TypedKey(key)
+}
+
+/* Option rows */
+
+// settingsOption is one entry of an option row's menu: what the user reads and
+// what is stored.
+type settingsOption struct {
+	Label string
+	Value string
+}
+
+// optionControl is the page's dropdown: the chosen value in a field of its own,
+// opening the rest as a menu beneath itself.
+//
+// A field rather than bare text on the right of the row. Fyne's Select would
+// draw one, but AppTheme flattens its border away — and the value on its own,
+// which is what this was, reads as part of the row's description rather than as
+// the control.
+type optionControl struct {
+	tapBase
+
+	label      *canvas.Text
+	background *canvas.Rectangle
+	options    []settingsOption
+	onPick     func(string)
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*optionControl)(nil)
+	_ desktop.Hoverable = (*optionControl)(nil)
+)
+
+func newOptionControl(value string, options []settingsOption, onPick func(string)) *optionControl {
+	label := canvas.NewText(optionLabel(options, value), theme.Colors.TextPrimary)
+	label.TextSize = theme.Sizes.SettingsLabelSize
+
+	chevron := newScaledIcon(fynetheme.MenuDropDownIcon(), theme.Sizes.SettingsIconSize)
+
+	c := &optionControl{label: label, background: newFieldBackground(), options: options, onPick: onPick}
+
+	padding := theme.Sizes.SettingsRowPaddingH
+	row := NewFillRow(0,
+		vcenter(label),
+		HorizontalSpacer(theme.Sizes.ChipDotGap),
+		container.NewCenter(chevron),
+	)
+
+	c.content = fixedControl(theme.Sizes.SettingsControlWidth,
+		container.NewStack(c.background, NewInset(row, 0, 0, padding, padding)))
+	c.onTap = c.open
+	c.ExtendBaseWidget(c)
+
+	return c
+}
+
+func (c *optionControl) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(c.content)
+}
+
+// set shows a different option as chosen.
+func (c *optionControl) set(value string) {
+	c.label.Text = optionLabel(c.options, value)
+	c.label.Refresh()
+}
+
+func (c *optionControl) MouseIn(*desktop.MouseEvent) {
+	c.background.FillColor = theme.Colors.ChannelSelectedBg
+	c.background.Refresh()
+}
+
+func (c *optionControl) MouseOut() {
+	c.background.FillColor = theme.Colors.ComposerBg
+	c.background.Refresh()
+}
+
+func (c *optionControl) open() {
+	items := make([]*fyne.MenuItem, len(c.options))
+	for i, option := range c.options {
+		items[i] = fyne.NewMenuItem(option.Label, func() { c.onPick(option.Value) })
+	}
+
+	showDropdown(c, items)
+}
+
+// optionLabel is what an option's stored value reads as. An unrecognised value —
+// a hand-edited file naming something the client dropped — shows itself, rather
+// than an empty control that looks broken.
+func optionLabel(options []settingsOption, value string) string {
+	for _, option := range options {
+		if option.Value == value {
+			return option.Label
+		}
+	}
+
+	return value
+}
+
+// showDropdown pops items beneath obj, at least as wide as obj itself, so the
+// menu reads as the control opening rather than as a menu appearing near it.
+// Fyne sizes a pop-up menu to its longest item, which for "Cosy" is a sliver.
+func showDropdown(obj fyne.CanvasObject, items []*fyne.MenuItem) {
+	target := fyne.CurrentApp().Driver().CanvasForObject(obj)
+	if target == nil || len(items) == 0 {
+		return
+	}
+
+	menu := widget.NewPopUpMenu(fyne.NewMenu("", items...), target)
+	menu.ShowAtPosition(AnchorBelow(obj))
+	menu.Resize(fyne.NewSize(max(obj.Size().Width, menu.MinSize().Width), menu.MinSize().Height))
+}
+
+/* Colours */
+
+// newSwatchRect is a sample of one colour, carrying the shared hairline so a
+// saturated fill lifts off the surface behind it and a dark one is still a shape.
+func newSwatchRect(fill color.Color, side, radius float32) *canvas.Rectangle {
+	swatch := canvas.NewRectangle(fill)
+	swatch.SetMinSize(fyne.NewSize(side, side))
+	swatch.CornerRadius = radius
+	Outline(swatch)
+
+	return swatch
+}
+
+// swatchButton is the round sample beside a hex field, opening the palette when
+// it is clicked. Typing a hex is exact but nobody knows a hex by heart; the
+// palette is what makes a colour something to choose rather than to know.
+type swatchButton struct {
+	tapBase
+
+	swatch  *canvas.Rectangle
+	content fyne.CanvasObject
+}
+
+var _ fyne.Tappable = (*swatchButton)(nil)
+
+func newSwatchButton(fill color.Color, onTap func()) *swatchButton {
+	side := theme.Sizes.SettingsSwatchSize
+
+	b := &swatchButton{swatch: newSwatchRect(fill, side, side/2)}
+	b.content = container.NewCenter(b.swatch)
+	b.onTap = onTap
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+func (b *swatchButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+// SetColor repaints the sample, for a colour typed into the field beside it.
+func (b *swatchButton) SetColor(fill color.Color) {
+	b.swatch.FillColor = fill
+	b.swatch.Refresh()
+}
+
+// palettePresets are the colours the picker offers: a neutral ramp, then two
+// rows of hues. They are a starting point, not a limit — the hex field beside
+// the picker takes anything.
+var palettePresets = []string{
+	"#FFFFFF", "#D1D5DB", "#9CA3AF", "#6B7280", "#4B5563", "#2B3142", "#1F2330", "#0F1117",
+	"#5B7CFA", "#3B82F6", "#06B6D4", "#10B981", "#22C55E", "#EAB308", "#F97316", "#EF4444",
+	"#8B5CF6", "#A855F7", "#EC4899", "#F43F5E", "#14B8A6", "#84CC16", "#C98A2A", "#C73E42",
+}
+
+// newPaletteCard is the picker itself: the presets as a grid, on the same card
+// the rest of the page is made of.
+func newPaletteCard(onPick func(hex string)) fyne.CanvasObject {
+	side, gap := theme.Sizes.SettingsPaletteSize, theme.Sizes.SettingsPaletteGap
+
+	cells := make([]fyne.CanvasObject, 0, len(palettePresets))
+	for _, hex := range palettePresets {
+		fill, ok := theme.ParseHex(hex)
+		if !ok {
+			continue
+		}
+		cells = append(cells, newPaletteCell(fill, hex, onPick))
+	}
+
+	grid := NewFlow(float32(paletteColumns)*(side+gap), gap, cells...)
+
+	card := canvas.NewRectangle(theme.Colors.SessionCardBg)
+	card.CornerRadius = theme.Sizes.SettingsGroupRadius
+	Outline(card)
+
+	padding := theme.Sizes.SettingsPreviewGap
+
+	return container.NewStack(card, NewInset(grid, padding, padding, padding, padding))
+}
+
+// newPaletteCell is one preset. TappableContainer would give the hover for free,
+// but it highlights by filling a rectangle *behind* its content — which a swatch
+// covers completely.
+func newPaletteCell(fill color.Color, hex string, onPick func(string)) fyne.CanvasObject {
+	side := theme.Sizes.SettingsPaletteSize
+
+	cell := &swatchButton{swatch: newSwatchRect(fill, side, theme.Sizes.SettingsInputRadius)}
+	cell.content = cell.swatch
+	cell.onTap = func() { onPick(hex) }
+	cell.ExtendBaseWidget(cell)
+
+	return cell
+}
+
+/* Usage meters */
+
+// newUsageBar is the how-full-is-it bar the cache section draws, and the setter
+// that fills it. A figure beside a budget is two numbers to divide; the bar is
+// the answer, and it turns as it runs out.
+func newUsageBar() (*fyne.Container, func(ratio float32)) {
+	height := theme.Sizes.SettingsUsageHeight
+
+	track := canvas.NewRectangle(theme.Colors.ChannelSelectedBg)
+	track.CornerRadius = height / 2
+
+	fill := canvas.NewRectangle(theme.Colors.ServerSelectedBg)
+	fill.CornerRadius = height / 2
+
+	layout := &usageBarLayout{}
+	bar := container.New(layout, track, fill)
+
+	return bar, func(ratio float32) {
+		layout.ratio = clampWithin(ratio, 0, 1)
+		fill.FillColor = usageTint(ratio)
+		fill.Refresh()
+		Relayout(bar)
+	}
+}
+
+// usageTint warns as a budget fills. The thresholds are what the cache's own
+// trim does not tell the user: it evicts silently, so a bar sitting at the line
+// is the only sign that images are being thrown away as fast as they arrive.
+func usageTint(ratio float32) color.Color {
+	switch {
+	case ratio >= 1:
+		return theme.Colors.NoticeDanger
+	case ratio >= 0.85:
+		return theme.Colors.NoticeWarning
+	}
+
+	return theme.Colors.ServerSelectedBg
+}
+
+// usageBarLayout stretches the track across the slot and the fill across its
+// share of it.
+type usageBarLayout struct{ ratio float32 }
+
+func (l *usageBarLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 2 {
+		return
+	}
+
+	height := theme.Sizes.SettingsUsageHeight
+	y := (size.Height - height) / 2
+
+	objects[0].Resize(fyne.NewSize(size.Width, height))
+	objects[0].Move(fyne.NewPos(0, y))
+
+	// A sliver of fill is still a shape: a cache holding a handful of avatars
+	// against a half-gigabyte budget would otherwise draw as an empty track.
+	width := max(size.Width*l.ratio, height)
+	objects[1].Resize(fyne.NewSize(min(width, size.Width), height))
+	objects[1].Move(fyne.NewPos(0, y))
+}
+
+func (l *usageBarLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(0, theme.Sizes.SettingsUsageHeight)
+}
+
+/* The rail */
+
+// settingsRailButton is one section in the rail: its mark, its name, and a fill
+// that says which one is open. TappableContainer would give the hover for free
+// but not the selection, which has to survive the pointer leaving.
+type settingsRailButton struct {
+	tapBase
+
+	background *canvas.Rectangle
+	content    fyne.CanvasObject
+	selected   bool
+}
+
+var (
+	_ fyne.Tappable     = (*settingsRailButton)(nil)
+	_ desktop.Hoverable = (*settingsRailButton)(nil)
+)
+
+func newSettingsRailButton(entry railEntry, selected bool, onTap func()) *settingsRailButton {
+	b := &settingsRailButton{
+		background: canvas.NewRectangle(color.Transparent),
+		selected:   selected,
+	}
+	b.onTap = onTap
+
+	text := theme.Colors.CategoryText
+	if selected {
+		text = theme.Colors.TextPrimary
+		b.background.FillColor = theme.Colors.ChannelSelectedBg
+	}
+	b.background.CornerRadius = theme.Sizes.SettingsGroupRadius
+
+	label := canvas.NewText(entry.title, text)
+	label.TextSize = theme.Sizes.SettingsRailTextSize
+
+	row := HBoxNoSpacing(
+		container.NewCenter(newScaledIcon(entry.icon, theme.Sizes.SettingsIconSize)),
+		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
+		container.NewCenter(label),
+	)
+
+	b.content = NewMinHeightContainer(theme.Sizes.SettingsRailRowHeight,
+		container.NewStack(b.background, NewInset(row, 0, 0, theme.Sizes.ChipPaddingH, 0)))
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+func (b *settingsRailButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+func (b *settingsRailButton) MouseIn(*desktop.MouseEvent) {
+	if b.selected {
+		return
+	}
+
+	b.background.FillColor = theme.Colors.TappableHoverBg
+	b.background.Refresh()
+}
+
+func (b *settingsRailButton) MouseOut() {
+	if b.selected {
+		return
+	}
+
+	b.background.FillColor = color.Transparent
+	b.background.Refresh()
+}
+
+/* Dismissal */
+
+// dismissSink is the full-bleed surface behind a popover: it takes the next
+// click anywhere else and closes what is open. It draws nothing — a picker is
+// not modal enough to earn a dimmed window — and keeps the ordinary cursor, so
+// the page underneath still reads as reachable.
+type dismissSink struct {
+	tapBase
+
+	content fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable      = (*dismissSink)(nil)
+	_ desktop.Cursorable = (*dismissSink)(nil)
+)
+
+func newDismissSink(onTap func()) *dismissSink {
+	s := &dismissSink{content: canvas.NewRectangle(color.Transparent)}
+	s.onTap = onTap
+	s.ExtendBaseWidget(s)
+
+	return s
+}
+
+func (s *dismissSink) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(s.content)
+}
+
+func (s *dismissSink) Cursor() desktop.Cursor { return desktop.DefaultCursor }
+
+/* Small helpers */
+
+// clampValue holds v inside [low, high].
+func clampValue(v, low, high float64) float64 {
+	return math.Max(low, math.Min(v, high))
+}

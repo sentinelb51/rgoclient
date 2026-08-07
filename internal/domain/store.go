@@ -63,4 +63,9 @@ type Store interface {
 
 	// CanKickMembers reports whether the account may remove members from a server.
 	CanKickMembers(serverID string) bool
+
+	// CanBypassSlowmode reports whether the account may send in a channel without
+	// waiting out its cooldown. A channel's Slowmode is what it is configured at;
+	// this is whether it applies to us.
+	CanBypassSlowmode(channelID string) bool
 }

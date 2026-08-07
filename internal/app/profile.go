@@ -5,9 +5,10 @@ package app
 // Both are drawn from one domain.Profile resolved out of the store here, so the
 // widgets never look anything up themselves.
 //
-// The bio is the exception. It is not part of the user record the client already
-// holds, so it is fetched after the card is up and filled in when it lands —
-// which is why a card is a value plus one late arrival rather than a snapshot.
+// The bio and the banner are the exception. Neither is part of the user record
+// the client already holds, so both are fetched after the card is up and filled
+// in when they land — which is why a card is a value plus one late arrival
+// rather than a snapshot.
 
 import (
 	"log"
@@ -34,7 +35,7 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 	})
 
 	a.showPopover(card.Content, anchor)
-	a.loadBio(userID, card)
+	a.loadProfile(userID, card)
 }
 
 // showProfileDialog opens the full profile, centred on the modal layer. It
@@ -46,7 +47,7 @@ func (a *App) showProfileDialog(userID string) {
 	})
 
 	a.showOverlay(dialog.Content)
-	a.loadBio(userID, dialog)
+	a.loadProfile(userID, dialog)
 }
 
 // messageAction is what the "Message" button does, or nil when there is nothing
@@ -108,21 +109,21 @@ func (a *App) profileOf(userID string) domain.Profile {
 	return profile
 }
 
-// loadBio fetches the profile text and fills it into a card that is already on
-// screen, so nothing waits on the network to appear. A card the user has since
-// dismissed is detached, and updating it draws nothing.
-func (a *App) loadBio(userID string, card *ui.ProfileCard) {
+// loadProfile fetches the bio and banner and fills them into a card that is
+// already on screen, so nothing waits on the network to appear. A card the user
+// has since dismissed is detached, and updating it draws nothing.
+func (a *App) loadProfile(userID string, card *ui.ProfileCard) {
 	epoch := a.epoch
 
 	go func() {
-		bio, err := a.client.UserBio(userID)
+		profile, err := a.client.UserProfile(userID)
 		if err != nil {
-			// A profile reads perfectly well without a bio, and a notice over the card
+			// A profile reads perfectly well without either, and a notice over the card
 			// would be louder than the miss is worth — so this only reaches the log.
 			log.Printf("fetch profile %s: %v", userID, err)
 			return
 		}
-		if bio == "" {
+		if profile.Bio == "" && profile.BackgroundURL == "" {
 			return
 		}
 
@@ -131,8 +132,8 @@ func (a *App) loadBio(userID string, card *ui.ProfileCard) {
 				return
 			}
 
-			card.SetBio(bio)
-			a.repositionOverlay() // the card just grew
+			card.SetProfile(profile)
+			a.repositionOverlay() // a bio grows the card
 		}, false)
 	}()
 }

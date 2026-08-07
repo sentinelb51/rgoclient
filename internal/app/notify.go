@@ -19,10 +19,15 @@ import (
 // the user reads, so it says what happened rather than what the API returned —
 // callers log the error itself alongside. Call on the UI thread.
 func (a *App) notify(tone ui.Tone, format string, args ...any) {
-	text := fmt.Sprintf(format, args...)
-	log.Printf("notice: %s", text)
+	a.notifyNotice(ui.Notice{Tone: tone, Body: fmt.Sprintf(format, args...)})
+}
 
-	a.notices.Push(tone, text)
+// notifyNotice is notify for an outcome that deserves a heading of its own,
+// rather than the one its tone would give it. Call on the UI thread.
+func (a *App) notifyNotice(notice ui.Notice) {
+	log.Printf("notice: %s", notice.Body)
+
+	a.notices.PushNotice(notice)
 }
 
 // confirm puts a question on the modal layer. The dialog closes itself whichever

@@ -21,6 +21,7 @@ type fakeStore struct {
 
 	manageMessages bool
 	kickMembers    bool
+	bypassSlowmode bool
 }
 
 var _ domain.Store = (*fakeStore)(nil)
@@ -93,6 +94,7 @@ func (s *fakeStore) SystemText(system *domain.SystemMessage) string {
 
 func (s *fakeStore) CanManageMessages(string) bool { return s.manageMessages }
 func (s *fakeStore) CanKickMembers(string) bool    { return s.kickMembers }
+func (s *fakeStore) CanBypassSlowmode(string) bool { return s.bypassSlowmode }
 
 // testDeps is the bundle a widget test mounts against: a store that knows
 // nothing, and the real caches, which are inert without a network. Every field
@@ -101,7 +103,7 @@ func (s *fakeStore) CanKickMembers(string) bool    { return s.kickMembers }
 func testDeps() Deps {
 	return Deps{
 		Store:   &fakeStore{},
-		Images:  cache.NewImageCache(),
+		Images:  cache.NewImageCache("", cache.DefaultImageLimits()),
 		Texts:   cache.NewTextCache(8),
 		Actions: stubActions{},
 	}

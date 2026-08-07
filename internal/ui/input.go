@@ -22,13 +22,13 @@ import (
 
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
 
 const (
-	maxInputLines    = 8
 	maxReplies       = 5
 	attachPreviewW   = 200
 	attachPreviewImg = 150
@@ -83,6 +83,7 @@ type MessageInput struct {
 	deps         Deps
 	window       fyne.Window
 	shiftPressed bool
+	ctrlPressed  bool
 }
 
 // NewMessageInput creates a message input wired to the given dependencies. The
@@ -111,7 +112,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	return m
 }
 
-// MinSize grows the entry up to maxInputLines as the user types.
+// MinSize grows the entry up to ComposerMaxLines as the user types.
 func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 
 // composerMinSize sizes a growing composer-style entry: one line per newline up
@@ -123,7 +124,7 @@ func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 // *inside* InnerPadding. Counting it twice left four dead pixels under the caret.
 func composerMinSize(e *widget.Entry) fyne.Size {
 	size := e.MinSize()
-	lines := min(max(strings.Count(e.Text, "\n")+1, 1), maxInputLines)
+	lines := min(max(strings.Count(e.Text, "\n")+1, 1), int(theme.Sizes.ComposerMaxLines))
 	th := e.Theme()
 	size.Height = lineHeight(th.Size(fynetheme.SizeNameText))*float32(lines) +
 		th.Size(fynetheme.SizeNameInnerPadding)*2
@@ -168,14 +169,20 @@ func (m *MessageInput) FocusLost() {
 }
 
 func (m *MessageInput) KeyDown(key *fyne.KeyEvent) {
-	if key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight {
+	switch key.Name {
+	case desktop.KeyShiftLeft, desktop.KeyShiftRight:
 		m.shiftPressed = true
+	case desktop.KeyControlLeft, desktop.KeyControlRight:
+		m.ctrlPressed = true
 	}
 }
 
 func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
-	if key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight {
+	switch key.Name {
+	case desktop.KeyShiftLeft, desktop.KeyShiftRight:
 		m.shiftPressed = false
+	case desktop.KeyControlLeft, desktop.KeyControlRight:
+		m.ctrlPressed = false
 	}
 }
 
@@ -183,6 +190,9 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 // pending replies/attachments on Escape, starts editing the last own message on
 // Up in an empty composer, and otherwise defers to the embedded entry, refreshing
 // so MinSize recomputes.
+//
+// Which of Enter and Ctrl+Enter sends is a setting; Shift+Enter is a newline
+// either way, so the habit that works everywhere else keeps working.
 //
 // An open mention picker gets first refusal on the navigation keys, since it
 // binds the same ones: Enter would send the half-written message and Up would
@@ -210,7 +220,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 		m.Refresh()
 	case key.Name != fyne.KeyReturn && key.Name != fyne.KeyEnter:
 		m.Entry.TypedKey(key)
-	case m.shiftPressed:
+	case m.shiftPressed || !m.sends():
 		m.TypedRune('\n')
 		m.Refresh()
 	default:
@@ -219,6 +229,17 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 		}
 		m.Refresh()
 	}
+}
+
+// sends reports whether the Enter now being handled is the sending one. With
+// "Enter sends" off it is Ctrl+Enter instead, which is why the modifier is
+// tracked at all.
+func (m *MessageInput) sends() bool {
+	if config.Current().Behaviour.EnterSends {
+		return !m.ctrlPressed
+	}
+
+	return m.ctrlPressed
 }
 
 func (m *MessageInput) TypedRune(r rune) {
@@ -681,6 +702,154 @@ func (b *replyIconButton) applyState() {
 	canvas.Refresh(b.icon)
 }
 
+/* Slowmode */
+
+// SlowmodeBadge floats over the bottom-right of the message column, just above
+// the composer card, and reports the channel's send cooldown: what it is while
+// the user may send, and what is left of it while they may not.
+//
+// It sits *outside* the card rather than in it. Inside, it was furniture the
+// entry had to make room for — every relabelling took width off what was being
+// typed. Out here it is a marker on the conversation instead, and the entry
+// spans the card in every channel.
+//
+// Nothing is drawn behind it: like the composer card it hangs over the message
+// column, and a second filled surface a few pixels above the first read as a
+// bar growing out of the card. Bare text is instead sized up until it holds
+// itself apart from the conversation passing underneath. The stopwatch is drawn
+// from canvas primitives rather than an icon resource for the same reason the
+// channel glyphs are — a stroked shape takes a palette colour directly, so the
+// mark and the text beside it change tone as one. Nothing here accepts a pointer
+// event, so the messages behind the chip stay hoverable and right-clickable.
+type SlowmodeBadge struct {
+	widget.BaseWidget
+
+	// OnResize fires when the chip's width or visibility changes, so whoever
+	// mounted it can re-run that one row's layout: the chip is pinned to the row's
+	// trailing edge, so every relabelling moves where it starts. Fyne re-lays out
+	// for a *growing* minimum on its own; a shrinking one it leaves reserved.
+	OnResize func()
+
+	glyph   *fyne.Container // holds the stopwatch, redrawn when the tone changes
+	label   *canvas.Text
+	content *fyne.Container
+
+	tone color.Color // what the glyph and label are currently drawn in
+}
+
+var _ fyne.Widget = (*SlowmodeBadge)(nil)
+
+// NewSlowmodeBadge builds an empty, hidden badge. Set gives it something to say.
+func NewSlowmodeBadge() *SlowmodeBadge {
+	b := &SlowmodeBadge{
+		glyph: container.NewStack(),
+		label: canvas.NewText("", theme.Colors.SlowmodeText),
+		tone:  theme.Colors.SlowmodeText,
+	}
+	b.label.TextSize = theme.Sizes.SlowmodeTextSize
+	b.glyph.Objects = []fyne.CanvasObject{stopwatchGlyph(b.tone)}
+
+	// As on the reply card, container.NewCenter is what lines the glyph up with the
+	// text beside it: each takes its own minimum size inside a row as tall as the
+	// larger of them.
+	chip := HBoxNoSpacing(
+		container.NewCenter(b.glyph),
+		HorizontalSpacer(theme.Sizes.SlowmodeGap),
+		container.NewCenter(b.label),
+	)
+
+	// The gap to the card below belongs to the chip, not to a spacer in the column
+	// it hangs in: a spacer would hold that room open in every channel that has no
+	// slowmode, where the chip itself simply isn't there.
+	b.content = NewInset(chip, 0, theme.Sizes.SlowmodeDockGap, 0, theme.Sizes.SlowmodeInsetH)
+
+	b.Hide()
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+func (b *SlowmodeBadge) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+// Set labels the badge: cooldown is what the channel enforces, remaining what is
+// left of it — zero when the user may send now. A zero cooldown hides the badge,
+// which is every channel that has none.
+func (b *SlowmodeBadge) Set(cooldown, remaining time.Duration) {
+	if cooldown <= 0 {
+		if b.Visible() {
+			b.Hide()
+			b.resized()
+		}
+		return
+	}
+
+	text, tone := util.ShortDuration(cooldown)+" slowmode", theme.Colors.SlowmodeText
+	if remaining > 0 {
+		text, tone = util.ShortDuration(remaining), theme.Colors.SlowmodeWaiting
+	}
+
+	// This runs once a second for the length of a cooldown, so a repaint — and the
+	// relayout of the row it sits in — is worth asking whether anything actually
+	// changed first.
+	if tone != b.tone {
+		b.tone = tone
+		b.label.Color = tone
+		b.glyph.Objects = []fyne.CanvasObject{stopwatchGlyph(tone)}
+		b.glyph.Refresh()
+	}
+
+	moved := !b.Visible()
+	if text != b.label.Text {
+		b.label.Text = text
+		b.content.Refresh() // the chip's own width moved with its text
+		moved = true
+	}
+
+	b.Show()
+	if moved {
+		b.resized()
+	}
+}
+
+// resized tells whoever mounted the badge that the width it occupies has changed.
+func (b *SlowmodeBadge) resized() {
+	if b.OnResize != nil {
+		b.OnResize()
+	}
+}
+
+// stopwatchGlyph draws a stopwatch in col, on the same 20-unit grid the channel
+// glyphs are drawn on so the two read as one icon set.
+func stopwatchGlyph(col color.Color) fyne.CanvasObject {
+	size := theme.Sizes.SlowmodeGlyphSize
+	scale := size / 20
+
+	line := func(x1, y1, x2, y2 float32) *canvas.Line {
+		l := canvas.NewLine(col)
+		l.Position1 = fyne.NewPos(x1*scale, y1*scale)
+		l.Position2 = fyne.NewPos(x2*scale, y2*scale)
+		l.StrokeWidth = 2 * scale
+		return l
+	}
+
+	dial := canvas.NewCircle(color.Transparent)
+	dial.StrokeColor = col
+	dial.StrokeWidth = 2 * scale
+	dial.Move(fyne.NewPos(3.5*scale, 5.5*scale))
+	dial.Resize(fyne.NewSize(13*scale, 13*scale))
+
+	glyph := container.NewWithoutLayout(
+		dial,
+		line(7.5, 2.5, 12.5, 2.5), // the crown
+		line(10, 2.5, 10, 5.5),    // its stem
+		line(10, 12, 13.2, 9.2),   // the hand
+	)
+
+	return container.NewGridWrap(fyne.NewSize(size, size), glyph)
+}
+
 /* The mention picker */
 
 const (
@@ -1036,7 +1205,7 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	r.name.Text = util.Truncate(candidate.Name, mentionNameMaxRunes)
 	r.name.Color = theme.Colors.TextPrimary
 	if candidate.Color != nil {
-		r.name.Color = candidate.Color
+		r.name.Color = solidColor(candidate.Color)
 	}
 	r.handle.Text = "@" + candidate.Username
 	r.name.Refresh()

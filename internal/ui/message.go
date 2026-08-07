@@ -12,6 +12,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -42,12 +43,19 @@ type MessageWidget struct {
 	// the widget is mounted can be updated in place by RefreshAuthor rather than
 	// re-rendering the channel. Both are nil for a grouped continuation, which
 	// draws neither a name nor an avatar.
-	authorText *canvas.Text
+	authorText *AccentText
 	avatar     *Avatar
 
 	// gutterTimestamp is the small left-gutter time a grouped continuation shows
 	// in place of the avatar, revealed on hover. nil for a full message.
 	gutterTimestamp *canvas.Text
+
+	// systemText is the sentence a system message is, and systemLine the row it
+	// shares with the time beside it — kept so a target resolving after the widget
+	// is mounted can be written in place, which moves what follows it. Both are nil
+	// for a message somebody wrote.
+	systemText *canvas.Text
+	systemLine *fyne.Container
 
 	// bottomSpacer is the bottom margin, kept so SetFollowedByGroup can tighten it
 	// when a continuation is appended directly beneath.
@@ -100,79 +108,26 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 		background: canvas.NewRectangle(color.Transparent),
 	}
 
-	text := message.Content
-	if message.System != nil {
-		text = deps.Store.SystemText(message.System)
-	}
-
 	var shortTime, fullTime string
 	if t, err := util.Timestamp(message.ID); err == nil {
 		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
-	// Every interactive piece of the row takes the same context menu, so the
-	// pointer never lands somewhere that swallows a right-click silently.
-	w.body = newFlushContainer(renderMessageBody(deps, text, w.TappedSecondary))
-	w.bodySlot = container.NewStack(w.body)
-
-	// A message that says nothing — a bot's embed, an attachment on its own —
-	// still renders an empty body one text line tall, which draws as a gap above
-	// whatever it does carry. Hiding the slot is what removes it: the layouts
-	// around it skip hidden children entirely, so no spacing is charged for it
-	// either. StartEdit shows it again, since an editor needs somewhere to sit.
-	w.emptyBody = text == ""
-	if w.emptyBody {
-		w.bodySlot.Hide()
-	}
-
-	var leftColumn, body fyne.CanvasObject
-	if grouped {
-		// Transparent until hover: toggling colour rather than visibility keeps the
-		// gutter's width fixed, so the body never shifts when the time appears.
-		w.gutterTimestamp = canvas.NewText(shortTime, color.Transparent)
-		w.gutterTimestamp.TextSize = theme.Sizes.MessageTimestampSize
-
-		gutter := &columnLayout{
-			width:     theme.Sizes.MessageAvatarColumnWidth,
-			topOffset: gutterTimestampTopOffset(),
-			collapse:  true,
-		}
-		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = buildGroupedContent(deps, message, w.bodySlot, w.TappedSecondary)
+	// A system message is not a message anybody wrote: no avatar, no name, nothing
+	// to edit and nothing hanging beneath it. It takes a line of its own and shares
+	// only the margins, the hover and the day separator with what people say.
+	var content fyne.CanvasObject
+	if message.System != nil {
+		content = w.buildSystemLine(shortTime)
 	} else {
-		name, nameColor, avatarURL := resolveAuthor(deps, message)
-		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
-			deps.Actions.OnUserTapped(message.AuthorID, w.avatar)
-		})
-		w.avatar.onSecondaryTap = w.TappedSecondary
-		leftColumn = container.New(&columnLayout{
-			width:     theme.Sizes.MessageAvatarColumnWidth,
-			topOffset: avatarTopOffset(),
-		}, w.avatar)
-
-		w.authorText = canvas.NewText(name, nameColor)
-		w.authorText.TextStyle = fyne.TextStyle{Bold: true}
-		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot, w.TappedSecondary)
-	}
-
-	// One row rather than a Border inside a Border: each of those inserts theme
-	// padding between its edges and its centre, so the gap after the avatar gutter
-	// was three times MessageContentPadding with nothing saying so.
-	row := NewFillRow(2, leftColumn, HorizontalSpacer(theme.Sizes.MessageContentPadding), body)
-
-	// Replies belong inside the row's margins, above the message they answer, so
-	// carrying one leaves the avatar and the name exactly where a message without
-	// one puts them.
-	content := fyne.CanvasObject(row)
-	if !grouped && len(message.Replies) > 0 {
-		content = VBoxNoSpacing(buildReplyBlock(deps, message, w.TappedSecondary), row)
+		content = w.buildAuthoredContent(grouped, shortTime, fullTime)
 	}
 
 	hPad := theme.Sizes.MessageHorizontalPadding
 	w.bottomSpacer = canvas.NewRectangle(color.Transparent)
-	w.bottomSpacer.SetMinSize(fyne.NewSize(0, verticalPad(followedByGroup)))
+	w.bottomSpacer.SetMinSize(fyne.NewSize(0, w.verticalPad(followedByGroup)))
 	inner := container.NewBorder(
-		VerticalSpacer(verticalPad(grouped)), w.bottomSpacer,
+		VerticalSpacer(w.verticalPad(grouped)), w.bottomSpacer,
 		HorizontalSpacer(hPad), HorizontalSpacer(hPad),
 		content,
 	)
@@ -202,13 +157,21 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 // Message returns the message this widget renders.
 func (w *MessageWidget) Message() *domain.Message { return w.message }
 
-// Author returns the message author's user ID.
-func (w *MessageWidget) Author() string { return w.message.AuthorID }
+// Author returns the user this row names: the message's author, or — for a system
+// event — whoever it is about, since that is the name the line has to resolve and
+// the one a lazy fetch has to bring back.
+func (w *MessageWidget) Author() string {
+	if w.message.System != nil {
+		return w.message.System.Target
+	}
+
+	return w.message.AuthorID
+}
 
 // SetFollowedByGroup tightens (or restores) the bottom margin when a same-author
 // continuation is appended directly beneath this message after it was mounted.
 func (w *MessageWidget) SetFollowedByGroup(followed bool) {
-	w.bottomSpacer.SetMinSize(fyne.NewSize(0, verticalPad(followed)))
+	w.bottomSpacer.SetMinSize(fyne.NewSize(0, w.verticalPad(followed)))
 	w.bottomSpacer.Refresh()
 	w.Refresh()
 }
@@ -217,18 +180,25 @@ func (w *MessageWidget) SetFollowedByGroup(followed bool) {
 // applies them in place, for when a previously-unknown author is fetched or a
 // member updates after the widget was mounted. A grouped continuation shows
 // neither name nor avatar, so there is nothing to update.
+//
+// A system line names its target in the middle of a sentence, so re-resolving it
+// changes the sentence's width — hence the relayout, which the row beside a name
+// of fixed extent doesn't need.
 func (w *MessageWidget) RefreshAuthor() {
+	if w.systemText != nil {
+		w.systemText.Text = w.deps.Store.SystemText(w.message.System)
+		w.systemText.Refresh()
+		Relayout(w.systemLine)
+
+		return
+	}
+
 	if w.authorText == nil {
 		return
 	}
 
 	name, nameColor, avatarURL := resolveAuthor(w.deps, w.message)
-	if w.authorText.Text != name || w.authorText.Color != nameColor {
-		w.authorText.Text = name
-		w.authorText.Color = nameColor
-		w.authorText.Refresh()
-	}
-
+	w.authorText.Set(name, nameColor)
 	w.avatar.SetSource(w.deps.Images, avatarURL)
 }
 
@@ -247,6 +217,13 @@ func (w *MessageWidget) canEdit() bool {
 	return w.message.System == nil && w.isOwnMessage()
 }
 
+// canReply reports whether the reply action should be offered. A system event is
+// the channel narrating itself and nobody is waiting to be answered, so quoting
+// one back at the channel is offered nowhere.
+func (w *MessageWidget) canReply() bool {
+	return w.message.System == nil
+}
+
 // canDelete reports whether the delete action should be offered: your own
 // message, or any message in a channel where you hold ManageMessages. Both
 // questions are asked lazily, on the first hover or right-click, so a mounted
@@ -256,6 +233,14 @@ func (w *MessageWidget) canDelete() bool {
 }
 
 /* Quick actions and context menu */
+
+// actionMark tints one of the client's action marks in the neutral colour, which
+// is what an action that only takes you somewhere wears. The two that commit
+// something — saving an edit, deleting a message — name their own colour at the
+// call site, since that colour is the warning.
+func actionMark(res fyne.Resource) fyne.Resource {
+	return tintedIcon(res, theme.Colors.SwiftActionIcon)
+}
 
 // buildActions creates the hidden, rounded group of quick-action buttons. The
 // set is dynamic: reply is always offered, edit only on your own non-system
@@ -267,19 +252,20 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 	}
 	act := w.deps.Actions
 
-	buttons := []fyne.CanvasObject{
-		NewIconButton(fynetheme.MailReplyIcon(), func() { act.OnReply(w.message) }, onHover),
+	var buttons []fyne.CanvasObject
+	if w.canReply() {
+		buttons = append(buttons, NewIconButton(actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }, onHover))
 	}
 	if w.canEdit() {
-		buttons = append(buttons, NewIconButton(fynetheme.DocumentCreateIcon(), func() { act.OnEdit(w.message) }, onHover))
+		buttons = append(buttons, NewIconButton(actionMark(assets.ActionEditIcon), func() { act.OnEdit(w.message) }, onHover))
 	}
 	if w.canDelete() {
-		buttons = append(buttons, NewIconButton(fynetheme.DeleteIcon(), func() { act.OnDelete(w.message) }, onHover))
+		buttons = append(buttons, NewIconButton(tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }, onHover))
 	}
 
 	// The overflow button is always last and opens the full context menu — the
 	// same one right-clicking the message shows — beneath itself.
-	more := NewIconButton(fynetheme.MoreVerticalIcon(), nil, onHover)
+	more := NewIconButton(actionMark(assets.ActionMoreIcon), nil, onHover)
 	more.onTap = func() { ShowContextMenu(more, w.menuItems(), AnchorBelow(more)) }
 	buttons = append(buttons, more)
 
@@ -295,31 +281,34 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	act := w.deps.Actions
 
-	items := []*fyne.MenuItem{
-		fyne.NewMenuItemWithIcon("Reply", fynetheme.MailReplyIcon(), func() { act.OnReply(w.message) }),
+	var items []*fyne.MenuItem
+	if w.canReply() {
+		items = append(items, fyne.NewMenuItemWithIcon("Reply", actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }))
 	}
 	if w.canEdit() {
-		items = append(items, fyne.NewMenuItemWithIcon("Edit", fynetheme.DocumentCreateIcon(), func() { act.OnEdit(w.message) }))
+		items = append(items, fyne.NewMenuItemWithIcon("Edit", actionMark(assets.ActionEditIcon), func() { act.OnEdit(w.message) }))
 	}
 
-	items = append(items, fyne.NewMenuItemSeparator())
+	if len(items) > 0 {
+		items = append(items, fyne.NewMenuItemSeparator())
+	}
 	if w.message.Content != "" {
-		items = append(items, fyne.NewMenuItemWithIcon("Copy message", fynetheme.ContentCopyIcon(), func() {
+		items = append(items, fyne.NewMenuItemWithIcon("Copy message", actionMark(assets.ActionCopyIcon), func() {
 			CopyToClipboard(w.message.Content)
 		}))
 	}
 	items = append(items,
-		fyne.NewMenuItemWithIcon("Copy message ID", fynetheme.ContentCopyIcon(), func() {
+		fyne.NewMenuItemWithIcon("Copy message ID", actionMark(assets.ActionCopyIcon), func() {
 			CopyToClipboard(w.message.ID)
 		}),
-		fyne.NewMenuItemWithIcon("Copy author ID", fynetheme.AccountIcon(), func() {
+		fyne.NewMenuItemWithIcon("Copy author ID", actionMark(assets.AccountIcon), func() {
 			CopyToClipboard(w.message.AuthorID)
 		}),
 	)
 
 	if w.canDelete() {
 		items = append(items, fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItemWithIcon("Delete", fynetheme.DeleteIcon(), func() { act.OnDelete(w.message) }))
+			fyne.NewMenuItemWithIcon("Delete", tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }))
 	}
 
 	return items
@@ -373,8 +362,8 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 
 	// The save/cancel pair replaces the hover quick-actions for the whole edit.
 	buttons := container.NewStack(roundedPanel(), HBoxNoSpacing(
-		NewIconButton(fynetheme.DocumentSaveIcon(), save, nil),
-		NewIconButton(fynetheme.CancelIcon(), cancel, nil),
+		NewIconButton(tintedIcon(assets.ActionSaveIcon, theme.Colors.SwiftActionConfirm), save, nil),
+		NewIconButton(actionMark(assets.ActionCancelIcon), cancel, nil),
 	))
 	w.actionsOverlay.Objects = []fyne.CanvasObject{buttons}
 	w.actionsOverlay.Refresh()
@@ -509,6 +498,71 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 
 /* Content assembly */
 
+// buildAuthoredContent assembles a message somebody wrote: the avatar gutter — or,
+// for a grouped continuation, the hover timestamp standing in it — the header, the
+// body slot, and any reply previews above them.
+func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime string) fyne.CanvasObject {
+	deps, message := w.deps, w.message
+
+	// Every interactive piece of the row takes the same context menu, so the
+	// pointer never lands somewhere that swallows a right-click silently.
+	w.body = newFlushContainer(renderMessageBody(deps, message.Content, w.TappedSecondary))
+	w.bodySlot = container.NewStack(w.body)
+
+	// A message that says nothing — a bot's embed, an attachment on its own —
+	// still renders an empty body one text line tall, which draws as a gap above
+	// whatever it does carry. Hiding the slot is what removes it: the layouts
+	// around it skip hidden children entirely, so no spacing is charged for it
+	// either. StartEdit shows it again, since an editor needs somewhere to sit.
+	w.emptyBody = message.Content == ""
+	if w.emptyBody {
+		w.bodySlot.Hide()
+	}
+
+	var leftColumn, body fyne.CanvasObject
+	if grouped {
+		// Transparent until hover: toggling colour rather than visibility keeps the
+		// gutter's width fixed, so the body never shifts when the time appears.
+		w.gutterTimestamp = canvas.NewText(shortTime, color.Transparent)
+		w.gutterTimestamp.TextSize = theme.Sizes.MessageTimestampSize
+
+		gutter := &columnLayout{
+			width:     theme.Sizes.MessageAvatarColumnWidth,
+			topOffset: gutterTimestampTopOffset(),
+			collapse:  true,
+		}
+		leftColumn = container.New(gutter, w.gutterTimestamp)
+		body = buildGroupedContent(deps, message, w.bodySlot, w.TappedSecondary)
+	} else {
+		name, nameColor, avatarURL := resolveAuthor(deps, message)
+		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
+			deps.Actions.OnUserTapped(message.AuthorID, w.avatar)
+		})
+		w.avatar.onSecondaryTap = w.TappedSecondary
+		leftColumn = container.New(&columnLayout{
+			width:     theme.Sizes.MessageAvatarColumnWidth,
+			topOffset: avatarTopOffset(),
+		}, w.avatar)
+
+		w.authorText = NewAccentText(name, nameColor, 0, fyne.TextStyle{Bold: true})
+		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot, w.TappedSecondary)
+	}
+
+	// One row rather than a Border inside a Border: each of those inserts theme
+	// padding between its edges and its centre, so the gap after the avatar gutter
+	// was three times MessageContentPadding with nothing saying so.
+	row := NewFillRow(2, leftColumn, HorizontalSpacer(theme.Sizes.MessageContentPadding), body)
+
+	// Replies belong inside the row's margins, above the message they answer, so
+	// carrying one leaves the avatar and the name exactly where a message without
+	// one puts them.
+	if grouped || len(message.Replies) == 0 {
+		return row
+	}
+
+	return VBoxNoSpacing(buildReplyBlock(deps, message, w.TappedSecondary), row)
+}
+
 // resolveAuthor resolves the display name, role colour, and avatar URL for a
 // message's author. Shared by construction and RefreshAuthor, so a lazily
 // fetched author renders identically either way.
@@ -521,6 +575,82 @@ func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor c
 	}
 
 	return author.Name, nameColor, author.AvatarURL
+}
+
+/* System events */
+
+// buildSystemLine renders a server-generated event as the one line it is: the
+// mark for what happened, standing in the gutter an avatar would occupy, then the
+// sentence and the time it happened at.
+//
+// The time is drawn rather than revealed on hover, as a full message's is: there
+// is no name for it to follow here, and a line that reads "Someone left" with
+// nothing to say when is the one case where the timestamp is most of the content.
+//
+// Nothing in here accepts a pointer. The row itself carries the hover and the
+// context menu, and the innermost object always wins, so a widget standing in this
+// line would be a hole in it.
+func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
+	w.systemText = canvas.NewText(w.deps.Store.SystemText(w.message.System), theme.Colors.SystemMessageText)
+	w.systemText.TextSize = theme.Sizes.SystemMessageTextSize
+
+	time := canvas.NewText(timestamp, theme.Colors.TimestampText)
+	time.TextSize = theme.Sizes.MessageTimestampSize
+
+	mark, tone := systemMark(w.message.System.Kind)
+	icon := newScaledIcon(tintedIcon(mark, tone), theme.Sizes.SystemMessageIconSize)
+	gutter := container.New(&columnLayout{
+		width:     theme.Sizes.MessageAvatarColumnWidth,
+		topOffset: systemIconTopOffset(),
+	}, icon)
+
+	// Both texts are siblings in the one row, so the smaller time centres itself
+	// against the line rather than needing an offset of its own.
+	w.systemLine = HBoxNoSpacing(w.systemText, HorizontalSpacer(theme.Sizes.MessageContentPadding), time)
+
+	return NewFillRow(2, gutter, HorizontalSpacer(theme.Sizes.MessageContentPadding), w.systemLine)
+}
+
+// systemMark is the mark an event is announced by and the colour it is drawn in.
+// The two are decided together because they say different halves of one thing:
+// the tone is the class of event — an arrival, a departure, a removal, a change
+// to the channel — which is what a column of these is skimmed by, and the glyph
+// is which event of that class it was.
+//
+// SystemKind is Revolt's own vocabulary, carried verbatim, so an event the
+// platform adds later falls through to the generic mark in the neutral grey
+// rather than drawing nothing.
+func systemMark(kind domain.SystemKind) (fyne.Resource, color.Color) {
+	switch kind {
+	case domain.SystemUserJoined:
+		return assets.SystemJoinedIcon, theme.Colors.SystemMessageJoin
+	case domain.SystemUserAdded:
+		return assets.SystemAddedIcon, theme.Colors.SystemMessageJoin
+	case domain.SystemUserLeft:
+		return assets.SystemLeftIcon, theme.Colors.SystemMessageLeave
+	case domain.SystemUserRemove:
+		return assets.SystemRemovedIcon, theme.Colors.SystemMessageLeave
+	case domain.SystemUserKicked:
+		return assets.SystemKickedIcon, theme.Colors.SystemMessageDanger
+	case domain.SystemUserBanned:
+		return assets.SystemBannedIcon, theme.Colors.SystemMessageDanger
+	case domain.SystemChannelRenamed:
+		return assets.SystemRenamedIcon, theme.Colors.SystemMessageChange
+	case domain.SystemChannelDescriptionChanged:
+		return assets.SystemDescriptionIcon, theme.Colors.SystemMessageChange
+	case domain.SystemChannelIconChanged:
+		return assets.SystemPictureIcon, theme.Colors.SystemMessageChange
+	case domain.SystemChannelOwnershipChanged:
+		return assets.SystemOwnerIcon, theme.Colors.SystemMessageChange
+	case domain.SystemMessagePinned:
+		return assets.SystemPinnedIcon, theme.Colors.SystemMessageChange
+	case domain.SystemMessageUnpinned:
+		return assets.SystemUnpinnedIcon, theme.Colors.SystemMessageChange
+	case domain.SystemCallStarted:
+		return assets.SystemCallIcon, theme.Colors.SystemMessageCall
+	}
+
+	return assets.SystemEventIcon, theme.Colors.SystemMessageIcon
 }
 
 /* Vertical alignment */
@@ -545,10 +675,22 @@ func gutterTimestampTopOffset() float32 {
 	return (messageLineHeight() - lineHeight(theme.Sizes.MessageTimestampSize)) / 2
 }
 
-// verticalPad returns a message's top or bottom margin: tight when it abuts a
-// same-author continuation, the full gap otherwise.
-func verticalPad(tight bool) float32 {
-	if tight {
+// systemIconTopOffset centres an event's mark on the one line of text beside it.
+// The mark is a different height from a line of type, so sharing that line's
+// centre takes an offset of its own — as the grouped timestamp above does.
+func systemIconTopOffset() float32 {
+	return (lineHeight(theme.Sizes.SystemMessageTextSize) - theme.Sizes.SystemMessageIconSize) / 2
+}
+
+// verticalPad returns this message's top or bottom margin: tight when it abuts a
+// same-author continuation, the full gap otherwise. A system line keeps its own
+// margin whatever surrounds it — it can neither open nor continue a group, so the
+// question the flag answers doesn't arise, and a run of joins reads as one block.
+func (w *MessageWidget) verticalPad(tight bool) float32 {
+	switch {
+	case w.message.System != nil:
+		return theme.Sizes.SystemMessagePadding
+	case tight:
 		return theme.Sizes.MessageGroupedVerticalPadding
 	}
 
@@ -557,7 +699,7 @@ func verticalPad(tight bool) float32 {
 
 // buildMessageContent assembles the author header plus whatever the message
 // carries beneath its text.
-func buildMessageContent(deps Deps, message *domain.Message, author *canvas.Text, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+func buildMessageContent(deps Deps, message *domain.Message, author *AccentText, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	header := buildMessageHeader(author, timestamp, body)
 
 	extras := buildMessageExtras(deps, message, onMenu)
@@ -604,7 +746,7 @@ func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.Po
 // Both texts go straight into the HBox, which stretches each to the line's full
 // height; canvas.Text centres its glyphs in whatever height it is given, so the
 // smaller timestamp lands centred against the name with no offset of our own.
-func buildMessageHeader(author *canvas.Text, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
+func buildMessageHeader(author *AccentText, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize
 

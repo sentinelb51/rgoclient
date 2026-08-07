@@ -15,6 +15,72 @@ import (
 	"time"
 )
 
+/* Colours */
+
+// Gradient is a colour of more than one stop. A Revolt role colour is a CSS
+// colour value, and the presets the server itself offers include gradients, so
+// what arrives for a role is not always one colour.
+//
+// It is a color.Color in its own right — the mean of its stops — so everything
+// filling a single shape with a role's colour (a chip's dot, a reply's accent
+// bar, a picker row) keeps working without knowing gradients exist. Only what can
+// spread one, a run of text, asks for the stops.
+type Gradient []color.Color
+
+// RGBA averages the stops, in the premultiplied space color.Color is defined in.
+func (g Gradient) RGBA() (uint32, uint32, uint32, uint32) {
+	if len(g) == 0 {
+		return 0, 0, 0, 0
+	}
+
+	var r, gr, b, a uint32
+	for _, stop := range g {
+		sr, sg, sb, sa := stop.RGBA()
+		r, gr, b, a = r+sr, gr+sg, b+sb, a+sa
+	}
+
+	n := uint32(len(g))
+
+	return r / n, gr / n, b / n, a / n
+}
+
+// At samples the gradient at t in [0,1], interpolating between the two stops it
+// falls between. Stops are evenly spaced: Revolt's own presets place none of
+// them, and a stop position nothing sends is not worth carrying.
+func (g Gradient) At(t float64) color.Color {
+	if len(g) == 0 {
+		return color.Transparent
+	}
+	if len(g) == 1 {
+		return g[0]
+	}
+
+	t = min(max(t, 0), 1)
+	span := t * float64(len(g)-1)
+	i := min(int(span), len(g)-2)
+
+	return blend(g[i], g[i+1], span-float64(i))
+}
+
+// blend mixes two colours, at t of the way from first to second.
+func blend(first, second color.Color, t float64) color.Color {
+	fr, fg, fb, fa := first.RGBA()
+	sr, sg, sb, sa := second.RGBA()
+
+	// RGBA reports 16-bit premultiplied channels; color.RGBA holds 8-bit
+	// premultiplied ones, so the mix is taken wide and narrowed once.
+	channel := func(x, y uint32) uint8 {
+		return uint8(uint32(float64(x)*(1-t)+float64(y)*t) >> 8)
+	}
+
+	return color.RGBA{
+		R: channel(fr, sr),
+		G: channel(fg, sg),
+		B: channel(fb, sb),
+		A: channel(fa, sa),
+	}
+}
+
 /* Files */
 
 // FileKind classifies an uploaded file by what the client can do with it.
@@ -252,6 +318,10 @@ type Channel struct {
 	Name      string
 	AvatarURL string // the conversation's picture; "" for a server channel
 
+	// Slowmode is how long a member must wait between messages here, 0 when the
+	// channel has none. Only a server's text channels carry one.
+	Slowmode time.Duration
+
 	Recipients    []string
 	LastMessageID string
 	Active        bool
@@ -345,8 +415,10 @@ type Member struct {
 }
 
 // Role is a server role the way a profile card shows one: its name, in its own
-// colour.
+// colour. The ID is carried because a chip offers it for copying — nothing else
+// resolves a role by it.
 type Role struct {
+	ID    string
 	Name  string
 	Color color.Color // nil when the role has no colour, or none that parses
 }
@@ -359,9 +431,16 @@ type Author struct {
 	Color     color.Color // nil when no coloured role applies
 }
 
+// UserProfile is the half of a profile the client does not already hold: a
+// request of its own, so it lands after the card is on screen.
+type UserProfile struct {
+	Bio           string
+	BackgroundURL string // the profile banner; "" leaves the accent colour showing
+}
+
 // Profile is everything the two profile presentations draw, resolved in one
-// pass. Bio is the exception: it is a request of its own, so it arrives after
-// the card is already on screen.
+// pass. UserProfile is the exception: it is a request of its own, so it arrives
+// after the card is already on screen.
 type Profile struct {
 	UserID string
 	Name   string // the server nickname where there is one, else the display name

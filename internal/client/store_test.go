@@ -10,7 +10,7 @@ import (
 	"RGOClient/internal/domain"
 )
 
-func TestParseHexColor(t *testing.T) {
+func TestParseColor(t *testing.T) {
 	tests := []struct {
 		in   string
 		want color.Color
@@ -20,22 +20,45 @@ func TestParseHexColor(t *testing.T) {
 		{"#f00", color.NRGBA{R: 255, G: 0, B: 0, A: 255}, true},
 		{"#5B7CFA", color.NRGBA{R: 0x5B, G: 0x7C, B: 0xFA, A: 255}, true},
 		{"#000000", color.NRGBA{A: 255}, true},
-		{"5B7CFA", nil, false},  // missing #
-		{"#5B7CF", nil, false},  // wrong length
-		{"#GGGGGG", nil, false}, // not hex
-		{"linear-gradient(red, blue)", nil, false},
+		{"5B7CFA", nil, false},                     // missing #
+		{"#5B7CF", nil, false},                     // wrong length
+		{"#GGGGGG", nil, false},                    // not hex
+		{"linear-gradient(red, blue)", nil, false}, // named stops carry no triple
 		{"", nil, false},
 	}
 
 	for _, tt := range tests {
-		got, ok := parseHexColor(tt.in)
+		got, ok := parseColor(tt.in)
 		if ok != tt.ok {
-			t.Errorf("parseHexColor(%q) ok = %v, want %v", tt.in, ok, tt.ok)
+			t.Errorf("parseColor(%q) ok = %v, want %v", tt.in, ok, tt.ok)
 			continue
 		}
 		if ok && got != tt.want {
-			t.Errorf("parseHexColor(%q) = %v, want %v", tt.in, got, tt.want)
+			t.Errorf("parseColor(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+// A role colour is as often one of Revolt's gradient presets as a triple, and
+// every stop has to survive the conversion for anything to draw one.
+func TestParseColorKeepsGradientStops(t *testing.T) {
+	got, ok := parseColor("linear-gradient(to right, #D52D00, #EF7627, #FFFFFF)")
+	if !ok {
+		t.Fatal("a gradient of hex stops did not parse")
+	}
+
+	gradient, isGradient := got.(domain.Gradient)
+	if !isGradient {
+		t.Fatalf("parseColor returned %T, want a domain.Gradient", got)
+	}
+
+	want := domain.Gradient{
+		color.NRGBA{R: 0xD5, G: 0x2D, B: 0x00, A: 255},
+		color.NRGBA{R: 0xEF, G: 0x76, B: 0x27, A: 255},
+		color.NRGBA{R: 0xFF, G: 0xFF, B: 0xFF, A: 255},
+	}
+	if !slices.Equal(gradient, want) {
+		t.Errorf("stops = %v, want %v", gradient, want)
 	}
 }
 

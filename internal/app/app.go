@@ -17,6 +17,7 @@ import (
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -26,12 +27,18 @@ import (
 const (
 	windowTitle = "Revoltgo Client"
 
-	cachedPreviews = 100 // text-attachment previews kept in memory
-
 	// deletePreviewRunes is how much of a message the delete confirmation quotes
 	// back: enough to recognise it, short enough to keep the card one question.
 	deletePreviewRunes = 120
 )
+
+// Info is what the binary knows about itself, stamped at link time and shown in
+// the settings page's About section. main owns the values; internal/app cannot
+// read them.
+type Info struct {
+	Version string
+	Build   string
+}
 
 // App holds the view state and the mounted widgets. It also implements
 // ui.MessageActions, so widgets can call back into it.
@@ -76,19 +83,24 @@ type App struct {
 	memberSidebar *fyne.Container // the member column itself, hidden by its header toggle
 	messageList   *fyne.Container
 	messageScroll *ui.ObservableScroll
-	composerDock  *fyne.Container // the floating card the message column runs under
+	composerDock  *fyne.Container // slowmode chip + card: what the message column runs under
+	floatingDock  *fyne.Container // that stack hung over messageScroll; relaid out when the chip appears
 	input         *ui.MessageInput
+	slowmodeBadge *ui.SlowmodeBadge // the cooldown chip above that card's top-right corner
 	homeButton    *ui.SidebarButton
 	serverHeader  *widget.Label
 	channelHeader *widget.Label
 	channelGlyph  *fyne.Container // holds the message header's # / @ / group mark
 
-	/* Modal layer and extra windows */
+	/* Modal layer and the settings page */
 
-	settingsWindow fyne.Window          // nil when closed
-	overlay        *ui.Overlay          // nil when nothing is showing
-	joinDialog     *ui.JoinServerDialog // the invite dialog on the modal layer, if any
-	editing        *ui.MessageWidget    // the message being edited in place, if any
+	// settings is a layer in the window's content stack rather than a canvas
+	// overlay, so a confirmation — which is one — can still be shown over it.
+	settings *ui.SettingsPage
+
+	overlay    *ui.Overlay          // nil when nothing is showing
+	joinDialog *ui.JoinServerDialog // the invite dialog on the modal layer, if any
+	editing    *ui.MessageWidget    // the message being edited in place, if any
 
 	/* Lazy author resolution, see members.go */
 
@@ -102,10 +114,21 @@ type App struct {
 	ackChannelID string
 	ackMessageID string
 
+	/* Slowmode, see messages.go */
+
+	slowmodeUntil map[string]time.Time // channelID -> when this account may send there again
+	slowmodeTimer *time.Timer          // re-armed a second at a time while one is running
+
 	// epoch counts logins. A worker captures it before it leaves the UI thread and
 	// checks it on the way back, so a response that outlived a logout is dropped
 	// instead of painting the previous account's data into the new one's view.
 	epoch uint64
+
+	info Info // version and build, for the About section
+
+	// stylesDirty records that the tables have moved under a client that has not
+	// been rebuilt from them yet, because the settings page was covering it.
+	stylesDirty bool
 
 	pendingToken   string // stashed by a credential login until Ready names the user
 	pendingJoin    bool   // a join is in flight, so its ServerJoined should select
@@ -114,21 +137,25 @@ type App struct {
 
 var _ ui.MessageActions = (*App)(nil)
 
-// New creates the application and its main window.
-func New(fyneApp fyne.App) *App {
+// New creates the application and its main window. The caches are sized from the
+// settings here and never resized, which is why the settings page marks their
+// entries as needing a restart.
+func New(fyneApp fyne.App, info Info) *App {
 	window := fyneApp.NewWindow(windowTitle)
 	window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 	window.SetIcon(assets.AppIcon)
 
 	revolt := client.New()
+	settings := config.Current().Cache
 
-	return &App{
+	a := &App{
 		fyne:                fyneApp,
 		window:              window,
+		info:                info,
 		client:              revolt,
 		store:               revolt.Store(),
-		images:              cache.NewImageCache(),
-		texts:               cache.NewTextCache(cachedPreviews),
+		images:              cache.NewImageCache(settings.ImageDir, imageLimits(settings)),
+		texts:               cache.NewTextCache(settings.TextPreviews),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelList:         container.NewVBox(),
 		memberList:          ui.VBoxNoSpacing(),
@@ -138,7 +165,14 @@ func New(fyneApp fyne.App) *App {
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
+		slowmodeUntil:       make(map[string]time.Time),
 	}
+
+	// Built here rather than on first open so the layer is a fixed object buildUI
+	// can stack: the page has to survive the rebuild a style change asks for.
+	a.settings = ui.NewSettingsPage(a.settingsHooks())
+
+	return a
 }
 
 // Run shows the login window, starts the event pump, and enters the Fyne event
@@ -185,6 +219,10 @@ func (a *App) showMainUI() {
 	a.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 
 	a.window.SetOnClosed(func() {
+		if err := config.Save(); err != nil {
+			log.Printf("save settings: %v", err)
+		}
+
 		a.images.Shutdown()
 		a.client.Shutdown()
 	})
@@ -194,7 +232,15 @@ func (a *App) showMainUI() {
 // The platform handle isn't available until the event loop has created the
 // window, so it retries briefly until the styling lands. Every window the client
 // opens goes through here, so none shows default chrome against our colours.
+//
+// Turned off in the settings, the window keeps whatever chrome the system gives
+// it — which is the only way back, since the recolouring cannot be undone
+// without restarting.
 func (a *App) styleNativeChrome(window fyne.Window) {
+	if !config.Current().Interface.ThemeTitleBar {
+		return
+	}
+
 	go func() {
 		for range 40 {
 			var done bool

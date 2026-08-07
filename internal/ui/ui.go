@@ -4,6 +4,7 @@
 package ui
 
 import (
+	"bytes"
 	"image/color"
 	"log"
 	"net/url"
@@ -16,6 +17,7 @@ import (
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
+	"RGOClient/internal/ui/theme"
 )
 
 /* Dependencies */
@@ -73,6 +75,38 @@ func newScaledIcon(res fyne.Resource, side float32) *canvas.Image {
 	}
 
 	return icon
+}
+
+// iconStroke is the colour the client's own marks are drawn in. They are
+// outlines, and Fyne's recolouring rewrites *fills* only — theme.NewColoredResource
+// hands a stroked mark back exactly as white as it found it — so tinting one is a
+// substitution in the source instead.
+const iconStroke = "#ffffff"
+
+// tintedIcons memoises the substitution below. Every message row asks for its
+// marks as it is built, and the answer depends only on the pair, so a channel of
+// system events would otherwise rewrite the same handful of files a hundred times.
+// UI thread only, like the measurement caches.
+var tintedIcons = map[string]fyne.Resource{}
+
+// tintedIcon recolours one of the client's own stroked marks. The colour is part
+// of the resource's name because Fyne caches a rasterised SVG under it: two
+// resources sharing a name would share one raster, and the second colour asked
+// for would come back as the first. That name is also this cache's key, so a
+// restyle — which changes the colour, hence the name — misses it rather than
+// handing back what the palette used to say.
+func tintedIcon(res fyne.Resource, c color.Color) fyne.Resource {
+	hex := theme.Hex(c)
+	name := hex + "-" + res.Name()
+	if cached, ok := tintedIcons[name]; ok {
+		return cached
+	}
+
+	tinted := fyne.NewStaticResource(name,
+		bytes.ReplaceAll(res.Content(), []byte(iconStroke), []byte(hex)))
+	tintedIcons[name] = tinted
+
+	return tinted
 }
 
 /* Context menus */

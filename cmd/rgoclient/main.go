@@ -1,9 +1,11 @@
 package main
 
 import (
+	"log"
 	"strconv"
 
 	"RGOClient/internal/app"
+	"RGOClient/internal/config"
 	apptheme "RGOClient/internal/ui/theme"
 
 	"fyne.io/fyne/v2"
@@ -49,8 +51,18 @@ func main() {
 		Migrations: map[string]bool{"fyneDo": true},
 	})
 
+	// The settings are read before the first widget is built: the palette and the
+	// size table are applied from them here, and everything above reads those
+	// tables at construction.
+	if err := config.Load(); err != nil {
+		log.Printf("load settings: %v", err)
+	}
+	settings := config.Current()
+	apptheme.Apply(settings.Styles.Colors, settings.Styles.Sizes)
+	apptheme.SetFontSize(settings.Interface.FontSize)
+
 	fyneApp := fyneapp.NewWithID(appID)
 	fyneApp.Settings().SetTheme(apptheme.NewAppTheme(theme.DefaultTheme()))
 
-	app.New(fyneApp).Run()
+	app.New(fyneApp, app.Info{Version: version, Build: build}).Run()
 }

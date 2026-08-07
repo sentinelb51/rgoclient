@@ -333,12 +333,21 @@ func NewFixedWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.C
 	return container.New(&minSizeLayout{min: fyne.NewSize(width, 0), pinWidth: true}, objects...)
 }
 
+// NewFixedHeightContainer pins a slot to exactly height whatever its contents ask
+// for. It is what stops a control that grows on interaction from moving the row
+// it sits in: the settings page swaps a slider's value for a text field when it
+// is clicked, and an entry is half again as tall as the number it replaces.
+func NewFixedHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&minSizeLayout{min: fyne.NewSize(0, height), pinHeight: true}, objects...)
+}
+
 // minSizeLayout stretches every child to fill the container and reports a
-// minimum size that is at least min on each axis. pinWidth makes min.Width a
-// ceiling too, so the container reports exactly that width.
+// minimum size that is at least min on each axis. pinWidth and pinHeight make
+// that axis a ceiling too, so the container reports exactly the given extent.
 type minSizeLayout struct {
-	min      fyne.Size
-	pinWidth bool
+	min       fyne.Size
+	pinWidth  bool
+	pinHeight bool
 }
 
 func (l *minSizeLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -357,6 +366,9 @@ func (l *minSizeLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	}
 	if l.pinWidth {
 		m.Width = l.min.Width
+	}
+	if l.pinHeight {
+		m.Height = l.min.Height
 	}
 
 	return m

@@ -28,6 +28,10 @@ const avatarSize = "256"
 // larger than the sidebar's 40px.
 const iconSize = "64"
 
+// bannerSize is the rendition asked for of a profile background, which is never
+// drawn wider than the profile dialog.
+const bannerSize = "512"
+
 /* Files */
 
 // toFile converts an uploaded file, resolving the URL it is served from. Revolt
@@ -176,7 +180,7 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 	if out.URL == "" {
 		out.URL = embed.OriginalURL
 	}
-	if colour, ok := parseHexColor(embed.Colour); ok {
+	if colour, ok := parseColor(embed.Colour); ok {
 		out.Color = colour
 	}
 
@@ -343,14 +347,51 @@ func toBadges(user *revoltgo.User) []string {
 
 /* Colours */
 
-// parseHexColor parses "#RGB" and "#RRGGBB". Anything else — a gradient, a CSS
-// name — yields ok=false, and the caller falls back to its own default.
-func parseHexColor(s string) (color.Color, bool) {
-	if len(s) == 0 || s[0] != '#' {
-		return nil, false
-	}
-	hex := s[1:]
+// parseColor reads a Revolt colour. Revolt takes any CSS value for a role or an
+// embed accent, and the role presets it offers are as often a gradient as a bare
+// triple — every flag and the rainbow among them. So every stop in the value is
+// read, in the order written: several become a domain.Gradient, one collapses to
+// itself, and a value carrying no hex triple at all — a CSS name, an rgb() — is
+// ok=false, leaving the caller its own default.
+func parseColor(s string) (color.Color, bool) {
+	stops := colorStops(s)
 
+	switch len(stops) {
+	case 0:
+		return nil, false
+	case 1:
+		return stops[0], true
+	}
+
+	return domain.Gradient(stops), true
+}
+
+// colorStops pulls the hex triples out of a CSS value. Nothing else in a
+// gradient can be mistaken for one: what precedes the stops is a keyword or an
+// angle, and neither carries a '#'.
+func colorStops(s string) []color.Color {
+	var stops []color.Color
+
+	for i := 0; i < len(s); i++ {
+		if s[i] != '#' {
+			continue
+		}
+
+		end := i + 1
+		for end < len(s) && isHexDigit(s[end]) {
+			end++
+		}
+		if c, ok := parseHexTriple(s[i+1 : end]); ok {
+			stops = append(stops, c)
+		}
+		i = end - 1
+	}
+
+	return stops
+}
+
+// parseHexTriple parses the digits of "RGB" or "RRGGBB", without their '#'.
+func parseHexTriple(hex string) (color.Color, bool) {
 	parse := func(h string) (uint8, bool) {
 		v, err := strconv.ParseUint(h, 16, 8)
 		return uint8(v), err == nil
@@ -374,4 +415,8 @@ func parseHexColor(s string) (color.Color, bool) {
 	}
 
 	return nil, false
+}
+
+func isHexDigit(b byte) bool {
+	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
 }

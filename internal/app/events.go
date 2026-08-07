@@ -14,13 +14,14 @@ import (
 	"time"
 
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/ui"
 )
 
 // ackDelay is the coalescing window for read acknowledgements of the open
 // channel: a burst of incoming messages produces one ack for the newest of them
 // instead of one request per message.
-const ackDelay = time.Second
+func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 
 // pumpEvents drains the client's event stream for the life of the process. It is
 // started once, before the first login, so no event can arrive before there is
@@ -134,6 +135,13 @@ func (a *App) onDisconnected(event client.Disconnected) {
 func (a *App) onMessageCreated(event client.MessageCreated) {
 	channelID := event.Message.ChannelID
 
+	// One of our own starts the channel's cooldown. The send path has already
+	// started it for a message composed here, so this is what covers one the same
+	// account sent from another client.
+	if event.Message.AuthorID == a.store.SelfID() {
+		a.startSlowmode(channelID)
+	}
+
 	if channelID == a.currentChannelID {
 		a.appendMessage(event.Message, event.Previous)
 		a.scheduleAck(channelID, event.Message.ID)
@@ -163,7 +171,7 @@ func (a *App) scheduleAck(channelID, messageID string) {
 		return
 	}
 
-	a.ackTimer = time.AfterFunc(ackDelay, func() {
+	a.ackTimer = time.AfterFunc(ackDelay(), func() {
 		a.doOnUI(func() {
 			a.ackTimer = nil
 			a.sendAck(a.ackChannelID, a.ackMessageID)

@@ -15,6 +15,7 @@ package config
 import (
 	"encoding/json"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sync"
@@ -63,6 +64,14 @@ type Interface struct {
 	GroupMessages     bool `json:"group_messages"`
 	ShowMemberSidebar bool `json:"show_member_sidebar"`
 	ThemeTitleBar     bool `json:"theme_title_bar"`
+
+	/* Disclosure */
+
+	// AdvancedMode reveals the settings that tune the client rather than describe
+	// it: the timings, the mount caps, the cache budgets and the raw size and
+	// colour tables. Off, the page shows what a setting changes; on, it shows
+	// everything that can be changed.
+	AdvancedMode bool `json:"advanced_mode"`
 }
 
 // Styles holds only what differs from the defaults, keyed by the exact field
@@ -77,17 +86,32 @@ type Styles struct {
 // Behaviour is what the client does rather than how it looks: the work it takes
 // on per event, and how much of the conversation it keeps mounted.
 type Behaviour struct {
-	/* Members */
+	// Members. The member list is the one part of the client whose cost scales
+	// with somebody else's server rather than with anything the user did, so each
+	// of these is a lever on that: what is fetched, what is drawn, and how often a
+	// list of thousands is rebuilt.
 
-	SortMembers        bool `json:"sort_members"`
-	GroupByPresence    bool `json:"group_by_presence"`
-	HideOfflineMembers bool `json:"hide_offline_members"`
+	SortMembers         bool `json:"sort_members"`
+	GroupByPresence     bool `json:"group_by_presence"`
+	HoistRoles          bool `json:"hoist_roles"`
+	HideOfflineMembers  bool `json:"hide_offline_members"`
+	HideRolelessMembers bool `json:"hide_roleless_members"`
+	FetchAllMembers     bool `json:"fetch_all_members"`
+	LiveMemberPresence  bool `json:"live_member_presence"`
 
-	/* Typing indicators */
+	MemberRefreshDelayMS int `json:"member_refresh_delay_ms"`
+	MemberOverscan       int `json:"member_overscan"`
+
+	// Typing indicators. TypingNames is the master switch as well as the limit:
+	// at zero nothing is drawn on either surface and the gateway event is dropped
+	// where it arrives, so the whole receiving half costs nothing.
 
 	SendTyping       bool `json:"send_typing"`
-	ShowTyping       bool `json:"show_typing"`
+	TypingNames      int  `json:"typing_names"`
+	TypingShowSelf   bool `json:"typing_show_self"`
 	TypingInChannels bool `json:"typing_in_channels"`
+	TypingAvatars    bool `json:"typing_avatars"`
+	TypingAnimation  bool `json:"typing_animation"`
 
 	/* Messages */
 
@@ -117,16 +141,23 @@ type Notifications struct {
 	ShowDanger  bool `json:"show_danger"`
 }
 
-// Cache configures the on-disk and in-memory caches. ImageDir, TextPreviews,
+// Cache configures the on-disk and in-memory caches. AssetDir, TextPreviews,
 // MessagesPerChannel and CachedChannels are read once while the caches are being
 // built, so changing them takes a restart; the image budgets are held on the
 // cache itself and apply as soon as they are set.
 type Cache struct {
-	ImageDir string `json:"image_dir"` // "" for the user's cache directory
+	// AssetDir is the root the picture caches keep their folders under, one per
+	// class of picture — "" for the user's cache directory.
+	AssetDir string `json:"asset_dir"`
 
 	ImageDiskMiB   int `json:"image_disk_mib"`
 	ImageMemoryMiB int `json:"image_memory_mib"`
 	MaxImageEdge   int `json:"max_image_edge"`
+
+	// ImageLoaders bounds how many pictures are downloaded at once. A member list
+	// scrolled quickly asks for a picture per row it passes, and without a bound
+	// that is one goroutine and one connection each.
+	ImageLoaders int `json:"image_loaders"`
 
 	TextPreviews       int `json:"text_previews"`
 	MessagesPerChannel int `json:"messages_per_channel"`
@@ -167,10 +198,17 @@ func Default() Settings {
 			ThemeTitleBar:     true,
 		},
 		Behaviour: Behaviour{
-			SortMembers:        true,
-			GroupByPresence:    true,
+			SortMembers:          true,
+			GroupByPresence:      true,
+			HoistRoles:           true,
+			FetchAllMembers:      true,
+			LiveMemberPresence:   true,
+			MemberRefreshDelayMS: 250,
+			MemberOverscan:       6,
+
 			SendTyping:         true,
-			ShowTyping:         true,
+			TypingNames:        3,
+			TypingAnimation:    true,
 			GroupWindowSeconds: 420,
 			InitialMountCount:  50,
 			MountedCap:         250,
@@ -191,6 +229,7 @@ func Default() Settings {
 			ImageDiskMiB:       512,
 			ImageMemoryMiB:     192,
 			MaxImageEdge:       1600,
+			ImageLoaders:       8,
 			TextPreviews:       100,
 			MessagesPerChannel: 500,
 			CachedChannels:     5,
@@ -218,17 +257,26 @@ func (b Behaviour) AckDelay() time.Duration {
 	return time.Duration(b.AckDelayMS) * time.Millisecond
 }
 
+// MemberRefreshDelay is how long a member-list rebuild waits for more changes
+// before running. A busy server changes presence continuously and each change
+// reorders the list, so this is the difference between one rebuild and hundreds.
+func (b Behaviour) MemberRefreshDelay() time.Duration {
+	return time.Duration(b.MemberRefreshDelayMS) * time.Millisecond
+}
+
 // Lifetime is how long a notice stays on the layer.
 func (n Notifications) Lifetime() time.Duration {
 	return time.Duration(n.LifetimeSeconds) * time.Second
 }
 
-// ImageDiskBytes is the on-disk budget for cached images.
+// ImageDiskBytes is the on-disk budget for cached pictures — the whole of it,
+// which the picture caches divide between them.
 func (c Cache) ImageDiskBytes() int64 {
 	return int64(c.ImageDiskMiB) * 1024 * 1024
 }
 
-// ImageMemoryBytes is the budget for decoded images held in memory.
+// ImageMemoryBytes is the budget for decoded pictures held in memory, divided
+// the same way.
 func (c Cache) ImageMemoryBytes() int64 {
 	return int64(c.ImageMemoryMiB) * 1024 * 1024
 }
@@ -301,10 +349,8 @@ func Load() error {
 // hand-editable, so a mount cap of nothing or a cache of no channels has to fail
 // safe rather than leave the client unable to draw a conversation.
 func (s *Settings) sanitise() {
-	floor := func(value *int, min int) {
-		if *value < min {
-			*value = min
-		}
+	floor := func(value *int, lowest int) {
+		*value = max(*value, lowest)
 	}
 
 	floor(&s.Behaviour.GroupWindowSeconds, 0)
@@ -314,6 +360,8 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.AuthorFetchDelayMS, 0)
 	floor(&s.Behaviour.AckDelayMS, 0)
 	floor(&s.Behaviour.ScrollSpeed, 1)
+	floor(&s.Behaviour.MemberRefreshDelayMS, 0)
+	floor(&s.Behaviour.MemberOverscan, 0)
 
 	floor(&s.Notifications.LifetimeSeconds, 1)
 	floor(&s.Notifications.MaxStacked, 1)
@@ -321,6 +369,7 @@ func (s *Settings) sanitise() {
 	floor(&s.Cache.ImageDiskMiB, 1)
 	floor(&s.Cache.ImageMemoryMiB, 1)
 	floor(&s.Cache.MaxImageEdge, 64)
+	floor(&s.Cache.ImageLoaders, 1)
 	floor(&s.Cache.TextPreviews, 1)
 	floor(&s.Cache.MessagesPerChannel, 1)
 	floor(&s.Cache.CachedChannels, 1)
@@ -381,24 +430,12 @@ func scheduleSave() {
 }
 
 // clone copies the settings, including the override maps, so the published value
-// shares nothing mutable with the one it replaced.
+// shares nothing mutable with the one it replaced. maps.Clone keeps a nil map
+// nil, which is what an untouched Styles section is and what omitempty writes out.
 func (s *Settings) clone() *Settings {
 	next := *s
-	next.Styles.Sizes = cloneMap(s.Styles.Sizes)
-	next.Styles.Colors = cloneMap(s.Styles.Colors)
+	next.Styles.Sizes = maps.Clone(s.Styles.Sizes)
+	next.Styles.Colors = maps.Clone(s.Styles.Colors)
 
 	return &next
-}
-
-func cloneMap[V any](in map[string]V) map[string]V {
-	if in == nil {
-		return nil
-	}
-
-	out := make(map[string]V, len(in))
-	for key, value := range in {
-		out[key] = value
-	}
-
-	return out
 }

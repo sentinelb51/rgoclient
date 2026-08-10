@@ -19,9 +19,11 @@ type fakeStore struct {
 	channels map[string]domain.Channel
 	servers  map[string]domain.Server
 
-	manageMessages bool
-	kickMembers    bool
-	bypassSlowmode bool
+	serverMembers map[string][]domain.Member // serverID
+	hoisted       map[string][]domain.Role   // serverID
+
+	permissions       domain.Permission
+	serverPermissions domain.Permission
 }
 
 var _ domain.Store = (*fakeStore)(nil)
@@ -51,11 +53,15 @@ func (s *fakeStore) HasMember(serverID, userID string) bool {
 	return ok
 }
 
-func (s *fakeStore) Members(string) []domain.Member { return nil }
+func (s *fakeStore) Members(serverID string) []domain.Member {
+	return s.serverMembers[serverID]
+}
 
 func (s *fakeStore) MemberRoles(serverID, userID string) []domain.Role {
 	return s.roles[serverID+":"+userID]
 }
+
+func (s *fakeStore) HoistedRoles(serverID string) []domain.Role { return s.hoisted[serverID] }
 
 func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 	channel, ok := s.channels[channelID]
@@ -63,6 +69,16 @@ func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 }
 
 func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
+
+// EmojiURL derives a URL from the ID the way the real store does. The host is
+// invented: nothing in a widget test fetches one.
+func (s *fakeStore) EmojiURL(emojiID string) string {
+	if emojiID == "" {
+		return ""
+	}
+
+	return "https://cdn.invalid/emojis/" + emojiID
+}
 
 func (s *fakeStore) Server(serverID string) (domain.Server, bool) {
 	server, ok := s.servers[serverID]
@@ -94,9 +110,8 @@ func (s *fakeStore) SystemTextParts(system *domain.SystemMessage) (name, rest st
 	return system.TextParts(s.UserName(system.Target))
 }
 
-func (s *fakeStore) CanManageMessages(string) bool { return s.manageMessages }
-func (s *fakeStore) CanKickMembers(string) bool    { return s.kickMembers }
-func (s *fakeStore) CanBypassSlowmode(string) bool { return s.bypassSlowmode }
+func (s *fakeStore) Permissions(string) domain.Permission       { return s.permissions }
+func (s *fakeStore) ServerPermissions(string) domain.Permission { return s.serverPermissions }
 
 // testDeps is the bundle a widget test mounts against: a store that knows
 // nothing, and the real caches, which are inert without a network. Every field
@@ -105,7 +120,8 @@ func (s *fakeStore) CanBypassSlowmode(string) bool { return s.bypassSlowmode }
 func testDeps() Deps {
 	return Deps{
 		Store:   &fakeStore{},
-		Images:  cache.NewImageCache("", cache.DefaultImageLimits()),
+		Images:  cache.NewImageCache("", cache.ImagesFolder, cache.DefaultImageLimits()),
+		Emojis:  cache.NewImageCache("", cache.EmojisFolder, cache.DefaultImageLimits()),
 		Texts:   cache.NewTextCache(8),
 		Actions: stubActions{},
 	}

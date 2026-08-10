@@ -72,6 +72,46 @@ func TestUniformBodySelectable(t *testing.T) {
 	}
 }
 
+// TestEmojiSitsOnItsLine covers the three rules a custom emoji brings with it. It
+// is a picture, so a body carrying one can never flatten to the selectable Label
+// its text alone would have been. RichText cannot break a row before a segment it
+// cannot measure as text, so the body keeps a gutter at least as wide as the
+// emoji — without it, one landing at a line end is cut off by the message column.
+// And it must be exactly a line tall: RichText baseline-aligns a row whose objects
+// differ in height and reads this one's baseline as zero, which drops it into the
+// line below.
+func TestEmojiSitsOnItsLine(t *testing.T) {
+	test.NewTempApp(t)
+
+	const body = "look :01J9WN3PHX4ZQSNSZH10CK4RHS:"
+
+	rendered := renderMessageBody(testDeps(), body, nil)
+	row, ok := rendered.(*fyne.Container)
+	if !ok {
+		t.Fatalf("a body with an emoji rendered as %T, want the row holding the reserve", rendered)
+	}
+	if len(row.Objects) != 2 {
+		t.Fatalf("the row holds %d objects, want the text and the reserve", len(row.Objects))
+	}
+
+	side := emojiSide("")
+	if got := row.Objects[1].MinSize().Width; got < side {
+		t.Errorf("the gutter is %v wide, want at least the emoji's %v", got, side)
+	}
+
+	rt := row.Objects[0].(*widget.RichText)
+	rt.Resize(fyne.NewSize(400, 100))
+	objects := test.WidgetRenderer(rt).Objects()
+
+	emoji, text := objects[1], objects[0]
+	if emoji.Size() != fyne.NewSize(side, side) {
+		t.Errorf("the emoji is %v, want the square %v the line is tall", emoji.Size(), side)
+	}
+	if emoji.Position().Y != text.Position().Y {
+		t.Errorf("the emoji sits at y=%v and the words beside it at y=%v", emoji.Position().Y, text.Position().Y)
+	}
+}
+
 // bodyCatcher renders a selectable body at the given width and returns the
 // catcher covering its selection overlay.
 func bodyCatcher(t *testing.T, onMenu func(*fyne.PointEvent)) (*bodyText, *selectionCatcher) {
@@ -214,7 +254,7 @@ func TestSpoilerSharedReveal(t *testing.T) {
 func TestNestedFormattingInDecoration(t *testing.T) {
 	b := &mdBuilder{}
 	for _, block := range markdown.Parse("~~a **bold** c~~").Blocks {
-		b.block(block)
+		b.block(block, widget.RichTextStyle{})
 	}
 
 	var sawBold bool

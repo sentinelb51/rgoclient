@@ -27,6 +27,7 @@ import (
 type Deps struct {
 	Store   domain.Store      // resolves IDs into names, avatars and permissions
 	Images  *cache.ImageCache // avatars, icons, attachments
+	Emojis  *cache.ImageCache // custom emoji, kept in a pool of their own
 	Texts   *cache.TextCache  // text-attachment previews
 	Actions MessageActions    // user-interaction callbacks
 }
@@ -43,6 +44,22 @@ type MessageActions interface {
 	// channel need not be in the open server, or in one at all, so the controller
 	// decides what has to be switched to on the way.
 	OnChannelTapped(channelID string)
+
+	// OnServerTapped goes to a server the account is already in, as an invite
+	// card's "Go to server" does. Unlike a channel there is nothing to open
+	// inside it, so the controller picks the first channel it can see.
+	OnServerTapped(serverID string)
+
+	// OnJoinInvite redeems an invite code. The joined server arrives through the
+	// gateway, so nothing is expected back.
+	OnJoinInvite(code string)
+
+	// ResolveInvite fills in what an invite code opens. Alone among the reads it
+	// is a request rather than a cache lookup — an invite names a server the
+	// account is by definition not in — so the answer arrives through done,
+	// called on the UI thread. The controller is expected to remember it, since
+	// the same card remounts on every scroll past it.
+	ResolveInvite(code string, done func(domain.Invite, error))
 
 	OnAttachmentTapped(attachment *domain.File)
 	OnReply(message *domain.Message)

@@ -77,6 +77,8 @@ var Colors = struct {
 	MentionHandleText     color.Color
 	SlowmodeText          color.Color
 	SlowmodeWaiting       color.Color
+	TypingText            color.Color
+	TypingMark            color.Color
 	ErrorText             color.Color
 
 	/* Scrolling */
@@ -89,6 +91,18 @@ var Colors = struct {
 	EmbedAccent color.Color
 	EmbedTitle  color.Color
 	EmbedSite   color.Color
+
+	/* Member list */
+
+	MemberNameOffline color.Color
+	MemberSectionText color.Color
+	MemberBotTagBg    color.Color
+	MemberBotTagText  color.Color
+
+	/* Invite cards */
+
+	InviteCaption color.Color
+	InviteDetail  color.Color
 
 	/* User profiles */
 
@@ -213,6 +227,14 @@ var Colors = struct {
 	SlowmodeText:    color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	SlowmodeWaiting: color.RGBA{R: 229, G: 166, B: 75, A: 255},  // #E5A64B
 
+	// Who is typing is the quietest thing in the client: it is true for a few
+	// seconds and then it is not, and nothing is lost by missing it. So the line
+	// takes the same grey a slowmode rule does, and the dots are lifted only far
+	// enough to be seen moving — a mark in the channel list has no text beside it
+	// to be read against.
+	TypingText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	TypingMark: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
 	ErrorText: color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 
 	// The position indicator drawn while a view moves. The same slate as the reply
@@ -231,6 +253,22 @@ var Colors = struct {
 	EmbedAccent: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
 	EmbedTitle:  color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, the mention accent — a title is a link
 	EmbedSite:   color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
+	// An offline name is dimmed rather than hidden, which is what lets one list
+	// hold both halves without reading as two. It has a name of its own rather
+	// than borrowing CategoryText: that is a *header's* colour, and two things
+	// wanting different tunings must not share one entry — which is what they did
+	// before the sections were rows in their own right.
+	MemberNameOffline: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
+	MemberSectionText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+
+	// The bot tag is the chip surface at a smaller size, so a row carrying one
+	// still reads as a row.
+	MemberBotTagBg:   color.RGBA{R: 90, G: 106, B: 176, A: 255},  // #5A6AB0
+	MemberBotTagText: color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+
+	InviteCaption: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	InviteDetail:  color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
 	// The banner is the profile card's one block of colour, so it falls back to a
 	// slate the palette already uses rather than the accent, which would make every
@@ -279,6 +317,18 @@ var Sizes = struct {
 	MemberRowHeight  float32
 	MemberNameSize   float32
 
+	// A section is its own row in the list, so its height is load-bearing: the
+	// list places rows by a prefix sum over exactly these two numbers, and the top
+	// padding lives *inside* the section height rather than beside it so there are
+	// still only two.
+	MemberSectionHeight   float32
+	MemberSectionTopPad   float32
+	MemberSectionTextSize float32
+
+	MemberPresenceDotSize float32
+	MemberPresenceDotRing float32
+	MemberBotTagSize      float32
+
 	/* Server and channel rows */
 
 	ServerIconSize          float32
@@ -294,6 +344,12 @@ var Sizes = struct {
 	CategoryIndicatorStroke float32
 
 	/* Message area */
+
+	// The column's *reported* minimum, which is all the window has to go on: it
+	// stands in for what the messages and the composer hold, so neither can grow
+	// the window. Below these the content is clipped rather than the window pushed.
+	MessageAreaMinWidth  float32
+	MessageAreaMinHeight float32
 
 	MessageAvatarSize             float32
 	MessageAvatarColumnWidth      float32
@@ -346,6 +402,13 @@ var Sizes = struct {
 	EmbedImageMaxHeight float32
 	EmbedSpacing        float32
 
+	InviteCardWidth   float32
+	InviteIconSize    float32
+	InviteCaptionSize float32
+	InviteNameSize    float32
+	InviteDetailSize  float32
+	InviteTextGap     float32
+
 	/* Composer and its mention picker */
 
 	ComposerDockMargin  float32
@@ -365,6 +428,12 @@ var Sizes = struct {
 	SlowmodeGap         float32
 	SlowmodeInsetH      float32
 	SlowmodeDockGap     float32
+	TypingMarkSize      float32
+	TypingTextSize      float32
+	TypingAvatarSize    float32
+	TypingGap           float32
+	TypingInsetH        float32
+	ChannelTypingSize   float32
 
 	/* User profiles */
 
@@ -469,6 +538,7 @@ var Sizes = struct {
 	SettingsRowHeight     float32
 	SettingsRowPaddingH   float32
 	SettingsRowPaddingV   float32
+	SettingsControlGap    float32
 	SettingsGroupRadius   float32
 	SettingsGroupGap      float32
 	SettingsLabelSize     float32
@@ -503,6 +573,14 @@ var Sizes = struct {
 	MemberRowHeight:  36,
 	MemberNameSize:   13,
 
+	MemberSectionHeight:   30,
+	MemberSectionTopPad:   8,
+	MemberSectionTextSize: 12,
+
+	MemberPresenceDotSize: 10,
+	MemberPresenceDotRing: 2,
+	MemberBotTagSize:      9,
+
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
 	ServerMarkerHeight:      24,
@@ -514,6 +592,9 @@ var Sizes = struct {
 	CategorySpacing:         10,
 	CategoryIndicatorSize:   14,
 	CategoryIndicatorStroke: 2,
+
+	MessageAreaMinWidth:  320,
+	MessageAreaMinHeight: 160,
 
 	MessageAvatarSize:             40,
 	MessageAvatarColumnWidth:      46,
@@ -582,6 +663,16 @@ var Sizes = struct {
 	EmbedImageMaxHeight: 240,
 	EmbedSpacing:        4,
 
+	// InviteCardWidth is the card's whole width, not a ceiling like
+	// EmbedMaxWidth: an invite mounts empty and is filled in a moment later, so
+	// it has to be the same size before and after.
+	InviteCardWidth:   340,
+	InviteIconSize:    44,
+	InviteCaptionSize: 11,
+	InviteNameSize:    15,
+	InviteDetailSize:  12,
+	InviteTextGap:     2,
+
 	// The dock's margin is the gap it floats in, not what does the floating — the
 	// messages running under it are. It also has to stay under the message row's
 	// own horizontal padding: content wider than the gutter would show beside the
@@ -612,6 +703,17 @@ var Sizes = struct {
 	SlowmodeGap:       6,
 	SlowmodeInsetH:    10,
 	SlowmodeDockGap:   6,
+
+	// The typing line hangs at the other end of the same row, so it takes the
+	// chip's inset and gap unchanged and is set a size smaller: it is the one
+	// thing over the message column that is nobody's message, and a sentence there
+	// at conversation size reads as one. The dots are square on the line's height.
+	TypingMarkSize:    22,
+	TypingTextSize:    13,
+	TypingAvatarSize:  16,
+	TypingGap:         6,
+	TypingInsetH:      10,
+	ChannelTypingSize: 18,
 
 	// The avatar overhangs the banner by half its height, so the banner is sized
 	// against it: too short and the avatar hangs off the card's top edge.
@@ -678,7 +780,7 @@ var Sizes = struct {
 	ConfirmRadius:     6,
 
 	SessionCardAvatarSize: 32,
-	WindowDefaultWidth:    1000,
+	WindowDefaultWidth:    1200,
 	WindowDefaultHeight:   600,
 
 	ViewerMaxWidth:     1200,
@@ -700,15 +802,19 @@ var Sizes = struct {
 	SettingsRailTextSize:  14,
 	// The pane is capped rather than filled: a row is a label at one end and one
 	// control at the other, and across a maximised window the two lose each other.
-	SettingsPageWidth:   620,
+	SettingsPageWidth:   720,
 	SettingsPagePadding: 24,
 	SettingsHeaderSize:  22,
 	SettingsCaptionSize: 11,
-	SettingsRowHeight:   44,
+	SettingsRowHeight:   52,
 	SettingsRowPaddingH: 14,
 	// Chosen against SettingsInputHeight: the two together are the row height, so
 	// a row holding a control is exactly as tall as one holding only text.
-	SettingsRowPaddingV:  4,
+	SettingsRowPaddingV: 8,
+	// The gap above a control that sits under its description rather than beside
+	// it. A slider is given the row's whole width, so nothing but this separates
+	// it from the sentence explaining it.
+	SettingsControlGap:   10,
 	SettingsGroupRadius:  8,
 	SettingsGroupGap:     20,
 	SettingsLabelSize:    14,

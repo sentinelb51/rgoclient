@@ -53,7 +53,13 @@ type App struct {
 	client *client.Client
 	store  domain.Store      // client.Store(), held for how often it is read
 	images *cache.ImageCache // avatars, icons, attachments
+	emojis *cache.ImageCache // custom emoji, kept in a pool of their own
 	texts  *cache.TextCache  // text-attachment previews
+
+	// assetDir is the root both picture caches live under, held because the
+	// settings page names the directory in use rather than the configured one — a
+	// change to it only takes effect at the next start.
+	assetDir string
 
 	/* View state */
 
@@ -74,23 +80,24 @@ type App struct {
 
 	/* Mounted UI */
 
-	mainRow       *fyne.Container // the four-column fill row, relaid out by toggleMemberList
-	tooltip       *ui.Tooltip     // the hover label floating over that row
-	notices       *ui.NoticeStack // the transient messages floating over it too
-	serverList    *fyne.Container
-	channelList   *fyne.Container
-	memberList    *fyne.Container
-	memberSidebar *fyne.Container // the member column itself, hidden by its header toggle
-	messageList   *fyne.Container
-	messageScroll *ui.ObservableScroll
-	composerDock  *fyne.Container // slowmode chip + card: what the message column runs under
-	floatingDock  *fyne.Container // that stack hung over messageScroll; relaid out when the chip appears
-	input         *ui.MessageInput
-	slowmodeBadge *ui.SlowmodeBadge // the cooldown chip above that card's top-right corner
-	homeButton    *ui.SidebarButton
-	serverHeader  *widget.Label
-	channelHeader *widget.Label
-	channelGlyph  *fyne.Container // holds the message header's # / @ / group mark
+	mainRow         *fyne.Container // the four-column fill row, relaid out by toggleMemberList
+	tooltip         *ui.Tooltip     // the hover label floating over that row
+	notices         *ui.NoticeStack // the transient messages floating over it too
+	serverList      *fyne.Container
+	channelList     *fyne.Container
+	memberList      *ui.MemberList  // virtualised: it mounts only the rows on screen
+	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
+	messageList     *fyne.Container
+	messageScroll   *ui.ObservableScroll
+	composerDock    *fyne.Container // slowmode chip + card: what the message column runs under
+	floatingDock    *fyne.Container // that stack hung over messageScroll; relaid out when the chip appears
+	input           *ui.MessageInput
+	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
+	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
+	homeButton      *ui.SidebarButton
+	serverHeader    *widget.Label
+	channelHeader   *widget.Label
+	channelGlyph    *fyne.Container // holds the message header's # / @ / group mark
 
 	/* Modal layer and the settings page */
 
@@ -108,6 +115,17 @@ type App struct {
 	pendingAuthors []client.AuthorRef
 	authorTimer    *time.Timer
 
+	/* The member sidebar, see members.go */
+
+	// memberTimer coalesces a burst of presence changes into one rebuild, and
+	// memberSeq drops the older of two rebuilds racing back from their walks.
+	// memberStale records that the sidebar is hidden and has stopped following.
+	memberTimer *time.Timer
+	memberSeq   uint64
+	memberStale bool
+
+	fetchedMembers map[string]bool // serverID -> its whole membership has been pulled
+
 	/* Read-ack coalescing, see events.go */
 
 	ackTimer     *time.Timer
@@ -118,6 +136,29 @@ type App struct {
 
 	slowmodeUntil map[string]time.Time // channelID -> when this account may send there again
 	slowmodeTimer *time.Timer          // re-armed a second at a time while one is running
+
+	/* Typing indicators, see typing.go */
+
+	// typing is who is composing where and when to stop saying so. Every channel
+	// is tracked, not only the open one, because the sidebar marks the others.
+	// typingTimer is re-armed to the next expiry across all of them.
+	typing      map[string]map[string]time.Time // channelID -> userID -> when it lapses
+	typingTimer *time.Timer
+
+	// The sending half: where this account last announced itself, when, and the
+	// quiet period after which it takes that back.
+	typingChannelID string
+	sentTypingAt    time.Time
+	typingIdleTimer *time.Timer
+
+	/* Invite cards, see overlay.go */
+
+	// invites is what a code resolved to, kept because a card is rebuilt every
+	// time its message scrolls back into view and the answer never changes within
+	// a session. pendingInvites holds the cards waiting on a request already in
+	// flight, so the same invite posted twice costs one.
+	invites        map[string]inviteResult
+	pendingInvites map[string][]func(domain.Invite, error)
 
 	// epoch counts logins. A worker captures it before it leaves the UI thread and
 	// checks it on the way back, so a response that outlived a logout is dropped
@@ -147,6 +188,7 @@ func New(fyneApp fyne.App, info Info) *App {
 
 	revolt := client.New()
 	settings := config.Current().Cache
+	assetDir := cache.CacheRoot(settings.AssetDir)
 
 	a := &App{
 		fyne:                fyneApp,
@@ -154,18 +196,21 @@ func New(fyneApp fyne.App, info Info) *App {
 		info:                info,
 		client:              revolt,
 		store:               revolt.Store(),
-		images:              cache.NewImageCache(settings.ImageDir, imageLimits(settings)),
+		assetDir:            assetDir,
+		images:              cache.NewImageCache(assetDir, cache.ImagesFolder, imageLimits(settings)),
+		emojis:              cache.NewImageCache(assetDir, cache.EmojisFolder, emojiLimits(settings)),
 		texts:               cache.NewTextCache(settings.TextPreviews),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelList:         container.NewVBox(),
-		memberList:          ui.VBoxNoSpacing(),
 		messageList:         ui.VBoxNoSpacing(),
 		tooltip:             ui.NewTooltip(),
 		notices:             ui.NewNoticeStack(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
+		fetchedMembers:      make(map[string]bool),
 		slowmodeUntil:       make(map[string]time.Time),
+		typing:              make(map[string]map[string]time.Time),
 	}
 
 	// Built here rather than on first open so the layer is a fixed object buildUI
@@ -209,7 +254,7 @@ func (a *App) stale(epoch uint64) bool { return a.epoch != epoch }
 
 // deps returns the dependency bundle handed to widgets.
 func (a *App) deps() ui.Deps {
-	return ui.Deps{Store: a.store, Images: a.images, Texts: a.texts, Actions: a}
+	return ui.Deps{Store: a.store, Images: a.images, Emojis: a.emojis, Texts: a.texts, Actions: a}
 }
 
 // showMainUI swaps the window to the main layout and wires up shutdown.
@@ -224,6 +269,7 @@ func (a *App) showMainUI() {
 		}
 
 		a.images.Shutdown()
+		a.emojis.Shutdown()
 		a.client.Shutdown()
 	})
 }
@@ -341,10 +387,7 @@ func deletePrompt(message *domain.Message) string {
 func (a *App) deleteMessage(message *domain.Message) {
 	a.background(
 		func() error { return a.client.DeleteMessage(message.ChannelID, message.ID) },
-		func(err error) {
-			log.Printf("delete message %s: %v", message.ID, err)
-			a.notify(ui.ToneDanger, "Could not delete that message.")
-		},
+		a.notifyFailure("delete message "+message.ID, "Could not delete that message."),
 	)
 }
 
@@ -389,13 +432,15 @@ func (a *App) startEditing(w *ui.MessageWidget) {
 		a.client.Messages().Replace(message.ChannelID, &updated)
 		a.refreshMessage(message.ChannelID, message.ID)
 
+		// The revert has to happen before the notice, so this wraps notifyFailure
+		// rather than restating it.
+		onFail := a.notifyFailure("edit message "+message.ID, "Could not save your edit.")
 		a.background(
 			func() error { return a.client.EditMessage(message.ChannelID, message.ID, newContent) },
 			func(err error) {
-				log.Printf("edit message %s: %v", message.ID, err)
 				a.client.Messages().Replace(message.ChannelID, message)
 				a.refreshMessage(message.ChannelID, message.ID)
-				a.notify(ui.ToneDanger, "Could not save your edit.")
+				onFail(err)
 			},
 		)
 	}

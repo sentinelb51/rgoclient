@@ -24,7 +24,7 @@ const serverHoverGrowth = 1.1
 // or selected, and wears the same selection bar on its left edge as the channel
 // row does when it is the open server.
 type ServerWidget struct {
-	widget.BaseWidget
+	tapBase
 	Server domain.Server
 
 	// OnHover reports the pointer entering and leaving, so the sidebar can name
@@ -33,7 +33,6 @@ type ServerWidget struct {
 	Menu    func() []*fyne.MenuItem
 
 	images      *cache.ImageCache
-	onTap       func()
 	background  *canvas.Circle
 	marker      *canvas.Rectangle
 	iconWrapper *fyne.Container
@@ -58,10 +57,14 @@ func NewServerWidget(images *cache.ImageCache, server domain.Server, onTap func(
 	w := &ServerWidget{
 		Server:     server,
 		images:     images,
-		onTap:      onTap,
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
 		marker:     canvas.NewRectangle(color.Transparent),
 	}
+
+	// Menu is assigned by the sidebar after construction, so it is read when the
+	// click arrives rather than captured here.
+	w.onTap = onTap
+	w.onSecondaryTap = func(event *fyne.PointEvent) { showMenuHook(w, w.Menu, event) }
 	w.ExtendBaseWidget(w)
 
 	return w
@@ -135,25 +138,11 @@ func (w *ServerWidget) refreshAppearance() {
 	}
 }
 
-func (w *ServerWidget) Tapped(*fyne.PointEvent) {
-	if w.onTap != nil {
-		w.onTap()
-	}
-}
-
-func (w *ServerWidget) TappedSecondary(event *fyne.PointEvent) {
-	showMenuHook(w, w.Menu, event)
-}
-
-func (w *ServerWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
-
 func (w *ServerWidget) MouseIn(*desktop.MouseEvent) {
 	w.hovered = true
 	w.refreshAppearance()
 	w.notifyHover(true)
 }
-
-func (w *ServerWidget) MouseMoved(*desktop.MouseEvent) {}
 
 func (w *ServerWidget) MouseOut() {
 	w.hovered = false
@@ -171,17 +160,16 @@ func (w *ServerWidget) notifyHover(hovering bool) {
 
 // ChannelWidget is a selectable channel row carrying selection and unread state.
 type ChannelWidget struct {
-	widget.BaseWidget
+	tapBase
 	Channel domain.Channel
 
 	// Menu supplies the items right-clicking the row offers.
 	Menu func() []*fyne.MenuItem
 
-	onTap func()
-
 	background         *canvas.Rectangle
 	selectionIndicator *canvas.Rectangle
 	unreadIndicator    *canvas.Rectangle
+	typingMark         *TypingMark       // the trailing mark, hidden unless somebody is composing
 	leading            fyne.CanvasObject // the type glyph, or a conversation's avatar
 	label              *canvas.Text
 	labelBox           *fyne.Container // label fitted to its slot; see NewEllipsisText
@@ -213,10 +201,10 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 
 	w := &ChannelWidget{
 		Channel:            channel,
-		onTap:              onTap,
 		background:         canvas.NewRectangle(color.Transparent),
 		selectionIndicator: canvas.NewRectangle(color.Transparent),
 		unreadIndicator:    canvas.NewRectangle(color.Transparent),
+		typingMark:         NewTypingMark(theme.Sizes.ChannelTypingSize, theme.Colors.TypingMark),
 		leading:            channelLeading(deps, channel),
 		height:             height,
 		label:              label,
@@ -225,6 +213,11 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 		// and wrapping that would take the full name to be whatever survived.
 		labelBox: NewEllipsisText(label),
 	}
+
+	// As on ServerWidget, Menu is assigned after construction and so is read when
+	// the click arrives.
+	w.onTap = onTap
+	w.onSecondaryTap = func(event *fyne.PointEvent) { showMenuHook(w, w.Menu, event) }
 	w.ExtendBaseWidget(w)
 
 	return w
@@ -243,6 +236,14 @@ func (w *ChannelWidget) SetState(selected, unread bool) {
 	w.Refresh()
 }
 
+// SetTyping marks the row as one somebody is composing in. It is separate from
+// SetState rather than a third argument to it because every caller of that pair
+// depends on its no-op guard, and typing arrives on its own schedule. Carries the
+// same guard: the mark is idle for the life of most rows.
+func (w *ChannelWidget) SetTyping(typing, animate bool) {
+	w.typingMark.SetActive(typing, animate)
+}
+
 func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	w.selectionIndicator.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, 0))
 	w.unreadIndicator.SetMinSize(fyne.NewSize(theme.Sizes.UnreadIndicatorWidth, 0))
@@ -253,9 +254,12 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 
 	// The name takes the leftover width rather than its natural width: a long DM
 	// title would otherwise widen the whole channel column.
+	// The typing mark rides in the row's right gutter, which held nothing but that
+	// gap before: hidden it costs the row no width, and it is the one place a mark
+	// reads as something other than the unread bar at the opposite edge.
 	content := container.NewBorder(nil, nil,
 		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
-		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+		HBoxNoSpacing(container.NewCenter(w.typingMark), HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
 		w.labelBox,
 	)
 
@@ -292,18 +296,6 @@ func (w *ChannelWidget) refreshAppearance() {
 	w.label.Refresh()
 }
 
-func (w *ChannelWidget) Tapped(*fyne.PointEvent) {
-	if w.onTap != nil {
-		w.onTap()
-	}
-}
-
-func (w *ChannelWidget) TappedSecondary(event *fyne.PointEvent) {
-	showMenuHook(w, w.Menu, event)
-}
-
-func (w *ChannelWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
-
 func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
 	if !w.selected {
 		w.background.FillColor = theme.Colors.ChannelHoverBackground
@@ -311,16 +303,19 @@ func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
 	}
 }
 
-func (w *ChannelWidget) MouseMoved(*desktop.MouseEvent) {}
-
 func (w *ChannelWidget) MouseOut() { w.refreshAppearance() }
 
 /* Channel categories */
 
 // CategoryWidget is a collapsible category header. Toggling it shows or hides
 // the channel widgets registered through SetChannels.
+//
+// Through tapBase it accepts a right-click and does nothing with it, having no
+// menu of its own. That is the same outcome as refusing one — nothing above it in
+// the channel column answers a right-click either — but it is the innermost
+// object, so it is worth knowing that the event stops here.
 type CategoryWidget struct {
-	widget.BaseWidget
+	tapBase
 	title    string
 	onToggle func(collapsed bool)
 
@@ -347,6 +342,7 @@ func NewCategoryWidget(title string, onToggle func(collapsed bool)) *CategoryWid
 		indicator:  container.NewCenter(drawIndicator(true)),
 		background: canvas.NewRectangle(color.Transparent),
 	}
+	w.onTap = w.toggle
 	w.ExtendBaseWidget(w)
 
 	return w
@@ -406,7 +402,8 @@ func (w *CategoryWidget) CreateRenderer() fyne.WidgetRenderer {
 	return &categoryRenderer{widget: w, inner: inner}
 }
 
-func (w *CategoryWidget) Tapped(*fyne.PointEvent) {
+// toggle flips the category open or shut, which is what tapping it does.
+func (w *CategoryWidget) toggle() {
 	w.collapsed = !w.collapsed
 	w.applyCollapsed()
 
@@ -415,14 +412,10 @@ func (w *CategoryWidget) Tapped(*fyne.PointEvent) {
 	}
 }
 
-func (w *CategoryWidget) Cursor() desktop.Cursor { return desktop.PointerCursor }
-
 func (w *CategoryWidget) MouseIn(*desktop.MouseEvent) {
 	w.background.FillColor = theme.Colors.ChannelHoverBackground
 	w.background.Refresh()
 }
-
-func (w *CategoryWidget) MouseMoved(*desktop.MouseEvent) {}
 
 func (w *CategoryWidget) MouseOut() {
 	w.background.FillColor = color.Transparent
@@ -565,55 +558,6 @@ func GroupIcon() fyne.CanvasObject {
 	glyph := container.NewWithoutLayout(head(13, 10, 5.5), head(7, 10, 5.5))
 
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), glyph))
-}
-
-/* Member rows */
-
-// NewMemberWidget builds a member row: a small circular avatar and the display
-// name, the whole row tappable. Offline members get dimmed name text. The row is
-// returned as its TappableContainer so the controller can fill in the Menu hook,
-// as it does for the server and channel rows.
-func NewMemberWidget(deps Deps, member domain.Member, online bool) *TappableContainer {
-	textColor := theme.Colors.TextPrimary
-	if !online {
-		textColor = theme.Colors.CategoryText
-	}
-
-	label := canvas.NewText(member.Name, textColor)
-	label.TextSize = theme.Sizes.MemberNameSize
-
-	avatarSize := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
-	avatar := circularAvatar(deps.Images, member.AvatarURL, avatarSize)
-
-	// As in the channel row, the name fills the leftover width and is shortened to
-	// fit rather than being allowed to widen the member column.
-	row := container.NewBorder(nil, nil,
-		container.NewHBox(
-			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-			container.NewCenter(avatar),
-		),
-		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		NewEllipsisText(label),
-	)
-
-	userID := member.UserID
-	content := NewMinHeightContainer(theme.Sizes.MemberRowHeight, row)
-
-	// The row is its own anchor, so the profile card opens beside the name that
-	// was clicked; the handler is set after construction because it needs it.
-	tappable := NewTappableContainer(content, nil)
-	tappable.onTap = func() { deps.Actions.OnUserTapped(userID, tappable) }
-
-	return tappable
-}
-
-// NewMemberSection is the small bold header grouping members, e.g. "Online — 5".
-func NewMemberSection(title string) fyne.CanvasObject {
-	text := canvas.NewText(title, theme.Colors.CategoryText)
-	text.TextStyle = fyne.TextStyle{Bold: true}
-	text.TextSize = 12
-
-	return container.NewHBox(HorizontalSpacer(theme.Sizes.ChannelLeftPadding), container.NewPadded(text))
 }
 
 /* Saved sessions */

@@ -12,6 +12,7 @@ import (
 	"image/color"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -195,6 +196,10 @@ func (s *store) Members(serverID string) []domain.Member {
 
 	// The sort key is resolved alongside the member rather than lowered inside the
 	// comparator, which would redo that work O(n log n) times on a large server.
+	//
+	// The user ID breaks a tie so the order is total: the member list buckets this
+	// slice without re-sorting it, and two people sharing a display name swapping
+	// places between rebuilds would move a row out from under the pointer.
 	type entry struct {
 		member domain.Member
 		key    string
@@ -204,7 +209,13 @@ func (s *store) Members(serverID string) []domain.Member {
 		resolved := toMember(state, member, server)
 		entries[i] = entry{member: resolved, key: strings.ToLower(resolved.Name)}
 	}
-	slices.SortFunc(entries, func(x, y entry) int { return strings.Compare(x.key, y.key) })
+	slices.SortFunc(entries, func(x, y entry) int {
+		if by := strings.Compare(x.key, y.key); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.member.UserID, y.member.UserID)
+	})
 
 	members := make([]domain.Member, len(entries))
 	for i := range entries {
@@ -232,10 +243,13 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, server *revo
 	}
 
 	// The account behind the membership fills in whatever the nickname and the
-	// per-server avatar did not override.
+	// per-server avatar did not override. A membership with no account cached
+	// stays PresenceOffline, which is the right default and one more reason the
+	// bulk fetch — which brings the accounts with it — matters.
 	if user := state.User(member.ID.User); user != nil {
 		out.Username = user.Username
-		out.Online = user.Online
+		out.Presence = toPresence(user)
+		out.Bot = user.Bot != nil
 		if out.Name == "" {
 			out.Name = displayName(user)
 		}
@@ -247,9 +261,8 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, server *revo
 		out.Name = "Unknown user"
 	}
 
-	if c, ok := roleColor(server, member.Roles); ok {
-		out.Color = c
-	}
+	out.HasRoles = len(member.Roles) > 0
+	out.Color, out.HoistRoleID = memberRoleInfo(server, member.Roles)
 
 	return out
 }
@@ -294,41 +307,97 @@ func serverRoles(server *revoltgo.Server, roleIDs []string) []domain.Role {
 
 	roles := make([]domain.Role, len(found))
 	for i, k := range found {
-		roles[i] = domain.Role{ID: k.id, Name: k.role.Name}
-		if k.role.Colour != nil {
-			if c, ok := parseColor(*k.role.Colour); ok {
-				roles[i].Color = c
-			}
-		}
+		roles[i] = toRole(k.id, k.role)
 	}
 
 	return roles
 }
 
-// roleColor returns the colour of the most-senior coloured role among roleIDs
-// (lowest Rank, by Revolt's convention), or ok=false when none has a colour that
-// parses.
-func roleColor(server *revoltgo.Server, roleIDs []string) (color.Color, bool) {
-	if server == nil {
-		return nil, false
+// HoistedRoles lists the roles a server displays as sections of their own, most
+// senior first — which is ascending Rank, Revolt ranking the most senior lowest.
+//
+// It hands back values: nothing may escape holding a *revoltgo.ServerRole, which
+// the gateway rewrites in place.
+func (s *store) HoistedRoles(serverID string) []domain.Role {
+	state := s.state()
+	if state == nil || serverID == "" {
+		return nil
 	}
 
-	var best *revoltgo.ServerRole
+	server := state.Server(serverID)
+	if server == nil {
+		return nil
+	}
+
+	roles := make([]domain.Role, 0, len(server.Roles))
+	for id, role := range server.Roles {
+		if role != nil && role.Hoist {
+			roles = append(roles, toRole(id, role))
+		}
+	}
+	slices.SortFunc(roles, func(x, y domain.Role) int {
+		if by := cmp.Compare(x.Rank, y.Rank); by != 0 {
+			return by
+		}
+
+		// Ranks are not guaranteed distinct and map iteration is not ordered, so
+		// two roles sharing one would otherwise swap sections between rebuilds.
+		return strings.Compare(x.ID, y.ID)
+	})
+
+	return roles
+}
+
+// toRole converts one role definition. revoltgo leaves ServerRole.ID empty — the
+// map key is the ID — so it is passed in.
+func toRole(id string, role *revoltgo.ServerRole) domain.Role {
+	out := domain.Role{ID: id, Name: role.Name, Rank: role.Rank, Hoist: role.Hoist}
+	if role.Colour != nil {
+		if c, ok := parseColor(*role.Colour); ok {
+			out.Color = c
+		}
+	}
+
+	return out
+}
+
+// memberRoleInfo answers both of the questions a member row asks of its roles in
+// one walk: what colour to draw the name in, and which section to file the row
+// under. The most senior role wins each — lowest Rank, by Revolt's convention —
+// and they are answered together because this runs per member on every rebuild
+// of a list that can hold thousands.
+//
+// The two are independent: the most senior *coloured* role need not be the most
+// senior *hoisted* one.
+func memberRoleInfo(server *revoltgo.Server, roleIDs []string) (color.Color, string) {
+	if server == nil {
+		return nil, ""
+	}
+
+	var coloured, hoisted *revoltgo.ServerRole
+	var hoistID string
+
 	for _, id := range roleIDs {
 		role := server.Roles[id]
-		if role == nil || role.Colour == nil || *role.Colour == "" {
+		if role == nil {
 			continue
 		}
-		if best == nil || role.Rank < best.Rank {
-			best = role
+
+		if role.Colour != nil && *role.Colour != "" && (coloured == nil || role.Rank < coloured.Rank) {
+			coloured = role
+		}
+		if role.Hoist && (hoisted == nil || role.Rank < hoisted.Rank) {
+			hoisted, hoistID = role, id
 		}
 	}
 
-	if best == nil {
-		return nil, false
+	if coloured == nil {
+		return nil, hoistID
 	}
 
-	return parseColor(*best.Colour)
+	fill, _ := parseColor(*coloured.Colour)
+
+	return fill, hoistID
 }
 
 /* Channels and servers */
@@ -449,6 +518,22 @@ func (s *store) channelServerID(channelID string) string {
 	return ""
 }
 
+/* Emojis */
+
+// EmojiURL is where a custom emoji's picture is served from. It is built from
+// the ID and asks State nothing, deliberately: State holds the emoji of the
+// servers the account is in, and a message routinely names one from a server it
+// is not — Revolt sends the ID either way, and Autumn serves the picture either
+// way. A lookup here would blank out exactly the emoji nobody could otherwise
+// see. It is therefore the one read here that answers while logged out.
+func (s *store) EmojiURL(emojiID string) string {
+	if emojiID == "" {
+		return ""
+	}
+
+	return revoltgo.EndpointAutumnFile(emojiTag, emojiID, emojiSize)
+}
+
 /* Messages */
 
 // MessageAuthor resolves the name, avatar and role colour for a message's author
@@ -483,28 +568,42 @@ func (s *store) SystemTextParts(system *domain.SystemMessage) (name, rest string
 
 /* Permissions */
 
-// permissionBypassSlowmode is Revolt's BypassSlowmode channel permission.
-// revoltgo's constants stop at MentionRoles, so the bit is named here rather
-// than imported. It falls inside PermissionGrantAllSafe, which is what a server
-// owner is granted, so ownership already carries it.
-const permissionBypassSlowmode int64 = 1 << 39
+// The presets Revolt grants without asking any role: everything short of the
+// unsafe bits for an owner, the conversation grant for a DM or group, and what a
+// member serving a timeout is left with.
+const (
+	permissionGrantAll       = domain.Permission(revoltgo.PermissionGrantAllSafe)
+	permissionInConversation = domain.Permission(revoltgo.PermissionPresetDM)
+	permissionViewOnly       = domain.Permission(revoltgo.PermissionPresetViewOnly)
+	permissionInTimeout      = domain.Permission(revoltgo.PermissionPresetTimeout)
+)
 
-// CanManageMessages reports whether the account may delete other people's
-// messages in a channel.
-func (s *store) CanManageMessages(channelID string) bool {
-	return s.channelPermissions(channelID)&revoltgo.PermissionManageMessages != 0
-}
-
-// CanBypassSlowmode reports whether the account may send in a channel without
-// waiting out its cooldown.
-func (s *store) CanBypassSlowmode(channelID string) bool {
-	return s.channelPermissions(channelID)&permissionBypassSlowmode != 0
-}
-
-// channelPermissions is the account's permission bitfield in a channel, or 0
-// when there is no session, no such channel, or the calculation fails — all of
-// which mean the same thing to a caller: assume nothing is allowed.
-func (s *store) channelPermissions(channelID string) int64 {
+// Permissions is everything the account may do in a channel, or none at all when
+// there is no session or nothing is known about the channel — which a caller
+// reads as "assume nothing is allowed".
+//
+// It resolves the whole thing here rather than calling revoltgo's
+// State.ChannelPermissions, which gets four things wrong that land on exactly
+// what this is for:
+//
+//   - It ignores Channel.RolePermissions. A channel denied to everyone and handed
+//     back to one role is how a private channel is actually built, and without the
+//     overwrites every member of that role is told they cannot see it.
+//   - It applies a member's roles in whatever order the member carries them, so
+//     of two roles disagreeing about one permission the winner is arbitrary.
+//     Revolt ranks them, most senior lowest, and the most senior has the last word.
+//   - It clamps a timed-out member *before* the channel's overwrites rather than
+//     after, so an overwrite can hand back what the timeout took.
+//   - It decides a DM from Channel.Permissions, a field Revolt sends only on a
+//     group — so every DM comes back view-only. See conversationPermissions.
+//
+// It also returns an error for a server the account is not a member of, which is
+// a state the client is routinely in — see rankRoles.
+//
+// The State lookups happen here and the arithmetic in the two resolvers below,
+// which take plain values: State's caches are unexported, so nothing reaching
+// through a session could be given a known server to answer about.
+func (s *store) Permissions(channelID string) domain.Permission {
 	state := s.state()
 	if state == nil {
 		return 0
@@ -515,27 +614,176 @@ func (s *store) channelPermissions(channelID string) int64 {
 		return 0
 	}
 
-	permissions, err := state.ChannelPermissions(self, channel)
-	if err != nil {
+	if channel.ChannelType != revoltgo.ChannelTypeText && channel.ChannelType != revoltgo.ChannelTypeVoice {
+		return conversationPermissions(channel, state.User(recipientID(state, channel)), self.ID)
+	}
+
+	if channel.Server == nil {
 		return 0
+	}
+	server := state.Server(*channel.Server)
+	if server == nil {
+		return 0
+	}
+
+	return channelPermissions(server, state.Member(server.ID, self.ID), channel, self.ID)
+}
+
+// conversationPermissions resolves what the account may do in a channel of its
+// own: saved notes, a direct message, a group. other is the DM's opposite
+// number, or nil — nobody else's relationship comes into it.
+func conversationPermissions(channel *revoltgo.Channel, other *revoltgo.User, userID string) domain.Permission {
+	switch channel.ChannelType {
+	case revoltgo.ChannelTypeSavedMessages:
+		return permissionGrantAll
+	case revoltgo.ChannelTypeGroup:
+		if channel.Owner == userID {
+			return permissionGrantAll
+		}
+		if channel.Permissions != nil {
+			return domain.Permission(*channel.Permissions)
+		}
+
+		return permissionInConversation
+	case revoltgo.ChannelTypeDM:
+		// Revolt decides a DM from the *relationship*, not from the channel: a direct
+		// message carries no permissions field at all, whatever revoltgo's own
+		// ChannelPermissions reads it for. Blocked in either direction leaves the
+		// history readable and nothing else; anyone you already have a conversation
+		// with, you may write to.
+		if blocked(other) {
+			return permissionViewOnly
+		}
+
+		return permissionInConversation
+	}
+
+	return 0
+}
+
+// ServerPermissions is everything the account may do across a server, before any
+// one channel's overwrites narrow it.
+func (s *store) ServerPermissions(serverID string) domain.Permission {
+	state := s.state()
+	if state == nil {
+		return 0
+	}
+
+	self, server := state.Self(), state.Server(serverID)
+	if self == nil || server == nil {
+		return 0
+	}
+
+	return serverPermissions(server, state.Member(serverID, self.ID), self.ID)
+}
+
+// channelPermissions resolves what a member may do in one of a server's
+// channels: the server's own grant, then the channel's default overwrite, then
+// the channel's overwrites for the roles the member holds — most senior last, so
+// it has the last word. The timeout clamp comes after all of it, so no overwrite
+// can hand back what a timeout took.
+func channelPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, channel *revoltgo.Channel, userID string) domain.Permission {
+	if server.Owner == userID {
+		return permissionGrantAll
+	}
+
+	// One ranking of the member's roles serves both passes: the server's grant, and
+	// this channel's overwrites keyed by the same roles in the same order.
+	roles := rankRoles(server, member)
+	permissions := grantedBy(server, roles)
+
+	if channel.DefaultPermissions != nil {
+		permissions = applyOverwrite(permissions, *channel.DefaultPermissions)
+	}
+	for _, role := range roles {
+		if overwrite, ok := channel.RolePermissions[role.id]; ok {
+			permissions = applyOverwrite(permissions, overwrite)
+		}
+	}
+
+	return clampTimeout(permissions, member)
+}
+
+// serverPermissions resolves what a member may do across a server, which is
+// channelPermissions without any one channel narrowing it.
+func serverPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, userID string) domain.Permission {
+	if server.Owner == userID {
+		return permissionGrantAll
+	}
+
+	return clampTimeout(grantedBy(server, rankRoles(server, member)), member)
+}
+
+// rankedRole is one of a member's roles paired with the ID it is filed under.
+// revoltgo leaves ServerRole.ID empty — the map key is the ID — and a channel's
+// overwrites are keyed by it, so the pairing has to survive the sort.
+type rankedRole struct {
+	id        string
+	rank      int64
+	overwrite revoltgo.PermissionOverwrite
+}
+
+// rankRoles resolves a member's roles *least* senior first: that is the order
+// overwrites apply in, so the most senior role lands last and has the last word.
+// Revolt ranks the most senior lowest, which makes this descending rank.
+//
+// A nil member — a membership State has not heard of yet — resolves as one
+// holding no roles rather than as no access at all. That is not leniency for its
+// own sake: it is what Revolt itself computes for someone carrying only the
+// default role, and it is what revoltgo fabricates on ServerCreate for a server
+// joined while the client is running. Answering "no access" instead would empty
+// the channel sidebar of a server the account had just joined.
+func rankRoles(server *revoltgo.Server, member *revoltgo.ServerMember) []rankedRole {
+	if member == nil {
+		return nil
+	}
+
+	roles := make([]rankedRole, 0, len(member.Roles))
+	for _, id := range member.Roles {
+		if role := server.Roles[id]; role != nil {
+			roles = append(roles, rankedRole{id: id, rank: role.Rank, overwrite: role.Permissions})
+		}
+	}
+	slices.SortFunc(roles, func(x, y rankedRole) int { return cmp.Compare(y.rank, x.rank) })
+
+	return roles
+}
+
+// grantedBy applies a member's roles to a server's default grant, in the order
+// rankRoles put them in.
+func grantedBy(server *revoltgo.Server, roles []rankedRole) domain.Permission {
+	permissions := domain.Permission(server.DefaultPermissions)
+	for _, role := range roles {
+		permissions = applyOverwrite(permissions, role.overwrite)
 	}
 
 	return permissions
 }
 
-// CanKickMembers reports whether the account may remove members from a server.
-func (s *store) CanKickMembers(serverID string) bool {
-	state := s.state()
-	if state == nil {
+// blocked reports whether a DM's other participant has blocked the account or
+// been blocked by it. Somebody State cannot name is not blocked — the
+// conversation is in the list, which is the only evidence there is.
+func blocked(user *revoltgo.User) bool {
+	if user == nil {
 		return false
 	}
 
-	self, server := state.Self(), state.Server(serverID)
-	if self == nil || server == nil {
-		return false
+	return user.Relationship == revoltgo.UserRelationsTypeBlocked ||
+		user.Relationship == revoltgo.UserRelationsTypeBlockedOther
+}
+
+// applyOverwrite grants and then revokes, which is Revolt's own order: a role
+// that both allows and denies one permission denies it.
+func applyOverwrite(permissions domain.Permission, overwrite revoltgo.PermissionOverwrite) domain.Permission {
+	return (permissions | domain.Permission(overwrite.Allow)) &^ domain.Permission(overwrite.Deny)
+}
+
+// clampTimeout cuts a member serving a timeout back to what the timeout leaves
+// them.
+func clampTimeout(permissions domain.Permission, member *revoltgo.ServerMember) domain.Permission {
+	if member == nil || member.Timeout == nil || !time.Now().Before(*member.Timeout) {
+		return permissions
 	}
 
-	permissions, err := state.ServerPermissions(self, server)
-
-	return err == nil && permissions&revoltgo.PermissionKickMembers != 0
+	return permissions & permissionInTimeout
 }

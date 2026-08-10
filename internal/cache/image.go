@@ -52,6 +52,15 @@ type ImageLimits struct {
 	// sizes through one key, so a per-call-site cap would let the smallest
 	// requester decide what every larger one gets.
 	MaxEdge int64
+
+	// Loaders bounds how many pictures are fetched at once. Unlike the budgets it
+	// is fixed at construction — the semaphore is a channel, and resizing one out
+	// from under the goroutines holding it cannot be done safely — so SetLimits
+	// ignores it and the settings row says a restart is needed.
+	//
+	// Without it a member list flung through thousands of rows fires a goroutine
+	// and a connection per row it passes. A zero or negative value is one loader.
+	Loaders int
 }
 
 // DefaultImageLimits are what the client ran with before the budgets became
@@ -61,8 +70,15 @@ func DefaultImageLimits() ImageLimits {
 		DiskBytes:   512 * 1024 * 1024,
 		MemoryBytes: 192 * 1024 * 1024,
 		MaxEdge:     1600,
+		Loaders:     8,
 	}
 }
+
+// EmojiMaxEdge caps an emoji's decode. It is not the settings' MaxImageEdge and
+// has no reason to be: an emoji is drawn at a line's height and never larger, so
+// decoding one at the resolution a photograph needs would spend a whole memory
+// budget on a dozen of them.
+const EmojiMaxEdge = 128
 
 // ImageStats is what the cache currently occupies, for the settings page to
 // report.
@@ -70,6 +86,16 @@ type ImageStats struct {
 	Files       int
 	DiskBytes   int64
 	MemoryBytes int64
+}
+
+// Add sums two caches' occupancy, for a settings page that meters more than one
+// of them as the single number the budget is expressed in.
+func (s ImageStats) Add(other ImageStats) ImageStats {
+	return ImageStats{
+		Files:       s.Files + other.Files,
+		DiskBytes:   s.DiskBytes + other.DiskBytes,
+		MemoryBytes: s.MemoryBytes + other.MemoryBytes,
+	}
 }
 
 // ImageCache stores decoded images in memory and persists them to disk in the
@@ -92,6 +118,10 @@ type ImageCache struct {
 	maxMemory atomic.Int64
 	maxEdge   atomic.Int64
 
+	// loaders is the download semaphore — see ImageLimits.Loaders. Buffered to the
+	// bound and never replaced, so it is read without the lock.
+	loaders chan struct{}
+
 	dir      string
 	client   *http.Client
 	ticker   *time.Ticker
@@ -106,13 +136,11 @@ type imageLoad struct {
 	img  image.Image
 }
 
-// NewImageCache creates a cache rooted at dir — empty for the user's cache
-// directory — and starts the background flush, which also trims the directory
-// back under budget.
-func NewImageCache(dir string, limits ImageLimits) *ImageCache {
-	if dir == "" {
-		dir = DefaultCacheDir()
-	}
+// NewImageCache creates a cache in folder under root — an empty root for the
+// user's cache directory — and starts the background flush, which also trims the
+// directory back under budget.
+func NewImageCache(root, folder string, limits ImageLimits) *ImageCache {
+	dir := filepath.Join(CacheRoot(root), folder)
 
 	c := &ImageCache{
 		memory:   make(map[string]image.Image),
@@ -121,6 +149,7 @@ func NewImageCache(dir string, limits ImageLimits) *ImageCache {
 		inflight: make(map[string]*imageLoad),
 		sizes:    make(map[string]int64),
 		recency:  NewLRU(),
+		loaders:  make(chan struct{}, max(limits.Loaders, 1)),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
 		flushNow: make(chan struct{}, 1),
@@ -141,7 +170,8 @@ func NewImageCache(dir string, limits ImageLimits) *ImageCache {
 
 // SetLimits changes what the cache may occupy. The memory budget is enforced on
 // the next touch and the disk budget on the next trim, so nothing is discarded
-// at the moment of the change. Safe from any goroutine.
+// at the moment of the change. Loaders is fixed at construction and ignored here.
+// Safe from any goroutine.
 func (c *ImageCache) SetLimits(limits ImageLimits) {
 	c.maxDisk.Store(limits.DiskBytes)
 	c.maxMemory.Store(limits.MemoryBytes)
@@ -205,17 +235,29 @@ func (c *ImageCache) Clear() {
 	}
 }
 
-// DefaultCacheDir returns the directory used to persist images when none is
-// configured.
-func DefaultCacheDir() string {
+// Asset folders under the cache root, one per class of picture. They are kept
+// apart so a budget, a trim and a clear address one class without touching the
+// others: an afternoon of scrolling through attachments must not evict the
+// handful of emoji every message is drawn with.
+const (
+	ImagesFolder = "images" // avatars, icons, attachments, embeds
+	EmojisFolder = "emojis" // custom emoji drawn inside a message body
+)
+
+// CacheRoot returns the directory the client keeps its cached assets under:
+// the configured one, or a place inside the user's cache directory.
+func CacheRoot(configured string) string {
+	if configured != "" {
+		return configured
+	}
 	if dir, err := os.UserCacheDir(); err == nil {
-		return filepath.Join(dir, "RGOClient", "assets", "images")
+		return filepath.Join(dir, "RGOClient", "assets")
 	}
 	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".cache", "RGOClient", "assets", "images")
+		return filepath.Join(home, ".cache", "RGOClient", "assets")
 	}
 
-	return filepath.Join(".", "cache", "images")
+	return filepath.Join(".", "cache")
 }
 
 // Shutdown stops the background flush and persists any pending images.
@@ -313,7 +355,12 @@ func (c *ImageCache) LoadAsync(id, url string, circular bool, onLoaded func(imag
 	}
 
 	go func() {
+		// Claimed here rather than before the goroutine: acquiring on the calling
+		// thread would block the UI thread on whatever is already downloading.
+		c.loaders <- struct{}{}
 		img := c.loadShared(id, url)
+		<-c.loaders
+
 		if img == nil {
 			return
 		}

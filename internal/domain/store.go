@@ -38,22 +38,36 @@ type Store interface {
 	// where Channel would resolve a picture and a slowmode nobody asked for.
 	ChannelName(channelID string) string
 
+	// EmojiURL is where a custom emoji's picture is served from, or "" for an
+	// empty ID. It is *derived* from the ID rather than looked up, which is why it
+	// has no ok: a message can carry an emoji from a server the account is not in,
+	// so no local record covers it — and the CDN serves the picture regardless.
+	EmojiURL(emojiID string) string
+
 	// HasUser and HasMember answer whether a record is already resolved, without
 	// resolving it. Lazy author resolution asks once per mounted message, so this
 	// pair is on the render hot path and must not allocate.
 	HasUser(userID string) bool
 	HasMember(serverID, userID string) bool
 
-	// Members lists everyone the client knows of in a server. That is the gateway's
-	// members plus whoever lazy author resolution has pulled in, not the full
-	// membership: Revolt's members endpoint has no pagination, so asking for every
-	// member of a large server would flood memory.
+	// Members lists everyone the client knows of in a server, ordered by display
+	// name unless the settings say otherwise. That is whoever has been fetched —
+	// the whole membership once the client has asked for it, otherwise the
+	// gateway's members plus whoever lazy author resolution has pulled in.
+	//
+	// It resolves a nickname, an avatar, a presence and a role colour per member,
+	// so it is the most expensive read here. Call it off the UI thread.
 	Members(serverID string) []Member
 
 	// MemberRoles resolves one member's roles, most senior first. Kept off Member
 	// because only a profile draws them and building a sidebar would otherwise
 	// allocate a slice per row.
 	MemberRoles(serverID, userID string) []Role
+
+	// HoistedRoles lists the roles a server displays as sections of their own,
+	// most senior first. Separate from MemberRoles because the member list needs
+	// the server's sections once, not every member's roles once per member.
+	HoistedRoles(serverID string) []Role
 
 	// MessageAuthor resolves a message's author in one pass — channel to member to
 	// user — preferring the per-server member and falling back to the raw user.
@@ -64,15 +78,15 @@ type Store interface {
 	// that name as a mention, so it cannot arrive already folded into prose.
 	SystemTextParts(system *SystemMessage) (name, rest string)
 
-	// CanManageMessages reports whether the account may delete other people's
-	// messages in a channel.
-	CanManageMessages(channelID string) bool
-
-	// CanKickMembers reports whether the account may remove members from a server.
-	CanKickMembers(serverID string) bool
-
-	// CanBypassSlowmode reports whether the account may send in a channel without
-	// waiting out its cooldown. A channel's Slowmode is what it is configured at;
-	// this is whether it applies to us.
-	CanBypassSlowmode(channelID string) bool
+	// Permissions is everything the account may do in a channel, and
+	// ServerPermissions the same question at server scope. Both report the empty
+	// set when there is nothing to resolve against — logged out, or an ID nothing
+	// is known about — which callers read as "assume nothing is allowed".
+	//
+	// A whole bitfield rather than a question per permission because a call site
+	// asking three things should walk the roles once, and because the interface
+	// would otherwise grow a method for every bit Revolt defines. Ask it with
+	// Permission.Has.
+	Permissions(channelID string) Permission
+	ServerPermissions(serverID string) Permission
 }

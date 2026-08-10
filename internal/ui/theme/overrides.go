@@ -213,17 +213,10 @@ func ParseHex(s string) (color.Color, bool) {
 	}, true
 }
 
-// Hex formats a colour as "#RRGGBB", or "#RRGGBBAA" when it is not opaque.
-//
-// The channels are read off color.RGBA directly rather than through the Color
-// interface: RGBA() returns alpha-premultiplied values, so a translucent entry
-// would come back darker than it was written and never round-trip.
+// Hex formats a colour as "#RRGGBB", or "#RRGGBBAA" when it is not opaque. It
+// round-trips ParseHex because toRGBA preserves straight alpha — see there.
 func Hex(c color.Color) string {
-	rgba, ok := c.(color.RGBA)
-	if !ok {
-		r, g, b, a := c.RGBA()
-		rgba = color.RGBA{R: uint8(r >> 8), G: uint8(g >> 8), B: uint8(b >> 8), A: uint8(a >> 8)}
-	}
+	rgba := toRGBA(c)
 
 	if rgba.A == 0xFF {
 		return fmt.Sprintf("#%02X%02X%02X", rgba.R, rgba.G, rgba.B)
@@ -259,6 +252,14 @@ func lighten(c color.Color, amount float64) color.Color {
 	return color.RGBA{R: lift(rgba.R), G: lift(rgba.G), B: lift(rgba.B), A: rgba.A}
 }
 
+// toRGBA reads a colour's channels with its alpha left *straight*, which is what
+// every caller here needs and what the color.Color interface will not give.
+//
+// The palette writes straight alpha into color.RGBA, so a palette entry is
+// returned as it was written. RGBA() is the fallback for anything else, and it
+// reports channels already multiplied by the alpha — so a translucent entry taken
+// that way comes back darker than it was written and never round-trips. Hence the
+// assertion first.
 func toRGBA(c color.Color) color.RGBA {
 	if rgba, ok := c.(color.RGBA); ok {
 		return rgba

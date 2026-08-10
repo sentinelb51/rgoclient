@@ -59,13 +59,21 @@ func messageGroupWindow() time.Duration { return config.Current().Behaviour.Grou
 /* The message area */
 
 // buildMessageArea builds the message list, header, and composer.
+//
+// The column reports a fixed minimum rather than what it is holding. It is the
+// one section whose contents are somebody else's — a long display name, a wide
+// attachment, a mention picker over a tall composer — and Fyne grows a window the
+// frame its content's minimum outgrows it, without ever giving the room back. Left
+// to report honestly, the window resized itself as messages mounted.
 func (a *App) buildMessageArea() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
 	a.input = ui.NewMessageInput(a.deps(), a.window)
-	a.input.SetPlaceHolder("Send a message...")
+	a.input.SetPlaceHolder(composerPlaceholder)
 	a.input.OnSubmit = a.handleSubmit
 	a.input.OnEditLast = a.editLastOwnMessage
+	a.input.OnRefused = func(reason string) { a.notify(ui.ToneWarning, "%s", reason) }
+	a.input.OnTyping = a.noteTyping
 	a.input.RegisterDropHandler()
 
 	// Floating composer dock: the mention picker, reply and attachment rows and the
@@ -111,9 +119,15 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// to rest clear of it. A zero-width spacer takes the row's fill, which is what
 	// pins the chip to the trailing edge at its own minimum — and that row's layout
 	// is the one it re-runs each time it is relabelled.
+	// The typing line hangs at the leading end of that same row. The spacer stays
+	// the fill rather than the line taking it: a hidden child is skipped by the
+	// row's layout, so a fill slot that can disappear would leave the chip placed
+	// from the left in every channel where nobody is typing.
 	a.slowmodeBadge = ui.NewSlowmodeBadge()
-	badgeRow := ui.NewFillRow(0, ui.HorizontalSpacer(0), a.slowmodeBadge)
+	a.typingIndicator = ui.NewTypingIndicator(a.images)
+	badgeRow := ui.NewFillRow(1, a.typingIndicator, ui.HorizontalSpacer(0), a.slowmodeBadge)
 	a.slowmodeBadge.OnResize = func() { ui.Relayout(badgeRow) }
+	a.typingIndicator.OnResize = func() { ui.Relayout(badgeRow) }
 	a.composerDock = ui.VBoxNoSpacing(badgeRow, card)
 
 	a.messageScroll = ui.NewObservableVScroll(ui.NewDockReserve(a.messageList, a.composerDock))
@@ -136,11 +150,13 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 
 	a.floatingDock = ui.NewFloatingDock(a.messageScroll, a.composerDock)
 	layout := ui.NewFillColumn(1, header, a.floatingDock)
-	return container.NewStack(background, layout)
+
+	floor := fyne.NewSize(theme.Sizes.MessageAreaMinWidth, theme.Sizes.MessageAreaMinHeight)
+	return ui.NewFixedSizeContainer(floor, container.NewStack(background, layout))
 }
 
 // resizeDock re-hangs the floating stack after something in it appeared or
-// disappeared — today only the slowmode chip. Fyne re-lays out for a growing
+// disappeared — the slowmode chip, the typing line. Fyne re-lays out for a growing
 // minimum on its own but leaves a shrinking one reserved, and here the stack
 // stands on its own height twice over: the card is placed from the bottom up, and
 // ui.DockReserve is how much of the message column it costs. Laying out the
@@ -154,6 +170,39 @@ func (a *App) resizeDock() {
 
 /* Composing */
 
+// The composer's placeholder, which is where a channel that will not take a
+// message says so: without SendMessage the entry is disabled, so the placeholder
+// is the only thing left in the card to carry the reason.
+const (
+	composerPlaceholder = "Send a message..."
+	composerNoAccess    = "You don't have access to this channel"
+	composerNoSending   = "You can't send messages in this channel"
+)
+
+// syncComposer matches the composer to what the account may do in the open
+// channel. Called from every path that changes which channel that is, and from
+// the gateway event that can change the answer without the channel moving — so
+// it reads the open channel rather than being told, and there is one answer
+// however it was reached.
+func (a *App) syncComposer() {
+	if a.input == nil {
+		return
+	}
+
+	channel, known := a.store.Channel(a.currentChannelID)
+	permissions := a.store.Permissions(a.currentChannelID)
+	a.input.SetPermissions(permissions)
+
+	switch {
+	case !known || permissions.Has(domain.PermissionSendMessage):
+		a.input.SetPlaceHolder(composerPlaceholder)
+	case !a.canViewChannel(channel):
+		a.input.SetPlaceHolder(composerNoAccess)
+	default:
+		a.input.SetPlaceHolder(composerNoSending)
+	}
+}
+
 // handleSubmit sends the composed message, its attachments, and its replies. The
 // composer is cleared immediately and the send runs in the background: the
 // message appears when the gateway echoes it back.
@@ -163,6 +212,15 @@ func (a *App) handleSubmit(text string) {
 	}
 
 	channelID := a.currentChannelID
+
+	// The entry is disabled where this is missing, so reaching here means the
+	// permission went away while the message was being typed. Unlike slowmode this
+	// one is said out loud: nothing on screen has changed to explain it.
+	if !a.store.Permissions(channelID).Has(domain.PermissionSendMessage) {
+		a.syncComposer()
+		a.notify(ui.ToneWarning, "%s.", composerNoSending)
+		return
+	}
 
 	// A channel in slowmode refuses the send and keeps what was typed. Nothing is
 	// said about it: the badge counting down beside the caret is already the
@@ -179,6 +237,7 @@ func (a *App) handleSubmit(text string) {
 	a.input.ClearReplies()
 	a.jumpToLatest()
 	a.startSlowmode(channelID)
+	a.stopTyping(channelID) // emptying the entry from here raises no keystroke to notice
 
 	// The cooldown starts optimistically, so a second Enter cannot outrun the
 	// request — and is given back when the message never landed.
@@ -203,7 +262,10 @@ const slowmodeTick = time.Second
 // rule exists but does not apply.
 func (a *App) slowmodeOf(channelID string) time.Duration {
 	channel, ok := a.store.Channel(channelID)
-	if !ok || channel.Slowmode == 0 || a.store.CanBypassSlowmode(channelID) {
+	if !ok || channel.Slowmode == 0 {
+		return 0
+	}
+	if a.store.Permissions(channelID).Has(domain.PermissionBypassSlowmode) {
 		return 0
 	}
 
@@ -530,11 +592,6 @@ func (a *App) jumpToLatest() {
 	}
 
 	a.displayCached()
-}
-
-// removeMessage unmounts a single deleted message. Call on the UI thread.
-func (a *App) removeMessage(channelID, messageID string) {
-	a.removeMessages(channelID, []string{messageID})
 }
 
 // removeMessages unmounts deleted messages in one pass, re-evaluating grouping at

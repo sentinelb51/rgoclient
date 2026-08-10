@@ -34,6 +34,8 @@ func inlineString(nodes []Inline) string {
 			fmt.Fprintf(&b, "@(%s)", v.UserID)
 		case *ChannelMention:
 			fmt.Fprintf(&b, "#(%s)", v.ChannelID)
+		case *Emoji:
+			fmt.Fprintf(&b, ":(%s)", v.EmojiID)
 		}
 	}
 	return b.String()
@@ -49,7 +51,6 @@ func TestParseInline(t *testing.T) {
 		"~~strike~~":        "s(strike)",
 		"||spoiler||":       "sp(spoiler)",
 		"`code`":            "c(code)",
-		"``a`b``":           "c(a`b)", // double-backtick span keeps inner backtick
 		"**bold _nested_**": "b(bold i(nested))",
 		"a **b** c":         "a b(b) c",
 		"[label](http://x)": "a(label|http://x)",
@@ -81,6 +82,47 @@ func TestParseInline(t *testing.T) {
 		"<@>":               "<@>",         // no ID
 		"<# general>":       "<# general>", // not an ID
 		"a < b # c":         "a < b # c",
+
+		// Custom emoji. A colon is ordinary punctuation, so only an exact ULID
+		// between two of them is one — everything else has to survive untouched, or
+		// prose and clock times would sprout blank squares.
+		"hey :01J9WN3PHX4ZQSNSZH10CK4RHS: there": "hey :(01J9WN3PHX4ZQSNSZH10CK4RHS) there",
+		":01J9WN3PHX4ZQSNSZH10CK4RHS:":           ":(01J9WN3PHX4ZQSNSZH10CK4RHS)",
+		":smile:":                                ":smile:",
+		"meeting at 10:30:00 sharp":              "meeting at 10:30:00 sharp",
+		":01J9WN3PHX4ZQSNSZH10CK4RH:":            ":01J9WN3PHX4ZQSNSZH10CK4RH:",   // a character short
+		":01J9WN3PHX4ZQSNSZH10CK4RHSX:":          ":01J9WN3PHX4ZQSNSZH10CK4RHSX:", // one too many
+		":01J9WN3PHX4ZQSNSZH10CK4RH-:":           ":01J9WN3PHX4ZQSNSZH10CK4RH-:",  // not all alphanumeric
+		"ratio 1:2":                              "ratio 1:2",
+
+		// Escapes cover all ASCII punctuation, which is the only rule wide enough
+		// to reach the syntax this flavour adds on top of CommonMark's.
+		`\:01J9WN3PHX4ZQSNSZH10CK4RHS:`: ":01J9WN3PHX4ZQSNSZH10CK4RHS:",
+		`\<@01ABC>`:                     "<@01ABC>",
+
+		// A code span closes on a backtick run of its own length, so a longer run
+		// inside one is content rather than a second span.
+		"`a``b`":    "c(a``b)",
+		"``a`b``":   "c(a`b)",
+		"`` `x` ``": "c( `x` )",
+
+		// Bare URLs link the way Discord's do, including the punctuation rules
+		// that decide where one ends.
+		"see https://x.dev/a for":      "see a(https://x.dev/a|https://x.dev/a) for",
+		"(see https://x.dev)":          "(see a(https://x.dev|https://x.dev))",
+		"https://en.wikipedia.org/(a)": "a(https://en.wikipedia.org/(a)|https://en.wikipedia.org/(a))",
+		"<https://x.dev>":              "a(https://x.dev|https://x.dev)",
+		"say https:// only":            "say https:// only", // a scheme with no host
+		"not xy://":                    "not xy://",
+		"a://b":                        "a://b", // one letter is not a scheme
+
+		// Link destinations may bracket or balance their parentheses, and a title
+		// is accepted and dropped.
+		"[a](<u v>)":         "a(a|u v)",
+		`[a](u "t")`:         "a(a|u)",
+		"[a](https://x/(y))": "a(a|https://x/(y))",
+		"[see [1]](u)":       "a(see [1]|u)",
+		"[a]()":              "[a]()",
 	}
 
 	for input, want := range cases {
@@ -148,6 +190,21 @@ func TestParseCodeBlock(t *testing.T) {
 	}
 }
 
+// TestParseFenceInfoString covers the two cases the info string decides: a
+// backtick in it means the fence closes on its own line, and a space in it means
+// it was never a language and must not be swallowed as one.
+func TestParseFenceInfoString(t *testing.T) {
+	cb, ok := Parse("```one line```").Blocks[0].(*CodeBlock)
+	if !ok || cb.Language != "" || cb.Text != "one line" {
+		t.Errorf("one-line fence = %#v", Parse("```one line```").Blocks[0])
+	}
+
+	cb, ok = Parse("```not a language\nbody\n```").Blocks[0].(*CodeBlock)
+	if !ok || cb.Language != "" || cb.Text != "not a language\nbody" {
+		t.Errorf("prose info string = %#v", Parse("```not a language\nbody\n```").Blocks[0])
+	}
+}
+
 func TestParseList(t *testing.T) {
 	doc := Parse("- one\n- two\n- three")
 	list, ok := doc.Blocks[0].(*List)
@@ -162,16 +219,93 @@ func TestParseList(t *testing.T) {
 	}
 }
 
-func TestParseBlockquote(t *testing.T) {
-	doc := Parse("> quoted line\n> second")
-	bq, ok := doc.Blocks[0].(*Blockquote)
-	if !ok || inlineString(bq.Children) != "quoted line\\nsecond" {
-		t.Errorf("block 0 = %#v", doc.Blocks[0])
+// quoted returns a blockquote's single paragraph in tagged form.
+func quoted(t *testing.T, block Block) string {
+	t.Helper()
+
+	bq, ok := block.(*Blockquote)
+	if !ok || len(bq.Blocks) != 1 {
+		t.Fatalf("block = %#v, want a blockquote of one block", block)
+	}
+	p, ok := bq.Blocks[0].(*Paragraph)
+	if !ok {
+		t.Fatalf("quoted block = %#v, want a paragraph", bq.Blocks[0])
 	}
 
-	doc = Parse(">>> everything\nafter is quoted")
-	if bq, ok := doc.Blocks[0].(*Blockquote); !ok || inlineString(bq.Children) != "everything\\nafter is quoted" {
-		t.Errorf("triple-quote = %#v", doc.Blocks[0])
+	return inlineString(p.Children)
+}
+
+func TestParseBlockquote(t *testing.T) {
+	if got := quoted(t, Parse("> quoted line\n> second").Blocks[0]); got != "quoted line\\nsecond" {
+		t.Errorf("got %q", got)
+	}
+	if got := quoted(t, Parse(">>> everything\nafter is quoted").Blocks[0]); got != "everything\\nafter is quoted" {
+		t.Errorf("triple-quote got %q", got)
+	}
+}
+
+// TestParseBlockquoteBlocks covers what a quote holding blocks rather than a run
+// of inlines is for: block markers inside one still mean what they say, and a
+// quote marker among them nests.
+func TestParseBlockquoteBlocks(t *testing.T) {
+	bq, ok := Parse("> # Note\n> - one\n> - two").Blocks[0].(*Blockquote)
+	if !ok || len(bq.Blocks) != 2 {
+		t.Fatalf("block 0 = %#v, want a quote of two blocks", Parse("> # Note\n> - one").Blocks[0])
+	}
+	if h, ok := bq.Blocks[0].(*Heading); !ok || h.Level != 1 {
+		t.Errorf("quoted block 0 = %#v, want H1", bq.Blocks[0])
+	}
+	if list, ok := bq.Blocks[1].(*List); !ok || len(list.Items) != 2 {
+		t.Errorf("quoted block 1 = %#v, want a list of 2", bq.Blocks[1])
+	}
+
+	outer, ok := Parse("> > deep").Blocks[0].(*Blockquote)
+	if !ok || len(outer.Blocks) != 1 {
+		t.Fatalf("nested quote = %#v", Parse("> > deep").Blocks[0])
+	}
+	if got := quoted(t, outer.Blocks[0]); got != "deep" {
+		t.Errorf("nested quote body = %q", got)
+	}
+}
+
+// TestParseNestedList covers indentation: a deeper item is a sublist of the same
+// run, and each depth numbers itself.
+func TestParseNestedList(t *testing.T) {
+	list, ok := Parse("1. a\n  1. b\n  2. c\n2. d").Blocks[0].(*List)
+	if !ok || len(list.Items) != 4 {
+		t.Fatalf("block 0 = %#v, want an ordered list of 4", Parse("1. a\n  1. b").Blocks[0])
+	}
+
+	for i, want := range []ListItem{{Indent: 0, Number: 1}, {Indent: 1, Number: 1}, {Indent: 1, Number: 2}, {Indent: 0, Number: 2}} {
+		if got := list.Items[i]; got.Indent != want.Indent || got.Number != want.Number {
+			t.Errorf("item %d = indent %d number %d, want %d/%d", i, got.Indent, got.Number, want.Indent, want.Number)
+		}
+	}
+
+	// A change of marker kind ends the run; a change of depth does not.
+	if blocks := Parse("- a\n1. b").Blocks; len(blocks) != 2 {
+		t.Errorf("got %d blocks for a bullet followed by a number, want 2", len(blocks))
+	}
+}
+
+// TestParseMultilineSpans covers the reason a paragraph is parsed as one run
+// rather than a line at a time: a Discord span crosses a hard line break.
+func TestParseMultilineSpans(t *testing.T) {
+	cases := map[string]string{
+		"**bold\nacross**": "b(bold\\nacross)",
+		"||spoiler\nhid||": "sp(spoiler\\nhid)",
+		"*a\n*b":           "*a\\n*b", // whitespace-edged content still stays literal
+		"one **two\nthree": "one **two\\nthree",
+	}
+
+	for input, want := range cases {
+		p, ok := Parse(input).Blocks[0].(*Paragraph)
+		if !ok {
+			t.Fatalf("%q did not parse as a paragraph", input)
+		}
+		if got := inlineString(p.Children); got != want {
+			t.Errorf("Parse(%q) = %q, want %q", input, got, want)
+		}
 	}
 }
 
@@ -184,5 +318,44 @@ func TestDocumentText(t *testing.T) {
 	}
 	if got := DocumentText(Parse("")); got != "" {
 		t.Errorf("an empty document yielded %q", got)
+	}
+}
+
+// TestLinks covers what the walk is for: every way of writing a link is found
+// wherever it is nested, and the two places a URL is written but not linked —
+// code, and a spoiler somebody chose to hide — report nothing.
+func TestLinks(t *testing.T) {
+	cases := []struct {
+		input string
+		want  []string
+	}{
+		{"bare https://x.dev/a here", []string{"https://x.dev/a"}},
+		{"[masked](https://x.dev/b)", []string{"https://x.dev/b"}},
+		{"<https://x.dev/c>", []string{"https://x.dev/c"}},
+		{"> quoted https://x.dev/d", []string{"https://x.dev/d"}},
+		{"- item https://x.dev/e", []string{"https://x.dev/e"}},
+		{"# heading https://x.dev/f", []string{"https://x.dev/f"}},
+		{"**bold https://x.dev/g**", []string{"https://x.dev/g"}},
+		{"two https://x.dev/h and https://x.dev/i", []string{"https://x.dev/h", "https://x.dev/i"}},
+
+		// Written about, not written as a link.
+		{"`https://x.dev/j`", nil},
+		{"```\nhttps://x.dev/k\n```", nil},
+		{"||https://x.dev/l||", nil},
+		{"nothing here", nil},
+	}
+
+	for _, c := range cases {
+		got := Links(Parse(c.input))
+		if len(got) != len(c.want) {
+			t.Errorf("Links(%q) = %q, want %q", c.input, got, c.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != c.want[i] {
+				t.Errorf("Links(%q) = %q, want %q", c.input, got, c.want)
+				break
+			}
+		}
 	}
 }

@@ -40,6 +40,10 @@ const (
 	replyTextSize   = 13
 	replyButtonSize = 20
 	replyIconSize   = 18
+
+	// uploadRefused is what a drop or a paste into a channel that forbids uploads
+	// reports, from wherever the file came in.
+	uploadRefused = "You can't upload files in this channel."
 )
 
 var (
@@ -71,6 +75,19 @@ type MessageInput struct {
 	// outline while the entry is live.
 	OnFocusChanged func(focused bool)
 
+	// OnRefused reports something the composer would not take, so the app can say
+	// why. Dropping a file into a channel that forbids uploads is what it exists
+	// for: nothing else would happen, and nothing happening is indistinguishable
+	// from a bug.
+	OnRefused func(reason string)
+
+	// OnTyping reports each keystroke, with whether anything is left in the entry
+	// afterwards. It is one callback rather than a started/stopped pair because a
+	// backspace that empties the composer is the clearest "stopped" there is, and
+	// it arrives on the same path as the rest. Whether any of it reaches the
+	// gateway is the app's to decide.
+	OnTyping func(typing bool)
+
 	// Mentions is the autocomplete list, mounted by the composer above the reply
 	// cards and hidden until the caret sits inside a mention. mentionStart is the
 	// byte offset of the marker being completed, or -1, and mentionKind what it
@@ -84,6 +101,12 @@ type MessageInput struct {
 	AttachmentContainer *fyne.Container
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
+
+	// permissions is what the account may do in the open channel. It is *pushed*
+	// by the app rather than looked up: the composer has no channel of its own, and
+	// the app already knows which one is open. Zero — the state it starts in, and
+	// the one it returns to when nothing is selected — allows nothing.
+	permissions domain.Permission
 
 	deps         Deps
 	window       fyne.Window
@@ -119,6 +142,33 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 
 // MinSize grows the entry up to ComposerMaxLines as the user types.
 func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
+
+// SetPermissions tells the composer what the account may do in the open channel.
+// Without SendMessage the entry is disabled outright rather than left to refuse
+// on submit: the placeholder is then the only thing in the card, so it is what
+// has to carry the reason, and a caret blinking in a box that will not send is
+// worse than no caret.
+//
+// Whatever was typed before the permission went away is kept. It is still the
+// user's text, the channel may hand the permission straight back, and clearing
+// it would be the client destroying work over a state it does not control.
+func (m *MessageInput) SetPermissions(permissions domain.Permission) {
+	m.permissions = permissions
+
+	if permissions.Has(domain.PermissionSendMessage) {
+		m.Enable()
+		return
+	}
+	m.Disable()
+}
+
+// refuse reports an input the composer would not take. Silent when nobody is
+// listening — every caller of this has already declined to act.
+func (m *MessageInput) refuse(reason string) {
+	if m.OnRefused != nil {
+		m.OnRefused(reason)
+	}
+}
 
 // composerMinSize sizes a growing composer-style entry: one line per newline up
 // to maxInputLines, plus the padding Fyne draws around the entry's text.
@@ -224,6 +274,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 		return
 	}
 	defer m.syncMentions()
+	defer m.reportTyping()
 
 	switch {
 	case key.Name == fyne.KeyUp && m.Text == "":
@@ -268,6 +319,16 @@ func (m *MessageInput) TypedRune(r rune) {
 	m.Entry.TypedRune(r)
 	m.Refresh()
 	m.syncMentions()
+	m.reportTyping()
+}
+
+// reportTyping tells the app a keystroke landed and whether anything survived it.
+// It rides the typing methods for the same reason syncMentions does: Entry's
+// OnChanged does not fire for every path that moves the text.
+func (m *MessageInput) reportTyping() {
+	if m.OnTyping != nil {
+		m.OnTyping(m.Text != "")
+	}
 }
 
 // TypedShortcut intercepts paste to support pasting an image or a file path as
@@ -281,6 +342,7 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 	m.Entry.TypedShortcut(s)
 	m.Refresh()
 	m.syncMentions()
+	m.reportTyping()
 }
 
 /* The mention picker */
@@ -458,8 +520,7 @@ func (m *MessageInput) pasteAsAttachment() bool {
 		if img := clipboard.Read(clipboard.FmtImage); len(img) > 0 {
 			path := filepath.Join(os.TempDir(), fmt.Sprintf("%d.png", time.Now().UnixNano()))
 			if os.WriteFile(path, img, 0o644) == nil {
-				m.AddAttachment(path)
-				return true
+				return m.AddAttachment(path)
 			}
 		}
 	}
@@ -467,17 +528,23 @@ func (m *MessageInput) pasteAsAttachment() bool {
 	content := fyne.CurrentApp().Clipboard().Content()
 	if content != "" {
 		if _, err := os.Stat(content); err == nil {
-			m.AddAttachment(content)
-			return true
+			return m.AddAttachment(content)
 		}
 	}
 
 	return false
 }
 
-// RegisterDropHandler attaches files dropped onto the composer's window.
+// RegisterDropHandler attaches files dropped onto the composer's window. The
+// permission is checked once for the whole drop: a folder's worth of files
+// refused one at a time would be a folder's worth of identical notices.
 func (m *MessageInput) RegisterDropHandler() {
 	m.window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
+		if !m.canUpload() {
+			m.refuse(uploadRefused)
+			return
+		}
+
 		for _, u := range uris {
 			if u.Scheme() == "file" {
 				m.AddAttachment(u.Path())
@@ -486,10 +553,25 @@ func (m *MessageInput) RegisterDropHandler() {
 	})
 }
 
-// AddAttachment queues a file and rebuilds the attachment previews.
-func (m *MessageInput) AddAttachment(path string) {
+// AddAttachment queues a file and rebuilds the attachment previews, reporting
+// whether it took it. A channel that does not take uploads refuses here rather
+// than at each of the two ways a file arrives — and a refused paste falls back to
+// pasting what was on the clipboard as text.
+func (m *MessageInput) AddAttachment(path string) bool {
+	if !m.canUpload() {
+		m.refuse(uploadRefused)
+		return false
+	}
+
 	m.Attachments = append(m.Attachments, domain.Attachment{Path: path, Name: filepath.Base(path)})
 	m.rebuildAttachments()
+
+	return true
+}
+
+// canUpload reports whether the open channel takes files at all.
+func (m *MessageInput) canUpload() bool {
+	return m.permissions.Has(domain.PermissionUploadFiles)
 }
 
 // RemoveAttachment removes a queued file by path.
@@ -879,6 +961,140 @@ func stopwatchGlyph(col color.Color) fyne.CanvasObject {
 	)
 
 	return container.NewGridWrap(fyne.NewSize(size, size), glyph)
+}
+
+/* Typing indicator */
+
+// TypingIndicator is the line naming who is composing, hanging over the
+// bottom-left of the message column at the other end of the row the slowmode
+// chip is pinned to.
+//
+// It follows the chip's rules because it is the same kind of thing: bare text
+// over the conversation with nothing drawn behind it, since a filled surface a
+// few pixels above the composer card reads as a bar growing out of it. Nothing
+// here accepts a pointer event either, so the messages passing underneath stay
+// hoverable and right-clickable.
+//
+// The avatars are rebuilt outright rather than pooled. Who is typing changes
+// every few seconds at worst, where a member row is recycled as fast as a list
+// scrolls — so there is no stale load to guard against, and none of the
+// generation machinery MemberRow needs.
+type TypingIndicator struct {
+	widget.BaseWidget
+
+	// OnResize fires when the line's height or visibility changes, so whoever
+	// mounted it can re-hang the dock. Fyne re-lays out for a growing minimum on
+	// its own; a shrinking one it leaves reserved.
+	OnResize func()
+
+	images *cache.ImageCache
+
+	mark    *TypingMark
+	faces   *fyne.Container
+	label   *canvas.Text
+	content *fyne.Container
+
+	shown []string // the avatars currently mounted, to notice when they move
+}
+
+// NewTypingIndicator creates the line, hidden and saying nothing.
+func NewTypingIndicator(images *cache.ImageCache) *TypingIndicator {
+	t := &TypingIndicator{
+		images: images,
+		mark:   NewTypingMark(theme.Sizes.TypingMarkSize, theme.Colors.TypingMark),
+		faces:  HBoxNoSpacing(),
+		label:  canvas.NewText("", theme.Colors.TypingText),
+	}
+
+	t.label.TextSize = theme.Sizes.TypingTextSize
+	t.faces.Hide()
+
+	line := HBoxNoSpacing(
+		container.NewCenter(t.mark),
+		HorizontalSpacer(theme.Sizes.TypingGap),
+		container.NewCenter(t.faces),
+		container.NewCenter(t.label),
+	)
+
+	// The gap to the card belongs to the line rather than to a spacer in the
+	// column, for the same reason it does on the chip: a spacer would hold the room
+	// open in every channel where nobody is typing.
+	t.content = NewInset(line, 0, theme.Sizes.SlowmodeDockGap, theme.Sizes.TypingInsetH, 0)
+
+	t.Hide()
+	t.ExtendBaseWidget(t)
+
+	return t
+}
+
+func (t *TypingIndicator) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(t.content)
+}
+
+// Set draws the line, or hides it when there is nothing to say. avatarURLs is
+// what to draw before the text and may be empty; animate runs the mark.
+//
+// Only a change is acted on. This is called on every typing event and again
+// whenever somebody lapses, so a channel where one person types steadily must not
+// re-mount an avatar row per keystroke.
+func (t *TypingIndicator) Set(text string, avatarURLs []string, animate bool) {
+	if text == "" {
+		if t.Visible() {
+			t.Hide()
+			t.mark.SetActive(false, false)
+			t.resized()
+		}
+		return
+	}
+
+	moved := !t.Visible()
+
+	if text != t.label.Text {
+		t.label.Text = text
+		t.label.Refresh()
+		moved = true
+	}
+
+	if !slices.Equal(avatarURLs, t.shown) {
+		t.setFaces(avatarURLs)
+		moved = true
+	}
+
+	t.Show()
+	t.mark.SetActive(true, animate)
+
+	if moved {
+		t.resized()
+	}
+}
+
+// setFaces re-mounts the avatar row. The gap after it is carried by a spacer of
+// its own so that an empty row costs nothing, the whole container being hidden.
+func (t *TypingIndicator) setFaces(avatarURLs []string) {
+	t.shown = slices.Clone(avatarURLs)
+	t.faces.Objects = nil
+
+	if len(avatarURLs) == 0 {
+		t.faces.Hide()
+		t.faces.Refresh()
+		return
+	}
+
+	side := fyne.NewSize(theme.Sizes.TypingAvatarSize, theme.Sizes.TypingAvatarSize)
+	for _, url := range avatarURLs {
+		t.faces.Add(circularAvatar(t.images, url, side))
+		t.faces.Add(HorizontalSpacer(theme.Sizes.TypingGap))
+	}
+
+	t.faces.Show()
+	t.faces.Refresh()
+}
+
+// resized tells whoever mounted the line that the room it takes has changed.
+func (t *TypingIndicator) resized() {
+	if t.OnResize != nil {
+		t.OnResize()
+	}
 }
 
 /* The mention picker */

@@ -233,17 +233,24 @@ func (w *MessageWidget) canEdit() bool {
 
 // canReply reports whether the reply action should be offered. A system event is
 // the channel narrating itself and nobody is waiting to be answered, so quoting
-// one back at the channel is offered nowhere.
-func (w *MessageWidget) canReply() bool {
-	return w.message.System == nil
+// one back at the channel is offered nowhere — and neither is a reply the channel
+// would not let you send.
+func (w *MessageWidget) canReply(permissions domain.Permission) bool {
+	return w.message.System == nil && permissions.Has(domain.PermissionSendMessage)
 }
 
 // canDelete reports whether the delete action should be offered: your own
-// message, or any message in a channel where you hold ManageMessages. Both
-// questions are asked lazily, on the first hover or right-click, so a mounted
-// page costs no permission checks at all.
-func (w *MessageWidget) canDelete() bool {
-	return w.isOwnMessage() || w.deps.Store.CanManageMessages(w.message.ChannelID)
+// message, or any message in a channel where you hold ManageMessages.
+func (w *MessageWidget) canDelete(permissions domain.Permission) bool {
+	return w.isOwnMessage() || permissions.Has(domain.PermissionManageMessages)
+}
+
+// permissions is what the account may do in this message's channel. It is asked
+// lazily, on the first hover or right-click, so a mounted page costs no
+// permission checks at all — and asked once per menu, since one bitfield answers
+// every question the menu has.
+func (w *MessageWidget) permissions() domain.Permission {
+	return w.deps.Store.Permissions(w.message.ChannelID)
 }
 
 /* Quick actions and context menu */
@@ -265,15 +272,16 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 		w.updateHover()
 	}
 	act := w.deps.Actions
+	permissions := w.permissions()
 
 	var buttons []fyne.CanvasObject
-	if w.canReply() {
+	if w.canReply(permissions) {
 		buttons = append(buttons, NewIconButton(actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }, onHover))
 	}
 	if w.canEdit() {
 		buttons = append(buttons, NewIconButton(actionMark(assets.ActionEditIcon), func() { act.OnEdit(w.message) }, onHover))
 	}
-	if w.canDelete() {
+	if w.canDelete(permissions) {
 		buttons = append(buttons, NewIconButton(tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }, onHover))
 	}
 
@@ -294,9 +302,10 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 // the right-click handler.
 func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	act := w.deps.Actions
+	permissions := w.permissions()
 
 	var items []*fyne.MenuItem
-	if w.canReply() {
+	if w.canReply(permissions) {
 		items = append(items, fyne.NewMenuItemWithIcon("Reply", actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }))
 	}
 	if w.canEdit() {
@@ -320,7 +329,7 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 		}),
 	)
 
-	if w.canDelete() {
+	if w.canDelete(permissions) {
 		items = append(items, fyne.NewMenuItemSeparator(),
 			fyne.NewMenuItemWithIcon("Delete", tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }))
 	}
@@ -760,9 +769,11 @@ func buildGroupedContent(deps Deps, message *domain.Message, body fyne.CanvasObj
 }
 
 // buildMessageExtras is what hangs below a message's text: its attachments, then
-// the embeds — what was uploaded before what was unfurled, since only the first
-// was deliberate. Empty for the great majority of messages, which is why both
-// callers check before wrapping the body in a box at all.
+// the embeds, then any invite it links to — what was uploaded before what was
+// unfurled, since only the first was deliberate, and the invite last because it
+// is the only one the client composed rather than the server. Empty for the
+// great majority of messages, which is why both callers check before wrapping
+// the body in a box at all.
 func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) []fyne.CanvasObject {
 	var extras []fyne.CanvasObject
 
@@ -771,6 +782,9 @@ func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.Po
 	}
 	if len(message.Embeds) > 0 {
 		extras = append(extras, buildEmbeds(deps, message.Embeds, onMenu))
+	}
+	if codes := inviteCodesIn(message.Content); len(codes) > 0 {
+		extras = append(extras, buildInvites(deps, codes))
 	}
 
 	return extras

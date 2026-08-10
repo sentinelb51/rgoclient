@@ -312,6 +312,41 @@ type Embed struct {
 	Color color.Color // the accent stripe; nil for the default
 }
 
+/* Permissions */
+
+// Permission is a set of the things an account may do somewhere. The bit
+// positions are Revolt's own, carried verbatim the way SystemKind carries its
+// vocabulary: they arrive from the server as one number and are compared here
+// without a translation table in between.
+//
+// Only the bits the client actually asks about are named. The rest still survive
+// a round trip — a Permission holds whatever the server sent — they simply have
+// nothing here to ask them.
+type Permission int64
+
+// Channel-scoped permissions, asked of Store.Permissions.
+const (
+	PermissionViewChannel        Permission = 1 << 20
+	PermissionReadMessageHistory Permission = 1 << 21
+	PermissionSendMessage        Permission = 1 << 22
+	PermissionManageMessages     Permission = 1 << 23
+	PermissionUploadFiles        Permission = 1 << 27
+
+	// PermissionBypassSlowmode is missing from revoltgo's constants — they stop at
+	// MentionRoles — which is the reason every bit is named here rather than
+	// imported from there.
+	PermissionBypassSlowmode Permission = 1 << 39
+)
+
+// Server-scoped permissions, asked of Store.ServerPermissions.
+const (
+	PermissionKickMembers Permission = 1 << 6
+)
+
+// Has reports whether every permission in want is held. Zero — which is what an
+// unresolvable question answers with — holds nothing.
+func (p Permission) Has(want Permission) bool { return p&want == want }
+
 /* Channels */
 
 // ChannelKind is what sort of channel this is.
@@ -377,6 +412,29 @@ type Category struct {
 	Channels []string
 }
 
+// Invite is what an invite code opens, described as Revolt describes it to
+// someone who is not a member yet.
+//
+// It is the one server-shaped value that cannot come from a Store: an invite is
+// interesting precisely when it names a server the account has never seen, so
+// there is nothing local to resolve it against and it only ever arrives from a
+// request. ServerID is still worth carrying — when the account *is* already in
+// the server, that is what turns the card's action from joining into going there.
+type Invite struct {
+	Code string
+
+	ServerID   string
+	ServerName string
+	IconURL    string
+
+	// ChannelName is where the code lands and InviterName who created it. Revolt
+	// sends both and either may be missing, so neither is load-bearing.
+	ChannelName string
+	InviterName string
+
+	MemberCount int
+}
+
 /* People */
 
 // Presence is a user's availability, as the ring around their avatar reports it.
@@ -389,6 +447,11 @@ const (
 	PresenceFocus
 	PresenceBusy
 )
+
+// IsOnline reports whether the presence is any of the ways of being here.
+// Invisible is deliberately not one of them — toPresence resolves it to Offline,
+// which is what it is for.
+func (p Presence) IsOnline() bool { return p != PresenceOffline }
 
 // Label names the presence in words.
 func (p Presence) Label() string {
@@ -438,17 +501,36 @@ type Member struct {
 	AvatarURL string
 	Color     color.Color // most-senior coloured role; nil when none applies
 
+	// HoistRoleID is the most senior *hoisted* role the member holds, or "" — the
+	// section the member sidebar files them under. One ID rather than the roles
+	// themselves for the same reason the roles are absent: the sidebar needs a
+	// bucket per member, and a slice per row is what that costs.
+	HoistRoleID string
+
 	JoinedAt time.Time
-	Online   bool
+	Presence Presence
+
+	// HasRoles is whether the member holds any role at all, counting one the
+	// server has not published to us — HoistRoleID answers a narrower question
+	// and is empty for a member whose only role is not hoisted.
+	HasRoles bool
+	Bot      bool
 }
 
 // Role is a server role the way a profile card shows one: its name, in its own
 // colour. The ID is carried because a chip offers it for copying — nothing else
 // resolves a role by it.
+//
+// Rank and Hoist are the server's own display rules rather than anything a chip
+// draws: Revolt ranks the most senior lowest, and a hoisted role is one the
+// member list gives a section of its own.
 type Role struct {
 	ID    string
 	Name  string
 	Color color.Color // nil when the role has no colour, or none that parses
+
+	Rank  int64
+	Hoist bool
 }
 
 // Author bundles the display fields for a message's author — the one-pass

@@ -4,8 +4,12 @@ import (
 	"testing"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/test"
 
+	"RGOClient/internal/cache"
+	"RGOClient/internal/config"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -14,6 +18,10 @@ import (
 // the generated Advanced list add up to the whole size table, with nothing named
 // twice. It fails the day a size is added that no section can reach, and the day
 // one is renamed out from under a curated group.
+//
+// Reachable means reachable with advanced mode on — the tables and several of the
+// curated groups are what that mode reveals. This walks the definitions, not the
+// rendered rows, so it says nothing about which of them are drawn.
 func TestStyleFieldsCoverTheTable(t *testing.T) {
 	known := make(map[string]bool)
 	for _, name := range theme.SizeFields() {
@@ -45,6 +53,107 @@ func TestStyleFieldsCoverTheTable(t *testing.T) {
 			t.Errorf("%q cannot be reached from any section", name)
 		}
 	}
+}
+
+// TestBasicModeShowsWholeGroups covers what advanced mode can quietly break.
+// Hiding a row is one line, and hiding the last row of a group leaves a captioned
+// card with nothing in it — which the rail then offers as somewhere to go. The
+// caption is load-bearing for the same reason: it is what a sub-entry is named
+// after. Neither is visible until somebody opens the section that broke.
+func TestBasicModeShowsWholeGroups(t *testing.T) {
+	test.NewTempApp(t)
+
+	counts := make(map[bool]map[SettingsSection]int)
+
+	for _, advanced := range []bool{false, true} {
+		counts[advanced] = make(map[SettingsSection]int)
+
+		page := newTestSettingsPage()
+		page.advanced = advanced
+
+		for _, entry := range visibleRailEntries(advanced) {
+			page.showSection(entry.section)
+
+			if len(page.groups) == 0 {
+				t.Errorf("advanced=%v: the %q section is empty", advanced, entry.title)
+			}
+
+			for _, group := range page.groups {
+				if group.object == nil {
+					t.Errorf("advanced=%v: %q kept a group that built nothing", advanced, entry.title)
+				}
+				if group.caption == "" && group.object == nil {
+					t.Errorf("advanced=%v: %q has a card the rail cannot name", advanced, entry.title)
+				}
+			}
+
+			counts[advanced][entry.section] = len(page.groups)
+		}
+	}
+
+	// The mode has to actually withhold something, or the pass above is vacuous.
+	for _, section := range []SettingsSection{SectionBehaviour, SectionCache, SectionStyles} {
+		if counts[false][section] >= counts[true][section] {
+			t.Errorf("%q shows %d groups in basic mode and %d in advanced — the gate is doing nothing",
+				railTitle(section), counts[false][section], counts[true][section])
+		}
+	}
+}
+
+// TestAdvancedSectionFallsBack covers the other half: the raw tables are listed
+// only in advanced mode, and the mode can be turned off while they are open —
+// from the rail's own switch, or from About's reset. Landing on a section the
+// rail does not list would leave the page showing nothing it could navigate back
+// from.
+func TestAdvancedSectionFallsBack(t *testing.T) {
+	test.NewTempApp(t)
+
+	page := newTestSettingsPage()
+	page.showSection(SectionAdvanced)
+
+	if page.section == SectionAdvanced {
+		t.Fatal("Advanced opened with advanced mode off")
+	}
+
+	listed := false
+	for _, entry := range visibleRailEntries(false) {
+		if entry.section == page.section {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Errorf("fell back to a section the rail does not list")
+	}
+}
+
+// newTestSettingsPage is a page whose hooks answer without a controller. Every
+// one is filled in: SettingsHooks promises that in the app, and a section is
+// entitled to call any of them while it builds.
+func newTestSettingsPage() *SettingsPage {
+	page := NewSettingsPage(SettingsHooks{
+		Deps:           testDeps(),
+		Update:         func(func(*config.Settings)) {},
+		Restyle:        func() {},
+		Close:          func() {},
+		Confirm:        func(Confirm) {},
+		Sessions:       func() []SettingsSession { return nil },
+		ForgetSession:  func(string) {},
+		LogOut:         func() {},
+		CacheDir:       func() string { return "" },
+		ChooseCacheDir: func(func(string)) {},
+		CacheStats:     func(func(cache.ImageStats)) {},
+		ClearCache:     func() {},
+		ConfigPath:     func() string { return "" },
+		OpenPath:       func(string) {},
+	})
+
+	// The rail and pane are built by build(), which mounts widgets a section test
+	// has no window for.
+	page.rail = container.NewVBox()
+	page.pane = VBoxNoSpacing()
+	page.title = canvas.NewText("", theme.Colors.TextPrimary)
+
+	return page
 }
 
 // TestDensityBundlesNameRealSizes covers the presets by the same rule: a bundle

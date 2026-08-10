@@ -9,10 +9,12 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/internal/cache"
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
 )
@@ -33,7 +35,7 @@ import (
 //
 // A body carrying a mention — of a person or of a channel — is never flattened:
 // the mention has its own colour, exactly the mixed-style case a Label cannot
-// express.
+// express. Neither is one carrying a custom emoji, which is not text at all.
 //
 // onMenu is the owning message's right-click handler, which a selectable body
 // has to be given explicitly — see bodyText.
@@ -56,7 +58,7 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 
 	b := &mdBuilder{deps: deps, onMenu: onMenu}
 	for _, block := range doc.Blocks {
-		b.block(block)
+		b.block(block, widget.RichTextStyle{})
 	}
 
 	rt := widget.NewRichText(b.segs...)
@@ -66,11 +68,11 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 	}
 
 	// RichText never breaks a row *before* a segment it cannot measure as text: a
-	// mention is appended to the row in hand however little of it is left, so one
-	// landing at a line end draws past the right edge and is cut off by the message
-	// column. Narrowing the text by the widest mention the body carries is what
-	// gives that overhang somewhere to land — the words wrap earlier, and the
-	// mention that follows them spills into the strip kept clear for it.
+	// mention or an emoji is appended to the row in hand however little of it is
+	// left, so one landing at a line end draws past the right edge and is cut off by
+	// the message column. Narrowing the text by the widest of them the body carries
+	// is what gives that overhang somewhere to land — the words wrap earlier, and
+	// what follows them spills into the strip kept clear for it.
 	return NewFillRow(0, rt, HorizontalSpacer(b.reserve))
 }
 
@@ -268,15 +270,11 @@ func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 				if j > 0 {
 					b.WriteByte('\n')
 				}
-				marker := "•  "
-				if n.Ordered {
-					marker = fmt.Sprintf("%d.  ", n.Start+j)
-				}
 				if !merge(fyne.TextStyle{}, "", false) {
 					return f, false
 				}
-				b.WriteString(marker)
-				if !flattenInlines(&b, item, emphasis{}, "", false, merge) {
+				b.WriteString(listMarker(n.Ordered, item))
+				if !flattenInlines(&b, item.Children, emphasis{}, "", false, merge) {
 					return f, false
 				}
 			}
@@ -324,7 +322,7 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			if !flattenInlines(b, n.Children, next, size, dim, merge) {
 				return false
 			}
-		default: // Underline, Strike, Spoiler, Link and both mentions need custom visuals
+		default: // Underline, Strike, Spoiler, Link, both mentions and an emoji need custom visuals
 			return false
 		}
 	}
@@ -350,7 +348,7 @@ type mdBuilder struct {
 	onMenu func(*fyne.PointEvent)
 	segs   []widget.RichTextSegment
 
-	// reserve is the width of the widest mention word emitted — the gutter
+	// reserve is the width of the widest mention word or emoji emitted — the gutter
 	// renderMessageBody has to keep clear on the right. See mentionSegment.
 	reserve float32
 }
@@ -425,25 +423,27 @@ func (b *mdBuilder) lineBreak(base widget.RichTextStyle) {
 	b.segs = append(b.segs, &widget.TextSegment{Style: style})
 }
 
-func (b *mdBuilder) block(block markdown.Block) {
+// block renders one block over base, which carries what an enclosing block has
+// already decided — the muted colour of a quote is the only such thing today, and
+// it is why base is a parameter rather than each case starting from zero.
+func (b *mdBuilder) block(block markdown.Block, base widget.RichTextStyle) {
 	switch n := block.(type) {
 	case *markdown.Paragraph:
-		base := widget.RichTextStyle{}
 		b.inlines(n.Children, emphasis{}, base, nil)
 		b.lineBreak(base)
 	case *markdown.Heading:
-		base := widget.RichTextStyle{SizeName: headingSize(n.Level)}
-		b.inlines(n.Children, emphasis{bold: true}, base, nil)
-		b.lineBreak(base)
+		style := base
+		style.SizeName = headingSize(n.Level)
+		b.inlines(n.Children, emphasis{bold: true}, style, nil)
+		b.lineBreak(style)
 	case *markdown.Subtext:
-		base := widget.RichTextStyle{
-			SizeName:  fynetheme.SizeNameCaptionText,
-			ColorName: fynetheme.ColorNamePlaceHolder,
-		}
-		b.inlines(n.Children, emphasis{}, base, nil)
-		b.lineBreak(base)
+		style := base
+		style.SizeName = fynetheme.SizeNameCaptionText
+		style.ColorName = fynetheme.ColorNamePlaceHolder
+		b.inlines(n.Children, emphasis{}, style, nil)
+		b.lineBreak(style)
 	case *markdown.Blockquote:
-		b.blockquote(n)
+		b.blockquote(n, base)
 	case *markdown.CodeBlock:
 		// A non-inline block segment renders its multi-line text literally and
 		// separates itself from surrounding content.
@@ -452,25 +452,54 @@ func (b *mdBuilder) block(block markdown.Block) {
 			Style: widget.RichTextStyle{TextStyle: fyne.TextStyle{Monospace: true}},
 		})
 	case *markdown.List:
-		b.list(n)
+		b.list(n, base)
 	}
 }
 
-// blockquote renders a quote with the indent bar repeated at the start of every
+// quoteBar is the indent mark drawn at the start of every quoted row.
+const quoteBar = "▏ "
+
+// blockquote renders a quote's blocks with the bar repeated at the start of every
 // source line (continuation of wrapped lines is not bar-prefixed — RichText owns
 // that wrapping).
-func (b *mdBuilder) blockquote(n *markdown.Blockquote) {
-	base := widget.RichTextStyle{ColorName: fynetheme.ColorNamePlaceHolder}
-	b.text("▏ ", emphasis{}, base, nil)
-	for _, child := range n.Children {
-		if _, ok := child.(*markdown.LineBreak); ok {
-			b.lineBreak(base)
-			b.text("▏ ", emphasis{}, base, nil)
-			continue
-		}
-		b.inlines([]markdown.Inline{child}, emphasis{}, base, nil)
+//
+// The blocks are built first and the bars spliced in afterwards, because what
+// ends a row is a block's own non-inline break segment and nothing before it
+// knows where those land. A quote holding a heading or a list is therefore the
+// ordinary block path with a prefix, and nested quotes stack their bars for free.
+func (b *mdBuilder) blockquote(n *markdown.Blockquote, base widget.RichTextStyle) {
+	base.ColorName = fynetheme.ColorNamePlaceHolder
+
+	bar := func() widget.RichTextSegment {
+		style := base
+		style.Inline = true
+
+		return &widget.TextSegment{Text: quoteBar, Style: style}
 	}
-	b.lineBreak(base)
+
+	mark := len(b.segs)
+	for _, block := range n.Blocks {
+		b.block(block, base)
+	}
+
+	rows := b.segs[mark:]
+	if len(rows) == 0 {
+		b.segs = append(b.segs, bar())
+		b.lineBreak(base)
+
+		return
+	}
+
+	quoted := make([]widget.RichTextSegment, 0, len(rows)+len(rows)/2+1)
+	quoted = append(quoted, bar())
+	for i, seg := range rows {
+		quoted = append(quoted, seg)
+		if !seg.Inline() && i < len(rows)-1 {
+			quoted = append(quoted, bar())
+		}
+	}
+
+	b.segs = append(b.segs[:mark], quoted...)
 }
 
 func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
@@ -516,6 +545,8 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 			b.mention("#"+mentionName(b.deps.Store.ChannelName(channelID)), em, base, func(fyne.CanvasObject) {
 				b.deps.Actions.OnChannelTapped(channelID)
 			})
+		case *markdown.Emoji:
+			b.emoji(n.EmojiID, base)
 		}
 	}
 }
@@ -620,10 +651,8 @@ func (s *mentionSegment) Update(o fyne.CanvasObject) {
 // when that object has no answer for the button, so a tappable word in a message
 // row that did not carry the menu would be a hole in it.
 type mentionText struct {
-	widget.BaseWidget
+	tapBase
 	textObj *canvas.Text
-	onTap   func(anchor fyne.CanvasObject)
-	onMenu  func(*fyne.PointEvent)
 }
 
 var (
@@ -634,13 +663,16 @@ var (
 )
 
 func newMentionText(text string, size float32, style fyne.TextStyle, onTap func(anchor fyne.CanvasObject), onMenu func(*fyne.PointEvent)) *mentionText {
-	w := &mentionText{
-		textObj: canvas.NewText(text, theme.Colors.MentionText),
-		onTap:   onTap,
-		onMenu:  onMenu,
-	}
+	w := &mentionText{textObj: canvas.NewText(text, theme.Colors.MentionText)}
 	w.textObj.TextSize = size
 	w.textObj.TextStyle = style
+
+	// The profile card is anchored on the word, so the tap hands back the widget
+	// itself; tapBase's handler takes no argument, hence the closure.
+	if onTap != nil {
+		w.onTap = func() { onTap(w) }
+	}
+	w.onSecondaryTap = onMenu
 	w.ExtendBaseWidget(w)
 
 	return w
@@ -657,35 +689,100 @@ func (w *mentionText) SetText(text string) {
 	w.Refresh()
 }
 
-func (w *mentionText) Tapped(*fyne.PointEvent) {
-	if w.onTap != nil {
-		w.onTap(w)
-	}
-}
-
-func (w *mentionText) TappedSecondary(event *fyne.PointEvent) {
-	if w.onMenu != nil {
-		w.onMenu(event)
-	}
-}
-
-func (w *mentionText) Cursor() desktop.Cursor { return desktop.PointerCursor }
-
 func (w *mentionText) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(w.textObj)
 }
 
-func (b *mdBuilder) list(n *markdown.List) {
-	base := widget.RichTextStyle{}
-	for i, item := range n.Items {
-		marker := "•  "
-		if n.Ordered {
-			marker = fmt.Sprintf("%d.  ", n.Start+i)
-		}
-		b.text(marker, emphasis{}, base, nil)
-		b.inlines(item, emphasis{}, base, nil)
+/* Custom emoji */
+
+// emoji renders a :ULID: as the picture it names. The URL is derived from the ID
+// rather than looked up — see domain.Store.EmojiURL — so an emoji from a server
+// the account is not in draws like any other.
+func (b *mdBuilder) emoji(emojiID string, base widget.RichTextStyle) {
+	url := b.deps.Store.EmojiURL(emojiID)
+	if url == "" {
+		return
+	}
+
+	side := emojiSide(base.SizeName)
+	b.reserve = max(b.reserve, side)
+	b.segs = append(b.segs, &emojiSegment{id: emojiID, url: url, side: side, images: b.deps.Emojis})
+}
+
+// emojiSide is the square an emoji is drawn in: one line of the text it sits
+// among, so one inside a heading is heading-sized as a mention is.
+//
+// It is measured rather than named, and that is not only proportion. RichText
+// baseline-aligns a row as soon as its objects differ in height, and it reads the
+// baseline of a segment it cannot measure as text as zero — so an emoji a pixel
+// taller than the words beside it is moved *down* by a whole baseline and draws
+// through the line below. Matching the line exactly is what keeps the row
+// unaligned and the emoji on it.
+//
+// It is measured here rather than read from lineHeight's memo because it has to
+// agree with the row *exactly*: the memo is keyed by size alone, so an entry it
+// answers with was not necessarily measured in the font now installed.
+func emojiSide(sizeName fyne.ThemeSizeName) float32 {
+	return fyne.MeasureText("M", mentionSize(sizeName), fyne.TextStyle{}).Height
+}
+
+// emojiSegment is one custom emoji in a body. Like a mention it is a segment
+// RichText cannot read as text, so it can neither break nor be broken before —
+// hence the reserve above.
+//
+// Unlike a mention it draws nothing interactive: an emoji has nothing to open,
+// and a canvas image accepts no events, so the hover and the right-click menu
+// stay with the message row underneath it. That is the same trade an embed's
+// card makes.
+type emojiSegment struct {
+	id     string
+	url    string
+	side   float32
+	images *cache.ImageCache
+}
+
+var _ widget.RichTextSegment = (*emojiSegment)(nil)
+
+func (s *emojiSegment) Inline() bool              { return true }
+func (s *emojiSegment) Select(_, _ fyne.Position) {}
+func (s *emojiSegment) SelectedText() string      { return "" }
+func (s *emojiSegment) Unselect()                 {}
+func (s *emojiSegment) Update(fyne.CanvasObject)  {}
+
+// Textual is empty because the picture is the whole of it: a body flattens on
+// what it renders, not on what it says, and RichText measures this segment by its
+// visual rather than by its text.
+func (s *emojiSegment) Textual() string { return "" }
+
+// Visual is the square the picture lands in. The square is reserved before the
+// load starts, so an emoji arriving repaints its own cell rather than re-flowing
+// the line it is in.
+func (s *emojiSegment) Visual() fyne.CanvasObject {
+	size := fyne.NewSize(s.side, s.side)
+	frame := container.NewGridWrap(size, canvas.NewRectangle(color.Transparent))
+	s.images.LoadIntoContainer(s.id, s.url, size, frame, false, nil)
+
+	return frame
+}
+
+func (b *mdBuilder) list(n *markdown.List, base widget.RichTextStyle) {
+	for _, item := range n.Items {
+		b.text(listMarker(n.Ordered, item), emphasis{}, base, nil)
+		b.inlines(item.Children, emphasis{}, base, nil)
 		b.lineBreak(base)
 	}
+}
+
+// listMarker is an item's indent and bullet or number, as the one run of text
+// that opens its row. The indent is spaces rather than a layout: a row here is a
+// RichText row, and the only thing that can push one in is its first segment.
+func listMarker(ordered bool, item markdown.ListItem) string {
+	indent := strings.Repeat("   ", item.Indent)
+	if ordered {
+		return fmt.Sprintf("%s%d.  ", indent, item.Number)
+	}
+
+	return indent + "•  "
 }
 
 // token is a run of either whitespace or non-whitespace from a split span.

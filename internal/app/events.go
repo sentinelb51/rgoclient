@@ -15,7 +15,6 @@ import (
 
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
-	"RGOClient/internal/ui"
 )
 
 // ackDelay is the coalescing window for read acknowledgements of the open
@@ -57,6 +56,12 @@ func (a *App) dispatch(event client.Event) {
 		a.doOnUI(func() { a.onMembersChanged(e) }, false)
 	case client.MemberUpdated:
 		a.doOnUI(func() { a.onMemberUpdated(e) }, false)
+	case client.UserUpdated:
+		a.doOnUI(func() { a.onUserUpdated(e) }, false)
+	case client.PresenceChanged:
+		a.doOnUI(func() { a.onPresenceChanged(e) }, false)
+	case client.TypingChanged:
+		a.doOnUI(func() { a.onTypingChanged(e) }, false)
 	}
 }
 
@@ -141,6 +146,11 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 	if event.Message.AuthorID == a.store.SelfID() {
 		a.startSlowmode(channelID)
 	}
+
+	// Sending is the end of typing, and Revolt does not reliably say so before the
+	// message lands — left to lapse, the line would name somebody under the message
+	// they just posted.
+	a.forgetTyping(channelID, event.Message.AuthorID)
 
 	if channelID == a.currentChannelID {
 		a.appendMessage(event.Message, event.Previous)
@@ -256,27 +266,70 @@ func (a *App) onChannelClosed(event client.ChannelClosed) {
 
 // onMembersChanged repaints the member sidebar when the open server's membership
 // changes.
+//
+// A join arrives as a membership and nothing else — revoltgo fabricates one with
+// no account attached — so the row would read "Unknown user" until something
+// asked who it was. ensureAuthor is that something, and its own batch refreshes
+// the sidebar when it lands.
 func (a *App) onMembersChanged(event client.MembersChanged) {
-	if a.currentServerID == event.ServerID {
-		a.refreshMemberList()
+	if a.currentServerID != event.ServerID {
+		return
 	}
+
+	a.ensureAuthor(event.ServerID, event.UserID)
+	a.queueMemberRefresh()
+}
+
+// onUserUpdated redraws what a change to somebody's account moves: their mounted
+// messages, and their row in the member sidebar.
+//
+// Neither reorders anything. A rename does move a sorted list, but a rename is
+// rare and a row briefly out of order is far cheaper than rebuilding the whole
+// model for one — the next rebuild puts it back.
+func (a *App) onUserUpdated(event client.UserUpdated) {
+	a.refreshAuthorMessages(event.UserID)
+	a.refreshMemberRow(event.UserID)
+	a.refreshTyping() // the line may be naming them, or waiting to
+}
+
+// onPresenceChanged moves somebody between the member list's sections.
+//
+// This is the one event a busy server produces continuously, and it is the one
+// that reorders, so it is queued rather than acted on: the rebuild is a walk of
+// the whole membership, and a thousand-member server can raise dozens of these a
+// second. Following presence at all is a setting, since on the largest servers
+// the cheapest answer is not to.
+//
+// HasMember decides whether it is even our business, and exists so that asking
+// allocates nothing.
+func (a *App) onPresenceChanged(event client.PresenceChanged) {
+	if !config.Current().Behaviour.LiveMemberPresence || a.currentServerID == "" {
+		return
+	}
+	if !a.store.HasMember(a.currentServerID, event.UserID) {
+		return
+	}
+
+	a.queueMemberRefresh()
 }
 
 // onMemberUpdated repaints the member sidebar when a member of the open server
 // changes, and updates that author's mounted messages in place so their name,
 // role colour and avatar stay current.
+//
+// When the member is the account itself, its roles are what every permission in
+// the server is resolved from: a role gained or lost changes which channels are
+// listed at all and whether the composer will take a message, neither of which
+// any other event announces.
 func (a *App) onMemberUpdated(event client.MemberUpdated) {
 	if a.currentServerID == event.ServerID {
-		a.refreshMemberList()
+		// A nickname or a role can move them between sections and re-colour the
+		// name, so it is the whole model rather than the one row.
+		a.queueMemberRefresh()
+		if event.UserID == a.store.SelfID() {
+			a.refreshChannelList()
+			a.syncComposer()
+		}
 	}
 	a.refreshAuthorMessages(event.UserID)
-}
-
-// notifyFailure is the standard failure handler for an action whose only visible
-// outcome is a notice: the API error goes to the log, the user gets a sentence.
-func (a *App) notifyFailure(what string, format string, args ...any) func(error) {
-	return func(err error) {
-		log.Printf("%s: %v", what, err)
-		a.notify(ui.ToneDanger, format, args...)
-	}
 }

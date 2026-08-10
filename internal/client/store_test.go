@@ -4,6 +4,7 @@ import (
 	"image/color"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -62,38 +63,43 @@ func TestParseColorKeepsGradientStops(t *testing.T) {
 	}
 }
 
-func TestRoleColorPicksMostSeniorColouredRole(t *testing.T) {
+// TestMemberRoleInfoPicksMostSeniorOfEach covers the one walk that decides both
+// of the things a member row asks of its roles. The two answers are independent
+// — the most senior *coloured* role need not be the most senior *hoisted* one —
+// and answering them from one pass is exactly where that could be got wrong.
+func TestMemberRoleInfoPicksMostSeniorColouredAndHoistedRoles(t *testing.T) {
 	server := &revoltgo.Server{
 		Roles: map[string]*revoltgo.ServerRole{
-			"admin":    {Rank: 1, Colour: new("#ff0000")},
-			"mod":      {Rank: 5, Colour: new("#00ff00")},
-			"everyone": {Rank: 10},                         // no colour: skipped
+			"owner":    {Rank: 0, Hoist: true},            // hoisted, no colour
+			"admin":    {Rank: 1, Colour: new("#ff0000")}, // coloured, not hoisted
+			"mod":      {Rank: 5, Colour: new("#00ff00"), Hoist: true},
+			"everyone": {Rank: 10},                         // neither
 			"broken":   {Rank: 0, Colour: new("gradient")}, // most senior but unparseable
 		},
 	}
 
-	got, ok := roleColor(server, []string{"mod", "admin", "everyone"})
-	if !ok {
-		t.Fatal("expected a colour")
+	fill, hoist := memberRoleInfo(server, []string{"mod", "admin", "owner", "everyone"})
+	if fill != (color.NRGBA{R: 255, A: 255}) {
+		t.Errorf("colour = %v, want admin red (lowest rank wins)", fill)
 	}
-	if got != (color.NRGBA{R: 255, A: 255}) {
-		t.Errorf("got %v, want admin red (lowest rank wins)", got)
-	}
-
-	// The most-senior role has an unparseable colour: it is still selected as
-	// "best", so resolution fails — documents current behaviour.
-	if _, ok := roleColor(server, []string{"broken", "admin"}); ok {
-		t.Error("unparseable senior colour: expected ok=false")
+	if hoist != "owner" {
+		t.Errorf("hoist = %q, want owner — the senior hoisted role, colourless or not", hoist)
 	}
 
-	if _, ok := roleColor(server, []string{"everyone"}); ok {
-		t.Error("no coloured roles: expected ok=false")
+	// The most-senior coloured role has an unparseable colour: it still wins the
+	// comparison, so nothing is resolved. Documents current behaviour.
+	if fill, _ := memberRoleInfo(server, []string{"broken", "admin"}); fill != nil {
+		t.Errorf("unparseable senior colour: got %v, want nil", fill)
 	}
-	if _, ok := roleColor(server, nil); ok {
-		t.Error("no roles: expected ok=false")
+
+	for _, roles := range [][]string{{"everyone"}, nil, {"missing"}} {
+		if fill, hoist := memberRoleInfo(server, roles); fill != nil || hoist != "" {
+			t.Errorf("roles %v: got (%v, %q), want (nil, \"\")", roles, fill, hoist)
+		}
 	}
-	if _, ok := roleColor(server, []string{"missing"}); ok {
-		t.Error("unknown role id: expected ok=false")
+
+	if fill, hoist := memberRoleInfo(nil, []string{"admin"}); fill != nil || hoist != "" {
+		t.Errorf("no server: got (%v, %q), want (nil, \"\")", fill, hoist)
 	}
 }
 
@@ -127,6 +133,168 @@ func TestServerRolesOrdersBySeniority(t *testing.T) {
 
 	if serverRoles(nil, []string{"admin"}) != nil {
 		t.Error("an unknown server should resolve no roles")
+	}
+}
+
+/* Permissions */
+
+// permissionFixture is the shape every case below varies: a server whose default
+// role sees nothing, one senior role and one junior one, and a text channel in
+// it. The defaults deny ViewChannel outright, which is how a private channel is
+// actually built — everything here is about who gets it back.
+func permissionFixture() (*revoltgo.Server, *revoltgo.Channel) {
+	server := &revoltgo.Server{
+		ID:                 "server",
+		Owner:              "owner",
+		DefaultPermissions: int64(domain.PermissionReadMessageHistory),
+		Roles: map[string]*revoltgo.ServerRole{
+			// Revolt ranks the most senior lowest, so "senior" outranks "junior".
+			"senior": {Rank: 1},
+			"junior": {Rank: 5},
+		},
+	}
+	channel := &revoltgo.Channel{
+		ID:          "channel",
+		ChannelType: revoltgo.ChannelTypeText,
+		Server:      new("server"),
+	}
+
+	return server, channel
+}
+
+func member(roles ...string) *revoltgo.ServerMember {
+	return &revoltgo.ServerMember{
+		ID:    revoltgo.MemberCompositeID{Server: "server", User: "self"},
+		Roles: roles,
+	}
+}
+
+// A channel denied to everyone and handed back to one role is how Revolt hides a
+// channel, and reading Channel.RolePermissions is the only thing that sees it —
+// revoltgo's own ChannelPermissions does not, which is why the calculation is
+// ours.
+func TestChannelPermissionsAppliesRoleOverwrites(t *testing.T) {
+	server, channel := permissionFixture()
+	channel.DefaultPermissions = &revoltgo.PermissionOverwrite{Deny: int64(domain.PermissionViewChannel)}
+	channel.RolePermissions = map[string]revoltgo.PermissionOverwrite{
+		"senior": {Allow: int64(domain.PermissionViewChannel)},
+	}
+
+	if got := channelPermissions(server, member("senior"), channel, "self"); !got.Has(domain.PermissionViewChannel) {
+		t.Error("a role the channel grants ViewChannel to cannot see it")
+	}
+	if got := channelPermissions(server, member("junior"), channel, "self"); got.Has(domain.PermissionViewChannel) {
+		t.Error("a role the channel says nothing about can see a channel denied to everyone")
+	}
+}
+
+// Two roles disagreeing about one permission is settled by rank, not by the
+// order the member happens to carry them in.
+func TestChannelPermissionsSeniorRoleWins(t *testing.T) {
+	server, channel := permissionFixture()
+	server.Roles["senior"].Permissions = revoltgo.PermissionOverwrite{Allow: int64(domain.PermissionSendMessage)}
+	server.Roles["junior"].Permissions = revoltgo.PermissionOverwrite{Deny: int64(domain.PermissionSendMessage)}
+
+	for _, order := range [][]string{{"senior", "junior"}, {"junior", "senior"}} {
+		if got := channelPermissions(server, member(order...), channel, "self"); !got.Has(domain.PermissionSendMessage) {
+			t.Errorf("roles %v: the junior role's denial beat the senior role's grant", order)
+		}
+	}
+
+	// And the other way round, so the test can't pass by ignoring rank entirely.
+	server.Roles["senior"].Permissions = revoltgo.PermissionOverwrite{Deny: int64(domain.PermissionSendMessage)}
+	server.Roles["junior"].Permissions = revoltgo.PermissionOverwrite{Allow: int64(domain.PermissionSendMessage)}
+
+	if got := channelPermissions(server, member("junior", "senior"), channel, "self"); got.Has(domain.PermissionSendMessage) {
+		t.Error("the junior role's grant beat the senior role's denial")
+	}
+}
+
+// A timeout is clamped last, after the channel's overwrites: an overwrite that
+// grants SendMessage must not hand back what the timeout took.
+func TestChannelPermissionsClampsTimeoutLast(t *testing.T) {
+	server, channel := permissionFixture()
+	channel.RolePermissions = map[string]revoltgo.PermissionOverwrite{
+		"senior": {Allow: int64(domain.PermissionViewChannel | domain.PermissionSendMessage)},
+	}
+
+	timedOut := member("senior")
+	timedOut.Timeout = new(time.Now().Add(time.Hour))
+
+	got := channelPermissions(server, timedOut, channel, "self")
+	if got.Has(domain.PermissionSendMessage) {
+		t.Error("a timed-out member can still send")
+	}
+	if !got.Has(domain.PermissionViewChannel) {
+		t.Error("a timed-out member should keep what the timeout preset leaves")
+	}
+
+	// An expired timeout is no timeout.
+	served := member("senior")
+	served.Timeout = new(time.Now().Add(-time.Hour))
+	if !channelPermissions(server, served, channel, "self").Has(domain.PermissionSendMessage) {
+		t.Error("an expired timeout is still being enforced")
+	}
+}
+
+// The owner holds everything, whatever the channel says — and a membership State
+// has not caught up with resolves as one carrying no roles, not as no access:
+// see rankRoles.
+func TestChannelPermissionsOwnerAndUnknownMember(t *testing.T) {
+	server, channel := permissionFixture()
+	channel.DefaultPermissions = &revoltgo.PermissionOverwrite{Deny: revoltgo.PermissionGrantAllSafe}
+
+	if !channelPermissions(server, nil, channel, "owner").Has(domain.PermissionViewChannel) {
+		t.Error("the owner was refused a channel that denies everything")
+	}
+
+	server.DefaultPermissions = int64(domain.PermissionViewChannel)
+	channel.DefaultPermissions = nil
+	if !channelPermissions(server, nil, channel, "self").Has(domain.PermissionViewChannel) {
+		t.Error("an unresolved membership was refused what the server grants by default")
+	}
+}
+
+// A DM carries no permissions field — Revolt only sends one on a group — so
+// reading it the way revoltgo's ChannelPermissions does answers view-only for
+// every direct message there is, which would disable the composer in all of them.
+func TestConversationPermissions(t *testing.T) {
+	dm := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeDM, Recipients: []string{"self", "them"}}
+	group := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeGroup, Owner: "them"}
+	notes := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeSavedMessages}
+
+	if !conversationPermissions(dm, &revoltgo.User{ID: "them"}, "self").Has(domain.PermissionSendMessage) {
+		t.Error("an ordinary direct message will not take a message")
+	}
+	if !conversationPermissions(dm, nil, "self").Has(domain.PermissionSendMessage) {
+		t.Error("a direct message with an unresolved recipient will not take a message")
+	}
+
+	for _, relationship := range []revoltgo.UserRelationshipType{
+		revoltgo.UserRelationsTypeBlocked, revoltgo.UserRelationsTypeBlockedOther,
+	} {
+		got := conversationPermissions(dm, &revoltgo.User{ID: "them", Relationship: relationship}, "self")
+		if got.Has(domain.PermissionSendMessage) {
+			t.Errorf("%s: a blocked direct message still takes messages", relationship)
+		}
+		if !got.Has(domain.PermissionReadMessageHistory) {
+			t.Errorf("%s: a blocked direct message should keep its history readable", relationship)
+		}
+	}
+
+	if !conversationPermissions(group, nil, "self").Has(domain.PermissionSendMessage) {
+		t.Error("a group with no permissions of its own will not take a message")
+	}
+	if !conversationPermissions(group, nil, "them").Has(domain.PermissionManageMessages) {
+		t.Error("the group's owner cannot manage it")
+	}
+	group.Permissions = new(int64(domain.PermissionViewChannel))
+	if conversationPermissions(group, nil, "self").Has(domain.PermissionSendMessage) {
+		t.Error("a group's own permissions were ignored")
+	}
+
+	if !conversationPermissions(notes, nil, "self").Has(domain.PermissionSendMessage) {
+		t.Error("saved notes will not take a note")
 	}
 }
 

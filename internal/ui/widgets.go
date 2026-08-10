@@ -3,6 +3,7 @@ package ui
 import (
 	"hash/fnv"
 	"image/color"
+	"math"
 	"slices"
 	"strconv"
 	"time"
@@ -543,8 +544,10 @@ func NewTooltip() *Tooltip {
 	card.Hide()
 
 	// Nothing in the layer is tappable or hoverable, so it never takes an event
-	// from the widgets underneath it.
-	return &Tooltip{Layer: container.NewWithoutLayout(card), card: card, label: label}
+	// from the widgets underneath it, and NewLayer keeps the name it is holding out
+	// of the window's minimum size — the card places itself, so it goes in a
+	// container of its own that the layer can fill without resizing it.
+	return &Tooltip{Layer: NewLayer(container.NewWithoutLayout(card)), card: card, label: label}
 }
 
 // Show names obj, placing the label just past its right edge and centred on it.
@@ -582,11 +585,24 @@ func (t *Tooltip) Hide() { t.card.Hide() }
 // circularAvatar builds a circular avatar of the given size, loading the image
 // from avatarURL when present. It is the one place an avatar image is mounted.
 func circularAvatar(images *cache.ImageCache, avatarURL string, size fyne.Size) *fyne.Container {
-	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
-	avatar := container.NewGridWrap(size, placeholder)
+	avatar, _ := newAvatarSlot(size)
 	loadAvatar(images, avatar, avatarURL, size)
 
 	return avatar
+}
+
+// newAvatarSlot is the same circle with nothing loaded into it. It exists apart
+// from circularAvatar for the member list, whose rows are recycled: a picture
+// asked for at construction has no generation to check itself against when it
+// arrives, and would be painted into whoever the row has since moved on to.
+//
+// The placeholder is handed back alongside the slot so a row swapping a picture
+// back out can restore *that* object. A fresh circle is one the canvas has never
+// seen, and a row that quietly put one back drew nothing at all.
+func newAvatarSlot(size fyne.Size) (*fyne.Container, *canvas.Circle) {
+	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
+
+	return container.NewGridWrap(size, placeholder), placeholder
 }
 
 // loadAvatar kicks off the circular image load for an already-built avatar
@@ -693,10 +709,24 @@ type ObservableScroll struct {
 
 var _ fyne.Draggable = (*ObservableScroll)(nil)
 
-// NewObservableVScroll creates an observable vertical scroll container.
+// NewObservableVScroll creates an observable vertical scroll container, drawing
+// the client's own position indicator down its right edge.
 func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
 	s := &ObservableScroll{indicator: canvas.NewRectangle(theme.Colors.ScrollIndicator)}
 	s.indicator.Hide()
+
+	return s.init(content)
+}
+
+// NewPlainVScroll is the same scroll without the position indicator, for a column
+// whose own content reaches the right edge the strip would be drawn over. The
+// settings pane centres its cards, so an indicator lands on top of one whenever
+// the window is narrow enough for the two to meet.
+func NewPlainVScroll(content fyne.CanvasObject) *ObservableScroll {
+	return new(ObservableScroll).init(content)
+}
+
+func (s *ObservableScroll) init(content fyne.CanvasObject) *ObservableScroll {
 	s.Direction = container.ScrollVerticalOnly
 	s.Content = content
 	s.ExtendBaseWidget(s)
@@ -713,11 +743,12 @@ func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
 func (s *ObservableScroll) CreateRenderer() fyne.WidgetRenderer {
 	base := s.Scroll.CreateRenderer()
 
-	return &scrollRenderer{
-		WidgetRenderer: base,
-		scroll:         s,
-		objects:        slices.Concat(base.Objects(), []fyne.CanvasObject{s.indicator}),
+	objects := base.Objects()
+	if s.indicator != nil {
+		objects = slices.Concat(objects, []fyne.CanvasObject{s.indicator})
 	}
+
+	return &scrollRenderer{WidgetRenderer: base, scroll: s, objects: objects}
 }
 
 // scrollRenderer is Fyne's scroll renderer with the indicator drawn last, over
@@ -862,9 +893,10 @@ func (s *ObservableScroll) Dragged(ev *fyne.DragEvent) {
 		return
 	}
 
-	s.Offset.X -= ev.Dragged.DX
-	s.Offset.Y -= ev.Dragged.DY
-	s.Refresh()
+	// ScrollToOffset rather than writing Offset and refreshing: Scroll.Refresh
+	// walks and repaints every descendant, which for a long pane is the whole
+	// column once per frame of the pan.
+	s.ScrollToOffset(fyne.NewPos(s.Offset.X-ev.Dragged.DX, s.Offset.Y-ev.Dragged.DY))
 	s.notify()
 }
 
@@ -1107,6 +1139,21 @@ func NewEllipsisText(text *canvas.Text) *fyne.Container {
 	return container.New(&ellipsisLayout{text: text, full: text.Text}, text)
 }
 
+// SetEllipsisText re-labels a box built by NewEllipsisText. The full text is
+// fixed at construction there, which is right for a row built per person and
+// wrong for one the member list recycles — and reading the name back off the
+// text object instead would take it to be whatever last fitted the column.
+func SetEllipsisText(box *fyne.Container, text string) {
+	layout, ok := box.Layout.(*ellipsisLayout)
+	if !ok {
+		return
+	}
+
+	layout.full = text
+	layout.sized = false // the fit is for the previous name, whatever the width
+	Relayout(box)
+}
+
 // ellipsisLayout re-fits its text to the width it is handed and centres it
 // vertically. Rewriting the text during Layout is safe because the reported
 // minimum size doesn't depend on the content — the width is fixed at zero and
@@ -1185,4 +1232,204 @@ func TruncateToWidth(text string, width, size float32, style fyne.TextStyle) str
 		return ""
 	}
 	return string(runes[:low]) + ellipsis
+}
+
+/* Typing mark */
+
+const (
+	// typingSweepPeriod is one full there-and-back of the line.
+	typingSweepPeriod = time.Second
+
+	// typingSweepSegments is the head and everything trailing it, and
+	// typingSweepLag how far behind the head — in fractions of a cycle — each
+	// following segment runs. Lagging in *time* rather than in space is what makes
+	// the trail take the same path: it bunches up behind the head at each turn and
+	// draws out again across the middle, with nothing to clamp at either end.
+	typingSweepSegments = 4
+	typingSweepLag      = 0.075
+
+	// typingSweepFade is how much of the colour ahead of it each segment keeps.
+	typingSweepFade = 0.55
+)
+
+// TypingMark is the sweeping line that says somebody is composing. Both places
+// that need one mount it: the line above the composer card, and a channel row in
+// the sidebar.
+//
+// It is a widget of its own rather than a container of rectangles because the
+// sweep has to be stopped when the tree holding it goes away, and only a renderer
+// is told about that. Every channel row is rebuilt from scratch by
+// refreshChannelList, so an animation left running against a discarded row would
+// tick for the life of the process.
+//
+// It accepts no pointer event, so hover and right-click reach whatever it is
+// drawn over: the message passing under the composer, or the channel row it
+// marks.
+type TypingMark struct {
+	widget.BaseWidget
+
+	segments []*canvas.Rectangle
+	content  *fyne.Container
+
+	travel float32 // how far the head's left edge moves, end to end
+
+	sweep *fyne.Animation
+}
+
+// NewTypingMark creates the mark at a given width, hidden and still. The width is
+// the caller's because the two surfaces are set differently: the composer's line
+// is body-sized, a sidebar row's mark is smaller than its name.
+func NewTypingMark(width float32, tint color.Color) *TypingMark {
+	m := &TypingMark{}
+
+	// Laid out by hand on the 20-unit grid the client's other glyphs use, so the
+	// line keeps its proportions at any width and the sweep can move a rectangle
+	// with no layout pass behind it. Nine units by three: long enough to read as a
+	// line rather than a dash, shallow enough not to read as a bar — and leaving
+	// eleven for it to travel, which is what has to be legible at a glance.
+	//
+	// The box is exactly as tall as the line, unlike the square the client's glyphs
+	// are drawn in: there is nothing above or below it, and both callers centre it
+	// in a row of their own.
+	scale := width / 20
+	barWidth, barHeight := 9*scale, 3*scale
+
+	m.travel = width - barWidth
+
+	alpha := float32(1)
+	m.segments = make([]*canvas.Rectangle, typingSweepSegments)
+	for i := range m.segments {
+		bar := canvas.NewRectangle(typingTrailTint(tint, alpha))
+		bar.CornerRadius = barHeight / 2
+		bar.Resize(fyne.NewSize(barWidth, barHeight))
+		bar.Move(fyne.NewPos(m.travel/2, 0))
+
+		m.segments[i] = bar
+		alpha *= typingSweepFade
+	}
+
+	// Farthest behind first: the head is opaque and has to be drawn over its own
+	// trail, and a container paints its objects in the order it holds them.
+	glyph := container.NewWithoutLayout()
+	for i := len(m.segments) - 1; i >= 0; i-- {
+		glyph.Add(m.segments[i])
+	}
+
+	m.content = container.NewGridWrap(fyne.NewSize(width, barHeight), glyph)
+
+	m.Hide()
+	m.ExtendBaseWidget(m)
+
+	return m
+}
+
+func (m *TypingMark) CreateRenderer() fyne.WidgetRenderer {
+	return &typingMarkRenderer{WidgetRenderer: widget.NewSimpleRenderer(m.content), mark: m}
+}
+
+// SetActive shows the mark and starts the sweep, or hides it and stops it.
+// Unchanged state is a no-op, so a repaint of a whole sidebar costs nothing per
+// row that did not move.
+//
+// A hidden widget must never keep an animation: it would repaint nothing sixty
+// times a second. Neither may a still one, which is what animate off asks for —
+// the line rests in the middle of its travel and no animation is started at all.
+func (m *TypingMark) SetActive(active, animate bool) {
+	if !active {
+		if m.Visible() || m.sweep != nil {
+			m.stop()
+			m.Hide()
+		}
+		return
+	}
+
+	// animate is only part of the state while the mark is up, which is why it is
+	// not compared on the way out: a still mark and a stopped one are the same
+	// thing hidden.
+	if m.Visible() && animate == (m.sweep != nil) {
+		return
+	}
+
+	m.stop()
+	m.Show()
+
+	if animate {
+		m.start()
+	}
+}
+
+// start runs the sweep. Nothing here refreshes anything: a written fill marks
+// nothing dirty, but canvas.Rectangle.Move repaints for itself — and moving is
+// all this does, the trail's colours being fixed at construction.
+//
+// The curve is linear because the shaping is in typingSweepAt. An eased one would
+// also stutter at every repeat, easing out of a cycle and back into the next at
+// the point the line is travelling fastest.
+func (m *TypingMark) start() {
+	m.sweep = fyne.NewAnimation(typingSweepPeriod, func(done float32) {
+		for i, bar := range m.segments {
+			at := typingSweepAt(done - float32(i)*typingSweepLag)
+			bar.Move(fyne.NewPos(m.travel*at, 0))
+		}
+	})
+
+	m.sweep.Curve = fyne.AnimationLinear
+	m.sweep.RepeatCount = fyne.AnimationRepeatForever
+	m.sweep.Start()
+}
+
+// stop halts the sweep and rests the line in the middle of its travel, which is
+// where a still mark is drawn — the trail collapsed under the head, where an
+// opaque head hides it. Nil-safe and idempotent: every start goes through it.
+func (m *TypingMark) stop() {
+	if m.sweep == nil {
+		return
+	}
+
+	m.sweep.Stop()
+	m.sweep = nil
+
+	for _, bar := range m.segments {
+		bar.Move(fyne.NewPos(m.travel/2, 0))
+	}
+}
+
+// typingTrailTint dims the mark's colour for a segment behind the head.
+//
+// It is not theme.Fade, which scales the alpha of a color.RGBA and leaves the
+// channels alone — and Go defines those channels as *already multiplied by* that
+// alpha. Faded that way, a colour composites brighter than the one it came from,
+// which for a trail meant a tail lighter than the line casting it. Everything has
+// to come down together.
+func typingTrailTint(c color.Color, alpha float32) color.Color {
+	r, g, b, a := c.RGBA()
+	scale := func(channel uint32) uint8 { return uint8(float32(channel>>8) * alpha) }
+
+	return color.RGBA{R: scale(r), G: scale(g), B: scale(b), A: scale(a)}
+}
+
+// typingSweepAt is where a segment sits at a point in the cycle, from 0 at the
+// left of the travel to 1 at the right and back. A cosine rather than a triangle:
+// the line eases into each turn instead of striking the end and reversing, and it
+// is that slowing which gathers the trail up behind the head there.
+//
+// The phase arrives negative for every segment but the head, so it is wrapped by
+// flooring rather than by truncating towards zero.
+func typingSweepAt(phase float32) float32 {
+	phase -= float32(math.Floor(float64(phase)))
+
+	return float32(1-math.Cos(2*math.Pi*float64(phase))) / 2
+}
+
+// typingMarkRenderer exists for Destroy alone: the tree holding the mark is
+// rebuilt by a restyle and by every refresh of the channel list, and the
+// animation has to go with it.
+type typingMarkRenderer struct {
+	fyne.WidgetRenderer
+	mark *TypingMark
+}
+
+func (r *typingMarkRenderer) Destroy() {
+	r.mark.stop()
+	r.WidgetRenderer.Destroy()
 }

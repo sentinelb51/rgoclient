@@ -11,6 +11,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -215,18 +216,37 @@ func (a *App) refreshChannelList() {
 }
 
 // newChannelRow builds a channel row reflecting its current state, or nil when
-// the store doesn't know the channel.
+// the store doesn't know the channel or the account cannot see it.
+//
+// A channel hidden this way is hidden everywhere at once: the sidebar walk that
+// builds these rows is also what feeds the composer its #mention candidates, so
+// one that never becomes a row is never a candidate either.
 func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 	channel, ok := a.store.Channel(channelID)
-	if !ok {
+	if !ok || !a.canViewChannel(channel) {
 		return nil
 	}
 
 	w := ui.NewChannelWidget(a.deps(), channel, func() { a.selectChannel(channelID) })
-	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+	a.applyChannelState(w, config.Current().Behaviour.TypingAnimation)
 	w.Menu = func() []*fyne.MenuItem { return a.channelMenu(channelID) }
 
 	return w
+}
+
+// applyChannelState paints a channel row from what the app currently knows about
+// it. Three paths need this — building a row, syncing the whole sidebar, and
+// repainting one row — and they must agree, so the row's state is derived in one
+// place. Both setters no-op on unchanged state, so calling it costs nothing for a
+// row that did not move.
+//
+// animate is passed rather than read because syncChannelList reads the setting
+// once for the whole sidebar.
+func (a *App) applyChannelState(w *ui.ChannelWidget, animate bool) {
+	channelID := w.Channel.ID
+
+	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+	w.SetTyping(a.isTypingIn(channelID), animate)
 }
 
 /* Context menus */
@@ -379,11 +399,38 @@ func (a *App) selectServer(serverID string) {
 		return
 	}
 
-	if len(server.Channels) > 0 {
-		a.selectChannel(server.Channels[0])
+	if channelID, ok := a.firstVisibleChannel(server); ok {
+		a.selectChannel(channelID)
 		return
 	}
+
 	a.clearChannelSelection()
+	a.showStatus("No channels you can see in this server")
+}
+
+// firstVisibleChannel is the channel a server opens on: the first one in its own
+// order the account can actually see. Landing on a hidden one would show the
+// no-access line for a server whose channels are perfectly readable.
+func (a *App) firstVisibleChannel(server domain.Server) (string, bool) {
+	for _, channelID := range server.Channels {
+		if channel, ok := a.store.Channel(channelID); ok && a.canViewChannel(channel) {
+			return channelID, true
+		}
+	}
+
+	return "", false
+}
+
+// canViewChannel reports whether the account may see a channel at all. It is the
+// one permission the client answers by hiding rather than by refusing: a channel
+// you cannot look into has nothing to offer a sidebar row.
+//
+// Only a server ever decides this. A conversation is in the user's own list
+// because they are in it — a group's permission field says what they may do
+// there, not whether the row should exist, and a closed DM leaves the list by
+// its own Active flag rather than by a permission.
+func (a *App) canViewChannel(channel domain.Channel) bool {
+	return channel.ServerID == "" || a.store.Permissions(channel.ID).Has(domain.PermissionViewChannel)
 }
 
 // enterServer switches both sidebars to a server without choosing a channel in
@@ -402,7 +449,12 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	a.syncServerSelection(serverID)
 	a.setHeader(a.serverHeader, server.Name)
 	a.refreshChannelList()
+
+	// Paint what is known, then go and get the rest: this is the single funnel
+	// both selectServer and #mention navigation pass through, so it is the one
+	// place a server's membership is worth asking for.
 	a.refreshMemberList()
+	a.loadMembers(serverID)
 
 	return server, true
 }
@@ -413,7 +465,7 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 // never resolves, and saying so is better than a click that does nothing.
 func (a *App) OnChannelTapped(channelID string) {
 	channel, ok := a.store.Channel(channelID)
-	if !ok {
+	if !ok || !a.canViewChannel(channel) {
 		a.notify(ui.ToneWarning, "That channel isn't available.")
 		return
 	}
@@ -434,20 +486,47 @@ func (a *App) OnChannelTapped(channelID string) {
 	a.selectChannel(channelID)
 }
 
+// OnServerTapped goes to a server the account is already in, as an invite card's
+// "Go to server" does. Unlike a channel there is nothing named to open inside it,
+// so selectServer picks the first one visible.
+//
+// A server the store has never heard of is one the account has since left — the
+// card was drawn from an invite resolved earlier in the session — so it says so
+// rather than opening an empty shell.
+func (a *App) OnServerTapped(serverID string) {
+	if _, ok := a.store.Server(serverID); !ok {
+		a.notify(ui.ToneWarning, "That server isn't available.")
+		return
+	}
+
+	a.selectServer(serverID)
+}
+
 // selectChannel switches to a channel, acknowledging unreads and showing its
 // messages from cache when available.
+//
+// What the account may do here decides how far the switch goes: a channel it
+// cannot see is a dead end, and firing the slowmode request and the first page of
+// history at one would be two requests the server can only refuse.
 func (a *App) selectChannel(channelID string) {
 	if a.currentChannelID == channelID {
 		return
 	}
 
+	// Whatever was half-composed here stays in the entry, but nobody in the channel
+	// being left should go on being told it is still being written in.
+	a.stopTyping(a.currentChannelID)
+
 	unread := a.unreadChannels[channelID]
+	channel, known := a.store.Channel(channelID)
+	permissions := a.store.Permissions(channelID)
+	viewable := known && a.canViewChannel(channel)
 	a.currentChannelID = channelID
 
 	a.setChannelGlyph()
-	if channel, ok := a.currentChannel(); ok {
+	if known {
 		a.setHeader(a.channelHeader, channel.Name)
-		if unread && channel.LastMessageID != "" {
+		if viewable && unread && channel.LastMessageID != "" {
 			delete(a.unreadChannels, channelID)
 			a.scheduleAck(channelID, channel.LastMessageID)
 		}
@@ -455,9 +534,25 @@ func (a *App) selectChannel(channelID string) {
 
 	a.syncChannelList()
 	a.refreshMentionCandidates()
-	a.refreshSlowmode() // what is already known, before the request below lands
+	a.syncComposer()
+	a.refreshSlowmode() // what is already known, before any request below lands
+	a.refreshTyping()   // whoever was typing here while the channel was in the background
+
+	if !viewable {
+		a.showStatus("You don't have access to this channel")
+		return
+	}
+
 	a.loadSlowmode(channelID)
 	a.focusInput() // so the user can type straight away
+
+	// Seeing a channel and being allowed to read what was said in it are separate
+	// permissions: an announcement channel a bot posts into can be one without the
+	// other, and asking for the page anyway would only be refused.
+	if !permissions.Has(domain.PermissionReadMessageHistory) {
+		a.showStatus("You can't read this channel's history")
+		return
+	}
 
 	if cached := a.client.Messages().Get(channelID); len(cached) > 0 {
 		a.displayMessages(cached)
@@ -470,12 +565,16 @@ func (a *App) selectChannel(channelID string) {
 
 // clearChannelSelection deselects the current channel and clears the view.
 func (a *App) clearChannelSelection() {
+	a.stopTyping(a.currentChannelID)
+
 	a.currentChannelID = ""
 	a.clearMessages()
 	a.setHeader(a.channelHeader, "")
 	a.setChannelGlyph()
 	a.syncChannelList()
 	a.refreshSlowmode()
+	a.refreshTyping()
+	a.syncComposer()
 }
 
 // syncServerSelection updates the highlighted server icon. The home button is
@@ -492,11 +591,14 @@ func (a *App) syncServerSelection(selectedID string) {
 	}
 }
 
-// syncChannelList refreshes the selection and unread state of every channel row.
+// syncChannelList refreshes the selection, unread and typing state of every
+// channel row.
 func (a *App) syncChannelList() {
+	animate := config.Current().Behaviour.TypingAnimation
+
 	for _, obj := range a.channelList.Objects {
 		if w, ok := obj.(*ui.ChannelWidget); ok {
-			w.SetState(w.Channel.ID == a.currentChannelID, a.unreadChannels[w.Channel.ID])
+			a.applyChannelState(w, animate)
 		}
 	}
 }
@@ -507,7 +609,7 @@ func (a *App) syncChannelList() {
 func (a *App) refreshChannelRow(channelID string) {
 	for _, obj := range a.channelList.Objects {
 		if w, ok := obj.(*ui.ChannelWidget); ok && w.Channel.ID == channelID {
-			w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+			a.applyChannelState(w, config.Current().Behaviour.TypingAnimation)
 			return
 		}
 	}

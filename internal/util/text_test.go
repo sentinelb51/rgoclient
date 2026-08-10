@@ -53,3 +53,46 @@ func TestInviteCode(t *testing.T) {
 		}
 	}
 }
+
+// TestInviteLinkCode covers the half of the pair that has to say no. It is
+// pointed at every link in every message, so the cases that matter are the
+// ordinary URLs it must leave alone — InviteCode accepts most of them, which is
+// exactly why the two are separate functions.
+func TestInviteLinkCode(t *testing.T) {
+	cases := []struct {
+		input string
+		want  string
+	}{
+		{"https://rvlt.gg/dcRHWEF1", "dcRHWEF1"},
+		{"http://stt.gg/dcRHWEF1", "dcRHWEF1"},
+		{"rvlt.gg/dcRHWEF1", "dcRHWEF1"},
+		{"https://RVLT.GG/dcRHWEF1", "dcRHWEF1"},
+		{"https://rvlt.gg/dcRHWEF1/", "dcRHWEF1"},
+		{"https://rvlt.gg/dcRHWEF1?ref=x", "dcRHWEF1"},
+		{"https://app.revolt.chat/invite/dcRHWEF1", "dcRHWEF1"},
+
+		// A self-hosted instance serves invites off its own domain, so the
+		// /invite/ form is accepted whoever is hosting it.
+		{"https://chat.example.org/invite/dcRHWEF1", "dcRHWEF1"},
+
+		// Ordinary links, which the lenient InviteCode would happily read a code
+		// out of. None of these may unfurl a card.
+		{"https://example.com/dcRHWEF1", ""},
+		{"https://github.com/sentinelb51/revoltgo", ""},
+		{"https://example.com/blog/2026/some-post", ""},
+		{"https://rvlt.gg", ""},
+		{"https://rvlt.gg/", ""},
+		{"https://rvlt.gg/a/b", ""},
+		{"https://rvlt.gg/not a code", ""},
+
+		// The known host smuggled into the authority is not the known host.
+		{"https://rvlt.gg@example.com/dcRHWEF1", ""},
+		{"", ""},
+	}
+
+	for _, c := range cases {
+		if got := InviteLinkCode(c.input); got != c.want {
+			t.Errorf("InviteLinkCode(%q) = %q, want %q", c.input, got, c.want)
+		}
+	}
+}

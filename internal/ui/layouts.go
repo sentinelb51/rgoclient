@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"cmp"
 	"image/color"
 
 	"fyne.io/fyne/v2"
@@ -205,6 +206,32 @@ func (l *columnLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 /* Overlays */
 
+// NewLayer wraps what is stacked over the main row — the tooltip, the notice
+// stack, the settings page — so that it fills the window and asks nothing of it.
+// A layer is furniture floating over the client, but Fyne grows a window to its
+// content's minimum the frame that minimum outgrows it and never gives the room
+// back, so a layer reporting what it holds resizes the window whenever a long
+// name is hovered or a notice is pushed.
+func NewLayer(objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&layerLayout{}, objects...)
+}
+
+// layerLayout fills the layer with each child and reports no minimum at all.
+type layerLayout struct{}
+
+func (l *layerLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+
+		child.Resize(size)
+		child.Move(fyne.Position{})
+	}
+}
+
+func (l *layerLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Size{} }
+
 // overlayLayout positions children relative to the top-right corner, allowing
 // them to bleed outside the parent (a negative Y). It reports a zero minimum
 // size, so it never affects the parent's layout.
@@ -351,6 +378,16 @@ func NewFixedHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne
 	return container.New(&minSizeLayout{min: fyne.NewSize(0, height), pinHeight: true}, objects...)
 }
 
+// NewFixedSizeContainer pins a slot to exactly size on both axes, still handing
+// its children whatever room it is given. It is what keeps the message column out
+// of the window's minimum: a Fyne window is grown to its content's minimum size
+// the frame that minimum outgrows it (and is never given the room back), so a
+// column reporting what it holds resizes the window from under the reader every
+// time a wide message is mounted or the composer grows.
+func NewFixedSizeContainer(size fyne.Size, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&minSizeLayout{min: size, pinWidth: true, pinHeight: true}, objects...)
+}
+
 // minSizeLayout stretches every child to fill the container and reports a
 // minimum size that is at least min on each axis. pinWidth and pinHeight make
 // that axis a ceiling too, so the container reports exactly the given extent.
@@ -494,14 +531,19 @@ func placeBeside(anchor fyne.Position, anchorSize, card, bounds fyne.Size) fyne.
 	y := anchor.Y + anchorSize.Height/2 - card.Height/2
 
 	return fyne.NewPos(
-		clampWithin(x, margin, bounds.Width-card.Width-margin),
-		clampWithin(y, margin, bounds.Height-card.Height-margin),
+		clamp(x, margin, bounds.Width-card.Width-margin),
+		clamp(y, margin, bounds.Height-card.Height-margin),
 	)
 }
 
-// clampWithin holds v between low and high, preferring low when the two cross —
-// a card taller than the layer starts at the top rather than being pushed off it.
-func clampWithin(v, low, high float32) float32 {
+// clamp holds v between low and high, preferring low when the two cross — a card
+// taller than the layer starts at the top rather than being pushed off it, and a
+// slider whose range is empty rests at its floor.
+//
+// Generic because the two things that need it are a layout in pixels and a
+// settings control in float64s, and a clamp that disagreed with itself between
+// them would be a bug nobody would look for.
+func clamp[T cmp.Ordered](v, low, high T) T {
 	return max(low, min(v, high))
 }
 

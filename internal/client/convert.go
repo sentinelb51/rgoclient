@@ -32,6 +32,33 @@ const iconSize = "64"
 // drawn wider than the profile dialog.
 const bannerSize = "512"
 
+// emojiTag is the Autumn bucket custom emoji are served from, and emojiSize the
+// rendition asked for: one is drawn at a line's height and never larger, so the
+// smallest rendition the CDN offers is already generous.
+const (
+	emojiTag  = "emojis"
+	emojiSize = "128"
+)
+
+// convertAll maps a slice of wire values through convert, dropping the ones it
+// refuses — a nil entry, a video embed with no player to hand it to, an unfurl
+// that came back with nothing to say. Every list crossing the boundary is
+// converted this way, so "nothing in, nothing out" is one rule rather than three.
+func convertAll[In, Out any](in []In, convert func(In) *Out) []*Out {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]*Out, 0, len(in))
+	for _, value := range in {
+		if converted := convert(value); converted != nil {
+			out = append(out, converted)
+		}
+	}
+
+	return out
+}
+
 /* Files */
 
 // toFile converts an uploaded file, resolving the URL it is served from. Revolt
@@ -72,18 +99,7 @@ func toFile(file *revoltgo.File) *domain.File {
 }
 
 func toFiles(files []*revoltgo.File) []*domain.File {
-	if len(files) == 0 {
-		return nil
-	}
-
-	out := make([]*domain.File, 0, len(files))
-	for _, file := range files {
-		if converted := toFile(file); converted != nil {
-			out = append(out, converted)
-		}
-	}
-
-	return out
+	return convertAll(files, toFile)
 }
 
 /* Messages */
@@ -141,14 +157,7 @@ func toMessage(message *revoltgo.Message) *domain.Message {
 }
 
 func toMessages(messages []*revoltgo.Message) []*domain.Message {
-	out := make([]*domain.Message, 0, len(messages))
-	for _, message := range messages {
-		if converted := toMessage(message); converted != nil {
-			out = append(out, converted)
-		}
-	}
-
-	return out
+	return convertAll(messages, toMessage)
 }
 
 /* Embeds */
@@ -243,18 +252,7 @@ func nameFromURL(raw string) string {
 }
 
 func toEmbeds(embeds []*revoltgo.MessageEmbed) []*domain.Embed {
-	if len(embeds) == 0 {
-		return nil
-	}
-
-	out := make([]*domain.Embed, 0, len(embeds))
-	for _, embed := range embeds {
-		if converted := toEmbed(embed); converted != nil {
-			out = append(out, converted)
-		}
-	}
-
-	return out
+	return convertAll(embeds, toEmbed)
 }
 
 /* Servers */
@@ -281,6 +279,26 @@ func toServer(server *revoltgo.Server) domain.Server {
 			Title:    category.Title,
 			Channels: category.Channels,
 		})
+	}
+
+	return out
+}
+
+// toInvite converts a resolved invite. MemberCount is widened from revoltgo's
+// uint64 rather than kept as one: nothing counts members in a way that could
+// overflow an int, and every other count in the domain is one.
+func toInvite(code string, invite *revoltgo.Invite) domain.Invite {
+	out := domain.Invite{
+		Code:        code,
+		ServerID:    invite.ServerID,
+		ServerName:  invite.ServerName,
+		ChannelName: invite.ChannelName,
+		InviterName: invite.UserName,
+		MemberCount: int(invite.MemberCount),
+	}
+
+	if invite.ServerIcon != nil {
+		out.IconURL = invite.ServerIcon.URL(iconSize)
 	}
 
 	return out

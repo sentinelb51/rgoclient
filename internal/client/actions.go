@@ -138,6 +138,34 @@ func (c *Client) AckServer(serverID string) error {
 	return session.ServerAck(serverID)
 }
 
+/* Typing */
+
+// BeginTyping announces this account as typing in a channel, and EndTyping takes
+// it back. Both are websocket frames rather than requests: they cost a write, no
+// rate limiter sees them, and there is nothing to wait for.
+//
+// The socket is the reason for the second guard. A session is published before
+// its websocket is opened, and closing one leaves the field pointing at a socket
+// that has gone — so Session.WS is nil in the window either side of a login, and
+// revoltgo writes through it without looking.
+func (c *Client) BeginTyping(channelID string) error {
+	session := c.session.Load()
+	if session == nil || session.WS == nil {
+		return ErrNoSession
+	}
+
+	return session.ChannelBeginTyping(channelID)
+}
+
+func (c *Client) EndTyping(channelID string) error {
+	session := c.session.Load()
+	if session == nil || session.WS == nil {
+		return ErrNoSession
+	}
+
+	return session.ChannelEndTyping(channelID)
+}
+
 /* Slowmode */
 
 // FetchSlowmode reads a channel's send cooldown and records it, so the store can
@@ -193,10 +221,10 @@ func (c *Client) LatestMessages(channelID string, limit int) (int, error) {
 	if session == nil {
 		return 0, ErrNoSession
 	}
-	if !c.beginFetch(channelID) {
+	if !c.claim(c.fetching, channelID) {
 		return 0, ErrBusy
 	}
-	defer c.endFetch(channelID)
+	defer c.release(c.fetching, channelID)
 
 	c.messages.SetDepleted(channelID, false)
 
@@ -224,10 +252,10 @@ func (c *Client) HistoryBefore(channelID, beforeID string, limit int) ([]*domain
 	if session == nil {
 		return nil, ErrNoSession
 	}
-	if !c.beginFetch(channelID) {
+	if !c.claim(c.fetching, channelID) {
 		return nil, ErrBusy
 	}
-	defer c.endFetch(channelID)
+	defer c.release(c.fetching, channelID)
 
 	page, err := session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 		Before:       beforeID,
@@ -245,25 +273,52 @@ func (c *Client) HistoryBefore(channelID, beforeID string, limit int) ([]*domain
 	return c.messages.Prepend(channelID, toMessages(page.Messages)), nil
 }
 
-// beginFetch claims a channel's page slot, reporting false when another request
-// already holds it.
-func (c *Client) beginFetch(channelID string) bool {
+// claim reserves key in one of the in-flight guards, reporting false when another
+// request already holds it; release gives it back. They are what turns a
+// superseded request into ErrBusy — revoltgo's REST layer takes no context, so a
+// request cannot be cancelled, only not made twice.
+//
+// The guard is passed in rather than named because the two of them key different
+// things — channels and servers — and Revolt does not promise an ID is unique
+// across both. Reading the field to pass it is safe without the lock: the maps
+// are built once in New and only ever cleared, never replaced.
+func (c *Client) claim(guard map[string]bool, key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.fetching[channelID] {
+	if guard[key] {
 		return false
 	}
-	c.fetching[channelID] = true
+	guard[key] = true
 
 	return true
 }
 
-func (c *Client) endFetch(channelID string) {
+func (c *Client) release(guard map[string]bool, key string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(c.fetching, channelID)
+	delete(guard, key)
+}
+
+// inParallel runs fn over every item, at most resolveWorkers at a time, and
+// returns once they have all finished. A slot is taken before the goroutine
+// starts rather than inside it, so the fan-out is bounded by the semaphore and
+// not merely throttled by it.
+func inParallel[T any](items []T, fn func(T)) {
+	var wg sync.WaitGroup
+
+	slots := make(chan struct{}, resolveWorkers)
+	for _, item := range items {
+		wg.Add(1)
+		slots <- struct{}{}
+
+		go func() {
+			defer func() { <-slots; wg.Done() }()
+			fn(item)
+		}()
+	}
+	wg.Wait()
 }
 
 /* Authors */
@@ -277,10 +332,15 @@ type AuthorRef struct {
 
 // AuthorResolution is what one batch came back with. Failed refs are handed back
 // so the caller can drop its guard and let a later message retry.
+//
+// It does not report whether a *member* record in particular was fetched. It used
+// to, so the caller could skip rebuilding the member sidebar for a pure user
+// fetch — but resolving the account behind an already-cached membership is what
+// gives that membership a name, so the sidebar and its mention candidates change
+// either way.
 type AuthorResolution struct {
 	Resolved []string
 	Failed   []AuthorRef
-	Member   bool // a member record was fetched, so the member sidebar changed
 }
 
 // ResolveAuthors pulls a batch of message authors into State, bounded by
@@ -296,56 +356,46 @@ func (c *Client) ResolveAuthors(targets []AuthorRef) AuthorResolution {
 	var (
 		mu     sync.Mutex
 		result AuthorResolution
-		wg     sync.WaitGroup
 	)
 
-	slots := make(chan struct{}, resolveWorkers)
-	for _, target := range targets {
-		wg.Add(1)
-		slots <- struct{}{}
+	inParallel(targets, func(target AuthorRef) {
+		ok := resolveAuthor(session, target)
 
-		go func() {
-			defer func() { <-slots; wg.Done() }()
+		mu.Lock()
+		defer mu.Unlock()
 
-			ok, fetchedMember := resolveAuthor(session, target)
-
-			mu.Lock()
-			if ok {
-				result.Resolved = append(result.Resolved, target.UserID)
-			} else {
-				result.Failed = append(result.Failed, target)
-			}
-			result.Member = result.Member || fetchedMember
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
+		if ok {
+			result.Resolved = append(result.Resolved, target.UserID)
+		} else {
+			result.Failed = append(result.Failed, target)
+		}
+	})
 
 	return result
 }
 
 // resolveAuthor fetches the user and, in a server, the member record behind one
 // author, pulling both into State. It reports whether the author is now
-// resolvable and whether a member record was actually fetched.
-func resolveAuthor(session *revoltgo.Session, target AuthorRef) (ok, fetchedMember bool) {
+// resolvable.
+func resolveAuthor(session *revoltgo.Session, target AuthorRef) bool {
 	if session.State.User(target.UserID) == nil {
 		if _, err := session.User(target.UserID); err != nil {
 			log.Printf("fetch user %s: %v", target.UserID, err)
-			return false, false
+			return false
 		}
 	}
 
 	// A missing member is only worth asking for in a server channel.
 	if target.ServerID == "" || session.State.Member(target.ServerID, target.UserID) != nil {
-		return true, false
+		return true
 	}
 
 	if _, err := session.ServerMember(target.ServerID, target.UserID); err != nil {
 		log.Printf("fetch member %s in server %s: %v", target.UserID, target.ServerID, err)
-		return false, false
+		return false
 	}
 
-	return true, true
+	return true
 }
 
 /* Conversations */
@@ -400,19 +450,11 @@ func resolveRecipients(session *revoltgo.Session, channels []*revoltgo.Channel) 
 		}
 	}
 
-	var wg sync.WaitGroup
-	slots := make(chan struct{}, resolveWorkers)
-	for _, id := range missing {
-		wg.Add(1)
-		slots <- struct{}{}
-		go func() {
-			defer func() { <-slots; wg.Done() }()
-			if _, err := session.User(id); err != nil {
-				log.Printf("fetch dm recipient %s: %v", id, err)
-			}
-		}()
-	}
-	wg.Wait()
+	inParallel(missing, func(id string) {
+		if _, err := session.User(id); err != nil {
+			log.Printf("fetch dm recipient %s: %v", id, err)
+		}
+	})
 }
 
 // OpenConversation returns the direct message with a user, asking the server to
@@ -453,6 +495,60 @@ func (c *Client) CloseChannel(channelID string) error {
 }
 
 /* Servers and members */
+
+// FetchMembers pulls a server's whole membership into the local cache, the
+// accounts behind it included, so the store can answer for everybody afterwards
+// without going back to the network. Concurrent calls for the same server return
+// ErrBusy.
+//
+// Revolt's members endpoint has no pagination and no search, so a server is one
+// request or nothing at all. exclude_offline is the only lever it offers and the
+// client declines it: the offline half is most of what a member list is for, and
+// asking without it is the only way to know the membership at all.
+//
+// The users matter as much as the memberships. revoltgo's State silently drops
+// an update for an account it has never cached, so somebody nobody had fetched
+// could never be seen to come online — this is what puts them there.
+//
+// The State write happens inside revoltgo and is gated on its TrackBulkAPICalls
+// option, which the client leaves at the default. Turn that off and this
+// succeeds while quietly recording nothing.
+func (c *Client) FetchMembers(serverID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+	if !c.claim(c.fetchingMembers, serverID) {
+		return ErrBusy
+	}
+	defer c.release(c.fetchingMembers, serverID)
+
+	_, err := session.ServerMembers(serverID, false)
+
+	return err
+}
+
+// FetchInvite resolves an invite code into the server it opens, without
+// redeeming it. It is what an invite card is drawn from, so it is asked for
+// every distinct code that appears in a channel — the caller is expected to
+// remember the answer rather than ask again on every scroll.
+//
+// Unlike the rest of the read side this cannot go through Store: State caches
+// only what the account is a member of, and an invite's whole purpose is naming
+// a server it is not.
+func (c *Client) FetchInvite(code string) (domain.Invite, error) {
+	session := c.session.Load()
+	if session == nil {
+		return domain.Invite{}, ErrNoSession
+	}
+
+	invite, err := session.Invite(code)
+	if err != nil {
+		return domain.Invite{}, err
+	}
+
+	return toInvite(code, invite), nil
+}
 
 // JoinInvite redeems an invite code.
 //

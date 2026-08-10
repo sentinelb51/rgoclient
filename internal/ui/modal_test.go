@@ -20,11 +20,17 @@ type stubActions struct{}
 
 func (stubActions) OnUserTapped(string, fyne.CanvasObject)     {}
 func (stubActions) OnChannelTapped(string)                     {}
+func (stubActions) OnServerTapped(string)                      {}
+func (stubActions) OnJoinInvite(string)                        {}
 func (stubActions) OnAttachmentTapped(*domain.File)            {}
 func (stubActions) OnReply(*domain.Message)                    {}
 func (stubActions) OnEdit(*domain.Message)                     {}
 func (stubActions) OnDelete(*domain.Message)                   {}
 func (stubActions) ResolveMessage(_, _ string) *domain.Message { return nil }
+
+// ResolveInvite never answers, which leaves an invite card in the state it
+// mounts in — the state every test that isn't about one wants it to stay in.
+func (stubActions) ResolveInvite(string, func(domain.Invite, error)) {}
 
 // TestAttachmentViewerFits checks that every attachment kind builds a card that
 // stays inside the bounds it was given — the modal is centred at its MinSize, so

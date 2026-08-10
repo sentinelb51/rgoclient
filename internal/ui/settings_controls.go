@@ -201,7 +201,7 @@ func NewSlider(low, high, step, value float64, onChanged func(float64)) *Slider 
 		low:       low,
 		high:      high,
 		step:      step,
-		value:     clampValue(value, low, high),
+		value:     clamp(value, low, high),
 		track:     canvas.NewRectangle(theme.Colors.ChannelSelectedBg),
 		fill:      canvas.NewRectangle(theme.Colors.ServerSelectedBg),
 		knob:      canvas.NewCircle(theme.Colors.TextPrimary),
@@ -229,7 +229,7 @@ func (s *Slider) Value() float64 { return s.value }
 // SetValue moves the slider without calling back, for a value something else
 // changed — the field beside it, or a section resetting a whole group.
 func (s *Slider) SetValue(value float64) {
-	value = clampValue(value, s.low, s.high)
+	value = clamp(value, s.low, s.high)
 	if value == s.value {
 		return
 	}
@@ -268,13 +268,13 @@ func (s *Slider) moveTo(x float32) {
 		return
 	}
 
-	ratio := float64(clampWithin((x-knob/2)/travel, 0, 1))
+	ratio := float64(clamp((x-knob/2)/travel, 0, 1))
 	value := s.low + ratio*(s.high-s.low)
 	if s.step > 0 {
 		value = math.Round(value/s.step) * s.step
 	}
 
-	value = clampValue(value, s.low, s.high)
+	value = clamp(value, s.low, s.high)
 	if value == s.value {
 		return
 	}
@@ -325,10 +325,13 @@ func (l *sliderLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(theme.Sizes.SettingsSliderKnob, theme.Sizes.SettingsSliderHeight)
 }
 
-// newNumberControl is a slider and the exact value beside it, each moving the
-// other. The value is a field once it is clicked: a slider is how a size is
-// *found*, and typing is how one already known is set.
-func newNumberControl(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
+// newNumberBody is a slider and the exact value beside it, each moving the
+// other, without the slot around them. The value is a field once it is clicked:
+// a slider is how a size is *found*, and typing is how one already known is set.
+//
+// The slider takes the fill index, so widening the body lengthens the slider and
+// leaves the value where it is.
+func newNumberBody(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
 	var slider *Slider
 
 	box := newNumberBox(value, low, high, unit, func(typed float64) {
@@ -340,12 +343,25 @@ func newNumberControl(value, low, high, step float64, unit string, onChanged fun
 		onChanged(dragged)
 	})
 
+	return NewFillRow(0,
+		slider,
+		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
+		NewFixedWidthContainer(theme.Sizes.SettingsValueWidth, box),
+	)
+}
+
+// newNumberControl fits the pair into a row's trailing control slot.
+func newNumberControl(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
 	return fixedControl(theme.Sizes.SettingsControlWidth,
-		NewFillRow(0,
-			slider,
-			HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
-			NewFixedWidthContainer(theme.Sizes.SettingsValueWidth, box),
-		))
+		newNumberBody(value, low, high, step, unit, onChanged))
+}
+
+// newWideNumberControl is the pair on a line of its own, pinned to the height of
+// a control slot but given the row's whole width — which is the room a slider
+// needs to be aimed with.
+func newWideNumberControl(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
+	return NewFixedHeightContainer(theme.Sizes.SettingsInputHeight,
+		newNumberBody(value, low, high, step, unit, onChanged))
 }
 
 /* The number beside a slider */
@@ -483,7 +499,7 @@ func (b *numberBox) commit(entry *numberEntry) {
 	b.entry = nil
 
 	if value, err := strconv.ParseFloat(strings.TrimSpace(entry.Text), 64); err == nil {
-		value = clampValue(value, b.low, b.high)
+		value = clamp(value, b.low, b.high)
 		if value != b.value {
 			b.value = value
 			if b.onCommit != nil {
@@ -772,7 +788,7 @@ func newUsageBar() (*fyne.Container, func(ratio float32)) {
 	bar := container.New(layout, track, fill)
 
 	return bar, func(ratio float32) {
-		layout.ratio = clampWithin(ratio, 0, 1)
+		layout.ratio = clamp(ratio, 0, 1)
 		fill.FillColor = usageTint(ratio)
 		fill.Refresh()
 		Relayout(bar)
@@ -821,13 +837,34 @@ func (l *usageBarLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 
 /* The rail */
 
-// settingsRailButton is one section in the rail: its mark, its name, and a fill
-// that says which one is open. TappableContainer would give the hover for free
-// but not the selection, which has to survive the pointer leaving.
+// newSettingsMarker is the bar that says a rail entry is open or a setting is on:
+// transparent until something fills it, flush with the left edge of whatever it
+// is stacked over. It returns the rectangle to fill and the wrapper that pins it
+// left, since the caller keeps the first and mounts the second.
+//
+// It is inset vertically rather than drawn the full height because everything it
+// is laid over has rounded corners — the group card behind a row, the rail
+// button's own fill — and a bar reaching into one squares it off.
+func newSettingsMarker() (*canvas.Rectangle, fyne.CanvasObject) {
+	marker := canvas.NewRectangle(color.Transparent)
+	marker.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, 0))
+	marker.CornerRadius = theme.Sizes.SelectionMarkerWidth / 2
+
+	inset := theme.Sizes.SettingsGroupRadius
+
+	return marker, HBoxNoSpacing(NewInset(marker, inset, inset, 0, 0))
+}
+
+// settingsRailButton is one entry in the rail — a section, or one group of the
+// open section — as its mark, its name, a fill and the bar that says it is the
+// one open. TappableContainer would give the hover for free but not the
+// selection, which has to survive the pointer leaving.
 type settingsRailButton struct {
 	tapBase
 
 	background *canvas.Rectangle
+	marker     *canvas.Rectangle
+	label      *canvas.Text
 	content    fyne.CanvasObject
 	selected   bool
 }
@@ -837,34 +874,74 @@ var (
 	_ desktop.Hoverable = (*settingsRailButton)(nil)
 )
 
+// newSettingsRailButton is a section: its icon, then its name.
 func newSettingsRailButton(entry railEntry, selected bool, onTap func()) *settingsRailButton {
-	b := &settingsRailButton{
-		background: canvas.NewRectangle(color.Transparent),
-		selected:   selected,
-	}
-	b.onTap = onTap
+	return newRailButton(entry.title, entry.icon, selected, onTap)
+}
 
-	text := theme.Colors.CategoryText
-	if selected {
-		text = theme.Colors.TextPrimary
-		b.background.FillColor = theme.Colors.ChannelSelectedBg
-	}
+// newSettingsSubButton is one group of the open section, listed under it. It
+// carries no icon — a group has no mark of its own, and newScaledIcon would
+// reserve the width for a nil resource rather than skip it — so the space an icon
+// would take is what indents it.
+func newSettingsSubButton(title string, selected bool, onTap func()) *settingsRailButton {
+	return newRailButton(title, nil, selected, onTap)
+}
+
+func newRailButton(title string, icon fyne.Resource, selected bool, onTap func()) *settingsRailButton {
+	b := &settingsRailButton{background: canvas.NewRectangle(color.Transparent)}
+	b.onTap = onTap
 	b.background.CornerRadius = theme.Sizes.SettingsGroupRadius
 
-	label := canvas.NewText(entry.title, text)
-	label.TextSize = theme.Sizes.SettingsRailTextSize
+	b.label = canvas.NewText(title, theme.Colors.CategoryText)
+	b.label.TextSize = theme.Sizes.SettingsRailTextSize
+
+	// A sub-entry keeps the width an icon would take and is indented past it, so
+	// its name starts clear of the section names rather than in the same column.
+	indent := theme.Sizes.ChipPaddingH
+	var lead fyne.CanvasObject = HorizontalSpacer(theme.Sizes.SettingsIconSize)
+	if icon != nil {
+		lead = container.NewCenter(newScaledIcon(icon, theme.Sizes.SettingsIconSize))
+	} else {
+		indent += theme.Sizes.SettingsPreviewGap
+	}
 
 	row := HBoxNoSpacing(
-		container.NewCenter(newScaledIcon(entry.icon, theme.Sizes.SettingsIconSize)),
+		lead,
 		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
-		container.NewCenter(label),
+		container.NewCenter(b.label),
 	)
 
+	var markerRow fyne.CanvasObject
+	b.marker, markerRow = newSettingsMarker()
+
 	b.content = NewMinHeightContainer(theme.Sizes.SettingsRailRowHeight,
-		container.NewStack(b.background, NewInset(row, 0, 0, theme.Sizes.ChipPaddingH, 0)))
+		container.NewStack(b.background, markerRow, NewInset(row, 0, 0, indent, 0)))
 	b.ExtendBaseWidget(b)
 
+	b.setSelected(selected)
+
 	return b
+}
+
+// setSelected repaints in place. The rail is not rebuilt to move the selection:
+// following the pane's scroll would otherwise replace every button several times
+// a second, including the one under the pointer — which then never hears MouseOut.
+func (b *settingsRailButton) setSelected(selected bool) {
+	b.selected = selected
+
+	b.label.Color = theme.Colors.CategoryText
+	b.background.FillColor = color.Transparent
+	b.marker.FillColor = color.Transparent
+
+	if selected {
+		b.label.Color = theme.Colors.TextPrimary
+		b.background.FillColor = theme.Colors.ChannelSelectedBg
+		b.marker.FillColor = theme.Colors.TextPrimary
+	}
+
+	b.label.Refresh()
+	b.background.Refresh()
+	b.marker.Refresh()
 }
 
 func (b *settingsRailButton) CreateRenderer() fyne.WidgetRenderer {
@@ -919,10 +996,3 @@ func (s *dismissSink) CreateRenderer() fyne.WidgetRenderer {
 }
 
 func (s *dismissSink) Cursor() desktop.Cursor { return desktop.DefaultCursor }
-
-/* Small helpers */
-
-// clampValue holds v inside [low, high].
-func clampValue(v, low, high float64) float64 {
-	return math.Max(low, math.Min(v, high))
-}

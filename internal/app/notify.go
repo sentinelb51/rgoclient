@@ -37,6 +37,17 @@ func (a *App) confirm(question ui.Confirm) {
 	a.showOverlay(ui.NewConfirmDialog(question, a.closeOverlay))
 }
 
+// notifyFailure is the standard failure handler for an action whose only visible
+// outcome is a notice: the API error goes to the log under what, the user gets
+// the sentence. It is what App.background's onFail wants nearly everywhere, so an
+// action that needs more should wrap this rather than restate it.
+func (a *App) notifyFailure(what string, format string, args ...any) func(error) {
+	return func(err error) {
+		log.Printf("%s: %v", what, err)
+		a.notify(ui.ToneDanger, format, args...)
+	}
+}
+
 /* Leaving a server */
 
 // confirmLeaveServer asks before leaving. The owner is never offered this — see
@@ -177,5 +188,5 @@ func (a *App) canKickMember(serverID, userID string) bool {
 		return false
 	}
 
-	return a.store.CanKickMembers(serverID)
+	return a.store.ServerPermissions(serverID).Has(domain.PermissionKickMembers)
 }

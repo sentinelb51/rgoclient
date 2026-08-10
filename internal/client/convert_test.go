@@ -141,3 +141,37 @@ func TestToEmbedsSkipsTheUndrawable(t *testing.T) {
 		t.Errorf("kept %q, want the website embed", got[0].Title)
 	}
 }
+
+// TestUserUpdateKindsSeparatesPresenceFromIdentity covers the classification the
+// member sidebar's whole event budget rests on. A presence change reorders the
+// list and is coalesced; a rename repaints one row. Getting the two the wrong way
+// round means either a rebuild per status change on a thousand-member server, or
+// somebody who never moves out of Offline.
+func TestUserUpdateKindsSeparatesPresenceFromIdentity(t *testing.T) {
+	online, name := true, "Ada"
+
+	tests := []struct {
+		label              string
+		data               revoltgo.PartialUser
+		clear              []string
+		presence, identity bool
+	}{
+		{"coming online", revoltgo.PartialUser{Online: &online}, nil, true, false},
+		{"a status", revoltgo.PartialUser{Status: &revoltgo.UserStatus{Text: "afk"}}, nil, true, false},
+		{"a rename", revoltgo.PartialUser{DisplayName: &name}, nil, false, true},
+		{"both at once", revoltgo.PartialUser{Online: &online, DisplayName: &name}, nil, true, true},
+		{"a cleared avatar", revoltgo.PartialUser{}, []string{"Avatar"}, false, true},
+		{"profile text nothing draws", revoltgo.PartialUser{}, []string{"ProfileContent"}, false, false},
+		{"nothing at all", revoltgo.PartialUser{}, nil, false, false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.label, func(t *testing.T) {
+			presence, identity := userUpdateKinds(test.data, test.clear)
+			if presence != test.presence || identity != test.identity {
+				t.Errorf("got (presence=%v, identity=%v), want (%v, %v)",
+					presence, identity, test.presence, test.identity)
+			}
+		})
+	}
+}

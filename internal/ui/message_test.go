@@ -208,7 +208,7 @@ func TestMentionsOpenWhatTheyName(t *testing.T) {
 	}
 
 	for _, m := range mentions {
-		if m.onMenu == nil {
+		if m.onSecondaryTap == nil {
 			t.Errorf("mention %q answers no right-click", m.textObj.Text)
 		}
 	}

@@ -110,30 +110,107 @@ func (a *App) showJoinServer() {
 	a.window.Canvas().Focus(dialog.Entry)
 }
 
-// joinServer redeems an invite code, closing the dialog once the server is in.
+// joinInvite redeems an invite code and reports the outcome to done, on the UI
+// thread. It is shared by the two places a join starts from — the dialog and an
+// invite card in a message — which differ only in where a failure is said.
 //
 // The joined server reaches the sidebar through the ServerJoined event rather
 // than this response — see Client.JoinInvite for why the response cannot name it
 // — so pendingJoin marks the request, telling onServerJoined this is the server
 // to switch to.
-func (a *App) joinServer(code string) {
+func (a *App) joinInvite(code string, done func(err error)) {
 	a.pendingJoin = true
 
 	go func() {
 		err := a.client.JoinInvite(code)
 
 		a.doOnUI(func() {
-			if err == nil {
-				a.closeOverlay()
+			if err != nil {
+				// The API's message ("bad status code 404: ...") is no use to the
+				// user, so it goes to the log and the caller says what to do.
+				log.Printf("join invite %s: %v", code, err)
+				a.pendingJoin = false
+			}
+			done(err)
+		}, false)
+	}()
+}
+
+// joinServer redeems a code from the invite dialog, closing it once the server
+// is in and reporting a failure on the dialog's own status line.
+func (a *App) joinServer(code string) {
+	a.joinInvite(code, func(err error) {
+		if err == nil {
+			a.closeOverlay()
+			return
+		}
+
+		if a.joinDialog != nil {
+			a.joinDialog.Fail("Could not join. Check the invite and try again.")
+		}
+	})
+}
+
+// OnJoinInvite redeems a code from an invite card in a message. There is no
+// dialog to answer in, and no overlay to close on success — the sidebar simply
+// gains the server — so only the failure is worth saying, on the notice layer.
+func (a *App) OnJoinInvite(code string) {
+	a.joinInvite(code, func(err error) {
+		if err != nil {
+			a.notify(ui.ToneWarning, "Could not join that server. The invite may have expired.")
+		}
+	})
+}
+
+// inviteResult is what a code resolved to. A failure is remembered alongside a
+// success because an invite that has expired stays expired, and a card that
+// re-asked on every scroll past its message would be a request per frame.
+type inviteResult struct {
+	invite domain.Invite
+	err    error
+}
+
+// resetInvites drops every resolved invite and every card still waiting on one.
+// The same code resolves differently for a different account — a server one is
+// in and another is not — so none of it survives a change of session.
+func (a *App) resetInvites() {
+	a.invites = make(map[string]inviteResult)
+	a.pendingInvites = make(map[string][]func(domain.Invite, error))
+}
+
+// ResolveInvite fills in what an invite code opens, from the session cache when
+// it has been asked before and from the network when it has not.
+func (a *App) ResolveInvite(code string, done func(domain.Invite, error)) {
+	if cached, ok := a.invites[code]; ok {
+		done(cached.invite, cached.err)
+		return
+	}
+
+	if waiting, inFlight := a.pendingInvites[code]; inFlight {
+		a.pendingInvites[code] = append(waiting, done)
+		return
+	}
+	a.pendingInvites[code] = []func(domain.Invite, error){done}
+
+	// Not through background: a failure here is an answer the card draws itself,
+	// not a notice, so there is nothing for an onFail to do.
+	epoch := a.epoch
+	go func() {
+		invite, err := a.client.FetchInvite(code)
+
+		a.doOnUI(func() {
+			waiting := a.pendingInvites[code]
+			delete(a.pendingInvites, code)
+
+			// A card from the previous account's view is gone along with the tree
+			// it was in, and its answer must not be cached against this one.
+			if a.stale(epoch) {
 				return
 			}
 
-			// The API's message ("bad status code 404: ...") is no use to the user,
-			// so it goes to the log and the dialog says what to do.
-			log.Printf("join invite %s: %v", code, err)
-			a.pendingJoin = false
-			if a.joinDialog != nil {
-				a.joinDialog.Fail("Could not join. Check the invite and try again.")
+			a.invites[code] = inviteResult{invite: invite, err: err}
+			for _, fill := range waiting {
+				fill(invite, err)
 			}
 		}, false)
 	}()

@@ -81,9 +81,11 @@ type ChannelClosed struct {
 }
 
 // MembersChanged reports that a server's membership has changed — someone joined
-// or left.
+// or left. The user is named because a join arrives before anything knows the
+// account behind it.
 type MembersChanged struct {
 	ServerID string
+	UserID   string
 }
 
 // MemberUpdated reports one member's nickname, roles or avatar changing.
@@ -92,16 +94,48 @@ type MemberUpdated struct {
 	UserID   string
 }
 
-func (Ready) isEvent()          {}
-func (Disconnected) isEvent()   {}
-func (MessageCreated) isEvent() {}
-func (MessageUpdated) isEvent() {}
-func (MessageDeleted) isEvent() {}
-func (ServerJoined) isEvent()   {}
-func (ServerLeft) isEvent()     {}
-func (ChannelClosed) isEvent()  {}
-func (MembersChanged) isEvent() {}
-func (MemberUpdated) isEvent()  {}
+// UserUpdated names a user whose account changed in a way that is drawn but
+// moves nothing: their name, avatar or badges.
+//
+// Neither this nor PresenceChanged carries the new value. An event names what
+// moved and the store answers what things now are, which is the whole contract
+// here — and it is what keeps a coalesced burst correct, the last read winning.
+type UserUpdated struct {
+	UserID string
+}
+
+// PresenceChanged names a user who came online, went offline, or changed status.
+// It is separate from UserUpdated because it is the one user change that
+// *reorders* the member list, and so the one worth coalescing.
+type PresenceChanged struct {
+	UserID string
+}
+
+// TypingChanged names somebody who started or stopped typing in a channel.
+//
+// It is the one event here that carries its value rather than naming what moved,
+// because there is nothing to ask afterwards: revoltgo's State does not model
+// typing, so no store answers who is typing where. The reader keeps that itself.
+type TypingChanged struct {
+	ChannelID string
+	UserID    string
+
+	Typing bool
+}
+
+func (Ready) isEvent()           {}
+func (Disconnected) isEvent()    {}
+func (MessageCreated) isEvent()  {}
+func (MessageUpdated) isEvent()  {}
+func (MessageDeleted) isEvent()  {}
+func (ServerJoined) isEvent()    {}
+func (ServerLeft) isEvent()      {}
+func (ChannelClosed) isEvent()   {}
+func (MembersChanged) isEvent()  {}
+func (MemberUpdated) isEvent()   {}
+func (UserUpdated) isEvent()     {}
+func (PresenceChanged) isEvent() {}
+func (TypingChanged) isEvent()   {}
 
 /* Registration */
 
@@ -224,14 +258,75 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberJoin) {
-		c.emit(epoch, MembersChanged{ServerID: event.ID})
+		c.emit(epoch, MembersChanged{ServerID: event.ID, UserID: event.User})
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberLeave) {
-		c.emit(epoch, MembersChanged{ServerID: event.ID})
+		c.emit(epoch, MembersChanged{ServerID: event.ID, UserID: event.User})
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberUpdate) {
 		c.emit(epoch, MemberUpdated{ServerID: event.ID.Server, UserID: event.ID.User})
 	})
+
+	// Nothing subscribed to this before, so somebody's avatar or display name
+	// changing stayed invisible for the life of the session — and presence never
+	// moved anybody between the member list's sections at all, State's own copy
+	// being kept current with nothing to announce it. revoltgo's default handler
+	// has already applied the change by the time this runs; all that is decided
+	// here is which of the two kinds it was.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserUpdate) {
+		presence, identity := userUpdateKinds(event.Data, event.Clear)
+		if presence {
+			c.emit(epoch, PresenceChanged{UserID: event.ID})
+		}
+		if identity {
+			c.emit(epoch, UserUpdated{UserID: event.ID})
+		}
+	})
+
+	// Both halves are registered because EventChannelStopTyping *embeds* the start
+	// event rather than aliasing it: the fields are promoted, but the handler is
+	// keyed on the concrete type and one does not answer for the other. The ID is
+	// the channel's.
+	//
+	// Neither is gated on the setting that draws them. revoltgo drops an event
+	// before decoding it when nothing is registered for its type, so registering
+	// nothing would be the cheaper answer — but there is no way to unregister
+	// afterwards, and the setting has to be able to change without a reconnect.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStartTyping) {
+		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User, Typing: true})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStopTyping) {
+		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User})
+	})
+}
+
+// userUpdateKinds classifies a partial user update. Both may be true, and two
+// events are emitted rather than one carrying a flag: a reader that has to
+// remember which bits of an event applied to it is a reader that will one day
+// read the wrong one.
+//
+// Telling the two apart at all is what PartialUser makes possible — every field
+// is nilable and Online is separate from Status, so a presence change is
+// recognisable without comparing the result against what was there before. Clear
+// names the fields the update *removes*, and a cleared avatar or display name is
+// as much a change as a set one; the rest of what Clear can carry is profile
+// text, which nothing mounted draws.
+func userUpdateKinds(data revoltgo.PartialUser, clear []string) (presence, identity bool) {
+	// Status is taken as presence whatever moved inside it. It carries the
+	// presence and the status line together, and re-reading is cheap where
+	// guessing wrong leaves somebody in the wrong section.
+	presence = data.Online != nil || data.Status != nil
+	identity = data.Username != nil || data.DisplayName != nil ||
+		data.Discriminator != nil || data.Avatar != nil || data.Badges != nil
+
+	for _, field := range clear {
+		if field == "Avatar" || field == "DisplayName" {
+			identity = true
+		}
+	}
+
+	return presence, identity
 }

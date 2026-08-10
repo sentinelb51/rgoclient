@@ -86,11 +86,32 @@ func (a *App) bindKeys() {
 /* Applying */
 
 // updateSettings records a change and carries out whatever takes effect at once.
-// The budgets are the only ones: they live on the cache rather than being read
-// from it, so they are set here rather than waiting for a rebuild.
+// Two things do: the picture budgets, which live on the cache rather than being
+// read from it, and the member list, whose shape is decided when it is built
+// rather than per row — so the Members group would otherwise do nothing visible
+// until somebody joined the open server.
 func (a *App) updateSettings(mutate func(*config.Settings)) {
 	config.Update(mutate)
-	a.images.SetLimits(imageLimits(config.Current().Cache))
+
+	settings := config.Current().Cache
+	a.images.SetLimits(imageLimits(settings))
+	a.emojis.SetLimits(emojiLimits(settings))
+
+	a.refreshMemberList()
+
+	// The typing settings are read where they are drawn, so turning the limit to
+	// zero or the animation off has to reach both surfaces now rather than at the
+	// next event. Withdrawing consent to be seen typing is the one that cannot
+	// wait to be noticed: it has to be said out loud, once, on the way out.
+	behaviour := config.Current().Behaviour
+	if !behaviour.SendTyping {
+		a.stopTyping(a.typingChannelID)
+	}
+	if !behaviour.TypingShowSelf {
+		a.forgetSelfTyping()
+	}
+	a.refreshTyping()
+	a.syncChannelList()
 }
 
 // applyStyles rebuilds the theme tables from the settings. The client itself is
@@ -125,15 +146,45 @@ func (a *App) restyle() {
 		a.displayCached()
 	}
 
+	// The typing line is a fresh widget knowing nothing, and the channel rows are
+	// the same objects with their renderers replaced — which stopped the pulse on
+	// the way out. Both are put back from state that outlived the rebuild.
+	a.refreshTyping()
+	a.syncChannelList()
+
 	a.styleNativeChrome(a.window)
 }
 
-// imageLimits is the cache's budgets as the settings express them.
+// emojiShare is the slice of the picture budget the emoji cache is given. The
+// settings name one number for what cached pictures may occupy, so the two caches
+// divide it rather than the second quietly doubling it. An eighth is generous —
+// an emoji is kilobytes where an attachment is megabytes — and what makes the
+// split worth having is not its size anyway: it is that an afternoon of scrolling
+// through pictures can no longer evict the handful of emoji every message is
+// drawn with.
+const emojiShare = 8
+
+// imageLimits is the picture cache's budgets as the settings express them, less
+// the emoji cache's share.
 func imageLimits(settings config.Cache) cache.ImageLimits {
+	emoji := emojiLimits(settings)
+
 	return cache.ImageLimits{
-		DiskBytes:   settings.ImageDiskBytes(),
-		MemoryBytes: settings.ImageMemoryBytes(),
+		DiskBytes:   settings.ImageDiskBytes() - emoji.DiskBytes,
+		MemoryBytes: settings.ImageMemoryBytes() - emoji.MemoryBytes,
 		MaxEdge:     int64(settings.MaxImageEdge),
+		Loaders:     settings.ImageLoaders,
+	}
+}
+
+// emojiLimits is that share, decoded at the emoji cap rather than the settings'
+// — see cache.EmojiMaxEdge.
+func emojiLimits(settings config.Cache) cache.ImageLimits {
+	return cache.ImageLimits{
+		DiskBytes:   settings.ImageDiskBytes() / emojiShare,
+		MemoryBytes: settings.ImageMemoryBytes() / emojiShare,
+		MaxEdge:     cache.EmojiMaxEdge,
+		Loaders:     settings.ImageLoaders,
 	}
 }
 
@@ -156,7 +207,7 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		ForgetSession: a.forgetSession,
 		LogOut:        a.logOut,
 
-		CacheDir:       a.images.Dir,
+		CacheDir:       func() string { return a.assetDir },
 		ChooseCacheDir: a.chooseCacheDir,
 		CacheStats:     a.cacheStats,
 		ClearCache:     a.clearImageCache,
@@ -234,12 +285,14 @@ func (a *App) chooseCacheDir(onPicked func(path string)) {
 	}, a.window)
 }
 
-// cacheStats measures the image cache off the UI thread and reports back on it.
+// cacheStats measures the picture caches off the UI thread and reports back on
+// it. The two are summed: they divide one budget, and it is that one number the
+// settings page meters them against.
 func (a *App) cacheStats(onDone func(cache.ImageStats)) {
 	epoch := a.epoch
 
 	go func() {
-		stats := a.images.Stats()
+		stats := a.images.Stats().Add(a.emojis.Stats())
 		a.doOnUI(func() {
 			if !a.stale(epoch) {
 				onDone(stats)
@@ -254,13 +307,14 @@ func (a *App) cacheStats(onDone func(cache.ImageStats)) {
 func (a *App) clearImageCache() {
 	a.background(func() error {
 		a.images.Clear()
+		a.emojis.Clear()
 		return nil
 	}, nil)
 
 	a.notifyNotice(ui.Notice{
 		Tone:  ui.ToneInfo,
 		Title: "Image cache cleared",
-		Body:  "Avatars and attachments are downloaded again as they are next drawn.",
+		Body:  "Avatars, attachments and emoji are downloaded again as they are next drawn.",
 	})
 }
 

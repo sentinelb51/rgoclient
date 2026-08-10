@@ -67,9 +67,15 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
-	mu       sync.Mutex               // guards fetching and slowmode
+	mu       sync.Mutex               // guards the three maps below
 	fetching map[string]bool          // channelID -> a page request is already in flight
 	slowmode map[string]time.Duration // channelID -> its send cooldown, once asked for
+
+	// fetchingMembers is fetching's counterpart for FetchMembers. A map of its own
+	// rather than a shared one because the key spaces are different — these are
+	// server IDs — and a channel and a server sharing an ID is not a thing Revolt
+	// promises will never happen.
+	fetchingMembers map[string]bool
 }
 
 // New returns a client with no session. Every read reports nothing known and
@@ -82,11 +88,12 @@ type Client struct {
 func New() *Client {
 	settings := config.Current().Cache
 	c := &Client{
-		messages: cache.NewMessageCache(settings.MessagesPerChannel, settings.CachedChannels),
-		events:   make(chan Event, eventBuffer),
-		done:     make(chan struct{}),
-		fetching: make(map[string]bool),
-		slowmode: make(map[string]time.Duration),
+		messages:        cache.NewMessageCache(settings.MessagesPerChannel, settings.CachedChannels),
+		events:          make(chan Event, eventBuffer),
+		done:            make(chan struct{}),
+		fetching:        make(map[string]bool),
+		slowmode:        make(map[string]time.Duration),
+		fetchingMembers: make(map[string]bool),
 	}
 	c.store = &store{client: c}
 
@@ -162,6 +169,7 @@ func (c *Client) Close() {
 	c.mu.Lock()
 	clear(c.fetching)
 	clear(c.slowmode)
+	clear(c.fetchingMembers)
 	c.mu.Unlock()
 
 	if session != nil {

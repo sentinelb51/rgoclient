@@ -1,7 +1,9 @@
 // Package markdown parses the Discord/Revolt flavour of markdown into a small
 // AST. It is deliberately not CommonMark: a single newline is a hard line break,
 // __text__ is underline rather than bold, and it adds -# subtext and ||spoiler||
-// syntax.
+// syntax. Where the two do not disagree it follows CommonMark — backslash escapes
+// any ASCII punctuation, a code span closes on a backtick run of its own length,
+// a link destination may bracket or balance its parentheses.
 //
 // The package is pure — no UI dependency — so it can be tested in isolation.
 // Rendering the AST to Fyne widgets lives in internal/ui.
@@ -31,8 +33,10 @@ type (
 	// Subtext is the small, muted -# line.
 	Subtext struct{ Children []Inline }
 
-	// Blockquote is a > quoted run; multiple quoted lines join with LineBreaks.
-	Blockquote struct{ Children []Inline }
+	// Blockquote is a > quoted run. It holds blocks rather than inlines because a
+	// quote may contain any of them — "> # Note" is a heading inside a quote, and
+	// a second ">" survives the strip, so quotes nest.
+	Blockquote struct{ Blocks []Block }
 
 	// CodeBlock is a fenced ``` block whose content is rendered literally.
 	CodeBlock struct {
@@ -40,11 +44,21 @@ type (
 		Text     string
 	}
 
-	// List is a run of consecutive list items, ordered or unordered.
+	// List is a run of consecutive list items, ordered or unordered. Start is the
+	// first item's number, kept for a renderer that only wants the run's origin.
 	List struct {
 		Ordered bool
 		Start   int
-		Items   [][]Inline
+		Items   []ListItem
+	}
+
+	// ListItem is one entry of a List. Indent is its nesting depth — a sublist is
+	// not a List of its own, since the run is one block and only the marker column
+	// moves — and Number is what an ordered item counts as at that depth.
+	ListItem struct {
+		Indent   int
+		Number   int
+		Children []Inline
 	}
 )
 
@@ -85,7 +99,8 @@ type (
 	// Code is `inline code`, rendered literally in a monospace font.
 	Code struct{ Text string }
 
-	// Link is a [label](url) masked link.
+	// Link is a [label](url) masked link, a <url> bracketed one, or a bare URL
+	// found in running text — the last two carry the URL as their own label.
 	Link struct {
 		Children []Inline
 		URL      string
@@ -97,6 +112,11 @@ type (
 	UserMention struct{ UserID string }
 
 	ChannelMention struct{ ChannelID string }
+
+	// Emoji is a :01J9WN3PHX4ZQSNSZH10CK4RHS: custom emoji, carrying only the ID
+	// for the same reason the mentions do — the picture is served from a CDN this
+	// package has no business naming.
+	Emoji struct{ EmojiID string }
 )
 
 func (*Text) isInline()           {}
@@ -110,3 +130,4 @@ func (*Code) isInline()           {}
 func (*Link) isInline()           {}
 func (*UserMention) isInline()    {}
 func (*ChannelMention) isInline() {}
+func (*Emoji) isInline()          {}

@@ -29,8 +29,8 @@ import (
 
 /* Account */
 
-func (p *SettingsPage) accountSection() []fyne.CanvasObject {
-	groups := []fyne.CanvasObject{p.group("Signed in as", "", p.identityRow())}
+func (p *SettingsPage) accountSection() []settingsGroup {
+	groups := []settingsGroup{p.group("Signed in as", "", p.identityRow())}
 
 	var cards []fyne.CanvasObject
 	for _, session := range p.hooks.Sessions() {
@@ -49,12 +49,12 @@ func (p *SettingsPage) accountSection() []fyne.CanvasObject {
 	}
 	if len(cards) > 0 {
 		groups = append(groups, p.group("Saved logins",
-			"Tokens kept on this machine so a login can be resumed without the password.",
+			"Accounts you can sign back into on this computer without typing your password.",
 			cards...))
 	}
 
 	groups = append(groups, p.group("Session", "",
-		p.actionRow("Log out", "Ends this session and returns to the login screen.",
+		p.actionRow("Log out", "Signs out and returns to the login screen.",
 			"Log out", ToneDanger, func() {
 				p.hooks.Confirm(Confirm{
 					Title:     "Log out",
@@ -89,7 +89,7 @@ func newSwatchlessAvatar(deps Deps, url string) fyne.CanvasObject {
 
 /* Interface */
 
-func (p *SettingsPage) interfaceSection() []fyne.CanvasObject {
+func (p *SettingsPage) interfaceSection() []settingsGroup {
 	settings := config.Current().Interface
 
 	accent := settings.Accent
@@ -97,10 +97,10 @@ func (p *SettingsPage) interfaceSection() []fyne.CanvasObject {
 		accent = theme.Hex(theme.Colors.ServerSelectedBg)
 	}
 
-	return []fyne.CanvasObject{
+	return []settingsGroup{
 		p.group("Appearance", "",
 			p.accentRow(accent),
-			p.optionRow("Density", "Sets the spacing of the message list in one go.",
+			p.optionRow("Density", "How tightly messages are spaced.",
 				settings.Density, densityOptions, func(s *config.Settings, value string) {
 					s.Interface.Density = value
 					applyDensity(s, value)
@@ -111,7 +111,7 @@ func (p *SettingsPage) interfaceSection() []fyne.CanvasObject {
 		),
 		p.group("Messages", "",
 			p.styleToggleRow("Group consecutive messages",
-				"Hides the repeated name and avatar when the same person writes again.",
+				"Hides the name and avatar when the same person writes again.",
 				settings.GroupMessages, func(s *config.Settings, on bool) { s.Interface.GroupMessages = on }),
 			p.styleToggleRow("Show the member sidebar by default", "",
 				settings.ShowMemberSidebar, func(s *config.Settings, on bool) { s.Interface.ShowMemberSidebar = on }),
@@ -139,26 +139,33 @@ func (p *SettingsPage) accentRow(accent string) fyne.CanvasObject {
 		})
 	})
 
-	return p.row("Accent colour", "Selection, focus rings, mentions and links.", control)
+	return p.row("Accent colour", "Used for selection, focus outlines, mentions and links.", control)
 }
 
 // fontSizeRow drives Fyne's own text size, which is what the built-in widgets —
 // buttons, menus, entries — draw at. The client's own text is sized by named
 // entries in the table, under Styles.
 func (p *SettingsPage) fontSizeRow(size float32) fyne.CanvasObject {
-	control := newNumberControl(float64(size), minFontSize, maxFontSize, 1, "pt", func(v float64) {
+	control := newWideNumberControl(float64(size), minFontSize, maxFontSize, 1, "pt", func(v float64) {
 		p.restyle(func(s *config.Settings) { s.Interface.FontSize = float32(v) })
 	})
 
-	return p.row("Interface font size", "Buttons, menus and text fields.", control)
+	return p.stackedRow("Interface font size", "The size of text in buttons, menus and text fields.", control)
 }
 
 /* Styles */
 
-func (p *SettingsPage) stylesSection() []fyne.CanvasObject {
-	groups := make([]fyne.CanvasObject, 0, len(styleGroups)+2)
+func (p *SettingsPage) stylesSection() []settingsGroup {
+	groups := make([]settingsGroup, 0, len(styleGroups)+2)
 
 	for _, group := range styleGroups {
+		// Gated whole rather than row by row: every group ends with its own reset
+		// button, so dropping only the sizes would leave a card holding nothing but
+		// a way to undo them.
+		if group.advanced && !p.advanced {
+			continue
+		}
+
 		rows := make([]fyne.CanvasObject, 0, len(group.fields))
 		for _, field := range group.fields {
 			if row := p.sizeRow(field.label, field.name); row != nil {
@@ -175,7 +182,7 @@ func (p *SettingsPage) stylesSection() []fyne.CanvasObject {
 	}
 
 	groups = append(groups, p.group("Everything", "",
-		p.actionRow("Reset all styles", "Puts every size and colour back to the client's own.",
+		p.actionRow("Reset all styles", "Returns every size and colour to the client's own.",
 			"Reset", ToneWarning, func() {
 				p.hooks.Confirm(Confirm{
 					Title:  "Reset all styles",
@@ -209,60 +216,95 @@ func (p *SettingsPage) resetFields(fields []styleField) {
 
 /* Behaviour */
 
-func (p *SettingsPage) behaviourSection() []fyne.CanvasObject {
+func (p *SettingsPage) behaviourSection() []settingsGroup {
 	settings := config.Current().Behaviour
 
-	return []fyne.CanvasObject{
-		p.group("Members", "",
-			p.toggleRow("Sort the member list by name",
-				"Off is cheaper: the list is re-sorted on every member event.",
-				settings.SortMembers, func(s *config.Settings, on bool) { s.Behaviour.SortMembers = on }),
-			p.toggleRow("Split into online and offline", "",
+	return []settingsGroup{
+		p.group("Members", "What the member sidebar shows and how it is kept up to date.",
+			p.toggleRow("Load every member",
+				"Shows the whole server. Off, only people who have posted appear.",
+				settings.FetchAllMembers, func(s *config.Settings, on bool) { s.Behaviour.FetchAllMembers = on }),
+			p.adv(p.toggleRow("Sort members by name",
+				"Orders each section alphabetically.",
+				settings.SortMembers, func(s *config.Settings, on bool) { s.Behaviour.SortMembers = on })),
+			p.toggleRow("Separate online and offline", "",
 				settings.GroupByPresence, func(s *config.Settings, on bool) { s.Behaviour.GroupByPresence = on }),
-			p.toggleRow("Hide offline members", "",
+			p.toggleRow("Give roles their own section",
+				"Lists roles such as Moderator above everyone else. Needs the section above.",
+				settings.HoistRoles, func(s *config.Settings, on bool) { s.Behaviour.HoistRoles = on }),
+			p.toggleRow("Hide offline members",
+				"Leaves offline members out of the list.",
 				settings.HideOfflineMembers, func(s *config.Settings, on bool) { s.Behaviour.HideOfflineMembers = on }),
+			p.toggleRow("Hide members without roles",
+				"Shows only people the server has given a role.",
+				settings.HideRolelessMembers, func(s *config.Settings, on bool) { s.Behaviour.HideRolelessMembers = on }),
+			p.adv(p.toggleRow("Update the list as people come and go",
+				"Off, the list only changes when you reopen the server.",
+				settings.LiveMemberPresence, func(s *config.Settings, on bool) { s.Behaviour.LiveMemberPresence = on })),
+			p.adv(p.numberRow("Presence settling time",
+				"How long to wait after a burst of status changes before redrawing the list.",
+				settings.MemberRefreshDelayMS, 0, maxMemberRefreshDelay, "ms",
+				func(s *config.Settings, v int) { s.Behaviour.MemberRefreshDelayMS = v })),
+			p.adv(p.numberRow("Extra rows drawn",
+				"How far past the visible area to draw. Higher is smoother to scroll and uses more memory.",
+				settings.MemberOverscan, 0, maxMemberOverscan, "",
+				func(s *config.Settings, v int) { s.Behaviour.MemberOverscan = v })),
+			p.note("The sidebar can be hidden from the channel header."),
 		),
 		p.group("Typing", "",
 			p.toggleRow("Let others see when I am typing", "",
 				settings.SendTyping, func(s *config.Settings, on bool) { s.Behaviour.SendTyping = on }),
-			p.toggleRow("Show when others are typing", "",
-				settings.ShowTyping, func(s *config.Settings, on bool) { s.Behaviour.ShowTyping = on }),
-			p.toggleRow("Mark typing in the channel list", "",
+			p.numberRow("Names shown when people are typing",
+				"Zero turns the indicator off. Anyone past this many is counted instead.",
+				settings.TypingNames, 0, maxTypingNames, "",
+				func(s *config.Settings, v int) { s.Behaviour.TypingNames = v }),
+			p.toggleRow("Show myself typing",
+				"Adds you to the line while you are composing, as everyone else sees it.",
+				settings.TypingShowSelf, func(s *config.Settings, on bool) { s.Behaviour.TypingShowSelf = on }),
+			p.toggleRow("Mark typing in the channel list",
+				"Puts a mark beside any channel someone is typing in.",
 				settings.TypingInChannels, func(s *config.Settings, on bool) { s.Behaviour.TypingInChannels = on }),
-			p.note(notImplemented+" These are remembered and will take effect when it is."),
+			p.toggleRow("Show pictures beside who is typing",
+				"Draws each person's avatar before their name.",
+				settings.TypingAvatars, func(s *config.Settings, on bool) { s.Behaviour.TypingAvatars = on }),
+			p.toggleRow("Animate the typing marks",
+				"Off, the line rests still instead of sweeping.",
+				settings.TypingAnimation, func(s *config.Settings, on bool) { s.Behaviour.TypingAnimation = on }),
 		),
-		p.group("Messages", "How much of a conversation is kept drawn at once.",
-			p.numberRow("Group window",
-				"The longest gap two messages may still group across.",
+		p.group("Messages", "How much of a conversation is kept on screen at once.",
+			p.adv(p.numberRow("Grouping window",
+				"The longest gap between two messages that still appear under one name.",
 				settings.GroupWindowSeconds, 0, maxGroupWindow, "s",
-				func(s *config.Settings, v int) { s.Behaviour.GroupWindowSeconds = v }),
-			p.numberRow("Mounted on opening a channel",
-				"Fewer is a faster channel switch; scrollback fills in from cache.",
+				func(s *config.Settings, v int) { s.Behaviour.GroupWindowSeconds = v })),
+			p.adv(p.numberRow("Messages shown on open",
+				"Fewer makes switching channels faster. Older messages fill in as you scroll.",
 				settings.InitialMountCount, 5, maxMountedCap, "",
-				func(s *config.Settings, v int) { s.Behaviour.InitialMountCount = v }),
-			p.numberRow("Mounted at most",
-				"The ceiling during scrollback. Every mounted message is real memory.",
+				func(s *config.Settings, v int) { s.Behaviour.InitialMountCount = v })),
+			p.adv(p.numberRow("Maximum messages shown",
+				"The limit while scrolling back. Higher uses more memory.",
 				settings.MountedCap, 20, maxMountedCap, "",
-				func(s *config.Settings, v int) { s.Behaviour.MountedCap = max(v, s.Behaviour.InitialMountCount) }),
-			p.numberRow("Fetched per scroll-up", "",
+				func(s *config.Settings, v int) { s.Behaviour.MountedCap = max(v, s.Behaviour.InitialMountCount) })),
+			p.adv(p.numberRow("Messages loaded per scroll",
+				"How many older messages to fetch each time you reach the top.",
 				settings.HistoryPageSize, 5, maxHistoryPage, "",
-				func(s *config.Settings, v int) { s.Behaviour.HistoryPageSize = v }),
+				func(s *config.Settings, v int) { s.Behaviour.HistoryPageSize = v })),
 		),
 		p.group("Timing", "",
-			p.numberRow("Author lookup batching",
-				"How long a burst of unknown authors is collected before one request.",
+			p.adv(p.numberRow("Author lookup delay",
+				"How long to wait for more unknown authors before looking them up together.",
 				settings.AuthorFetchDelayMS, 0, maxDelayMS, "ms",
-				func(s *config.Settings, v int) { s.Behaviour.AuthorFetchDelayMS = v }),
-			p.numberRow("Read receipt delay",
-				"How long acknowledgements are coalesced for the open channel.",
+				func(s *config.Settings, v int) { s.Behaviour.AuthorFetchDelayMS = v })),
+			p.adv(p.numberRow("Read receipt delay",
+				"How long to wait before telling the server you have read a channel.",
 				settings.AckDelayMS, 0, maxDelayMS, "ms",
-				func(s *config.Settings, v int) { s.Behaviour.AckDelayMS = v }),
+				func(s *config.Settings, v int) { s.Behaviour.AckDelayMS = v })),
 		),
 		p.group("Input", "",
-			p.numberRow("Scroll speed", "", settings.ScrollSpeed, 1, maxScrollSpeed, "×",
+			p.numberRow("Scroll speed", "How far the wheel moves the conversation.",
+				settings.ScrollSpeed, 1, maxScrollSpeed, "×",
 				func(s *config.Settings, v int) { s.Behaviour.ScrollSpeed = v }),
 			p.toggleRow("Enter sends the message",
-				"Off sends on Ctrl+Enter and lets Enter start a new line.",
+				"Off, Enter starts a new line and Ctrl+Enter sends.",
 				settings.EnterSends, func(s *config.Settings, on bool) { s.Behaviour.EnterSends = on }),
 		),
 	}
@@ -270,20 +312,22 @@ func (p *SettingsPage) behaviourSection() []fyne.CanvasObject {
 
 /* Notifications */
 
-func (p *SettingsPage) notificationsSection() []fyne.CanvasObject {
+func (p *SettingsPage) notificationsSection() []settingsGroup {
 	settings := config.Current().Notifications
 
-	return []fyne.CanvasObject{
+	return []settingsGroup{
 		p.group("Notices", "The cards that appear in the top-right corner.",
-			p.numberRow("Stay for", "", settings.LifetimeSeconds, 1, maxNoticeLifetime, "s",
+			p.numberRow("Dismiss after", "How long a notice stays before it fades.",
+				settings.LifetimeSeconds, 1, maxNoticeLifetime, "s",
 				func(s *config.Settings, v int) { s.Notifications.LifetimeSeconds = v }),
-			p.numberRow("At most", "", settings.MaxStacked, 1, maxNoticeStack, "",
-				func(s *config.Settings, v int) { s.Notifications.MaxStacked = v }),
+			p.adv(p.numberRow("Maximum on screen", "How many notices can stack up at once.",
+				settings.MaxStacked, 1, maxNoticeStack, "",
+				func(s *config.Settings, v int) { s.Notifications.MaxStacked = v })),
 		),
 		p.group("Show", "",
 			p.toggleRow("Information", "Something happened and nothing is wrong.",
 				settings.ShowInfo, func(s *config.Settings, on bool) { s.Notifications.ShowInfo = on }),
-			p.toggleRow("Warnings", "Disruptive, but not destructive.",
+			p.toggleRow("Warnings", "Something was interrupted but nothing was lost.",
 				settings.ShowWarning, func(s *config.Settings, on bool) { s.Notifications.ShowWarning = on }),
 			p.toggleRow("Failures", "Something did not work.",
 				settings.ShowDanger, func(s *config.Settings, on bool) { s.Notifications.ShowDanger = on }),
@@ -293,40 +337,46 @@ func (p *SettingsPage) notificationsSection() []fyne.CanvasObject {
 
 /* Cache */
 
-func (p *SettingsPage) cacheSection() []fyne.CanvasObject {
+func (p *SettingsPage) cacheSection() []settingsGroup {
 	settings := config.Current().Cache
 
 	disk := p.newUsageMeter("On disk", "Measuring…")
-	memory := p.newUsageMeter("In memory", "Decoded and ready to draw.")
+	memory := p.newUsageMeter("In memory", "Ready to draw without decoding again.")
 	p.hooks.CacheStats(func(stats cache.ImageStats) {
 		disk.set(stats.DiskBytes, settings.ImageDiskBytes(), fileCount(stats.Files))
-		memory.set(stats.MemoryBytes, settings.ImageMemoryBytes(), "Decoded and ready to draw.")
+		memory.set(stats.MemoryBytes, settings.ImageMemoryBytes(), "Ready to draw without decoding again.")
 	})
 
-	return []fyne.CanvasObject{
-		p.group("Images", "Avatars, icons and attachments, kept on disk between runs.",
-			p.locationRow(settings.ImageDir),
-			p.note("The location is read once at startup; a change applies after a restart."),
+	return []settingsGroup{
+		p.group("Pictures", "Avatars, icons, attachments and emoji, kept between runs.",
+			p.locationRow(settings.AssetDir),
+			p.note("Each kind of picture is stored in its own folder inside it."),
+			p.note("Changing the location takes effect after a restart."),
 		),
 		p.group("Usage", "",
 			disk.block,
 			memory.block,
-			p.numberRow("Disk budget", "Trimmed oldest-first once it is exceeded.",
+			p.numberRow("Disk limit", "Once full, the pictures used longest ago are deleted first.",
 				settings.ImageDiskMiB, minCacheMiB, maxDiskMiB, "MiB",
 				func(s *config.Settings, v int) { s.Cache.ImageDiskMiB = v }),
-			p.numberRow("Memory budget", "Decoded images held for instant redraw.",
+			p.adv(p.numberRow("Memory limit", "How much of the cache is kept decoded and ready to draw.",
 				settings.ImageMemoryMiB, minCacheMiB, maxMemoryMiB, "MiB",
-				func(s *config.Settings, v int) { s.Cache.ImageMemoryMiB = v }),
-			p.numberRow("Largest decoded side",
-				"A photo arrives at full resolution and is never drawn that large.",
+				func(s *config.Settings, v int) { s.Cache.ImageMemoryMiB = v })),
+			p.adv(p.numberRow("Maximum image size",
+				"Larger pictures are scaled down to this before being stored.",
 				settings.MaxImageEdge, minImageEdge, maxImageEdge, "px",
-				func(s *config.Settings, v int) { s.Cache.MaxImageEdge = v }),
+				func(s *config.Settings, v int) { s.Cache.MaxImageEdge = v })),
+			p.adv(p.numberRow("Simultaneous downloads",
+				"How many pictures to fetch at the same time.",
+				settings.ImageLoaders, 1, maxImageLoaders, "",
+				func(s *config.Settings, v int) { s.Cache.ImageLoaders = v })),
+			p.adv(p.note("Changing the number of downloads takes effect after a restart.")),
 			p.actionRow("Clear the image cache",
-				"Everything is fetched again as it is next drawn.",
+				"Pictures are downloaded again the next time they are shown.",
 				"Clear", ToneDanger, func() {
 					p.hooks.Confirm(Confirm{
 						Title:  "Clear the image cache",
-						Body:   "Every cached avatar and attachment is deleted. They will be downloaded again as they are drawn.",
+						Body:   "Every cached avatar, attachment and emoji is deleted. They will be downloaded again as they are drawn.",
 						Action: "Clear",
 						Tone:   ToneDanger,
 						OnConfirm: func() {
@@ -337,19 +387,25 @@ func (p *SettingsPage) cacheSection() []fyne.CanvasObject {
 				}),
 		),
 		p.group("Messages", "",
-			p.numberRow("Kept per channel", "", settings.MessagesPerChannel, minCachedMessages, maxCachedMessages, "",
-				func(s *config.Settings, v int) { s.Cache.MessagesPerChannel = v }),
-			p.numberRow("Channels cached", "", settings.CachedChannels, 1, maxCachedChannels, "",
-				func(s *config.Settings, v int) { s.Cache.CachedChannels = v }),
-			p.numberRow("Text previews cached", "", settings.TextPreviews, 1, maxTextPreviews, "",
-				func(s *config.Settings, v int) { s.Cache.TextPreviews = v }),
-			p.note("These caches are built at startup, so a change applies after a restart."),
+			p.adv(p.numberRow("Messages kept per channel",
+				"How much of a conversation is remembered, so reopening it is instant.",
+				settings.MessagesPerChannel, minCachedMessages, maxCachedMessages, "",
+				func(s *config.Settings, v int) { s.Cache.MessagesPerChannel = v })),
+			p.adv(p.numberRow("Channels remembered",
+				"How many channels keep their messages after you leave them.",
+				settings.CachedChannels, 1, maxCachedChannels, "",
+				func(s *config.Settings, v int) { s.Cache.CachedChannels = v })),
+			p.adv(p.numberRow("Text previews kept",
+				"How many message previews are held for the channel and reply lists.",
+				settings.TextPreviews, 1, maxTextPreviews, "",
+				func(s *config.Settings, v int) { s.Cache.TextPreviews = v })),
+			p.adv(p.note("These changes take effect after a restart.")),
 		),
 	}
 }
 
-// locationRow is where the image cache lives, and the two things that can be
-// done about it. The path is the row's explanation rather than its value: it is
+// locationRow is the root the picture caches live under, and the two things that
+// can be done about it. The path is the row's explanation rather than its value: it is
 // long enough to need the whole width, and shortening it from the front would
 // hide the part that says which drive it is on.
 func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
@@ -358,7 +414,7 @@ func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
 
 	choose := widget.NewButton("Change…", func() {
 		p.hooks.ChooseCacheDir(func(picked string) {
-			p.change(func(s *config.Settings) { s.Cache.ImageDir = picked })
+			p.change(func(s *config.Settings) { s.Cache.AssetDir = picked })
 			p.reload()
 		})
 	})
@@ -370,7 +426,7 @@ func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
 		// Only offered once there is something to go back from, so the row does not
 		// advertise a default nobody has moved away from.
 		reset := widget.NewButton("Default", func() {
-			p.change(func(s *config.Settings) { s.Cache.ImageDir = "" })
+			p.change(func(s *config.Settings) { s.Cache.AssetDir = "" })
 			p.reload()
 		})
 		controls = append(controls, HorizontalSpacer(theme.Sizes.ChipSpacing), reset)
@@ -447,7 +503,7 @@ func fileCount(files int) string {
 //
 // The two lists are refilled in place rather than rebuilt through reload: a
 // rebuild would replace the field being typed into on the first keystroke.
-func (p *SettingsPage) advancedSection() []fyne.CanvasObject {
+func (p *SettingsPage) advancedSection() []settingsGroup {
 	sizes, colors := VBoxNoSpacing(), VBoxNoSpacing()
 
 	fill := func(query string) {
@@ -474,7 +530,7 @@ func (p *SettingsPage) advancedSection() []fyne.CanvasObject {
 	filter.PlaceHolder = "Padding, Radius…"
 	filter.OnChanged = fill
 
-	return []fyne.CanvasObject{
+	return []settingsGroup{
 		p.group("Find", "", p.row("Filter by name", "", textField(filter))),
 		p.groupOf("Every other size",
 			"Named exactly as the client names them. The Styles section covers the rest.",
@@ -495,8 +551,8 @@ func matchesField(field, query string) bool {
 
 /* About */
 
-func (p *SettingsPage) aboutSection() []fyne.CanvasObject {
-	return []fyne.CanvasObject{
+func (p *SettingsPage) aboutSection() []settingsGroup {
+	return []settingsGroup{
 		p.group("This build", "",
 			p.readOnlyRow("Version", p.hooks.Version),
 			p.readOnlyRow("Build", p.hooks.Build),
@@ -509,7 +565,7 @@ func (p *SettingsPage) aboutSection() []fyne.CanvasObject {
 		),
 		p.group("Start over", "",
 			p.actionRow("Reset every setting",
-				"Everything on these pages returns to its default.",
+				"Returns everything on these pages to its default.",
 				"Reset everything", ToneDanger, func() {
 					p.hooks.Confirm(Confirm{
 						Title:  "Reset every setting",
@@ -536,12 +592,16 @@ type styleField struct {
 }
 
 // styleGroup is a card of related sizes, and optionally a sample of what they
-// shape.
+// shape. A group is advanced when what it shapes is detail somebody has to go
+// looking for — the hairlines, the scroll bar — rather than the proportions of
+// the window they are already looking at.
 type styleGroup struct {
 	caption string
 	detail  string
 	fields  []styleField
 	preview func(p *SettingsPage) fyne.CanvasObject
+
+	advanced bool
 }
 
 var styleGroups = []styleGroup{
@@ -577,6 +637,7 @@ var styleGroups = []styleGroup{
 			{"SystemMessageIconSize", "System event mark"},
 			{"SystemMessagePadding", "Around a system event"},
 		},
+		advanced: true,
 	},
 	{
 		caption: "Sidebars",
@@ -626,6 +687,8 @@ var styleGroups = []styleGroup{
 			{"EmbedRadius", "Embed corner"},
 			{"EmbedPaddingV", "Embed padding, vertical"},
 			{"EmbedPaddingH", "Embed padding, horizontal"},
+			{"InviteCardWidth", "Invite card width"},
+			{"InviteIconSize", "Invite server icon"},
 			{"ChipRadius", "Chip corner"},
 			{"ProfileCornerRadius", "Profile card corner"},
 			{"TooltipRadius", "Tooltip corner"},
@@ -633,6 +696,7 @@ var styleGroups = []styleGroup{
 			{"ConfirmRadius", "Confirmation corner"},
 			{"ViewerCornerRadius", "Lightbox corner"},
 		},
+		advanced: true,
 	},
 	{
 		caption: "Scroll indicator",
@@ -642,6 +706,7 @@ var styleGroups = []styleGroup{
 			{"ScrollIndicatorInset", "Distance from the edge"},
 			{"ScrollIndicatorMinHeight", "Shortest it is drawn"},
 		},
+		advanced: true,
 	},
 	{
 		caption: "Media",
@@ -652,6 +717,7 @@ var styleGroups = []styleGroup{
 			{"EmbedMaxWidth", "Embed width"},
 			{"EmbedImageMaxHeight", "Embed picture height"},
 		},
+		advanced: true,
 	},
 }
 
@@ -709,12 +775,17 @@ func (p *SettingsPage) sidebarPreview() fyne.CanvasObject {
 	deps := p.hooks.Deps
 
 	channel := domain.Channel{ID: "preview", Name: "general", Kind: domain.ChannelText}
-	member := domain.Member{UserID: "preview", Name: "Someone"}
+
+	// The member list places its rows itself, so a lone row has to be given the
+	// height it would have had — which is the size this preview is here to show.
+	member := newMemberRow(deps, nil)
+	member.SetMember(domain.Member{UserID: "preview", Name: "Someone", Presence: domain.PresenceOnline})
 
 	rows := VBoxNoSpacing(
 		NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, NewChannelWidget(deps, channel, func() {})),
 		VerticalSpacer(theme.Sizes.SettingsPreviewGap),
-		NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, NewMemberWidget(deps, member, true)),
+		NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth,
+			NewMinHeightContainer(theme.Sizes.MemberRowHeight, member)),
 	)
 
 	return previewFrame(rows)
@@ -772,11 +843,20 @@ const (
 	maxDelayMS     = 2000
 	maxScrollSpeed = 12
 
+	maxMemberRefreshDelay = 5000
+	maxMemberOverscan     = 50
+
+	// maxTypingNames is a limit on the sentence, not on the feature: past a few
+	// names the line is wider than it is worth and "and 4 others" says the same
+	// thing in less.
+	maxTypingNames = 5
+
 	maxNoticeLifetime = 60
 	maxNoticeStack    = 8
 
 	minCacheMiB       = 16
 	maxDiskMiB        = 8192
+	maxImageLoaders   = 32
 	maxMemoryMiB      = 2048
 	minImageEdge      = 256
 	maxImageEdge      = 8192

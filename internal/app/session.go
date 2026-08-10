@@ -63,6 +63,15 @@ func (a *App) resetSessionState() {
 	a.pendingAuthors = nil
 	a.fetchedAuthors = make(map[string]bool)
 
+	// The membership guards belong to the previous account's view of those
+	// servers; the next account may not even be in them.
+	if a.memberTimer != nil {
+		a.memberTimer.Stop()
+		a.memberTimer = nil
+	}
+	a.memberStale = false
+	a.fetchedMembers = make(map[string]bool)
+
 	// A pending ack fires against whatever session is current when it fires, not
 	// the one that scheduled it, so one left running across a re-login would
 	// acknowledge the previous account's channel through the new account's session.
@@ -79,6 +88,12 @@ func (a *App) resetSessionState() {
 		a.slowmodeTimer = nil
 	}
 	a.slowmodeUntil = make(map[string]time.Time)
+
+	// Nobody the previous account could see is typing as far as this one is
+	// concerned, and an announcement of our own has no socket left to take back.
+	a.resetTyping()
+
+	a.resetInvites()
 
 	a.unreadChannels = make(map[string]bool)
 	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise

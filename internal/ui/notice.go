@@ -117,8 +117,10 @@ func NewNoticeStack() *NoticeStack {
 	margin := theme.Sizes.NoticeStackMargin
 
 	// Pinned to the top right: the bottom of the message area belongs to the
-	// composer, and a notice must never land on what the user is typing.
-	layer := container.NewBorder(nil, nil, nil, NewInset(list, margin, margin, 0, margin))
+	// composer, and a notice must never land on what the user is typing. The stack
+	// of cards is the layer's own business, so NewLayer keeps it out of the window's
+	// minimum size — without it a fourth notice made the window taller.
+	layer := NewLayer(container.NewBorder(nil, nil, nil, NewInset(list, margin, margin, 0, margin)))
 
 	return &NoticeStack{Layer: layer, list: list}
 }

@@ -37,7 +37,9 @@ measurement memoisation (`ui.lineHeights`, `ui.spaceWidths`), UI-thread only.
 
 - **`Client.Store()`** — reads, safe from any goroutine, never the network. A
   miss reports `ok=false`. Returns resolved values: a `domain.Member` already
-  carries nickname, per-server avatar and role colour.
+  carries nickname, per-server avatar, role colour, presence, bot mark and the
+  hoisted role it is filed under. Safe off-thread is not the same as cheap —
+  `Members` resolves all of that per member and sorts, so it belongs on a worker.
 - **`Client.Events()`** — one buffered channel, gateway order. `app.pumpEvents`
   is its single reader; `dispatch` hops onto the UI thread once per event.
   `client.Event`'s marker method is unexported, so the switch is exhaustive.
@@ -58,6 +60,16 @@ captures its own, so events from a replaced session are dropped; `App.epoch` +
   *pointer*, nil for files the server couldn't introspect — `domain.File` carries
   plain `Width`/`Height`/`Kind` so `client/convert.go` absorbs that nil check
   once. Uploads take `*revoltgo.FileParams`.
+- **`State.updateUser` silently drops** an update for an account it has never
+  cached, so presence for somebody nobody fetched never arrives. That is why
+  `FetchMembers` asks for the whole membership rather than only the memberships:
+  the same response carries the users, and putting them in State is what makes
+  `EventUserUpdate` mean anything for them. `Session.ServerMembers` writes both,
+  gated on revoltgo's `TrackBulkAPICalls` (on by default) — turn that off and the
+  call succeeds while recording nothing.
+- `ServerRole` carries `Hoist` and `Rank`; `PartialUser` makes every field nilable
+  and keeps `Online` separate from `Status`, which is what lets `userUpdateKinds`
+  tell a presence change from a rename without diffing against State.
 - **Known bug:** `Session.ChannelMessages(..., IncludeUsers: true)` only feeds
   Users/Members into State when the request *failed* (`if err != nil` where
   `err == nil` was meant). Hence the batched `ensureAuthor` path; when fixed, the
@@ -67,12 +79,38 @@ captures its own, so events from a replaced session are dropped; `App.epoch` +
   channel and nothing announces a change. `Client.FetchSlowmode` is the one action
   that goes round the typed API — a raw `session.HTTP.Request` for
   `EndpointChannel` — and records the result for `store.Channel` to hand back.
-  `BypassSlowmode` (`1 << 39`) is missing from the permission constants for the
-  same reason and is named in `client/store.go`.
+- **Known bug:** `State.ChannelPermissions`/`ServerPermissions` are not used, and
+  `client/store.go` does the whole calculation itself, because all three of their
+  mistakes land on exactly what it is for: they ignore `Channel.RolePermissions`
+  (a channel denied to everyone and handed back to one role — how a private
+  channel is actually built — reads as invisible to the role that holds it), they
+  apply a member's roles in whatever order the member carries them rather than by
+  rank, and they clamp a timed-out member *before* the channel's overwrites, so an
+  overwrite can hand back what the timeout took. They also error for a server the
+  account has no cached membership of, which is a state the client is routinely in,
+  and they decide a **DM** from `Channel.Permissions` — a field Revolt only sends on
+  a *group*, so every DM came back view-only and would have disabled the composer
+  in all of them. Revolt decides a DM from the relationship instead, which is
+  `User.Relationship` (`client.blocked`).
+  `BypassSlowmode` (`1 << 39`) is missing from the permission constants too, hence
+  `domain.Permission` naming every bit itself.
 - **Known bug:** `MessageFlags` is a bitfield and revoltgo numbers it 1, 2, 3 —
   positions, not bits — so its `MentionsOnline` collides with
   `SuppressNotifications|MentionsEveryone` and can never be read for what it is.
   `client/convert.go` names the two bits it wants itself.
+- **Custom emoji.** `EndpointCustomEmoji` is the *metadata* route (`/custom/emoji/{id}`),
+  and nothing the client draws needs it: the picture is `EndpointAutumnFile("emojis", id, …)`,
+  derivable from the ID alone. `store.EmojiURL` therefore asks `State` nothing —
+  `State` only holds the emoji of servers the account is in, while a message
+  routinely names one from a server it is not, and Autumn serves those all the same.
+- **`Session.WS` is nilable and unguarded.** `ChannelBeginTyping`/`ChannelEndTyping`
+  are websocket writes rather than requests — no rate limiter, nothing to wait
+  for — but they reach `s.WS.WriteMessage` without a check, and `WS` is nil until
+  `Open` builds it and stale after `Close`. `Client.BeginTyping`/`EndTyping`
+  therefore test it alongside the session. Also note `EventChannelStopTyping`
+  *embeds* `EventChannelStartTyping` rather than aliasing it: the fields are
+  promoted, but handlers are keyed on the concrete type, so both must be
+  registered. `ID` on either is the **channel**.
 - **No `context.Context`.** revoltgo's REST layer takes none, so a superseded
   request can't be cancelled — only its result discarded. `Client.fetching`
   (per-channel in-flight dedup → `ErrBusy`) and the epoch counters do that
@@ -99,11 +137,15 @@ internal/
   client/                client.go, convert.go, store.go, events.go, actions.go
   cache/                 cache.go (LRU + TextCache), message.go, image.go
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
-                         members.go, overlay.go, profile.go, notify.go, settings.go
-  ui/                    ui.go, layouts.go, widgets.go, sidebar.go, message.go,
-                         embed.go, markdown.go, attachment.go, input.go, modal.go,
-                         profile.go, notice.go, settings*.go, theme/, titlebar_*.go
-  markdown/              pure parser -> AST, no UI
+                         members.go, typing.go, overlay.go, profile.go, notify.go,
+                         settings.go
+  ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
+                         message.go, embed.go, invite.go, markdown.go,
+                         attachment.go, input.go, modal.go, profile.go, notice.go,
+                         settings*.go, theme/, titlebar_*.go
+  markdown/              pure parser -> AST, no UI. parser.go is two passes:
+                         classify each line into a block, then one byte scanner
+                         over each block's whole text
   util/                  pure helpers: sizes, IDs, truncation, ULID timestamps
 ```
 
@@ -119,18 +161,40 @@ Where things live that the filename doesn't tell you:
   in it: going through `selectServer` would load the first channel on the way past.
 - `app/members.go` holds lazy author resolution as well as the member sidebar and
   the mention candidates, since one `Store.Members` walk feeds all three.
+- `app/typing.go` holds both halves of the typing indicator — the expiry map and
+  its timer, and the throttle that announces this account — because they are one
+  feature with one setting group and neither is legible without the other.
+- `ui/members.go` is the member list end to end and is its own file because it is
+  its own subsystem: the flat model (`NewMemberModel`), the geometry
+  (`memberOffsets`, `visibleRange`, `memberListLayout`), the virtualised
+  `MemberList`, and the recycled `MemberRow` / `MemberSectionRow`. The model is
+  pure and theme-free so `App` can build it off the UI thread.
 - `ui/widgets.go` is the shared vocabulary: tapBase widgets, `Outline` +
   `NewColumnDivider`, `Elevate`, Tooltip, chips, the avatar loader,
-  `ObservableScroll` + its indicator, `AccentText`, `NewEllipsisText`.
+  `ObservableScroll` + its indicator, `AccentText`, `NewEllipsisText`,
+  `TypingMark` — which is here rather than beside either caller because the
+  composer's line and a channel row both mount one.
+- `ui/input.go` holds the composer, the mention picker, the slowmode chip and the
+  typing line. The last two are one row and follow one set of rules: bare text
+  over the message column, nothing drawn behind it, an `OnResize` hook so the row
+  can be re-laid out, and a change guard before any repaint.
 - `ui/layouts.go` holds every custom layout, `fitWithin` and `Relayout`.
 - `ui/message.go` also owns the system line, the day separator and reply previews.
+- `ui/invite.go` holds the invite card *and* `inviteCodesIn`, the scan that decides
+  a message has one — the card is mounted from what that scan finds, so the two
+  belong together.
 - `ui/settings_controls.go` holds the controls, none of them a Fyne form widget.
 - `ui/theme/overrides.go` holds `Apply` — reflection over the two tables, against a
   defaults snapshot taken at init.
 - `cache/message.go`: entries *and* published slices are immutable, so a UI-thread
   reader holding an older slice is safe. Find/Remove/Replace binary-search by ULID.
 - `cache/image.go`: memory bounded in *bytes*, plus disk. `Get` stamps mtime, so
-  `trimDiskCache` evicts by recency.
+  `trimDiskCache` evicts by recency. One `ImageCache` is one *folder* under the
+  configured root (`ImagesFolder`, `EmojisFolder`), with its own budget and LRU:
+  the split is not tidiness, it is that an afternoon of scrolling attachments
+  would otherwise evict the handful of emoji every message is drawn with. The
+  settings name **one** budget, so `app.emojiShare` divides it rather than the
+  second cache doubling it, and `cacheStats` sums both against that one number.
 
 ## Data flow
 
@@ -140,10 +204,18 @@ Where things live that the filename doesn't tell you:
    `pendingToken` *before* Ready can land. The login screen stays up until Ready.
 2. `onReady` → save token, record unreads, `showMainUI`, `refreshServerList`,
    `selectServer(first)` — or `selectHome` when the account is in no servers.
-3. `selectServer` → `refreshChannelList`, `refreshMemberList` →
-   `selectChannel(first)`. There is **no bulk member fetch**: Revolt's members
-   endpoint has no pagination, so large servers would flood memory. Members
-   resolve lazily per author.
+3. `selectServer` → `refreshChannelList`, `refreshMemberList`, `loadMembers` →
+   `selectChannel(first)`. `loadMembers` is **one request for the whole
+   membership**, once per server per session (`App.fetchedMembers`,
+   `Client.FetchMembers`): Revolt has no pagination and no member search, so a
+   server is all of it or none, and `exclude_offline` is declined because the
+   Offline section is the point. It is paint-then-fill, so re-entering a server
+   never blanks its list, and it is a setting (`FetchAllMembers`) because it is
+   the one call whose cost is somebody else's server. It also fills the *user*
+   cache, which is what makes presence work at all — `State.updateUser` drops an
+   update for an account it has never seen, so an unfetched member could never be
+   seen to come online. Lazy per-author resolution stays for what it does not
+   reach: webhooks, people who have left, a failed fetch, and conversations.
 4. `selectChannel` → cached messages, else `Client.LatestMessages` (deduped per
    channel); ack unread. Callers render from the *cache* (`displayCached`), never
    from a page captured off-thread. `displayMessages` mounts only the newest
@@ -165,6 +237,11 @@ Where things live that the filename doesn't tell you:
    `System.Target` and `MessageWidget.Author` answers with it, which is what lets
    `refreshAuthorMessages` cover both in one pass. `RefreshAuthor` relayouts the
    line, since the name sits *inside* the sentence and the time beside it moves.
+   In a server the batch then goes through `refreshMemberList` whatever it
+   resolved — `AuthorResolution` deliberately does not distinguish a member fetch
+   from a user one, because `toMember` fills a membership's name and username from
+   the account behind it and `memberCandidates` drops a member it cannot name, so
+   a resolved *user* is what can make an already-cached membership mentionable.
 6. The client caches an incoming message (the cache returns the predecessor under
    its own lock, so grouping survives bursts) and emits `MessageCreated` with
    both. If scrollback has detached the view from the tail the append is skipped —
@@ -186,7 +263,14 @@ Where things live that the filename doesn't tell you:
    of a line would cost every mention typed there. Candidates are **pushed** —
    `refreshMemberList` and `refreshChannelList` each build rows and candidates
    from one walk — so a keystroke is two string comparisons per candidate with
-   nothing allocated. The picker mounts *inside* the composer card, not
+   nothing allocated. A **server's** people therefore arrive only from
+   `refreshMemberList`, which makes that walk off the UI thread;
+   `refreshMentionCandidates` covers the conversation case alone
+   (`recipientCandidates`, bounded by the channel's own recipient list) and
+   returns at once for a server channel. Asking it for a server's would walk a
+   whole membership on the UI thread, per channel switch, to arrive at what the
+   picker is already holding — every path into a server channel goes through
+   `enterServer` first. The picker mounts *inside* the composer card, not
    floating: a Fyne pop-up takes canvas focus, which would stop the typing that
    drives it. Because it is inside the card, **it must not close on blur**:
    Fyne unfocuses on the mouse *press* and re-hit-tests on the release to decide
@@ -223,12 +307,35 @@ Where things live that the filename doesn't tell you:
 10. **Joining a server.** The join response does *not* add the server: revoltgo
     decodes it into an `Invite` whose `ServerID` is never populated. The
     `ServerJoined` event does, and `App.pendingJoin` tells that handler to select
-    what it adds.
+    what it adds. Both entry points — the dialog and an invite card — go through
+    `App.joinInvite`, which differs only in where a failure is said.
+    An **invite link in a message** unfurls into `ui.InviteCard`, built from a
+    *code* rather than an invite because a code is all the message carries.
+    Resolving one is `Client.FetchInvite` (the fetch route *does* populate
+    `ServerID`), so a card mounts in its loading state and fills itself through
+    `SetInvite` — which is also how a caller already holding a `domain.Invite`
+    skips the request (`NewInviteCardFor`). The card's width is fixed rather than
+    measured, unlike an embed's: it is mounted saying nothing, and one that
+    resized on arrival would shuffle the column under someone reading it. Its
+    action follows membership — `Store.Server` reports the account is in the
+    server, so the card offers `OnServerTapped` instead of `OnJoinInvite`.
+    `App.invites` caches both outcomes, failures included (an expired invite
+    stays expired, and a card remounts on every scroll past it), and
+    `App.pendingInvites` collapses two cards for one code onto one request.
+    Finding the links is `markdown.Links` over the parsed body, not a scan of the
+    source: a URL in a code span is not a link, and a spoiler's contents are
+    deliberately not reported. `util.InviteLinkCode` is the **strict** matcher
+    that decides which of those URLs is an invite, and is not interchangeable
+    with `util.InviteCode` — the lenient one serves a field somebody typed into
+    and reads a code out of any last path segment, which pointed at a channel's
+    worth of links would card half of them. `util.MayContainInvite` is the
+    substring guard that keeps the parse off the mounting path for the
+    overwhelming majority of messages.
 11. **Slowmode.** `selectChannel` paints what is known and fires `loadSlowmode`,
     which re-asks on *every* visit — see the revoltgo note: entering the channel is
     the only moment the client can learn the number, or that it moved.
     `App.slowmodeOf` is the cooldown as it applies *to this account*, so
-    `CanBypassSlowmode` collapses it to zero and the badge never appears for a
+    `BypassSlowmode` collapses it to zero and the badge never appears for a
     moderator. `handleSubmit` refuses while `slowmodeRemaining` is non-zero and
     keeps what was typed, saying nothing: the badge counting down is the answer,
     and a notice per keypress would bury it. The cooldown starts optimistically at
@@ -268,14 +375,48 @@ Where things live that the filename doesn't tell you:
     *overrides* keyed by `theme.Sizes`/`Colors` field names and applied by
     reflection, so the curated groups and the generated Advanced list add up to the
     whole table — `settings_test.go` asserts it.
+    A section returns `[]settingsGroup` — a card *beside its caption* — because the
+    rail lists the open section's groups under it and scrolling to one is an offset
+    into the pane. That offset is a prefix sum over `MinSize`, taken once per
+    section (`measureGroups`): `Position()` is right only while the pane's top inset
+    is zero and is unset before the first layout, and the scroll path must not walk
+    the pane per event. A tap sets the marked entry itself, since the scroll clamps
+    at the end of the content and the last group never reaches the top;
+    `ObservableScroll.OnScroll` corrects it afterwards and fires only for real
+    movement, never a programmatic one. The rail is **not** rebuilt to move the
+    marker (`settingsRailButton.setSelected`) — following a scroll would destroy the
+    button under the pointer, which then never hears `MouseOut`. A caption-less group
+    is a preview: a card, but nowhere to go, hence `navGroups` beside `subButtons`.
+    **Advanced mode** (`config.Interface.AdvancedMode`, the switch at the foot of the
+    rail) is what keeps the page short. `p.adv(row)` returns nil in basic mode,
+    `separateRows` drops nils — which also closes the hole where a `sizeRow` for an
+    unknown field reached a container — and `group` drops a card with nothing left.
+    A `styleGroup` is gated whole rather than per row: each ends with its own reset
+    button, so gating the sizes would leave a card holding only a way to undo them.
+    It is read in `Rebuild`/`reload`, not per section, since a rail tap cannot change
+    it and the two things that can both come through `reload`. `showSection` holds
+    the fallback off `SectionAdvanced`, because About's reset turns the mode off from
+    another section entirely.
     The controls are the client's own (`settings_controls.go` — see the footgun on
-    Fyne's form widgets). Each sits in a row's `fixedControl`, so a row is the same
-    height whichever it holds, which is what lets `numberBox` swap its number for a
-    `widget.Entry` without a layout jump. That swap is where a stale focus bites:
+    Fyne's form widgets). A row with a *slider* stacks it under the description at
+    full width (`stackedRow`, `newWideNumberControl`) — 190 px is not enough to aim
+    one — while `sizeRow` stays inline, being a line of table with no prose, of which
+    Styles and Advanced mount a hundred. Everything else sits in a row's
+    `fixedControl`, so a row is the same height whichever it holds, which is what
+    lets `numberBox` swap its number for a `widget.Entry` without a layout jump.
+    That swap is where a stale focus bites:
     focusing a second box makes the first report `FocusLost` *after* the second
     installed its field, so `numberBox.commit` ignores the reporting entry unless it
     is still the open one. The colour picker floats on `SettingsPage.popover`,
     inside the page's own layer, for the same reason the page isn't on the modal one.
+    `newSettingsMarker` is the one bar that says "this is the open section" and
+    "this setting is on". It is inset vertically by `SettingsGroupRadius` on every
+    row rather than drawn full height: the group card is stacked *under* its rows,
+    so a bar reaching a corner squares it off, and insetting only the end rows would
+    need a row to know its own index and give three different bar lengths.
+    Row copy is UI text, not commentary: the label names the setting and stands
+    alone, the description says what changes in one plain sentence, and a row whose
+    label is complete carries none. What the client does internally is a Go comment.
 14. **Profiles.** `Actions.OnUserTapped(userID, anchor)` opens the compact card
     beside the anchor; "Full profile" swaps it for the centred dialog. Both draw
     from one `domain.Profile` that `profileOf` resolves in a single pass. The bio
@@ -286,7 +427,19 @@ Where things live that the filename doesn't tell you:
     banner *replaces* the accent strip rather than covering it: a `canvas.Image`
     takes one radius for all four corners, so the card's own corners are right at
     the top and the bottom band is laid over itself squared off to meet the body.
-15. **Role colours.** A Revolt role colour is a CSS value, and the server's own
+15. **Custom emoji.** `:26-char-ULID:` in a body is `markdown.Emoji`; the length is
+    exact because a colon is ordinary punctuation, and a looser match would turn
+    "10:30:00" and every `:shortcode:` nobody serves a picture for into a blank
+    square. It renders as a bare `canvas.Image` in a fixed square — no widget, so
+    hover and the row's menu pass through it as they do an embed's card — loaded
+    from the emoji cache. The square is exactly `emojiSide`, one line of the text
+    around it: RichText baseline-aligns a row as soon as its objects differ in
+    height and reads the baseline of a segment it cannot measure as text as *zero*,
+    so an emoji a pixel taller is moved down a whole baseline and draws through the
+    line below. It is measured, not memoised through `lineHeight`, because it has to
+    agree with that row exactly. Like a mention it can neither break nor be broken
+    before, so it feeds `mdBuilder.reserve` too.
+16. **Role colours.** A Revolt role colour is a CSS value, and the server's own
     presets are as often a gradient as a triple — hence `client.parseColor` reading
     *every* stop and `domain.Gradient` carrying them. A gradient is a `color.Color`
     answering as the mean of its stops, so a chip's dot, a reply's accent bar and a
@@ -302,6 +455,137 @@ Where things live that the filename doesn't tell you:
     `mentionRow.set`); a shape needs nothing, its texture being keyed by the object.
     `widgets_test.go` asserts this over the built tree, because the software painter
     a render test uses takes a different path and would not notice.
+17. **Permissions.** `Store.Permissions(channelID)` / `ServerPermissions(serverID)`
+    hand back a whole `domain.Permission` bitfield rather than a `CanX` per
+    question: a call site asking three things should walk the roles once, and the
+    interface would otherwise grow a method per bit Revolt defines. Zero — logged
+    out, an unknown ID, a channel with no server — means "allow nothing".
+    The arithmetic is `client.channelPermissions` / `serverPermissions`, which take
+    plain `*revoltgo.Server`/`Member`/`Channel` values rather than reading `State`:
+    that is what makes it testable at all, `State`'s caches being unexported. Order
+    is load-bearing — server default, then the member's roles least senior *first*
+    so the most senior has the last word, then the channel's default overwrite, then
+    the channel's overwrites for those same roles, then the timeout clamp last so no
+    overwrite can hand back what a timeout took. A **nil member** resolves as one
+    holding no roles, not as no access: that is what Revolt computes for the default
+    role and what revoltgo fabricates on `ServerCreate`, and refusing instead would
+    empty the sidebar of a server just joined.
+    `ViewChannel` is the one permission answered by **hiding** — `newChannelRow`
+    returns nil, so the channel is not a row and (same walk) not a `#mention`
+    candidate either, and `selectServer` opens on `firstVisibleChannel`. Only a
+    server decides it: `App.canViewChannel` exempts conversations, which are in the
+    user's own list because they are in them. `selectChannel` is where the checks
+    pay for themselves — a channel it cannot see returns before `loadSlowmode` and
+    `loadChannelMessages`, and `ReadMessageHistory` gates the page on its own, so
+    neither request is sent to be refused.
+    `SendMessage` **disables** the composer (`MessageInput.SetPermissions`), which
+    is why the placeholder carries the reason: it is then the only thing left in the
+    card. Typed text is kept. `UploadFiles` is checked in `AddAttachment`, where a
+    drop and a paste both land, and reported through `OnRefused` — nothing else
+    would happen, and nothing happening reads as a bug. A drop checks once for the
+    whole batch rather than once per file.
+    Nothing caches the answer. The lookups are `State`'s own RWMutex-guarded map
+    reads and the questions are asked per channel switch, per hover and once a
+    second at worst — while holding a `*revoltgo.ServerMember` would be both a data
+    race (the gateway writes `Roles` in place) and a cache to invalidate.
+    `onMemberUpdated` is the one event that can change the answer under a standing
+    selection: for **our own** member it rebuilds the channel list and re-syncs the
+    composer, since a role gained or lost is what makes a channel appear.
+18. **Parsing a body.** `markdown.Parse` classifies each line *once* into a
+    `lineKind` — paragraph collection stops at anything that is not `lineText`, so
+    a predicate per block type would be re-run per line — then hands each block's
+    text to `parseInline` **whole**, newlines included. That is not tidiness: a
+    Discord span crosses a hard line break, and a scanner given one line at a time
+    can never match one. `LineBreak` is what the scanner emits at a `\n`.
+    The scanner is a byte loop over an `inlineSpecial` table: an ordinary run costs
+    no call and no copy, being emitted as a slice of the source, and `inlineScanner.buf`
+    only exists once an escape has to be dropped out of a run. Everything else is
+    delimiter matching, in `matchInline`. The **autolink** is the exception that
+    lives in the scanner rather than in it — a bare URL's scheme sits *behind* the
+    `://` that announces it, so it is the one construct matched by looking back,
+    bounded by the pending run's start so it can't reach into a node already
+    emitted.
+    A `Blockquote` holds **blocks**, not inlines, so `> # Note` is a heading and a
+    quote marker among them nests; `mdBuilder.blockquote` builds them first and
+    splices the bar in afterwards, a block's own non-inline break segment being the
+    only thing that knows where a row ended. A `List` is one block whatever its
+    depth — `ListItem.Indent` moves the marker column, nothing else — and
+    `ListItem.Number` counts per depth, since the renderer cannot recover that from
+    a flat index.
+19. **The member list.** A server holds thousands of members whose presence changes
+    continuously, so nothing about it is per-row work on the UI thread.
+    `refreshMemberList` runs the `Store.Members` walk **off-thread** — it resolves a
+    nickname, avatar, presence and role colour per member and then sorts — together
+    with `ui.NewMemberModel`, which is pure and reads no theme size for exactly that
+    reason. Only installing the result hops back. Two rebuilds can race, so
+    `App.memberSeq` drops the older.
+    The model is flat and its two entry kinds are one fixed height each, which is
+    what makes a position a prefix sum (`memberOffsets`) and the window two binary
+    searches (`visibleRange`). `MemberList` mounts only that window and **recycles**
+    its rows: `MemberRow.SetMember` no-ops on unchanged state, so an overlapping
+    scroll and a whole-model repaint both cost nothing per row that did not move.
+    Keying the mounted map by *entry index* is what puts the same object back on the
+    same entry. Nothing per-row may capture a member — `RowMenu` is one hook on the
+    list taking a user ID, and both row callbacks read `w.userID` at the moment of
+    the click.
+    Ordering is one bucket index per member and no second sort: `Store.Members` has
+    already ordered them (tie-broken on user ID so it is total) and bucketing is
+    stable. An **offline member never appears in their hoisted role's section** —
+    a hoisted section is a list of who is here — and an empty bucket emits no header.
+    Presence is the only event that reorders, so `PresenceChanged` is *debounced*
+    through `queueMemberRefresh` while `UserUpdated` repaints one row in place.
+    Following presence at all is a setting; so are hoisting, hiding the offline
+    half, hiding members with no role, the settling window and the overscan. The
+    two hiding settings meet in `MemberListOptions.hides`, asked by both branches
+    of the model before anything decides where a member would have gone. Roleless
+    is **not** `HoistRoleID == ""` — a member holding only an unhoisted role has
+    none — hence `domain.Member.HasRoles`, which counts a role the server has not
+    published. **A hidden sidebar skips the model
+    build entirely** (`App.memberStale`, caught up by `toggleMemberList`) but never
+    the walk — the mention picker is fed off it, including people the list hides.
+20. **Typing indicators.** `client.TypingChanged` is the one event that carries
+    its value rather than naming what moved: `revoltgo.State` does not model
+    typing, so no store answers who is typing where and the reader keeps it —
+    `App.typing` (channel → user → expiry), the same shape as `slowmodeUntil`.
+    Every channel is tracked, not only the open one, because the sidebar marks
+    the others; nothing outlives `typingLifetime`, so it cannot grow. One
+    `typingTimer` is re-armed to the **next expiry across all channels** rather
+    than ticking, since the line changes only when somebody lapses, and
+    `pruneTyping` reports which channels emptied so only those repaint.
+    Revolt sends no stop before a message, so `onMessageCreated` forgets its
+    author. A name that is not resolved yet is *counted* rather than named
+    (`typingPhrase`'s `hidden` covers both that and everyone past the limit), and
+    the line redraws when `flushAuthors` or `UserUpdated` fills the gap.
+    Sending re-announces at most once per `typingSendInterval` and takes itself
+    back on an empty composer, a submit, a channel switch, or `typingIdleTimeout`
+    of quiet. `MessageInput.OnTyping` reports *whether text survived* the
+    keystroke, one callback rather than a pair, and rides the typing methods
+    beside `syncMentions` for the same reason they do.
+    `TypingShowSelf` files this account among the typists from `noteSelfTyping`,
+    a **local** echo rather than a reflected event: nothing guarantees Revolt
+    sends our own typing back, and the preview is wanted whether or not we are
+    announcing — so `typingChannelID` marks where we count as composing either
+    way, and a zero `sentTypingAt` is what says nothing is owed a retraction.
+    Only the first keystroke repaints; later ones move the expiry alone, and a
+    timer left armed at the older one costs a wake that prunes nothing and
+    re-arms itself. We are named "You", first and out of the sorted order, and
+    take a slot against the limit like anybody else.
+    `TypingNames` is the limit **and** the off switch — at zero
+    `onTypingChanged` returns on its first statement. It cannot be turned off any
+    earlier: revoltgo drops an event before decoding when nothing is registered
+    for its type, but it has no `RemoveHandler`, so a live setting has to be read
+    in the handler.
+    The mark is `ui.TypingMark`: a capsule sweeping its box once a second with a
+    lagged trail behind it. The lag is in **time**, not in space — every segment
+    walks the same path, so the trail gathers at each turn and draws out across
+    the middle with nothing to clamp at either end. The cosine is what eases the
+    turns, which is why the animation's own curve is linear; an eased one would
+    also stutter at every repeat. Only positions move, and
+    `canvas.Rectangle.Move` repaints for itself, so nothing here refreshes
+    anything. `typingTrailTint` is **not** `theme.Fade`: that scales the alpha of
+    a `color.RGBA` and leaves channels Go defines as already multiplied by it, so
+    a faded colour composites *brighter* than its source — a tail lighter than
+    the line casting it.
 
 ## Conventions
 
@@ -417,6 +701,17 @@ visual change more expensive. To check appearance, render to a PNG with
   own, so one long name shoved the message area sideways. Anything rendering a
   user-supplied name into a sidebar row goes in the stretching slot of a `Border`
   wrapped in `ui.NewEllipsisText` (or `Truncation = TextTruncateEllipsis`).
+- **The window is grown by what it holds.** `Canvas.EnsureMinSize` resizes the
+  window the frame its content's minimum outgrows it, and never gives the room
+  back — so anything reporting what it happens to be holding drags the window
+  about as messages arrive. The sidebars are pinned (above); the message column
+  reports `MessageAreaMinWidth`/`Height` through `ui.NewFixedSizeContainer`
+  instead of the widest mounted message and a composer grown by the mention
+  picker. Everything stacked over the main row goes through `ui.NewLayer`, which
+  reports nothing at all: a notice stack, an open settings page and a tooltip each
+  reached the window's minimum, and `container.NewWithoutLayout` does not even
+  skip a *hidden* child, so the tooltip kept the longest name it had ever shown.
+  `app_test.go` asserts the root's minimum is the same before and after each.
 - **Composer geometry.** A growing entry's height is
   `lineHeight × lines + InnerPadding × 2` (`composerMinSize`) — the input border is
   *not* added on top, because `entryRenderer.Layout` pays for it out of the text
@@ -469,13 +764,41 @@ visual change more expensive. To check appearance, render to a PNG with
   Message buttons draw `action-*.svg` rather than Fyne's icons for the same reason:
   a themed resource takes its colour from a theme *name*, and delete reading as
   delete is the point.
+- **Tap plumbing is `ui.tapBase`, not a hand-written pair of methods.** Embedding
+  it supplies `Tapped`, `TappedSecondary`, `MouseMoved` and the pointer `Cursor`
+  from two func fields, and every interactive widget here uses it. A widget whose
+  menu is assigned *after* construction — the sidebar's server and channel rows —
+  sets `onSecondaryTap` to a closure reading its own `Menu` field, so the items are
+  built when the click arrives. Deliberately **not** hoverable: adding a no-op
+  `MouseIn`/`MouseOut` here would take hover from every parent row, so a widget
+  that wants hover declares it itself. `ui.decoratedText` is the one hold-out and
+  stays one — its `Cursor` is conditional (a struck word is not a spoiler and must
+  not read as clickable), which `tapBase`'s fixed pointer would flatten.
 - **Repainting the message column.** `Container.Refresh` refreshes every child and
   `RichText.Refresh` re-wraps its text, so `messageList.Refresh()` re-flowed every
   mounted body on every gateway message. Every mutation of the mounted window goes
   through `App.remountMessages` (`ui.Relayout`: re-run this one layout, don't walk
   the children). Use `Refresh` only when what a *mounted* widget says has changed.
   For the same reason nothing on the scroll path may call `MinSize` on the list —
-  `BaseWidget.MinSize` is not memoised.
+  `BaseWidget.MinSize` is not memoised. A virtualised list's own layout must
+  therefore report its height from a **field**, never from a walk
+  (`memberListLayout.MinSize`): `container.Scroll` asks its content for a minimum
+  on every offset write.
+- **A recycled widget must own nothing it captured.** `ui.MemberRow` is reused for
+  a different person as the list scrolls, so every callback on it reads the field
+  it needs at the moment it fires rather than closing over a value — a menu that
+  captured a member ID kicks the wrong person after the first recycle. An
+  asynchronous load has no such field to read, so it carries a `generation` the row
+  bumps on every `SetMember` and `release`, and a picture arriving against a stale
+  one is dropped. The counter is UI-thread only, `ImageCache.LoadAsync` delivering
+  there, so it is a plain `uint64`.
+  Restoring a placeholder means putting **the same object** back, not a new one:
+  Fyne only learns of a canvas object when the container holding it is refreshed,
+  so a row that quietly swapped in a fresh `canvas.Circle` drew no avatar at all —
+  hence `newAvatarSlot` handing the placeholder back alongside the slot.
+  `ellipsisLayout` rewrites its text object during layout, so a recycled row
+  compares against its own `fullName` and re-labels through `ui.SetEllipsisText`;
+  reading the object back would take a shortened name for the real one.
 - **Fyne's scrollbar is a widget over the content, so the client draws its own.**
   Its `scrollBarArea` lies across the right edge of the content and accepts hover —
   innermost wins, so it stole the message row's. `AppTheme.Size` zeroes *both*
@@ -491,7 +814,14 @@ visual change more expensive. To check appearance, render to a PNG with
   `ScrollIndicatorWidth + ScrollIndicatorInset` must stay under
   `MessageHorizontalPadding` or the bar draws over the text; a width of zero turns
   it off. Only the message column has one — elsewhere the right edge carries rows
-  and controls a strip would obstruct.
+  and controls a strip would obstruct, which is what `NewPlainVScroll` is for: the
+  settings pane centres its cards, so an indicator pinned to the pane's edge lands
+  on one whenever the window is narrow enough for the two to meet. It leaves
+  `indicator` nil, so `CreateRenderer` must not append it — a typed-nil rectangle in
+  the renderer's object list is dereferenced by the painter.
+  Neither `Scrolled` nor `Dragged` may write `Offset` and call `Refresh`:
+  `Scroll.Refresh` walks and repaints every descendant, which for a pan is the whole
+  column once per frame. `ScrollToOffset` clamps and refreshes only the renderer.
 - **Tooltips and notices are layers over the main row, not canvas overlays.**
   Pushing an overlay routes the whole hit test into it, so the hovered widget would
   never see `MouseOut`. Confirmations *are* canvas overlays, on the modal layer
@@ -510,9 +840,13 @@ visual change more expensive. To check appearance, render to a PNG with
 
 ## Build / check
 
-`go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`
-(expect no output). Checked out with `core.autocrlf=true`, so write source files
-with LF endings.
+`go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`.
+
+The repository is LF throughout and `core.autocrlf=true` converts on checkout, so
+on Windows `gofmt -l` names every file it has converted — the diff is the line
+endings and nothing else. Read its output as *which* files rather than *whether
+any*, and check a named one with `gofmt -d` before believing it. Write source
+files with LF regardless: what is committed must stay LF.
 
 ## Versioning / CI
 
@@ -534,10 +868,10 @@ step, so a failing tree can't leave a tag behind. The exe is unsigned.
 ## Known gaps
 
 Simply not built, no constraint behind it: reply-preview tap navigation
-(`buildReplyPreview`), `App.createServer`, typing indicators (the three settings
-toggles are honoured by nothing; revoltgo has the calls and events ready),
+(`buildReplyPreview`), `App.createServer`,
 `ChannelCreate` (a DM opened while running appears at the next DM-list refresh),
-attach/emoji buttons (files arrive by drag or paste), role mentions,
+attach/emoji buttons (files arrive by drag or paste — a custom emoji renders but
+there is no picker to insert one, and no reactions), role mentions,
 mutual friends/servers and relationships on a profile, a notice history panel,
 code-block highlighting, a hue wheel/alpha/eyedropper in the colour picker,
 `MessageEmbedSpecial` (YouTube, Spotify, …), and moderation beyond the three
@@ -546,6 +880,15 @@ one call away but deliberately not offered).
 
 Where something is limited by revoltgo or Fyne rather than by effort:
 
+- **The member list is as complete as one request makes it.** Revolt's members
+  endpoint has no pagination, no search and no Discord-style lazy subscription to
+  the slice of the list actually on screen, so a server is one whole fetch or
+  nothing — `exclude_offline` is the only lever it offers. Nothing keeps the
+  membership current afterwards either: joins and leaves arrive on the gateway, but
+  a client left running on a very large server drifts until it re-enters. The
+  sections are Revolt's *hoisted* roles as the server defines them, with no way to
+  reorder or collapse one, and a role's icon is dropped at the boundary. Presence
+  reordering is the client's own debounce rather than anything the gateway batches.
 - **Slowmode** runs off the client's own clock: the `InSlowmode` rejection carries
   an authoritative `retry_after`, but revoltgo surfaces failures as a formatted
   string. A send refused because the cooldown started elsewhere reports the generic
@@ -564,10 +907,37 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   one-space nub at a wrap; inline `code` inside a decorated span isn't decorated.
   A decorated word landing at a line end overhangs the column and is clipped, as a
   mention would without `mdBuilder.reserve`; the reserve is not extended to them.
+  A quote's bar is drawn at body size whatever the row it opens, there being no way
+  to ask a spliced segment what the row around it settled on. A nested list indents
+  with spaces in the marker segment, RichText offering nothing else that moves the
+  start of a row. `CodeBlock.Language` is parsed and unused — nothing highlights.
 - **Embeds** render site line, title, description, colour and one picture. A bare
   **video** embed is dropped at the boundary (revoltgo carries only the URL, and
   there is no player); a bare **image** embed has the same missing dimensions, so it
   draws against the placeholder until the picture lands.
+- **An invite card** says "server" whatever the code opens: revoltgo carries
+  `Invite.Type`, and a *group* invite resolves with no `ServerID`, so it is
+  offered as a join — which works — under the wrong noun. It draws no banner
+  (`Invite.ServerBanner` is dropped at the boundary, as a profile's is flat for
+  the same reason) and does not refresh, so a server joined from another client
+  keeps offering Join until the channel is reopened. `NewInviteCardFor` exists
+  for a caller holding a resolved invite, but nothing calls it yet — the join
+  dialog still validates a pasted code without previewing what it opens.
+- **A custom emoji** is a still: `image.Decode` takes the first frame of an
+  animated one. It has no name beside it either — nothing tooltips a message body
+  — so one whose picture fails to arrive leaves an empty square rather than the
+  `:shortcode:` other clients fall back to, and a preview of a body that is only
+  emoji (`markdown.PlainText`) is blank.
+- **A typing indicator** runs off the client's own clock: Revolt sends no
+  heartbeat and no reliable stop, so an entry is carried by the events that keep
+  arriving and lapses at `typingLifetime`. Somebody who closes their client is
+  shown for up to that long. Nothing marks a channel outside the open server, the
+  sidebar being the only surface besides the open channel's line, and a name too
+  long for the row is truncated rather than the line wrapping — it shares its row
+  with the slowmode chip, which is pinned to the far edge. `TypingShowSelf` draws
+  what everyone else is shown, not what they have actually received: the local
+  echo does not know whether the announcement reached the gateway, and with
+  `SendTyping` off it is a preview of a line nobody is being sent.
 - **A system line** names only the subject — Revolt sends no actor, so a kick reads
   "X was kicked". A rename says only that it happened.
 - **Profiles** don't refresh while open, and the banner is flat: a `canvas.Image`
@@ -577,7 +947,9 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   falls back to the default text colour.
 - **The scroll indicator** only reports position — no drag, no track to click.
 - **Settings** that are read once while the caches are built (cache directory,
-  message cache caps, text-preview count) need a restart, and each row says so.
+  message cache caps, text-preview count, concurrent downloads — the last being a
+  channel sized at construction, which `SetLimits` cannot resize under the
+  goroutines holding it) need a restart, and each row says so.
   Presence/status and "log out everywhere" have no confirmed revoltgo action. The
   Advanced filter matches field names only; the curated Styles groups aren't
   searchable. The login screen has no notice layer (it isn't built until Ready), so
@@ -589,6 +961,6 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   classifies video/audio/archive/PDF but only `FileImage`/`FileText` are branched on.
 - `client.Client` has no test of its own — its actions want an HTTP fake, and
   revoltgo's REST layer takes no injectable transport.
-- `assets/` still carries unreferenced `close.svg`, `edit.svg`, `file.svg`,
-  `reply.svg`, `trash.svg`; nothing embeds them, and their mix of fills and strokes
-  wouldn't take `ui.tintedIcon` anyway.
+- `ui.NewInviteCardFor` — the entry point for a caller already holding a resolved
+  `domain.Invite` — is built and unreferenced. The join dialog still validates a
+  pasted code without previewing what it opens, which is what it is for.

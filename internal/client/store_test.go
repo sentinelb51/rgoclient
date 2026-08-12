@@ -263,37 +263,37 @@ func TestConversationPermissions(t *testing.T) {
 	group := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeGroup, Owner: "them"}
 	notes := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeSavedMessages}
 
-	if !conversationPermissions(dm, &revoltgo.User{ID: "them"}, "self").Has(domain.PermissionSendMessage) {
+	if !conversationPermissions(dm, domain.RelationshipFriend, "self").Has(domain.PermissionSendMessage) {
 		t.Error("an ordinary direct message will not take a message")
 	}
-	if !conversationPermissions(dm, nil, "self").Has(domain.PermissionSendMessage) {
+	if !conversationPermissions(dm, domain.RelationshipNone, "self").Has(domain.PermissionSendMessage) {
 		t.Error("a direct message with an unresolved recipient will not take a message")
 	}
 
-	for _, relationship := range []revoltgo.UserRelationshipType{
-		revoltgo.UserRelationsTypeBlocked, revoltgo.UserRelationsTypeBlockedOther,
+	for _, relationship := range []domain.Relationship{
+		domain.RelationshipBlocked, domain.RelationshipBlockedBy,
 	} {
-		got := conversationPermissions(dm, &revoltgo.User{ID: "them", Relationship: relationship}, "self")
+		got := conversationPermissions(dm, relationship, "self")
 		if got.Has(domain.PermissionSendMessage) {
-			t.Errorf("%s: a blocked direct message still takes messages", relationship)
+			t.Errorf("%v: a blocked direct message still takes messages", relationship)
 		}
 		if !got.Has(domain.PermissionReadMessageHistory) {
-			t.Errorf("%s: a blocked direct message should keep its history readable", relationship)
+			t.Errorf("%v: a blocked direct message should keep its history readable", relationship)
 		}
 	}
 
-	if !conversationPermissions(group, nil, "self").Has(domain.PermissionSendMessage) {
+	if !conversationPermissions(group, domain.RelationshipNone, "self").Has(domain.PermissionSendMessage) {
 		t.Error("a group with no permissions of its own will not take a message")
 	}
-	if !conversationPermissions(group, nil, "them").Has(domain.PermissionManageMessages) {
+	if !conversationPermissions(group, domain.RelationshipNone, "them").Has(domain.PermissionManageMessages) {
 		t.Error("the group's owner cannot manage it")
 	}
 	group.Permissions = new(int64(domain.PermissionViewChannel))
-	if conversationPermissions(group, nil, "self").Has(domain.PermissionSendMessage) {
+	if conversationPermissions(group, domain.RelationshipNone, "self").Has(domain.PermissionSendMessage) {
 		t.Error("a group's own permissions were ignored")
 	}
 
-	if !conversationPermissions(notes, nil, "self").Has(domain.PermissionSendMessage) {
+	if !conversationPermissions(notes, domain.RelationshipNone, "self").Has(domain.PermissionSendMessage) {
 		t.Error("saved notes will not take a note")
 	}
 }

@@ -74,9 +74,44 @@ type ServerLeft struct {
 	ServerID string
 }
 
+// ServerUpdated names a server whose own details changed: its name, its icon,
+// its categories or the channels filed under them.
+type ServerUpdated struct {
+	ServerID string
+}
+
+// RolesChanged names a server whose roles moved — one edited, one deleted, or
+// the ranks reordered. It does not say which: a role's colour and its rank are
+// what the member list sorts and colours by, so any of the three is one walk of
+// the membership either way.
+type RolesChanged struct {
+	ServerID string
+}
+
+// ChannelCreated is a channel that now exists for this account: one added to a
+// server, or a conversation opened from somewhere else.
+type ChannelCreated struct {
+	ChannelID string
+	ServerID  string // "" for a conversation
+}
+
+// ChannelUpdated names a channel whose own details changed — its name, icon,
+// description, or the permission overwrites that decide who can see it.
+type ChannelUpdated struct {
+	ChannelID string
+}
+
 // ChannelClosed is a conversation the user closed or a server channel that was
 // deleted. Both arrive the same way.
 type ChannelClosed struct {
+	ChannelID string
+}
+
+// ChannelRead names a channel this account acknowledged somewhere else. It is
+// the one event that arrives *because* of another client, which is why it exists
+// at all: without it a conversation read on a phone stays bold here for the life
+// of the session.
+type ChannelRead struct {
 	ChannelID string
 }
 
@@ -94,6 +129,25 @@ type MemberUpdated struct {
 	UserID   string
 }
 
+// RecipientsChanged reports somebody joining or leaving a group conversation.
+// It is a server's MembersChanged for the one kind of channel that has a
+// membership of its own, and it is named separately because a group has no
+// server: the ID is the channel's.
+type RecipientsChanged struct {
+	ChannelID string
+	UserID    string
+
+	Joined bool
+}
+
+// UserRemoved is an account taken off the platform. Everything of theirs goes
+// with it — their conversations, every group they were in and every membership —
+// so unlike UserUpdated there is nothing left to re-read: this names what has
+// already stopped existing.
+type UserRemoved struct {
+	UserID string
+}
+
 // UserUpdated names a user whose account changed in a way that is drawn but
 // moves nothing: their name, avatar or badges.
 //
@@ -101,6 +155,17 @@ type MemberUpdated struct {
 // moved and the store answers what things now are, which is the whole contract
 // here — and it is what keeps a coalesced burst correct, the last read winning.
 type UserUpdated struct {
+	UserID string
+}
+
+// RelationshipChanged names somebody this account now stands differently with:
+// a friend request either way, an unfriending, a block or an unblock.
+//
+// Like TypingChanged it exists because no store answers for it on its own —
+// revoltgo registers no default handler for the event and State's caches are
+// unexported, so the client records the new value itself and this only names who
+// it was about. Ask Store.User afterwards.
+type RelationshipChanged struct {
 	UserID string
 }
 
@@ -123,19 +188,27 @@ type TypingChanged struct {
 	Typing bool
 }
 
-func (Ready) isEvent()           {}
-func (Disconnected) isEvent()    {}
-func (MessageCreated) isEvent()  {}
-func (MessageUpdated) isEvent()  {}
-func (MessageDeleted) isEvent()  {}
-func (ServerJoined) isEvent()    {}
-func (ServerLeft) isEvent()      {}
-func (ChannelClosed) isEvent()   {}
-func (MembersChanged) isEvent()  {}
-func (MemberUpdated) isEvent()   {}
-func (UserUpdated) isEvent()     {}
-func (PresenceChanged) isEvent() {}
-func (TypingChanged) isEvent()   {}
+func (Ready) isEvent()               {}
+func (Disconnected) isEvent()        {}
+func (MessageCreated) isEvent()      {}
+func (MessageUpdated) isEvent()      {}
+func (MessageDeleted) isEvent()      {}
+func (ServerJoined) isEvent()        {}
+func (ServerLeft) isEvent()          {}
+func (ServerUpdated) isEvent()       {}
+func (RolesChanged) isEvent()        {}
+func (ChannelCreated) isEvent()      {}
+func (ChannelUpdated) isEvent()      {}
+func (ChannelClosed) isEvent()       {}
+func (ChannelRead) isEvent()         {}
+func (MembersChanged) isEvent()      {}
+func (MemberUpdated) isEvent()       {}
+func (RecipientsChanged) isEvent()   {}
+func (UserRemoved) isEvent()         {}
+func (UserUpdated) isEvent()         {}
+func (RelationshipChanged) isEvent() {}
+func (PresenceChanged) isEvent()     {}
+func (TypingChanged) isEvent()       {}
 
 /* Registration */
 
@@ -177,6 +250,7 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		previous := c.messages.Append(event.Channel, message)
 
 		c.emit(epoch, MessageCreated{Message: message, Previous: previous})
+		c.applyPinEvent(epoch, message)
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageUpdate) {
@@ -239,6 +313,33 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, MessageDeleted{ChannelID: event.Channel, MessageIDs: event.IDs})
 	})
 
+	// Both halves are registered for the reason the typing pair is: EventMessageUnreact
+	// *embeds* EventMessageReact rather than aliasing it, so the fields are promoted
+	// but one handler does not answer for the other. ID is the message.
+	//
+	// Nothing is emitted for a reaction this account has already recorded — our own
+	// goes into the cache when the server accepts it, so the echo that follows is
+	// what applyReaction reports as nothing moved.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageReact) {
+		if c.applyReaction(event.ChannelID, event.ID, event.EmojiID, event.UserID, true) {
+			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
+		}
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageUnreact) {
+		if c.applyReaction(event.ChannelID, event.ID, event.EmojiID, event.UserID, false) {
+			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
+		}
+	})
+
+	// One emoji taken off a message wholesale, whoever had chosen it — what a
+	// moderator's clear sends, one event per emoji.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageRemoveReaction) {
+		if c.clearReaction(event.ChannelID, event.ID, event.EmojiID) {
+			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
+		}
+	})
+
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerCreate) {
 		log.Printf("joined server %s", event.ID)
 
@@ -251,10 +352,64 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, ServerLeft{ServerID: event.ID})
 	})
 
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerUpdate) {
+		c.emit(epoch, ServerUpdated{ServerID: event.ID})
+	})
+
+	// All three role events collapse to one: what a reader does about a role is
+	// re-read the members it colours and orders, and that is the same walk whether
+	// the role was edited, deleted or merely re-ranked.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerRoleUpdate) {
+		c.emit(epoch, RolesChanged{ServerID: event.ID})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerRoleDelete) {
+		c.emit(epoch, RolesChanged{ServerID: event.ID})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerRoleRanksUpdate) {
+		c.emit(epoch, RolesChanged{ServerID: event.ID})
+	})
+
+	// The channel is promoted into the event rather than named by it, so unlike
+	// every other create this one arrives with everything about it — and revoltgo's
+	// own handler has already filed it in State by the time this runs.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelCreate) {
+		// Server is nilable because a conversation has none, which is exactly the
+		// distinction the reader needs — hence "" rather than a second field.
+		var serverID string
+		if event.Server != nil {
+			serverID = *event.Server
+		}
+
+		c.emit(epoch, ChannelCreated{ChannelID: event.ID, ServerID: serverID})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelUpdate) {
+		c.emit(epoch, ChannelUpdated{ChannelID: event.ID})
+	})
+
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelDelete) {
 		log.Printf("channel %s closed", event.ID)
 
 		c.emit(epoch, ChannelClosed{ChannelID: event.ID})
+	})
+
+	// Revolt sends this to every session of the account, the one that asked
+	// included, so it covers a channel read on another client and echoes our own
+	// acks back. The reader treats it as "no longer unread" either way, which our
+	// own ack has already made true.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelAck) {
+		c.emit(epoch, ChannelRead{ChannelID: event.ID})
+	})
+
+	// A session revoked from elsewhere — the session manager on another client, or
+	// a password change. The token is dead, so this is the same fatal drop a
+	// rejected authentication is.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, _ *revoltgo.EventLogout) {
+		log.Print("session revoked")
+
+		c.emit(epoch, Disconnected{Fatal: true})
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberJoin) {
@@ -267,6 +422,27 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberUpdate) {
 		c.emit(epoch, MemberUpdated{ServerID: event.ID.Server, UserID: event.ID.User})
+	})
+
+	// A group's own membership. Both halves are registered because
+	// EventChannelGroupLeave *embeds* the join event rather than aliasing it —
+	// the third pair in this file to do so — and the ID on either is the channel.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelGroupJoin) {
+		c.emit(epoch, RecipientsChanged{ChannelID: event.ID, UserID: event.User, Joined: true})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelGroupLeave) {
+		c.emit(epoch, RecipientsChanged{ChannelID: event.ID, UserID: event.User})
+	})
+
+	// An account removed from the platform outright. revoltgo's own handler has
+	// already dropped the user, every conversation and group they were in, and
+	// every membership — ignoring the tracking flags, since the account is gone
+	// rather than merely unwatched — so this only names who it was.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserPlatformWipe) {
+		log.Printf("user %s removed from the platform", event.UserID)
+
+		c.emit(epoch, UserRemoved{UserID: event.UserID})
 	})
 
 	// Nothing subscribed to this before, so somebody's avatar or display name
@@ -285,6 +461,23 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		}
 	})
 
+	// A relationship this account is one half of, changed here or anywhere else.
+	// Nothing else keeps one current: Ready fills User.Relationship for everybody it
+	// names and revoltgo registers no default handler for this, so without the
+	// recording below a friend added on a phone stays a stranger here for the life
+	// of the session — and a block would leave the composer open on a conversation
+	// that can no longer be written to.
+	//
+	// The ID on the event is *this* account; the user it carries is the other half.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserRelationship) {
+		if event.User == nil {
+			return
+		}
+		c.setRelationship(event.User.ID, toRelationship(event.User.Relationship))
+
+		c.emit(epoch, RelationshipChanged{UserID: event.User.ID})
+	})
+
 	// Both halves are registered because EventChannelStopTyping *embeds* the start
 	// event rather than aliasing it: the fields are promoted, but the handler is
 	// keyed on the concrete type and one does not answer for the other. The ID is
@@ -301,6 +494,35 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStopTyping) {
 		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User})
 	})
+}
+
+// applyPinEvent records a pin or unpin announced by an incoming system message,
+// and names the message it moved so a mounted row can redraw. Anything else is a
+// no-op, as is a pin of a message no longer cached.
+//
+// A pin is announced twice over — as this system message, and as a MessageUpdate
+// carrying the new flag — and only this one can be believed.
+// EventMessageUpdate.Data is a whole Message rather than a partial one, so Pinned
+// arrives as a plain bool with no way to tell "now false" from "not mentioned in
+// this update": read there, every ordinary content edit would land as an unpin.
+// The system event names the message and says which of the two happened, which is
+// the whole of what a reader needs.
+func (c *Client) applyPinEvent(epoch uint64, message *domain.Message) {
+	if message.System == nil {
+		return
+	}
+
+	target := message.System.PinnedMessageID()
+	if target == "" {
+		return
+	}
+
+	pinned := message.System.Kind == domain.SystemMessagePinned
+	if !c.markPinned(message.ChannelID, target, pinned) {
+		return
+	}
+
+	c.emit(epoch, MessageUpdated{ChannelID: message.ChannelID, MessageID: target})
 }
 
 // userUpdateKinds classifies a partial user update. Both may be true, and two

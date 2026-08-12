@@ -187,6 +187,47 @@ func TestMemberModelHidesRoleless(t *testing.T) {
 	}
 }
 
+// TestMemberModelFallsBackToEveryone covers the setting that exists because an
+// empty sidebar is indistinguishable from a broken one: the filters are set on
+// some other server and then a server they leave nothing of is opened.
+func TestMemberModelFallsBackToEveryone(t *testing.T) {
+	members := []domain.Member{
+		member("Ada", domain.PresenceOffline, ""),
+		member("Bo", domain.PresenceOffline, ""),
+	}
+
+	opts := MemberListOptions{GroupByPresence: true, HideOffline: true, HideRoleless: true}
+	if got := summarise(NewMemberModel(members, hoistedRoles, opts)); len(got) != 0 {
+		t.Fatalf("model = %v, want nothing without the fallback", got)
+	}
+
+	opts.FallbackToAll = true
+	want := []string{"# Offline — 2", "Ada", "Bo"}
+	if got := summarise(NewMemberModel(members, hoistedRoles, opts)); !equal(got, want) {
+		t.Errorf("model = %v\nwant   %v", got, want)
+	}
+
+	// It is the filters it undoes, not the shape of the list: an ungrouped list
+	// falls back to an ungrouped one.
+	opts = MemberListOptions{HideOffline: true, FallbackToAll: true}
+	if got := summarise(NewMemberModel(members, hoistedRoles, opts)); !equal(got, []string{"Ada", "Bo"}) {
+		t.Errorf("ungrouped model = %v, want [Ada Bo]", got)
+	}
+
+	// A server that really is empty stays empty — the fallback answers a filter,
+	// not a fetch that has not landed.
+	if got := NewMemberModel(nil, hoistedRoles, opts); len(got) != 0 {
+		t.Errorf("model = %v, want nothing for a membership nobody has", summarise(got))
+	}
+
+	// And one nothing was hiding is not walked twice to arrive at what it already
+	// had.
+	opts = MemberListOptions{GroupByPresence: true, FallbackToAll: true}
+	if got := summarise(NewMemberModel(members, hoistedRoles, opts)); !equal(got, want) {
+		t.Errorf("model = %v\nwant   %v", got, want)
+	}
+}
+
 // TestMemberModelUngroupedHasNoSections covers what turning the presence split
 // off has always meant — one run, hoisting included, which is otherwise easy to
 // leave half-applied.

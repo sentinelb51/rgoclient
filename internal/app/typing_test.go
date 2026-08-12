@@ -1,7 +1,7 @@
 package app
 
-// The two typing rules a reader cannot check by eye: the sentence, and when an
-// entry lapses. Both are pure — the map and the phrase builder need no session,
+// The two typing rules a reader cannot check by eye: what the line names, and
+// when an entry lapses. Both are pure — the map and the phrase builder need no session,
 // no widgets and no clock of their own, which is the whole reason the state
 // lives on App rather than behind the store.
 
@@ -19,20 +19,20 @@ func TestTypingPhrase(t *testing.T) {
 		want   string
 	}{
 		{"nobody", nil, 0, false, ""},
-		{"one, unnamed", nil, 1, false, "Someone is typing…"},
-		{"several, none named", nil, 3, false, "Several people are typing…"},
-		{"one", []string{"Alice"}, 0, false, "Alice is typing…"},
-		{"two", []string{"Alice", "Bob"}, 0, false, "Alice and Bob are typing…"},
-		{"three", []string{"Alice", "Bob", "Carol"}, 0, false, "Alice, Bob and Carol are typing…"},
-		{"one named, one over", []string{"Alice"}, 1, false, "Alice and 1 other are typing…"},
-		{"three named, four over", []string{"Alice", "Bob", "Carol"}, 4, false, "Alice, Bob, Carol and 4 others are typing…"},
+		{"one, unnamed", nil, 1, false, "Someone"},
+		{"several, none named", nil, 3, false, "3 people"},
+		{"one", []string{"Alice"}, 0, false, "Alice"},
+		{"two", []string{"Alice", "Bob"}, 0, false, "Alice, Bob"},
+		{"three", []string{"Alice", "Bob", "Carol"}, 0, false, "Alice, Bob, Carol"},
+		{"one named, one over", []string{"Alice"}, 1, false, "Alice +1"},
+		{"three named, four over", []string{"Alice", "Bob", "Carol"}, 4, false, "Alice, Bob, Carol +4"},
 
-		// "You" is plural whatever it is alone with, and leads however the rest sort.
-		{"self alone", nil, 0, true, "You are typing…"},
-		{"self and one", []string{"Alice"}, 0, true, "You and Alice are typing…"},
-		{"self and two", []string{"Alice", "Bob"}, 0, true, "You, Alice and Bob are typing…"},
-		{"self and one over", nil, 1, true, "You and 1 other are typing…"},
-		{"self, one named, two over", []string{"Alice"}, 2, true, "You, Alice and 2 others are typing…"},
+		// This account leads however the rest sort.
+		{"self alone", nil, 0, true, "You"},
+		{"self and one", []string{"Alice"}, 0, true, "You, Alice"},
+		{"self and two", []string{"Alice", "Bob"}, 0, true, "You, Alice, Bob"},
+		{"self and one over", nil, 1, true, "You +1"},
+		{"self, one named, two over", []string{"Alice"}, 2, true, "You, Alice +2"},
 	}
 
 	for _, test := range tests {

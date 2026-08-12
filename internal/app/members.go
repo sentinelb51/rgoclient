@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"log"
 	"time"
 
@@ -13,6 +14,12 @@ import (
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 )
+
+// memberFetchTimeout is how long the sidebar keeps saying it is loading a
+// membership before it gives up and offers to ask again. It is a const rather
+// than a setting because it is not a preference: what the user would be choosing
+// is how long to look at a sweeping line before being told nothing came.
+const memberFetchTimeout = 20 * time.Second
 
 // authorFetchDelay is how long author resolution waits for more authors before
 // going to the network. Mounting a page calls ensureAuthor once per widget, so a
@@ -95,7 +102,8 @@ func (a *App) flushAuthors() {
 				delete(a.fetchedAuthors, authorKey(ref.ServerID, ref.UserID))
 			}
 			a.refreshAuthorMessages(result.Resolved...)
-			a.refreshTyping() // somebody the line could only count may now have a name
+			a.refreshTyping()  // somebody the line could only count may now have a name
+			a.refreshFriends() // and somebody the friends list could not name at all
 
 			// In a server this is refreshMemberList's to redo, whether a member record
 			// was fetched or only the account behind one: toMember fills a membership's
@@ -137,11 +145,6 @@ func (a *App) refreshAuthorMessages(userIDs ...string) {
 }
 
 /* Member sidebar */
-
-// memberRefreshDelay is the coalescing window for a member-list rebuild. A busy
-// server changes presence continuously and each change reorders the list, so
-// this is the difference between one rebuild and hundreds.
-func memberRefreshDelay() time.Duration { return config.Current().Behaviour.MemberRefreshDelay() }
 
 // buildMemberList builds the right-hand member sidebar.
 func (a *App) buildMemberList() fyne.CanvasObject {
@@ -191,23 +194,11 @@ func (a *App) toggleMemberList() {
 		}
 	}
 
+	// Hiding the column tells nothing inside it, and the status mark is an
+	// animation — see MemberList.SetSweeping.
+	a.memberList.SetSweeping(a.memberSidebar.Visible())
+
 	ui.Relayout(a.mainRow)
-}
-
-// queueMemberRefresh rebuilds the member list a moment from now, coalescing
-// whatever else arrives inside the window into the same rebuild. Call on the UI
-// thread.
-func (a *App) queueMemberRefresh() {
-	if a.memberTimer != nil {
-		return
-	}
-
-	a.memberTimer = time.AfterFunc(memberRefreshDelay(), func() {
-		a.doOnUI(func() {
-			a.memberTimer = nil
-			a.refreshMemberList()
-		}, false)
-	})
 }
 
 // refreshMemberList rebuilds the member list for the current server, and hands
@@ -236,6 +227,7 @@ func (a *App) refreshMemberList() {
 		a.memberStale = false
 		a.memberList.Reset()
 		a.setMentionCandidates(ui.MentionUser, nil)
+		a.updateMemberStatus()
 
 		return
 	}
@@ -268,9 +260,109 @@ func (a *App) refreshMemberList() {
 			a.setMentionCandidates(ui.MentionUser, candidates)
 			if visible {
 				a.memberList.SetModel(entries)
+				a.updateMemberStatus()
 			}
 		}, false)
 	}()
+}
+
+/* What the sidebar says when its rows cannot */
+
+// updateMemberStatus decides the strip drawn over the list. It is computed from
+// the state rather than written at each place that changes it: a fetch starting,
+// finishing, timing out and a model landing can all reach it in either order, and
+// four call sites each setting a message is four chances for the sidebar to be
+// left claiming to be loading something that arrived.
+//
+// Call on the UI thread, after anything either half of it depends on has moved.
+func (a *App) updateMemberStatus() {
+	if a.memberList == nil {
+		return
+	}
+
+	serverID := a.currentServerID
+	status := memberStatusFor(serverID,
+		serverID != "" && a.memberLoading == serverID, a.memberFailed[serverID], a.memberList.Empty())
+
+	// The one thing the decision cannot make for itself: what a retry retries.
+	if status.Action != "" {
+		status.Retry = func() { a.retryMembers(serverID) }
+	}
+
+	a.memberList.SetStatus(status)
+}
+
+// memberStatusFor is the decision alone, taken apart from the widget it is
+// installed on so it can be checked without one.
+//
+// Order is the whole of it. A fetch in flight outranks a previous failure —
+// retrying is what put it in flight — and a failure outranks an empty list,
+// because "nobody to show" for a membership that never arrived is a lie the user
+// has no way to see through.
+func memberStatusFor(serverID string, loading, failed, empty bool) ui.MemberListStatus {
+	switch {
+	case serverID == "":
+		return ui.MemberListStatus{}
+	case loading && empty:
+		return ui.MemberListStatus{Text: "Loading members", Busy: true}
+	case loading:
+		return ui.MemberListStatus{Text: "Refreshing members", Busy: true}
+	case failed:
+		return ui.MemberListStatus{Text: "Couldn't load members.", Action: "Try again"}
+	case empty:
+		return ui.MemberListStatus{Text: "Nobody to show here."}
+	}
+
+	return ui.MemberListStatus{}
+}
+
+// retryMembers asks for a membership again after one failed or was given up on.
+// Call on the UI thread.
+func (a *App) retryMembers(serverID string) {
+	delete(a.fetchedMembers, serverID)
+	delete(a.memberFailed, serverID)
+
+	a.loadMembers(serverID)
+}
+
+// armMemberWatchdog gives the sidebar an answer for a membership that never
+// arrives.
+//
+// It does not cancel anything and cannot: revoltgo's REST layer takes no context,
+// so a request that has stopped being waited for is still out. What the timeout
+// buys is the sidebar no longer claiming to be loading something nothing is
+// watching — and if the answer does land afterwards it is still installed, the
+// fetch having been left alone.
+func (a *App) armMemberWatchdog(serverID string) {
+	a.stopMemberWatchdog()
+
+	var watchdog *time.Timer
+	watchdog = time.AfterFunc(memberFetchTimeout, func() {
+		a.doOnUI(func() {
+			// A fired timer cannot be recalled, so the wake checks it is still the
+			// one the field holds rather than trusting that it was not replaced.
+			if a.memberWatchdog != watchdog || a.memberLoading != serverID {
+				return
+			}
+
+			a.memberWatchdog = nil
+			a.memberLoading = ""
+			a.memberFailed[serverID] = true
+			log.Printf("fetch members of %s: no answer after %s", serverID, memberFetchTimeout)
+
+			a.updateMemberStatus()
+		}, false)
+	})
+	a.memberWatchdog = watchdog
+}
+
+func (a *App) stopMemberWatchdog() {
+	if a.memberWatchdog == nil {
+		return
+	}
+
+	a.memberWatchdog.Stop()
+	a.memberWatchdog = nil
 }
 
 // memberListOptions is what the settings say the list should look like. Read per
@@ -285,6 +377,7 @@ func memberListOptions() ui.MemberListOptions {
 		HoistRoles:      settings.HoistRoles,
 		HideOffline:     settings.HideOfflineMembers,
 		HideRoleless:    settings.HideRolelessMembers,
+		FallbackToAll:   settings.MemberListFallback,
 	}
 }
 
@@ -318,29 +411,60 @@ func (a *App) refreshMemberRow(userID string) {
 // server never blanks its list. Call on the UI thread.
 func (a *App) loadMembers(serverID string) {
 	if serverID == "" || a.fetchedMembers[serverID] || !config.Current().Behaviour.FetchAllMembers {
+		a.updateMemberStatus()
 		return
 	}
 	a.fetchedMembers[serverID] = true
+
+	a.memberLoading = serverID
+	a.armMemberWatchdog(serverID)
+	a.updateMemberStatus()
 
 	epoch := a.epoch
 	go func() {
 		err := a.client.FetchMembers(serverID)
 
-		a.doOnUI(func() {
-			if err != nil {
-				// The guard goes with it, so re-entering the server tries again.
-				delete(a.fetchedMembers, serverID)
-				log.Printf("fetch members of %s: %v", serverID, err)
-
-				return
-			}
-			if a.stale(epoch) || a.currentServerID != serverID {
-				return
-			}
-
-			a.refreshMemberList()
-		}, false)
+		a.doOnUI(func() { a.finishMembers(epoch, serverID, err) }, false)
 	}()
+}
+
+// finishMembers records how a membership fetch ended and lets the sidebar say
+// so. Call on the UI thread.
+func (a *App) finishMembers(epoch uint64, serverID string, err error) {
+	if err != nil {
+		// The guard goes with it, so re-entering the server tries again.
+		delete(a.fetchedMembers, serverID)
+		log.Printf("fetch members of %s: %v", serverID, err)
+	}
+	if a.stale(epoch) {
+		return
+	}
+
+	// A second attempt made while the first is still out is not a failure and must
+	// not be reported as one: the first request's own answer is still coming, and
+	// it is what finishes this.
+	if errors.Is(err, client.ErrBusy) {
+		a.fetchedMembers[serverID] = true
+		return
+	}
+
+	if a.memberLoading == serverID {
+		a.memberLoading = ""
+		a.stopMemberWatchdog()
+	}
+
+	if err != nil {
+		a.memberFailed[serverID] = true
+		a.updateMemberStatus()
+
+		return
+	}
+	delete(a.memberFailed, serverID)
+
+	if a.currentServerID != serverID {
+		return
+	}
+	a.refreshMemberList()
 }
 
 /* Mention candidates */

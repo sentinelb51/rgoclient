@@ -99,8 +99,12 @@ type Behaviour struct {
 	FetchAllMembers     bool `json:"fetch_all_members"`
 	LiveMemberPresence  bool `json:"live_member_presence"`
 
-	MemberRefreshDelayMS int `json:"member_refresh_delay_ms"`
-	MemberOverscan       int `json:"member_overscan"`
+	// MemberListFallback shows the whole membership when the two hiding settings
+	// have left nothing to draw. A sidebar that is empty because of a setting
+	// reads exactly like one that is empty because the fetch failed.
+	MemberListFallback bool `json:"member_list_fallback"`
+
+	MemberOverscan int `json:"member_overscan"`
 
 	// Typing indicators. TypingNames is the master switch as well as the limit:
 	// at zero nothing is drawn on either surface and the gateway event is dropped
@@ -124,6 +128,13 @@ type Behaviour struct {
 
 	AuthorFetchDelayMS int `json:"author_fetch_delay_ms"`
 	AckDelayMS         int `json:"ack_delay_ms"`
+
+	// RefreshDelayMS is the settling window every gateway event that invalidates
+	// a whole sidebar is coalesced over. One knob rather than one per surface: a
+	// rank reorder arrives as an event per role and a channel added to a server
+	// arrives as two events, so what the user is choosing is how long a burst is
+	// allowed to gather — not which burst.
+	RefreshDelayMS int `json:"refresh_delay_ms"`
 
 	/* Input */
 
@@ -198,13 +209,13 @@ func Default() Settings {
 			ThemeTitleBar:     true,
 		},
 		Behaviour: Behaviour{
-			SortMembers:          true,
-			GroupByPresence:      true,
-			HoistRoles:           true,
-			FetchAllMembers:      true,
-			LiveMemberPresence:   true,
-			MemberRefreshDelayMS: 250,
-			MemberOverscan:       6,
+			SortMembers:        true,
+			GroupByPresence:    true,
+			HoistRoles:         true,
+			FetchAllMembers:    true,
+			LiveMemberPresence: true,
+			MemberListFallback: true,
+			MemberOverscan:     6,
 
 			SendTyping:         true,
 			TypingNames:        3,
@@ -215,6 +226,7 @@ func Default() Settings {
 			HistoryPageSize:    50,
 			AuthorFetchDelayMS: 50,
 			AckDelayMS:         1000,
+			RefreshDelayMS:     250,
 			ScrollSpeed:        4,
 			EnterSends:         true,
 		},
@@ -257,11 +269,12 @@ func (b Behaviour) AckDelay() time.Duration {
 	return time.Duration(b.AckDelayMS) * time.Millisecond
 }
 
-// MemberRefreshDelay is how long a member-list rebuild waits for more changes
+// RefreshDelay is how long a queued sidebar rebuild waits for more changes
 // before running. A busy server changes presence continuously and each change
-// reorders the list, so this is the difference between one rebuild and hundreds.
-func (b Behaviour) MemberRefreshDelay() time.Duration {
-	return time.Duration(b.MemberRefreshDelayMS) * time.Millisecond
+// reorders the member list, so this is the difference between one rebuild and
+// hundreds.
+func (b Behaviour) RefreshDelay() time.Duration {
+	return time.Duration(b.RefreshDelayMS) * time.Millisecond
 }
 
 // Lifetime is how long a notice stays on the layer.
@@ -359,8 +372,8 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.MountedCap, s.Behaviour.InitialMountCount)
 	floor(&s.Behaviour.AuthorFetchDelayMS, 0)
 	floor(&s.Behaviour.AckDelayMS, 0)
+	floor(&s.Behaviour.RefreshDelayMS, 0)
 	floor(&s.Behaviour.ScrollSpeed, 1)
-	floor(&s.Behaviour.MemberRefreshDelayMS, 0)
 	floor(&s.Behaviour.MemberOverscan, 0)
 
 	floor(&s.Notifications.LifetimeSeconds, 1)

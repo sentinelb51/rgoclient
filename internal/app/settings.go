@@ -22,6 +22,7 @@ import (
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 )
@@ -139,6 +140,13 @@ func (a *App) restyle() {
 		return // still on the login screen; the tables are read when it is built
 	}
 
+	// The tree about to be replaced holds the typing marks, and a discarded widget
+	// hears nothing for up to a minute — see releaseChannelRows. Both surfaces are
+	// put back below from state that outlived the rebuild.
+	a.releaseChannelRows()
+	a.typingIndicator.Set("", nil, false)
+	a.memberList.SetSweeping(false)
+
 	a.fyne.Settings().SetTheme(theme.NewAppTheme(fynetheme.DefaultTheme()))
 	a.window.SetContent(a.buildUI())
 
@@ -203,9 +211,12 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		Version: a.info.Version,
 		Build:   a.info.Build,
 
-		Sessions:      settingsSessions,
-		ForgetSession: a.forgetSession,
-		LogOut:        a.logOut,
+		Sessions:         settingsSessions,
+		ForgetSession:    a.forgetSession,
+		LogOut:           a.logOut,
+		LogOutEverywhere: a.logOutEverywhere,
+		SetPresence:      a.setPresence,
+		SetStatusText:    a.setStatusText,
 
 		CacheDir:       func() string { return a.assetDir },
 		ChooseCacheDir: a.chooseCacheDir,
@@ -254,12 +265,72 @@ func (a *App) forgetSession(userID string) {
 	})
 }
 
-// logOut ends the session and returns to the login screen. Call on the UI thread.
+// logOut ends the session and returns to the login screen, revoking the token on
+// the way out rather than merely forgetting it here. Call on the UI thread.
+//
+// The revocation is a request and so cannot be made on this thread, but nothing
+// waits on it: Client.Logout drops the session before it asks, and the screen is
+// torn down here regardless. The two orderings that leaves are both safe —
+// resetSessionState clears every selection the gateway handlers key on, so an
+// event arriving in between finds nothing to paint into.
+//
+// A failure is logged rather than announced. The notice layer belongs to the main
+// UI, which this is in the middle of replacing with the login screen, so there is
+// nowhere left to say it — and nothing the user could do about it here anyway.
 func (a *App) logOut() {
 	a.closeSettings()
-	a.client.Close()
+
+	a.background(
+		a.client.Logout,
+		func(err error) { log.Printf("revoke session: %v", err) },
+	)
 	a.resetSessionState()
 	a.showLogin()
+}
+
+// logOutEverywhere revokes every session the account has, this one included, and
+// returns to the login screen. Call on the UI thread.
+//
+// The saved login goes with it, which plain logout deliberately keeps: the token
+// on this computer is one of the ones just revoked, so leaving its card on the
+// login screen would offer a sign-in that can only fail. It is removed before the
+// request rather than after — the identity is read off a session this is about to
+// drop, and a failure to reach the server does not make the token any less dead.
+func (a *App) logOutEverywhere() {
+	a.closeSettings()
+
+	if userID := a.store.SelfID(); userID != "" {
+		if err := RemoveSession(userID); err != nil {
+			log.Printf("remove session: %v", err)
+		}
+	}
+
+	a.background(
+		a.client.LogoutEverywhere,
+		func(err error) { log.Printf("revoke all sessions: %v", err) },
+	)
+	a.resetSessionState()
+	a.showLogin()
+}
+
+// setPresence publishes how this account appears. Nothing is painted here: the
+// change comes back as an ordinary user update, which is also what makes it
+// arrive when it was made from another client. Call on the UI thread.
+func (a *App) setPresence(presence domain.Presence) {
+	a.background(
+		func() error { return a.client.SetPresence(presence) },
+		a.notifyFailure("set presence", "Could not change your presence."),
+	)
+}
+
+// setStatusText publishes the line beside the account's name, on the same terms
+// as the presence beside it: nothing is painted, the gateway echo is what the
+// store answers from. Call on the UI thread.
+func (a *App) setStatusText(text string) {
+	a.background(
+		func() error { return a.client.SetStatusText(text) },
+		a.notifyFailure("set status text", "Could not change your status."),
+	)
 }
 
 // chooseCacheDir asks for a directory to keep cached images in. Fyne's folder

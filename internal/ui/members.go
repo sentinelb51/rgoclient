@@ -57,6 +57,10 @@ type MemberListOptions struct {
 	HoistRoles      bool
 	HideOffline     bool
 	HideRoleless    bool
+
+	// FallbackToAll draws everybody when the two hiding settings between them
+	// have left nothing at all — see NewMemberModel.
+	FallbackToAll bool
 }
 
 // NewMemberModel flattens members into the order the list draws them: each
@@ -74,11 +78,31 @@ type MemberListOptions struct {
 //
 // It reads no theme sizes, so it is safe to call off the UI thread — heights are
 // applied when the model is installed.
+//
+// A server whose members are all hidden by the settings comes back empty, and an
+// empty sidebar reads exactly like one whose fetch failed — the settings that
+// caused it are two pages away and were set for some other server. FallbackToAll
+// answers that by drawing everybody rather than nobody. The second pass is only
+// ever reached when the first produced no rows, which is the case where the walk
+// cost nothing to begin with, and only when a setting was hiding somebody: a
+// server that really is empty must stay empty.
 func NewMemberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
 	if len(members) == 0 {
 		return nil
 	}
 
+	entries := memberModel(members, hoisted, opts)
+	if len(entries) > 0 || !opts.FallbackToAll || !(opts.HideOffline || opts.HideRoleless) {
+		return entries
+	}
+
+	opts.HideOffline, opts.HideRoleless = false, false
+
+	return memberModel(members, hoisted, opts)
+}
+
+// memberModel is the flattening itself, with the hiding settings taken as given.
+func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
 	// Ungrouped is one run with no headers and no hoisting, which is what turning
 	// the presence split off has always meant.
 	if !opts.GroupByPresence {
@@ -257,6 +281,11 @@ type MemberList struct {
 	scroll  *ObservableScroll
 	content *fyne.Container
 	layout  *memberListLayout
+	status  *memberStatus
+
+	// column is the strip stacked over the scroller, held because showing or
+	// hiding the strip changes the room the scroller has.
+	column *fyne.Container
 
 	entries []MemberEntry
 	offsets []float32
@@ -276,6 +305,7 @@ func NewMemberList(deps Deps) *MemberList {
 	w := &MemberList{
 		deps:    deps,
 		layout:  &memberListLayout{},
+		status:  newMemberStatus(),
 		mounted: make(map[int]fyne.CanvasObject),
 		rows:    make(map[string]*MemberRow),
 	}
@@ -284,13 +314,19 @@ func NewMemberList(deps Deps) *MemberList {
 
 	w.scroll = NewObservableVScroll(w.content)
 	w.scroll.OnScroll = func(fyne.Position) { w.mount(false) }
+
+	// The strip takes its own height off the top and the scroller absorbs the
+	// rest. Laid *over* the list it read as a glitch rather than as a message: the
+	// first row is drawn from the column's own origin, so a strip on top of it cut
+	// the avatar and the name in half.
+	w.column = NewFillColumn(1, w.status.root, w.scroll)
 	w.ExtendBaseWidget(w)
 
 	return w
 }
 
 func (w *MemberList) CreateRenderer() fyne.WidgetRenderer {
-	return widget.NewSimpleRenderer(w.scroll)
+	return widget.NewSimpleRenderer(w.column)
 }
 
 // Resize re-mounts for the new viewport. Fyne fires no scroll event on a resize
@@ -333,6 +369,36 @@ func (w *MemberList) RefreshMember(member domain.Member) {
 	if row, ok := w.rows[member.UserID]; ok {
 		row.SetMember(member)
 	}
+}
+
+// Empty reports that the list has nothing to draw, which is what decides whether
+// its status is about a first load or a refresh.
+func (w *MemberList) Empty() bool { return len(w.entries) == 0 }
+
+// SetStatus says what the rows cannot. The strip appearing or disappearing
+// changes the viewport, so the window is re-mounted after the column is laid out
+// again — Fyne reclaims nothing for a child that has merely been hidden. Call on
+// the UI thread.
+func (w *MemberList) SetStatus(status MemberListStatus) {
+	if !w.status.set(status) {
+		return
+	}
+
+	Relayout(w.column)
+	w.mount(false)
+}
+
+// SetSweeping stops or restarts the status mark for a list whose column has been
+// hidden, or which is about to be dropped by a rebuild.
+//
+// It is the caller's to say because neither event reaches the widget: Fyne's
+// Visible() answers for one object rather than for a tree, so the mark cannot
+// ask whether an ancestor took it off screen, and a discarded widget is told
+// nothing at all. An animation nobody can see is a repaint request a frame for
+// the life of the process. Call on the UI thread.
+func (w *MemberList) SetSweeping(on bool) {
+	sweeping := on && w.status.shown.Busy
+	w.status.mark.SetActive(sweeping, sweeping)
 }
 
 // mount brings the window in line with the viewport. Unless force is set it
@@ -477,6 +543,133 @@ func (w *MemberList) clampOffset() {
 // Read per mount rather than held, so the setting applies to the next scroll.
 func memberOverscan() int { return config.Current().Behaviour.MemberOverscan }
 
+/* Status */
+
+// MemberListStatus is what the sidebar says when its rows cannot: the membership
+// is on its way, or the request for it never arrived.
+//
+// It is a strip *above* the list rather than a message in place of it. The list
+// is paint-then-fill — re-entering a server draws what is already known while the
+// fetch runs — so saying "refreshing" must not take the members already there
+// away. It costs its own height rather than being laid over the top row, which is
+// the one placement that reads the same whether there is anything under it or
+// not: over the rows it cut the first avatar and name in half.
+type MemberListStatus struct {
+	Text string // "" draws nothing at all
+
+	// Busy runs the sweeping mark above the text. It is the glyph the typing
+	// indicator uses, which is what keeps "something is happening" one shape in
+	// this client rather than two.
+	Busy bool
+
+	// Action labels the button under the text and Retry is what it does. Both or
+	// neither: a button with nothing to say is not one.
+	Action string
+	Retry  func()
+}
+
+// drawnAs reports whether two statuses draw the same thing. The callback is
+// compared only for presence — it is rebuilt per call, closing over the server it
+// would retry, and Go does not compare functions.
+func (s MemberListStatus) drawnAs(other MemberListStatus) bool {
+	return s.Text == other.Text && s.Busy == other.Busy && s.Action == other.Action &&
+		(s.Retry == nil) == (other.Retry == nil)
+}
+
+// memberStatus is the strip itself.
+//
+// It is built once and shown or hidden rather than rebuilt per status, because
+// it holds a TypingMark: Fyne tells a discarded widget nothing, so a strip
+// replaced on every change would leave a sweep running against a rectangle
+// nothing draws — one repaint request a frame, for the life of the process.
+type memberStatus struct {
+	root  *fyne.Container // the strip and its backing, hidden when there is nothing to say
+	strip *fyne.Container
+
+	// The two halves that come and go, held as the boxes carrying their own gap:
+	// hiding the mark alone would leave the space under it.
+	markBox  *fyne.Container
+	retryBox *fyne.Container
+
+	mark  *TypingMark
+	label *canvas.Text
+	retry *widget.Button
+
+	shown MemberListStatus
+}
+
+func newMemberStatus() *memberStatus {
+	pad, gap := theme.Sizes.MemberStatusPadding, theme.Sizes.MemberStatusGap
+
+	label := canvas.NewText("", theme.Colors.MemberStatusText)
+	label.TextSize = theme.Sizes.MemberStatusTextSize
+	label.Alignment = fyne.TextAlignCenter
+
+	s := &memberStatus{
+		mark:  NewTypingMark(theme.Sizes.MemberStatusMarkSize, theme.Colors.MemberStatusText),
+		label: label,
+		retry: widget.NewButton("", nil),
+	}
+
+	s.markBox = VBoxNoSpacing(container.NewCenter(s.mark), VerticalSpacer(gap))
+	s.retryBox = VBoxNoSpacing(VerticalSpacer(gap), container.NewCenter(s.retry))
+	s.strip = VBoxNoSpacing(s.markBox, label, s.retryBox)
+
+	// The list's own background rather than none at all: the strip is the top of
+	// the column, and a transparent one would show the window through it.
+	s.root = container.NewStack(canvas.NewRectangle(theme.Colors.MemberListBackground),
+		NewInset(s.strip, pad, pad, pad, pad))
+	s.root.Hide()
+
+	return s
+}
+
+// set draws status, or nothing at all when it has no text, reporting whether
+// anything moved — the caller re-lays the column out only when it did.
+//
+// Refresh rather than Relayout: the strip's own height changes with it — a
+// button appearing is a taller strip — and re-running one layout at the size it
+// already has cannot express that. It is a five-object tree changed only when
+// the fetch is.
+func (s *memberStatus) set(status MemberListStatus) bool {
+	if s.shown.drawnAs(status) {
+		s.retry.OnTapped = status.Retry // the label is the same; the server may not be
+		return false
+	}
+	s.shown = status
+
+	if status.Text == "" {
+		s.mark.SetActive(false, false)
+		s.root.Hide()
+
+		return true
+	}
+
+	s.label.Text = status.Text
+	s.mark.SetActive(status.Busy, status.Busy)
+	s.retry.SetText(status.Action)
+	s.retry.OnTapped = status.Retry
+
+	showIf(s.markBox, status.Busy)
+	showIf(s.retryBox, status.Retry != nil)
+
+	s.root.Show()
+	s.root.Refresh()
+
+	return true
+}
+
+// showIf shows or hides an object from a condition, which is what every one of
+// these is really saying.
+func showIf(obj fyne.CanvasObject, visible bool) {
+	if visible {
+		obj.Show()
+		return
+	}
+
+	obj.Hide()
+}
+
 /* Rows */
 
 // MemberRow is one person in the member sidebar: their avatar with a presence
@@ -497,7 +690,7 @@ type MemberRow struct {
 	dot         *canvas.Circle
 	name        *canvas.Text
 	nameBox     *fyne.Container
-	botTag      fyne.CanvasObject
+	botMark     fyne.CanvasObject
 
 	// row is the assembled tree, built once here rather than in CreateRenderer,
 	// which Fyne may run again after a renderer is dropped — by then the name box
@@ -546,14 +739,14 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		dot:         newPresenceDot(),
 		name:        name,
 		nameBox:     NewEllipsisText(name),
-		botTag:      newBotTag(),
+		botMark:     NewBotMark(theme.Sizes.MemberBotMarkSize),
 
 		// The recorded state has to match what was just built, or the first
 		// SetMember will no-op over a difference that is really there.
 		fill:     theme.Colors.TextPrimary,
 		presence: domain.PresenceOffline,
 	}
-	w.botTag.Hide()
+	w.botMark.Hide()
 
 	leading := HBoxNoSpacing(
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
@@ -565,7 +758,7 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 	// natural width: an HBox hands a zero-minimum child zero width, and the
 	// ellipsis box reports zero on purpose so no name can widen the column.
 	w.row = container.NewStack(w.background, container.NewBorder(nil, nil, leading,
-		HBoxNoSpacing(w.botTag, HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
+		HBoxNoSpacing(w.botMark, HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
 		w.nameBox,
 	))
 
@@ -650,9 +843,9 @@ func (w *MemberRow) setBot(bot bool) {
 
 	w.bot = bot
 	if bot {
-		w.botTag.Show()
+		w.botMark.Show()
 	} else {
-		w.botTag.Hide()
+		w.botMark.Hide()
 	}
 
 	// Showing or hiding neither lays a container out nor repaints it, and the
@@ -770,21 +963,6 @@ func (l *memberPresenceLayout) Layout(objects []fyne.CanvasObject, size fyne.Siz
 
 func (l *memberPresenceLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return objects[0].MinSize()
-}
-
-// newBotTag is the small mark following a bot's name. Fixed to its own width in
-// the row's trailing slot so it never competes with the ellipsis for the name.
-func newBotTag() fyne.CanvasObject {
-	background := canvas.NewRectangle(theme.Colors.MemberBotTagBg)
-	background.CornerRadius = theme.Sizes.ChipRadius
-
-	label := canvas.NewText("BOT", theme.Colors.MemberBotTagText)
-	label.TextStyle = fyne.TextStyle{Bold: true}
-	label.TextSize = theme.Sizes.MemberBotTagSize
-
-	padV, padH := theme.Sizes.ChipPaddingV, theme.Sizes.ChipPaddingH
-
-	return container.NewCenter(container.NewStack(background, NewInset(label, padV, padV, padH, padH)))
 }
 
 /* Section headers */

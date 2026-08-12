@@ -184,7 +184,41 @@ type Message struct {
 	System     *SystemMessage
 	Webhook    *Webhook
 	Masquerade bool
+
+	// Pinned is kept by the channel rather than by the message: it changes without
+	// the message being edited, and the pin/unpin system event is what announces it
+	// — see client/events.go, where the partial update Revolt sends alongside can't
+	// be read for it.
+	Pinned bool
+
+	// Reactions are in the order client/convert.go put them in, which is not one
+	// Revolt has an opinion about — see toReactions.
+	Reactions []Reaction
 }
+
+// Reaction is one emoji on a message and everybody who chose it.
+//
+// Emoji is either a literal unicode emoji or the ULID of a custom one: Revolt
+// uses the one field for both and says nothing about which, so whoever draws it
+// has to decide from the value.
+//
+// The people are carried rather than a count because the count is the lesser
+// half of the question — a chip is drawn differently for the account that is in
+// it, and that is answered here rather than by the client having to fold its own
+// ID into the conversion.
+type Reaction struct {
+	Emoji string
+	Users []string
+}
+
+// By reports whether userID is among those who chose this reaction. Logged out
+// is nobody, as it is for a mention.
+func (r *Reaction) By(userID string) bool {
+	return userID != "" && slices.Contains(r.Users, userID)
+}
+
+// Count is how many people chose it.
+func (r *Reaction) Count() int { return len(r.Users) }
 
 // MentionsUser reports whether the message pings userID, by name or by pinging
 // everyone who can see the channel. Logged out — no self ID — is nobody, not
@@ -225,11 +259,37 @@ const (
 	SystemCallStarted               SystemKind = "call_started"
 )
 
-// SystemMessage is a server-generated event. Target is whoever it is about,
-// where it is about someone.
+// SystemMessage is a server-generated event. Target is what it is about — see
+// TargetsUser, since that is not always somebody.
 type SystemMessage struct {
 	Kind   SystemKind
 	Target string
+}
+
+// TargetsUser reports whether Target names an account, which is what decides
+// whether resolving it is worth a fetch.
+//
+// Revolt files every system event's subject under the one "id" field whatever
+// kind of thing it is, and for a pin it is the *message* that was pinned. Asked
+// for that as a user, the server can only answer 404 — and since a failed author
+// fetch drops its guard so a later message can retry, the request came back on
+// every remount of the row.
+func (s *SystemMessage) TargetsUser() bool {
+	if s.Target == "" {
+		return false
+	}
+
+	return s.Kind != SystemMessagePinned && s.Kind != SystemMessageUnpinned
+}
+
+// PinnedMessageID is the message a pin or unpin event announces, or "" for any
+// other kind.
+func (s *SystemMessage) PinnedMessageID() string {
+	if s.Kind != SystemMessagePinned && s.Kind != SystemMessageUnpinned {
+		return ""
+	}
+
+	return s.Target
 }
 
 // TextParts renders the event as a line of prose, in the two pieces the client
@@ -330,7 +390,9 @@ const (
 	PermissionReadMessageHistory Permission = 1 << 21
 	PermissionSendMessage        Permission = 1 << 22
 	PermissionManageMessages     Permission = 1 << 23
+	PermissionInviteOthers       Permission = 1 << 25
 	PermissionUploadFiles        Permission = 1 << 27
+	PermissionReact              Permission = 1 << 29
 
 	// PermissionBypassSlowmode is missing from revoltgo's constants — they stop at
 	// MentionRoles — which is the reason every bit is named here rather than
@@ -435,6 +497,18 @@ type Invite struct {
 	MemberCount int
 }
 
+/* Emoji */
+
+// Emoji is one custom emoji a server defines. The picture is derived from the ID
+// alone (Store.EmojiURL), so nothing here is needed to *draw* one — what this
+// carries is the two things a picker needs and a rendered message does not: the
+// name it is searched by, and the server it is filed under.
+type Emoji struct {
+	ID       string
+	Name     string
+	ServerID string // "" for a detached emoji, which belongs to no server
+}
+
 /* People */
 
 // Presence is a user's availability, as the ring around their avatar reports it.
@@ -469,6 +543,36 @@ func (p Presence) Label() string {
 	return "Offline"
 }
 
+// Relationship is how this account stands with another one. Revolt files it on
+// the *other* user rather than as an edge between two, and it is directional:
+// Blocked and BlockedBy are the same wall seen from either side, as Outgoing and
+// Incoming are the same request.
+type Relationship uint8
+
+const (
+	RelationshipNone      Relationship = iota
+	RelationshipSelf                   // this account
+	RelationshipFriend                 //
+	RelationshipOutgoing               // we asked them
+	RelationshipIncoming               // they asked us
+	RelationshipBlocked                // we blocked them
+	RelationshipBlockedBy              // they blocked us
+)
+
+// Known reports whether this is a relationship at all. The account's own record
+// is not one — it is how Revolt marks which user is you — so listing
+// relationships means excluding it as well as everybody there is nothing between.
+func (r Relationship) Known() bool {
+	return r != RelationshipNone && r != RelationshipSelf
+}
+
+// Blocked reports whether messages cannot pass, whichever side put the wall up.
+// Revolt leaves the history readable and takes everything else away in both
+// directions, so the two are one answer everywhere the client asks.
+func (r Relationship) Blocked() bool {
+	return r == RelationshipBlocked || r == RelationshipBlockedBy
+}
+
 // User is an account, resolved to what the client shows of one.
 type User struct {
 	ID       string
@@ -480,6 +584,10 @@ type User struct {
 	Presence   Presence
 	StatusText string
 	Badges     []string
+
+	// Relationship is how this account stands with them, which is what decides
+	// whether a profile offers to write to them or to ask to be friends first.
+	Relationship Relationship
 
 	Online bool
 	Bot    bool
@@ -548,6 +656,15 @@ type UserProfile struct {
 	BackgroundURL string // the profile banner; "" leaves the accent colour showing
 }
 
+// Mutual is what this account has in common with somebody else — the servers
+// both are in, and the friends both have. Like UserProfile it is a request of
+// its own, and it is IDs alone: what they are called is a lookup the controller
+// makes, since the account holds both sides already.
+type Mutual struct {
+	UserIDs   []string
+	ServerIDs []string
+}
+
 // Profile is everything the two profile presentations draw, resolved in one
 // pass. UserProfile is the exception: it is a request of its own, so it arrives
 // after the card is already on screen.
@@ -567,6 +684,8 @@ type Profile struct {
 
 	Created time.Time // account creation, from the ID
 	Joined  time.Time // joined ServerName; zero outside a server
+
+	Relationship Relationship
 
 	Bot bool
 }

@@ -566,6 +566,59 @@ func (e *numberEntry) TypedKey(key *fyne.KeyEvent) {
 	e.Entry.TypedKey(key)
 }
 
+/* Text fields */
+
+var _ fyne.Focusable = (*commitEntry)(nil)
+
+// commitEntry is a field that reports its value once it has settled — on Enter,
+// and on losing the focus — rather than per keystroke, because every report is a
+// request and a sentence is typed a word at a time.
+//
+// Escape puts back what was there and is swallowed. widget.Entry hands the key
+// to the canvas otherwise, where the settings page reads it as "close the page".
+type commitEntry struct {
+	widget.Entry
+
+	// committed is the last value handed on, so a field left alone reports
+	// nothing when the focus moves off it.
+	committed string
+	onCommit  func(string)
+}
+
+func newCommitEntry(text string, onCommit func(string)) *commitEntry {
+	e := &commitEntry{committed: text, onCommit: onCommit}
+	e.ExtendBaseWidget(e)
+	e.OnSubmitted = func(string) { e.commit() }
+	e.SetText(text)
+
+	return e
+}
+
+func (e *commitEntry) FocusLost() {
+	e.Entry.FocusLost()
+	e.commit()
+}
+
+func (e *commitEntry) TypedKey(key *fyne.KeyEvent) {
+	if key.Name == fyne.KeyEscape {
+		e.SetText(e.committed)
+		return
+	}
+
+	e.Entry.TypedKey(key)
+}
+
+func (e *commitEntry) commit() {
+	if e.Text == e.committed {
+		return
+	}
+
+	e.committed = e.Text
+	if e.onCommit != nil {
+		e.onCommit(e.Text)
+	}
+}
+
 /* Option rows */
 
 // settingsOption is one entry of an option row's menu: what the user reads and

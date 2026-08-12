@@ -29,9 +29,10 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 		return
 	}
 
-	card := ui.NewProfileCard(a.deps(), a.profileOf(userID), ui.ProfileActions{
-		OnMessage: a.messageAction(userID),
-		OnExpand:  func() { a.showProfileDialog(userID) },
+	profile := a.profileOf(userID)
+	card := ui.NewProfileCard(a.deps(), profile, ui.ProfileActions{
+		Buttons:  a.profileButtons(profile),
+		OnExpand: func() { a.showProfileDialog(userID) },
 	})
 
 	a.showPopover(card.Content, anchor)
@@ -41,27 +42,15 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 // showProfileDialog opens the full profile, centred on the modal layer. It
 // replaces the card it was expanded from, so the two are never up together.
 func (a *App) showProfileDialog(userID string) {
-	dialog := ui.NewProfileDialog(a.deps(), a.profileOf(userID), ui.ProfileActions{
-		OnMessage: a.messageAction(userID),
-		OnClose:   a.closeOverlay,
+	profile := a.profileOf(userID)
+	dialog := ui.NewProfileDialog(a.deps(), profile, ui.ProfileActions{
+		Buttons: a.profileButtons(profile),
+		OnClose: a.closeOverlay,
 	})
 
 	a.showOverlay(dialog.Content)
 	a.loadProfile(userID, dialog)
-}
-
-// messageAction is what the "Message" button does, or nil when there is nothing
-// for it to do — the account's own profile, where it would open a conversation
-// with yourself.
-func (a *App) messageAction(userID string) func() {
-	if a.store.SelfID() == userID {
-		return nil
-	}
-
-	return func() {
-		a.closeOverlay()
-		a.openConversation(userID)
-	}
+	a.loadMutual(userID, dialog)
 }
 
 /* Resolving one */
@@ -88,6 +77,7 @@ func (a *App) profileOf(userID string) domain.Profile {
 	profile.Presence = user.Presence
 	profile.Status = user.StatusText
 	profile.Badges = user.Badges
+	profile.Relationship = user.Relationship
 	profile.Bot = user.Bot
 
 	// The server the profile was opened in is what makes them a member: the
@@ -136,6 +126,164 @@ func (a *App) loadProfile(userID string, card *ui.ProfileCard) {
 			a.repositionOverlay() // a bio grows the dialog
 		}, false)
 	}()
+}
+
+// loadMutual fetches the servers and friends the two accounts have in common and
+// fills them into the dialog. The dialog only — the compact card names somebody,
+// and a second request per avatar click is not what naming them costs.
+//
+// Nothing is asked about this account: everything is in common with yourself, and
+// Revolt refuses the route for it anyway.
+func (a *App) loadMutual(userID string, card *ui.ProfileCard) {
+	if userID == a.store.SelfID() {
+		return
+	}
+	epoch := a.epoch
+
+	go func() {
+		mutual, err := a.client.Mutual(userID)
+		if err != nil {
+			// A profile reads perfectly well without it, as it does without a bio.
+			log.Printf("fetch mutual %s: %v", userID, err)
+			return
+		}
+		if len(mutual.ServerIDs) == 0 && len(mutual.UserIDs) == 0 {
+			return
+		}
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+
+			card.SetMutual(a.mutualProfile(mutual))
+			a.repositionOverlay() // a section grows the dialog
+		}, false)
+	}()
+}
+
+// mutualProfile resolves what the two accounts have in common into what the
+// dialog draws: a name and where it leads, plus the totals, since somebody the
+// store cannot name is still one of the people in common and the card's "+n" is
+// what has to account for them.
+//
+// Both destinations replace what is on the modal layer rather than stacking on
+// it. A server is behind the dialog, so the dialog goes; another profile is the
+// same surface with somebody else in it, which is what makes the mutual friends
+// worth walking rather than only counting.
+func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
+	resolved := ui.MutualProfile{
+		ServerCount: len(mutual.ServerIDs),
+		FriendCount: len(mutual.UserIDs),
+	}
+
+	for _, serverID := range mutual.ServerIDs {
+		server, ok := a.store.Server(serverID)
+		if !ok || server.Name == "" {
+			continue
+		}
+
+		resolved.Servers = append(resolved.Servers, ui.MutualEntry{
+			Name: server.Name,
+			Open: func() {
+				a.closeOverlay()
+				a.OnServerTapped(serverID)
+			},
+		})
+	}
+	for _, userID := range mutual.UserIDs {
+		name := a.store.UserName(userID)
+		if name == "" {
+			continue
+		}
+
+		resolved.Friends = append(resolved.Friends, ui.MutualEntry{
+			Name: name,
+			Open: func() { a.showProfileDialog(userID) },
+		})
+	}
+
+	return resolved
+}
+
+/* What a profile offers to do */
+
+// profileButtons is what a card offers to do about somebody. It is decided here
+// rather than in the widget because the answer is entirely a question about the
+// relationship, and a card has no business knowing Revolt's states.
+//
+// "Message" is deliberately not always offered. Revolt will not open a
+// conversation with a stranger, so a button that could only fail is worse than
+// the one that leads somewhere — asking to be friends first. A bot is the
+// exception it has to be: nobody befriends one, and writing to it is the whole
+// of what it is for.
+func (a *App) profileButtons(profile domain.Profile) []ui.ProfileButton {
+	return a.relationshipButtons(profile, a.closeOverlay)
+}
+
+// relationshipButtons is that policy with the way out left open. A card is taken
+// down before it acts, since a profile does not refresh while it is up; the
+// friends list stays and refills instead, one row changing being the whole result
+// of acting on it.
+func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.ProfileButton {
+	userID, name := profile.UserID, profile.Name
+	if userID == "" || userID == a.store.SelfID() {
+		return nil
+	}
+
+	message := ui.ProfileButton{Label: "Message", Do: func() {
+		a.closeOverlay()
+		a.openConversation(userID)
+	}}
+	if profile.Bot {
+		return []ui.ProfileButton{message}
+	}
+
+	// Every action here settles the surface that raised it before it fires, so a
+	// button can never be clicked twice against a state the first click changed.
+	act := func(label string, danger bool, run func()) ui.ProfileButton {
+		return ui.ProfileButton{Label: label, Danger: danger, Do: func() {
+			done()
+			run()
+		}}
+	}
+
+	block := act("Block", true, func() { a.confirmBlockUser(userID, name) })
+
+	switch profile.Relationship {
+	case domain.RelationshipFriend:
+		return []ui.ProfileButton{message,
+			act("Remove friend", true, func() { a.confirmRemoveFriend(userID, name) })}
+
+	case domain.RelationshipIncoming:
+		// Neither of these is drawn as destructive, for the same reason neither is
+		// confirmed: a request declined can be sent again, where a friend removed and
+		// a block cannot be taken back by the person they were done to.
+		return []ui.ProfileButton{
+			act("Accept request", false, func() { a.acceptFriend(userID, name) }),
+			act("Ignore", false, func() { a.removeFriend(userID, name) }),
+		}
+
+	case domain.RelationshipOutgoing:
+		// Nothing to do but wait or withdraw, and a card that left the first out
+		// would read as one that had never been asked.
+		return []ui.ProfileButton{
+			{Label: "Request sent"},
+			act("Cancel request", false, func() { a.removeFriend(userID, name) }),
+		}
+
+	case domain.RelationshipBlocked:
+		return []ui.ProfileButton{act("Unblock", false, func() { a.unblockUser(userID, name) })}
+
+	case domain.RelationshipBlockedBy:
+		// Blocking back is the only thing that still works from this side.
+		return []ui.ProfileButton{block}
+	}
+
+	return []ui.ProfileButton{
+		act("Add friend", false, func() { a.addFriend(userID, name) }),
+		block,
+	}
 }
 
 /* Opening a conversation */

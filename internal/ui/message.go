@@ -60,6 +60,12 @@ type MessageWidget struct {
 	systemText *canvas.Text
 	systemLine *fyne.Container
 
+	// replies are the quoted lines above the message, kept because the message a
+	// reply quotes can be older than anything cached — resolving one is a request,
+	// and the line fills itself in when the answer lands. Empty for a grouped
+	// continuation, which draws no quotes.
+	replies []*replyPreview
+
 	// bottomSpacer is the bottom margin, kept so SetFollowedByGroup can tighten it
 	// when a continuation is appended directly beneath.
 	bottomSpacer *canvas.Rectangle
@@ -86,10 +92,16 @@ type MessageWidget struct {
 	// the message, and every path that re-evaluates one rebuilds the widget.
 	mentioned bool
 
-	editing     bool
-	emptyBody   bool // the message says nothing, so the slot stays hidden outside an edit
+	editing   bool
+	emptyBody bool // the message says nothing, so the slot stays hidden outside an edit
+
+	// overChild is the pointer being over something inside the row that takes
+	// hover for itself — the quick-action group, a reaction chip. Fyne gives hover
+	// to the innermost object that accepts it and nothing above hears of it, so
+	// each of those reports back here or the row would darken and drop its buttons
+	// the moment the pointer crossed one on the way to them.
 	overMessage bool
-	overActions bool
+	overChild   bool
 	hideTimer   *time.Timer
 }
 
@@ -170,9 +182,17 @@ func (w *MessageWidget) Message() *domain.Message { return w.message }
 // Author returns the user this row names: the message's author, or — for a system
 // event — whoever it is about, since that is the name the line has to resolve and
 // the one a lazy fetch has to bring back.
+//
+// A system event about a *message* rather than a person names nobody, so it
+// answers with "": its target is a message ID, and both IDs being ULIDs there is
+// nothing about the value itself that would stop one matching a user.
 func (w *MessageWidget) Author() string {
-	if w.message.System != nil {
-		return w.message.System.Target
+	if system := w.message.System; system != nil {
+		if !system.TargetsUser() {
+			return ""
+		}
+
+		return system.Target
 	}
 
 	return w.message.AuthorID
@@ -216,6 +236,18 @@ func (w *MessageWidget) RefreshAuthor() {
 	w.avatar.SetSource(w.deps.Images, avatarURL)
 }
 
+// RefreshReplies re-reads the quoted lines whose target is one of resolved, for
+// a reply whose message arrived after the widget was mounted. It is given the set
+// rather than refreshing unconditionally because re-laying a line out is not free
+// and every mounted row is offered the batch.
+func (w *MessageWidget) RefreshReplies(resolved map[string]bool) {
+	for _, preview := range w.replies {
+		if resolved[preview.messageID] {
+			preview.Refresh(w.deps)
+		}
+	}
+}
+
 /* Permissions */
 
 // isOwnMessage reports whether the message was authored by the logged-in user.
@@ -245,6 +277,21 @@ func (w *MessageWidget) canDelete(permissions domain.Permission) bool {
 	return w.isOwnMessage() || permissions.Has(domain.PermissionManageMessages)
 }
 
+// canPin reports whether pinning should be offered. Unlike deleting, authorship
+// buys nothing here: a pin is a change to the channel rather than to the
+// message, so Revolt asks for ManageMessages even over your own words.
+func (w *MessageWidget) canPin(permissions domain.Permission) bool {
+	return w.message.System == nil && permissions.Has(domain.PermissionManageMessages)
+}
+
+// canReact reports whether the chips under a message answer a click. A system
+// event is the channel narrating itself and Revolt refuses a reaction to one, so
+// the row is not offered there at all — which is also why nothing draws it: a
+// system message carries no reactions to show either.
+func (w *MessageWidget) canReact(permissions domain.Permission) bool {
+	return w.message.System == nil && permissions.Has(domain.PermissionReact)
+}
+
 // permissions is what the account may do in this message's channel. It is asked
 // lazily, on the first hover or right-click, so a mounted page costs no
 // permission checks at all — and asked once per menu, since one bitfield answers
@@ -268,13 +315,18 @@ func actionMark(res fyne.Resource) fyne.Resource {
 // message, delete on your own or where you can manage messages.
 func (w *MessageWidget) buildActions() *fyne.Container {
 	onHover := func(hovering bool) {
-		w.overActions = hovering
+		w.overChild = hovering
 		w.updateHover()
 	}
 	act := w.deps.Actions
 	permissions := w.permissions()
 
 	var buttons []fyne.CanvasObject
+	if w.canReact(permissions) {
+		react := NewIconButton(actionMark(assets.ActionAddIcon), nil, onHover)
+		react.onTap = func() { w.react(react) }
+		buttons = append(buttons, react)
+	}
 	if w.canReply(permissions) {
 		buttons = append(buttons, NewIconButton(actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }, onHover))
 	}
@@ -305,11 +357,28 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	permissions := w.permissions()
 
 	var items []*fyne.MenuItem
+	if w.canReact(permissions) {
+		items = append(items, fyne.NewMenuItemWithIcon("Add reaction", actionMark(assets.ActionAddIcon), func() {
+			w.react(w)
+		}))
+	}
 	if w.canReply(permissions) {
 		items = append(items, fyne.NewMenuItemWithIcon("Reply", actionMark(assets.ActionReplyIcon), func() { act.OnReply(w.message) }))
 	}
 	if w.canEdit() {
 		items = append(items, fyne.NewMenuItemWithIcon("Edit", actionMark(assets.ActionEditIcon), func() { act.OnEdit(w.message) }))
+	}
+
+	// Pinning is offered in the menu alone, never as a hover button: the quick
+	// actions are the three things done often enough to be worth a click without
+	// opening anything, and pinning is not one of them.
+	if w.canPin(permissions) {
+		label, mark := "Pin message", assets.SystemPinnedIcon
+		if w.message.Pinned {
+			label, mark = "Unpin message", assets.SystemUnpinnedIcon
+		}
+		pinned := !w.message.Pinned
+		items = append(items, fyne.NewMenuItemWithIcon(label, actionMark(mark), func() { act.OnPin(w.message, pinned) }))
 	}
 
 	if len(items) > 0 {
@@ -335,6 +404,15 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	}
 
 	return items
+}
+
+// react adds the picked emoji, for the two entry points that offer one to a
+// message carrying none. A chip already showing it toggles instead — picking one
+// that is already there is a request to have reacted, which is already true.
+func (w *MessageWidget) react(anchor fyne.CanvasObject) {
+	w.deps.Actions.OnPickEmoji(anchor, func(choice EmojiChoice) {
+		w.deps.Actions.OnReact(w.message, choice.Value(), true)
+	})
 }
 
 // TappedSecondary opens the message context menu at the cursor on right-click.
@@ -442,7 +520,7 @@ func (w *MessageWidget) updateHover() {
 		return
 	}
 
-	if w.overMessage || w.overActions {
+	if w.overMessage || w.overChild {
 		w.stopHideTimer()
 		w.ensureActions()
 		w.setHighlighted(true)
@@ -460,7 +538,7 @@ func (w *MessageWidget) updateHover() {
 			// to return with the field still set, and the guard above then refused
 			// to arm another one — leaving that message's actions up for good.
 			w.hideTimer = nil
-			if w.overMessage || w.overActions || w.editing {
+			if w.overMessage || w.overChild || w.editing {
 				return
 			}
 
@@ -567,7 +645,7 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 			collapse:  true,
 		}
 		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = buildGroupedContent(deps, message, w.bodySlot, w.TappedSecondary)
+		body = buildGroupedContent(w.bodySlot, w.buildExtras())
 	} else {
 		name, nameColor, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
@@ -580,7 +658,7 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 		}, w.avatar)
 
 		w.authorText = NewAccentText(name, nameColor, 0, fyne.TextStyle{Bold: true})
-		body = buildMessageContent(deps, message, w.authorText, fullTime, w.bodySlot, w.TappedSecondary)
+		body = buildMessageContent(w.authorText, fullTime, message.Pinned, w.bodySlot, w.buildExtras())
 	}
 
 	// One row rather than a Border inside a Border: each of those inserts theme
@@ -595,7 +673,10 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 		return row
 	}
 
-	return VBoxNoSpacing(buildReplyBlock(deps, message, w.TappedSecondary), row)
+	block, previews := buildReplyBlock(deps, message, w.TappedSecondary)
+	w.replies = previews
+
+	return VBoxNoSpacing(block, row)
 }
 
 // resolveAuthor resolves the display name, role colour, and avatar URL for a
@@ -746,10 +827,8 @@ func (w *MessageWidget) verticalPad(tight bool) float32 {
 
 // buildMessageContent assembles the author header plus whatever the message
 // carries beneath its text.
-func buildMessageContent(deps Deps, message *domain.Message, author *AccentText, timestamp string, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	header := buildMessageHeader(author, timestamp, body)
-
-	extras := buildMessageExtras(deps, message, onMenu)
+func buildMessageContent(author *AccentText, timestamp string, pinned bool, body fyne.CanvasObject, extras []fyne.CanvasObject) fyne.CanvasObject {
+	header := buildMessageHeader(author, timestamp, pinned, body)
 	if len(extras) == 0 {
 		return header
 	}
@@ -759,8 +838,7 @@ func buildMessageContent(deps Deps, message *domain.Message, author *AccentText,
 
 // buildGroupedContent renders a grouped continuation: the body and its extras,
 // with no author/timestamp header.
-func buildGroupedContent(deps Deps, message *domain.Message, body fyne.CanvasObject, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	extras := buildMessageExtras(deps, message, onMenu)
+func buildGroupedContent(body fyne.CanvasObject, extras []fyne.CanvasObject) fyne.CanvasObject {
 	if len(extras) == 0 {
 		return body
 	}
@@ -768,13 +846,22 @@ func buildGroupedContent(deps Deps, message *domain.Message, body fyne.CanvasObj
 	return container.NewVBox(append([]fyne.CanvasObject{body}, extras...)...)
 }
 
-// buildMessageExtras is what hangs below a message's text: its attachments, then
-// the embeds, then any invite it links to — what was uploaded before what was
-// unfurled, since only the first was deliberate, and the invite last because it
-// is the only one the client composed rather than the server. Empty for the
-// great majority of messages, which is why both callers check before wrapping
+// buildExtras is what hangs below a message's text: its attachments, then the
+// embeds, then any invite it links to, then its reactions — what was uploaded
+// before what was unfurled, since only the first was deliberate; the invite after
+// both, being the only one the client composed rather than the server; and the
+// reactions last, they being what everybody else added to all of it. Empty for
+// the great majority of messages, which is why both callers check before wrapping
 // the body in a box at all.
-func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) []fyne.CanvasObject {
+//
+// The reaction row is drawn only when there is one, so a mounted page still costs
+// no permission checks: the chips need to know whether they answer a click, and
+// asking that per message would be a lookup per row for a feature few of them
+// carry. Adding the first reaction is offered from the hover actions instead,
+// which are built lazily and already read permissions once.
+func (w *MessageWidget) buildExtras() []fyne.CanvasObject {
+	deps, message, onMenu := w.deps, w.message, w.TappedSecondary
+
 	var extras []fyne.CanvasObject
 
 	if len(message.Attachments) > 0 {
@@ -786,8 +873,18 @@ func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.Po
 	if codes := inviteCodesIn(message.Content); len(codes) > 0 {
 		extras = append(extras, buildInvites(deps, codes))
 	}
+	if len(message.Reactions) > 0 {
+		extras = append(extras, buildReactions(deps, message, w.canReact(w.permissions()), onMenu, w.setOverChild))
+	}
 
 	return extras
+}
+
+// setOverChild is the hook every child that takes hover for itself reports
+// through — see overChild.
+func (w *MessageWidget) setOverChild(hovering bool) {
+	w.overChild = hovering
+	w.updateHover()
 }
 
 // buildMessageHeader renders the author line — the bold name in its role colour
@@ -798,13 +895,24 @@ func buildMessageExtras(deps Deps, message *domain.Message, onMenu func(*fyne.Po
 // Both texts go straight into the HBox, which stretches each to the line's full
 // height; canvas.Text centres its glyphs in whatever height it is given, so the
 // smaller timestamp lands centred against the name with no offset of our own.
-func buildMessageHeader(author *AccentText, timestamp string, body fyne.CanvasObject) fyne.CanvasObject {
+//
+// A pinned message trails the same line with the mark the pin event is announced
+// by, in the timestamp's own colour: it is a note about the message rather than
+// part of what was said. It is a bare image and not a widget, so the row's hover
+// and context menu pass straight through it — the same rule an embed's card
+// follows.
+func buildMessageHeader(author *AccentText, timestamp string, pinned bool, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
 	ts.TextSize = theme.Sizes.MessageTimestampSize
 
-	nameLine := HBoxNoSpacing(author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts)
+	line := []fyne.CanvasObject{author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts}
+	if pinned {
+		side := theme.Sizes.MessagePinMarkSize
+		mark := newScaledIcon(tintedIcon(assets.SystemPinnedIcon, theme.Colors.TimestampText), side)
+		line = append(line, HorizontalSpacer(theme.Sizes.MessageAttachmentSpacing), container.NewCenter(mark))
+	}
 
-	return VBoxNoSpacing(nameLine, body)
+	return VBoxNoSpacing(HBoxNoSpacing(line...), body)
 }
 
 /* Day separator */
@@ -867,14 +975,20 @@ func (l *daySeparatorLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 /* Reply previews */
 
 // buildReplyBlock stacks the quoted lines above the message answering them,
-// ending in the gap that separates the two.
-func buildReplyBlock(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+// ending in the gap that separates the two. The lines are handed back as well as
+// mounted: the message one quotes may not be cached, and resolving it is a
+// request, so the line has to be able to fill itself in when the answer lands.
+func buildReplyBlock(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) (fyne.CanvasObject, []*replyPreview) {
+	previews := make([]*replyPreview, 0, len(message.Replies))
 	quotes := make([]fyne.CanvasObject, 0, len(message.Replies)+1)
+
 	for _, replyID := range message.Replies {
-		quotes = append(quotes, buildReplyPreview(deps, message.ChannelID, replyID, onMenu))
+		preview := newReplyPreview(deps, message.ChannelID, replyID, onMenu)
+		previews = append(previews, preview)
+		quotes = append(quotes, preview.row)
 	}
 
-	return VBoxNoSpacing(append(quotes, VerticalSpacer(theme.Sizes.MessageReplyBlockGap))...)
+	return VBoxNoSpacing(append(quotes, VerticalSpacer(theme.Sizes.MessageReplyBlockGap))...), previews
 }
 
 // newReplyLine draws the elbow that ties a quoted line to the message answering
@@ -921,36 +1035,76 @@ func (l *replyLineLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(width, 0)
 }
 
-// buildReplyPreview renders the small quoted line shown above a message that
-// replies to another.
-func buildReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	author, content, avatarURL, _ := resolveReply(deps, channelID, messageID)
+// replyPreview is the small quoted line shown above a message that replies to
+// another. It is a struct rather than a built subtree because what it quotes may
+// arrive later: the reply reaches as far back as somebody cared to answer, and
+// the message cache is only the tail of a channel.
+type replyPreview struct {
+	// row is the whole line, kept so filling one in can re-lay it out — the name
+	// sits inside the line and everything after it moves.
+	row *fyne.Container
+
+	channelID string
+	messageID string
+
+	avatar  *fyne.Container
+	author  *canvas.Text
+	content *canvas.Text
+}
+
+func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.PointEvent)) *replyPreview {
+	p := &replyPreview{channelID: channelID, messageID: messageID}
 
 	size := fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize)
-	avatar := circularAvatar(deps.Images, avatarURL, size)
+	p.avatar, _ = newAvatarSlot(size)
 
-	authorLabel := canvas.NewText(author, theme.Colors.TextPrimary)
-	authorLabel.TextStyle.Bold = true
-	authorLabel.TextSize = replyPreviewTextSize
+	p.author = canvas.NewText("", theme.Colors.TextPrimary)
+	p.author.TextStyle.Bold = true
+	p.author.TextSize = replyPreviewTextSize
 
-	contentLabel := canvas.NewText(content, theme.Colors.TimestampText)
-	contentLabel.TextSize = replyPreviewTextSize
+	p.content = canvas.NewText("", theme.Colors.TimestampText)
+	p.content.TextSize = replyPreviewTextSize
 
-	row := HBoxNoSpacing(
-		container.NewCenter(avatar),
+	quote := NewTappableContainer(HBoxNoSpacing(
+		container.NewCenter(p.avatar),
 		HorizontalSpacer(8),
-		container.NewCenter(authorLabel),
+		container.NewCenter(p.author),
 		HorizontalSpacer(5),
-		container.NewCenter(contentLabel),
-	)
-	quote := NewTappableContainer(row, func() {})
+		container.NewCenter(p.content),
+	), func() {})
 	quote.onSecondaryTap = onMenu
 
 	// The elbow both indents the quote to the message content column and draws the
 	// line down to the message. The row's own horizontal margin is already applied
 	// around the block, so it only has the gutter and the gap after it to span.
 	// TODO: navigate to the referenced message on tap.
-	return HBoxNoSpacing(newReplyLine(), quote)
+	p.row = HBoxNoSpacing(newReplyLine(), quote)
+	p.set(deps)
+
+	return p
+}
+
+// Resolved reports whether the line is quoting a message rather than saying it
+// could not find one. The controller asks so it knows which targets to fetch.
+func (p *replyPreview) Resolved(deps Deps) bool {
+	return deps.Actions.ResolveMessage(p.channelID, p.messageID) != nil
+}
+
+// Refresh re-reads the quoted message and re-lays the line out, for a target
+// that resolved after the widget was mounted.
+func (p *replyPreview) Refresh(deps Deps) {
+	p.set(deps)
+	p.author.Refresh()
+	p.content.Refresh()
+	Relayout(p.row)
+}
+
+func (p *replyPreview) set(deps Deps) {
+	author, content, avatarURL, _ := resolveReply(deps, p.channelID, p.messageID)
+
+	p.author.Text = author
+	p.content.Text = content
+	loadAvatar(deps.Images, p.avatar, avatarURL, fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize))
 }
 
 // resolveReply looks up a referenced message and returns its author, truncated

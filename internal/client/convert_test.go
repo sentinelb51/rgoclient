@@ -175,3 +175,44 @@ func TestUserUpdateKindsSeparatesPresenceFromIdentity(t *testing.T) {
 		})
 	}
 }
+
+// TestToReactionsIsOrdered covers the one thing the wire format cannot supply.
+// Reactions arrive as a JSON object, so revoltgo hands over a map: rendered as
+// it iterates, the chips would come out in a different order on every repaint.
+// The order also has to survive a count changing, or somebody joining a reaction
+// would move the chip beside it out from under the pointer.
+func TestToReactionsIsOrdered(t *testing.T) {
+	reactions := map[string][]string{
+		"\U0001F44D":                 {"01ALICE", "01BOB"},
+		"01J9WN3PHX4ZQSNSZH10CK4RHS": {"01BOB"},
+		"\U0001F389":                 {"01CAROL"},
+	}
+
+	var first []domain.Reaction
+	for range 8 {
+		got := toReactions(reactions)
+
+		if first == nil {
+			first = got
+			continue
+		}
+		for i := range got {
+			if got[i].Emoji != first[i].Emoji {
+				t.Fatalf("two conversions of one map disagree at %d: %q then %q", i, first[i].Emoji, got[i].Emoji)
+			}
+		}
+	}
+
+	if len(first) != len(reactions) {
+		t.Fatalf("converted %d reactions, want %d", len(first), len(reactions))
+	}
+	for i := 1; i < len(first); i++ {
+		if first[i-1].Emoji >= first[i].Emoji {
+			t.Errorf("%q is filed before %q", first[i-1].Emoji, first[i].Emoji)
+		}
+	}
+
+	if toReactions(nil) != nil {
+		t.Error("a message with no reactions converted to a slice")
+	}
+}

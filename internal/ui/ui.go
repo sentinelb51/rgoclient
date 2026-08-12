@@ -66,6 +66,22 @@ type MessageActions interface {
 	OnEdit(message *domain.Message)
 	OnDelete(message *domain.Message)
 
+	// OnPin pins or unpins a message. Which of the two is asked for rather than
+	// toggled: the widget has already read the state to label its own menu item,
+	// and re-deriving it in the controller could only disagree.
+	OnPin(message *domain.Message, pinned bool)
+
+	// OnReact adds or removes this account's reaction, for the same reason
+	// stated either way: the chip that raised it has already read whether the
+	// account is in that reaction, having drawn itself from it.
+	OnReact(message *domain.Message, emoji string, add bool)
+
+	// OnPickEmoji opens the emoji picker beside anchor and reports what is chosen.
+	// The controller opens it rather than the caller because what is on offer is a
+	// walk of every server the account is in, ordered around the open one — which
+	// no widget knows and none should have to ask.
+	OnPickEmoji(anchor fyne.CanvasObject, onPick func(EmojiChoice))
+
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message
 }

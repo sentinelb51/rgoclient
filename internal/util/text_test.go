@@ -96,3 +96,47 @@ func TestInviteLinkCode(t *testing.T) {
 		}
 	}
 }
+
+// A link this client composes has to be one it can read back: the same scan
+// unfurls an invite card under a message, so a host or a shape the writer and
+// the reader disagreed about would post links the client itself ignores.
+func TestInviteLinkRoundTrips(t *testing.T) {
+	for _, code := range []string{"dcRHWEF1", "AbCd1234"} {
+		link := InviteLink(code)
+		if got := InviteLinkCode(link); got != code {
+			t.Errorf("InviteLinkCode(InviteLink(%q)) = %q, want %q (link %q)", code, got, code, link)
+		}
+	}
+
+	if got := InviteLink(""); got != "" {
+		t.Errorf("InviteLink(\"\") = %q, want an empty string", got)
+	}
+}
+
+// TestIsEmojiID covers the one thing that decides whether an emoji is drawn as a
+// picture or as a character. Revolt carries both in the one field, so a rule that
+// is even slightly loose turns somebody's flag or shortcode into a request for a
+// picture that does not exist — an empty square where the emoji was.
+func TestIsEmojiID(t *testing.T) {
+	custom := []string{
+		"01J9WN3PHX4ZQSNSZH10CK4RHS",
+		"01HB2K3M4N5P6Q7R8S9T0V1W2X",
+	}
+	for _, id := range custom {
+		if !IsEmojiID(id) {
+			t.Errorf("%q was not read as a custom emoji", id)
+		}
+	}
+
+	literal := []string{
+		"", "\U0001F44D", "❤️", "\U0001F1EC\U0001F1E7",
+		"01J9WN3PHX4ZQSNSZH10CK4RH",   // one short
+		"01J9WN3PHX4ZQSNSZH10CK4RHSX", // one long
+		"01J9WN3PHX4ZQSNSZH10CK4RH-",  // right length, not alphanumeric
+	}
+	for _, emoji := range literal {
+		if IsEmojiID(emoji) {
+			t.Errorf("%q was read as a custom emoji ID", emoji)
+		}
+	}
+}

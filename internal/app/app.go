@@ -95,6 +95,7 @@ type App struct {
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
 	homeButton      *ui.SidebarButton
+	friendsRow      *ui.FriendsRow // the way into the friends list, above the conversations
 	serverHeader    *widget.Label
 	channelHeader   *widget.Label
 	channelGlyph    *fyne.Container // holds the message header's # / @ / group mark
@@ -107,6 +108,7 @@ type App struct {
 
 	overlay    *ui.Overlay          // nil when nothing is showing
 	joinDialog *ui.JoinServerDialog // the invite dialog on the modal layer, if any
+	friends    *ui.FriendsDialog    // the friends list on that layer, if any
 	editing    *ui.MessageWidget    // the message being edited in place, if any
 
 	/* Lazy author resolution, see members.go */
@@ -115,16 +117,39 @@ type App struct {
 	pendingAuthors []client.AuthorRef
 	authorTimer    *time.Timer
 
+	/* Lazy reply resolution, see messages.go */
+
+	// replies are the messages quoted by mounted replies that the message cache
+	// could not answer for — a reply reaches as far back as somebody cared to
+	// answer, while the cache is only a channel's tail. Kept apart from that cache
+	// for exactly that reason: filed among its messages, one would read as history.
+	replies        map[string]*domain.Message
+	fetchedReplies map[string]bool
+	pendingReplies []client.MessageRef
+	replyTimer     *time.Timer
+
+	/* Coalesced sidebar rebuilds, see events.go */
+
+	// dirty is which whole-surface rebuilds the events since the last flush have
+	// invalidated, and refreshTimer is the settling window they are gathered over.
+	dirty        refreshTarget
+	refreshTimer *time.Timer
+
 	/* The member sidebar, see members.go */
 
-	// memberTimer coalesces a burst of presence changes into one rebuild, and
-	// memberSeq drops the older of two rebuilds racing back from their walks.
+	// memberSeq drops the older of two rebuilds racing back from their walks;
 	// memberStale records that the sidebar is hidden and has stopped following.
-	memberTimer *time.Timer
 	memberSeq   uint64
 	memberStale bool
 
 	fetchedMembers map[string]bool // serverID -> its whole membership has been pulled
+
+	// memberLoading is the server whose membership is in flight, memberWatchdog
+	// the timer that gives the sidebar an answer when it never lands, and
+	// memberFailed the servers whose fetch failed and has not been retried.
+	memberLoading  string
+	memberWatchdog *time.Timer
+	memberFailed   map[string]bool
 
 	/* Read-ack coalescing, see events.go */
 
@@ -146,9 +171,11 @@ type App struct {
 	typingTimer *time.Timer
 
 	// The sending half: where this account last announced itself, when, and the
-	// quiet period after which it takes that back.
+	// quiet period after which it takes that back. lastTypedAt is what the idle
+	// timer checks rather than trusting its own firing — see armTypingIdle.
 	typingChannelID string
 	sentTypingAt    time.Time
+	lastTypedAt     time.Time
 	typingIdleTimer *time.Timer
 
 	/* Invite cards, see overlay.go */
@@ -170,6 +197,14 @@ type App struct {
 	// stylesDirty records that the tables have moved under a client that has not
 	// been rebuilt from them yet, because the settings page was covering it.
 	stylesDirty bool
+
+	/* The login screens, see session.go */
+
+	// loginStatus is the one line the login and second-factor screens report on,
+	// there being no notice layer until the main UI exists; readyTimer is the
+	// watchdog on the gateway snapshot that builds it.
+	loginStatus *ui.StatusLine
+	readyTimer  *time.Timer
 
 	pendingToken   string // stashed by a credential login until Ready names the user
 	pendingJoin    bool   // a join is in flight, so its ServerJoined should select
@@ -209,6 +244,9 @@ func New(fyneApp fyne.App, info Info) *App {
 		unreadChannels:      make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
 		fetchedMembers:      make(map[string]bool),
+		memberFailed:        make(map[string]bool),
+		replies:             make(map[string]*domain.Message),
+		fetchedReplies:      make(map[string]bool),
 		slowmodeUntil:       make(map[string]time.Time),
 		typing:              make(map[string]map[string]time.Time),
 	}
@@ -330,9 +368,15 @@ func (a *App) focusInput() {
 
 /* ui.MessageActions */
 
-// ResolveMessage looks a message up in the local cache.
+// ResolveMessage looks a message up in the local cache, falling back to the
+// reply targets fetched for quotes the cache had scrolled past. Never the
+// network — a widget asks this while it builds.
 func (a *App) ResolveMessage(channelID, messageID string) *domain.Message {
-	return a.client.Messages().Find(channelID, messageID)
+	if message := a.client.Messages().Find(channelID, messageID); message != nil {
+		return message
+	}
+
+	return a.replies[messageID]
 }
 
 // OnReply focuses the composer with the given message queued as a reply.
@@ -389,6 +433,78 @@ func (a *App) deleteMessage(message *domain.Message) {
 		func() error { return a.client.DeleteMessage(message.ChannelID, message.ID) },
 		a.notifyFailure("delete message "+message.ID, "Could not delete that message."),
 	)
+}
+
+// OnPin pins or unpins a message. Nothing is applied optimistically — the client
+// records the new state only once the server has agreed, so a refused pin leaves
+// the row exactly as it was and says so.
+//
+// The repaint is made here rather than left to the gateway. Revolt does echo the
+// pin back as a system message, but the client has already written what that
+// event carries, and the handler behind it deliberately announces nothing when
+// the state it was told about is the state it holds — otherwise every pin would
+// redraw its row twice.
+func (a *App) OnPin(message *domain.Message, pinned bool) {
+	if message == nil {
+		return
+	}
+
+	channelID, messageID := message.ChannelID, message.ID
+	what, failure := "pin message ", "Could not pin that message."
+	if !pinned {
+		what, failure = "unpin message ", "Could not unpin that message."
+	}
+
+	epoch := a.epoch
+	onFail := a.notifyFailure(what+messageID, "%s", failure)
+
+	go func() {
+		err := a.client.PinMessage(channelID, messageID, pinned)
+
+		a.doOnUI(func() {
+			if err != nil {
+				onFail(err)
+				return
+			}
+			if !a.stale(epoch) {
+				a.refreshMessage(channelID, messageID)
+			}
+		}, false)
+	}()
+}
+
+// OnReact adds or removes this account's reaction. Like a pin, nothing is
+// applied before the server agrees and the repaint is made here: the gateway
+// does echo a reaction back, but the client has already written what that event
+// carries, and the handler behind it announces nothing when the state it is told
+// about is the state it holds — otherwise every chip would redraw twice.
+func (a *App) OnReact(message *domain.Message, emoji string, add bool) {
+	if message == nil || emoji == "" {
+		return
+	}
+
+	channelID, messageID := message.ChannelID, message.ID
+	what, failure := "react to message ", "Could not add that reaction."
+	if !add {
+		what, failure = "unreact to message ", "Could not remove that reaction."
+	}
+
+	epoch := a.epoch
+	onFail := a.notifyFailure(what+messageID, "%s", failure)
+
+	go func() {
+		err := a.client.React(channelID, messageID, emoji, add)
+
+		a.doOnUI(func() {
+			if err != nil {
+				onFail(err)
+				return
+			}
+			if !a.stale(epoch) {
+				a.refreshMessage(channelID, messageID)
+			}
+		}, false)
+	}()
 }
 
 // OnEdit opens the in-place editor on the message's mounted widget. Only one edit

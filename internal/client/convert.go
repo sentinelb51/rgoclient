@@ -10,6 +10,7 @@ package client
 
 import (
 	"image/color"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -138,6 +139,8 @@ func toMessage(message *revoltgo.Message) *domain.Message {
 		MentionsEveryone: uint32(message.Flags)&(flagMentionsEveryone|flagMentionsOnline) != 0,
 		Edited:           message.Edited,
 		Masquerade:       message.Masquerade != nil,
+		Pinned:           message.Pinned,
+		Reactions:        toReactions(message.Reactions),
 	}
 
 	if message.System != nil {
@@ -158,6 +161,31 @@ func toMessage(message *revoltgo.Message) *domain.Message {
 
 func toMessages(messages []*revoltgo.Message) []*domain.Message {
 	return convertAll(messages, toMessage)
+}
+
+// toReactions orders a message's reactions by the emoji itself.
+//
+// An order has to be chosen here, and it cannot be Revolt's: reactions arrive as
+// a JSON object, which revoltgo decodes into a map, and a map has no order at
+// all — rendered as it iterates, the chips would deal themselves a fresh hand on
+// every repaint. Sorting by the emoji is the one order that survives a count
+// changing, which is what a chip has to do: somebody joining a reaction must not
+// move the one beside it out from under the pointer.
+//
+// The cost is that the chips are not in the order people chose them, which is
+// what other clients show. Nothing in the payload records that order.
+func toReactions(reactions map[string][]string) []domain.Reaction {
+	if len(reactions) == 0 {
+		return nil
+	}
+
+	out := make([]domain.Reaction, 0, len(reactions))
+	for emoji, users := range reactions {
+		out = append(out, domain.Reaction{Emoji: emoji, Users: users})
+	}
+	slices.SortFunc(out, func(a, b domain.Reaction) int { return strings.Compare(a.Emoji, b.Emoji) })
+
+	return out
 }
 
 /* Embeds */
@@ -321,6 +349,30 @@ func toChannelKind(kind revoltgo.ChannelType) domain.ChannelKind {
 	return domain.ChannelText
 }
 
+/* Relationships */
+
+// toRelationship converts Revolt's own vocabulary. "User" is the account itself
+// and "None" is a stranger, which are different answers to the same question and
+// so are named apart.
+func toRelationship(kind revoltgo.UserRelationshipType) domain.Relationship {
+	switch kind {
+	case revoltgo.UserRelationsTypeUser:
+		return domain.RelationshipSelf
+	case revoltgo.UserRelationsTypeFriend:
+		return domain.RelationshipFriend
+	case revoltgo.UserRelationsTypeOutgoing:
+		return domain.RelationshipOutgoing
+	case revoltgo.UserRelationsTypeIncoming:
+		return domain.RelationshipIncoming
+	case revoltgo.UserRelationsTypeBlocked:
+		return domain.RelationshipBlocked
+	case revoltgo.UserRelationsTypeBlockedOther:
+		return domain.RelationshipBlockedBy
+	}
+
+	return domain.RelationshipNone
+}
+
 /* Presence and badges */
 
 func toPresence(user *revoltgo.User) domain.Presence {
@@ -344,6 +396,28 @@ func toPresence(user *revoltgo.User) domain.Presence {
 	}
 
 	return domain.PresenceOnline
+}
+
+// fromPresence is toPresence backwards, for setting this account's own.
+//
+// Offline maps to *Invisible*, which is the whole of what choosing it means:
+// Revolt has no way to declare yourself offline while connected, and appearing
+// offline is what somebody picking it is asking for. toPresence resolves the bit
+// back to Offline on the way in, so the two agree and the picker shows what was
+// chosen.
+func fromPresence(presence domain.Presence) revoltgo.UserStatusPresence {
+	switch presence {
+	case domain.PresenceIdle:
+		return revoltgo.UserStatusPresenceIdle
+	case domain.PresenceFocus:
+		return revoltgo.UserStatusPresenceFocus
+	case domain.PresenceBusy:
+		return revoltgo.UserStatusPresenceBusy
+	case domain.PresenceOffline:
+		return revoltgo.UserStatusPresenceInvisible
+	}
+
+	return revoltgo.UserStatusPresenceOnline
 }
 
 // badges maps Revolt's badge bits to what each is called, in the order a profile

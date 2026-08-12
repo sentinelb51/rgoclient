@@ -10,6 +10,7 @@ import (
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -131,14 +132,18 @@ func TestAdvancedSectionFallsBack(t *testing.T) {
 // entitled to call any of them while it builds.
 func newTestSettingsPage() *SettingsPage {
 	page := NewSettingsPage(SettingsHooks{
-		Deps:           testDeps(),
-		Update:         func(func(*config.Settings)) {},
-		Restyle:        func() {},
-		Close:          func() {},
-		Confirm:        func(Confirm) {},
-		Sessions:       func() []SettingsSession { return nil },
-		ForgetSession:  func(string) {},
-		LogOut:         func() {},
+		Deps:             testDeps(),
+		Update:           func(func(*config.Settings)) {},
+		Restyle:          func() {},
+		Close:            func() {},
+		Confirm:          func(Confirm) {},
+		Sessions:         func() []SettingsSession { return nil },
+		ForgetSession:    func(string) {},
+		LogOut:           func() {},
+		LogOutEverywhere: func() {},
+		SetPresence:      func(domain.Presence) {},
+		SetStatusText:    func(string) {},
+
 		CacheDir:       func() string { return "" },
 		ChooseCacheDir: func(func(string)) {},
 		CacheStats:     func(func(cache.ImageStats)) {},
@@ -262,5 +267,39 @@ func TestAccentOverridesNameRealColours(t *testing.T) {
 		if _, ok := theme.DefaultColor(name); !ok {
 			t.Errorf("the accent writes %q, which is not in the palette", name)
 		}
+	}
+}
+
+// TestCommitEntryReportsOnlyRealChanges covers the two rules a status field
+// rests on: a report is a request, so an untouched field must make none however
+// often the focus crosses it, and Escape must be swallowed — the settings page
+// reads the key the canvas gets as "close".
+func TestCommitEntryReportsOnlyRealChanges(t *testing.T) {
+	var reported []string
+	entry := newCommitEntry("here", func(text string) { reported = append(reported, text) })
+
+	entry.FocusLost()
+	if len(reported) != 0 {
+		t.Errorf("an untouched field reported %v", reported)
+	}
+
+	entry.SetText("away")
+	entry.FocusLost()
+	entry.FocusLost()
+
+	if len(reported) != 1 || reported[0] != "away" {
+		t.Errorf("reported %v, want one report of the new value", reported)
+	}
+
+	entry.SetText("half-typed")
+	entry.TypedKey(&fyne.KeyEvent{Name: fyne.KeyEscape})
+
+	if entry.Text != "away" {
+		t.Errorf("Escape left %q, want the committed value back", entry.Text)
+	}
+
+	entry.FocusLost()
+	if len(reported) != 1 {
+		t.Errorf("reported %v, want the reverted field to have said nothing more", reported)
 	}
 }

@@ -10,6 +10,35 @@ package util
 
 import "strings"
 
+// emojiIDLen is the exact length of a custom emoji's ULID. markdown's own
+// scanner names the same number for the same reason and does not share this one:
+// that package parses bytes out of a body and imports nothing, where this
+// answers about a whole string somebody already has.
+const emojiIDLen = 26
+
+// IsEmojiID reports whether s is the ULID of a custom emoji rather than a
+// literal one. Revolt carries the two in the one field — a reaction's emoji, a
+// message's — and says nothing about which, so whoever has to draw it decides
+// from the value. Nothing looser than the exact length will do: an emoji is a
+// short string of anything at all, and a length range would read a two-letter
+// flag as an ID.
+func IsEmojiID(s string) bool {
+	if len(s) != emojiIDLen {
+		return false
+	}
+
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= '0' && c <= '9' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' {
+			continue
+		}
+
+		return false
+	}
+
+	return true
+}
+
 // Truncate shortens s to at most limit runes, replacing the tail with "..."
 // when it was cut. Slicing runes keeps multi-byte characters intact.
 func Truncate(s string, limit int) string {
@@ -55,6 +84,22 @@ const invitePathPrefix = "invite/"
 // of it. Only a host on this list may, since on any other "example.com/about"
 // would read as the code "about".
 var inviteShortHosts = [...]string{"rvlt.gg", "stt.gg"}
+
+// inviteLinkHost is the one this client *writes*. It is named separately from
+// the list above on purpose: InviteLinkCode has to keep reading every host
+// Revolt has ever served invites from, because that is what other people's
+// messages contain, while a link composed here should say what the platform is
+// called now. Adding a host to that list must not silently change this.
+const inviteLinkHost = "stt.gg"
+
+// InviteLink is the shareable form of a code the client has just created.
+func InviteLink(code string) string {
+	if code == "" {
+		return ""
+	}
+
+	return "https://" + inviteLinkHost + "/" + code
+}
 
 // InviteLinkCode extracts the invite code a URL points at, or "" when the URL is
 // not an invite link at all.

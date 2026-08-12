@@ -258,3 +258,53 @@ func TestSystemLineNamesAreMentions(t *testing.T) {
 		t.Errorf("an event about the channel drew %d mentions, want none", len(mentions))
 	}
 }
+
+// replyStore answers for a reply target only once told to, which is what the
+// controller's lazy fetch does to it: the message cache is a channel's tail and a
+// reply reaches as far back as somebody cared to answer.
+type replyStore struct {
+	stubActions
+
+	known map[string]*domain.Message
+}
+
+func (s *replyStore) ResolveMessage(_, messageID string) *domain.Message {
+	return s.known[messageID]
+}
+
+// TestReplyPreviewFillsInLater covers the rule the lazy reply fetch rests on: the
+// line has to be able to name a message it could not find when it was mounted,
+// and RefreshReplies must touch only the targets it is handed — re-laying a line
+// out is not free and every mounted row is offered the batch.
+func TestReplyPreviewFillsInLater(t *testing.T) {
+	deps := styledApp(t)
+	actions := &replyStore{known: make(map[string]*domain.Message)}
+	deps.Actions = actions
+
+	message := testMessage("01MSG00000000000000000000A", "answering")
+	message.Replies = []string{"01QUOTED000000000000000001", "01QUOTED000000000000000002"}
+
+	w := NewMessageWidget(deps, message, "", false, false)
+	if len(w.replies) != 2 {
+		t.Fatalf("a message quoting two others kept %d previews", len(w.replies))
+	}
+
+	first, second := w.replies[0], w.replies[1]
+	if first.author.Text != "" || first.content.Text == "" {
+		t.Errorf("an unresolved quote read %q / %q, want no name and a placeholder",
+			first.author.Text, first.content.Text)
+	}
+
+	quoted := testMessage("01QUOTED000000000000000001", "the original")
+	actions.known[quoted.ID] = quoted
+	placeholder := second.content.Text
+
+	w.RefreshReplies(map[string]bool{quoted.ID: true})
+
+	if first.content.Text != "the original" {
+		t.Errorf("the resolved quote reads %q, want the message it names", first.content.Text)
+	}
+	if second.content.Text != placeholder {
+		t.Errorf("a quote outside the batch was rewritten to %q", second.content.Text)
+	}
+}

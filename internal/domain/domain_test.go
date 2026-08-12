@@ -56,6 +56,36 @@ func TestSystemMessageTextParts(t *testing.T) {
 	}
 }
 
+// Revolt files every system event's subject under one "id", so the field alone
+// does not say what kind of thing is in it. Reading a pin's as a user is a fetch
+// the server can only refuse — and one that came back on every remount, a failed
+// author fetch being deliberately retryable.
+func TestSystemMessageTargetKind(t *testing.T) {
+	cases := []struct {
+		kind   SystemKind
+		target string
+		user   bool
+		pinned string
+	}{
+		{SystemUserJoined, "01USER", true, ""},
+		{SystemUserKicked, "01USER", true, ""},
+		{SystemMessagePinned, "01MESSAGE", false, "01MESSAGE"},
+		{SystemMessageUnpinned, "01MESSAGE", false, "01MESSAGE"},
+		{SystemChannelRenamed, "", false, ""},          // names nothing at all
+		{SystemKind("teleported"), "01USER", true, ""}, // a kind added after this client
+	}
+
+	for _, tc := range cases {
+		system := &SystemMessage{Kind: tc.kind, Target: tc.target}
+		if got := system.TargetsUser(); got != tc.user {
+			t.Errorf("%q.TargetsUser() = %v, want %v", tc.kind, got, tc.user)
+		}
+		if got := system.PinnedMessageID(); got != tc.pinned {
+			t.Errorf("%q.PinnedMessageID() = %q, want %q", tc.kind, got, tc.pinned)
+		}
+	}
+}
+
 func TestChannelKindIsConversation(t *testing.T) {
 	conversations := []ChannelKind{ChannelDM, ChannelGroup, ChannelSavedMessages}
 	for _, kind := range conversations {

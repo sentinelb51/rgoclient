@@ -14,10 +14,12 @@ import (
 type fakeStore struct {
 	self     domain.User
 	users    map[string]domain.User
+	related  []domain.User
 	members  map[string]domain.Member // "serverID:userID"
 	roles    map[string][]domain.Role // "serverID:userID"
 	channels map[string]domain.Channel
 	servers  map[string]domain.Server
+	emojis   []domain.Emoji
 
 	serverMembers map[string][]domain.Member // serverID
 	hoisted       map[string][]domain.Role   // serverID
@@ -37,6 +39,8 @@ func (s *fakeStore) User(userID string) (domain.User, bool) {
 }
 
 func (s *fakeStore) UserName(userID string) string { return s.users[userID].Name }
+
+func (s *fakeStore) Relationships() []domain.User { return s.related }
 
 func (s *fakeStore) HasUser(userID string) bool {
 	_, ok := s.users[userID]
@@ -79,6 +83,8 @@ func (s *fakeStore) EmojiURL(emojiID string) string {
 
 	return "https://cdn.invalid/emojis/" + emojiID
 }
+
+func (s *fakeStore) Emojis() []domain.Emoji { return s.emojis }
 
 func (s *fakeStore) Server(serverID string) (domain.Server, bool) {
 	server, ok := s.servers[serverID]

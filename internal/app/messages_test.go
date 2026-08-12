@@ -90,6 +90,21 @@ func TestContinuesGroup(t *testing.T) {
 		}
 	})
 
+	// A pinned message opens a group because its mark rides the name line, which is
+	// the one thing a continuation does not draw — grouped, pinning it would show
+	// nothing. Only the pinned message itself is affected: the row after it groups
+	// or not on its own merits.
+	t.Run("a pinned message", func(t *testing.T) {
+		pinned := message("01ELYNN", base.Add(time.Minute))
+		pinned.Pinned = true
+		if continuesGroup(prev, pinned) {
+			t.Error("a pinned message should start its own group")
+		}
+		if !continuesGroup(pinned, message("01ELYNN", base.Add(2*time.Minute))) {
+			t.Error("a pin should not stop the next message continuing under it")
+		}
+	})
+
 	// Midnight breaks the group even inside the time window, because the day
 	// separator is drawn between the two and a headerless block cannot straddle it.
 	t.Run("across midnight", func(t *testing.T) {

@@ -178,6 +178,8 @@ type ChannelWidget struct {
 
 	selected bool
 	unread   bool
+	typing   bool // what SetTyping was last told, so a collapsed row can resume it
+	animate  bool
 }
 
 var (
@@ -241,7 +243,28 @@ func (w *ChannelWidget) SetState(selected, unread bool) {
 // depends on its no-op guard, and typing arrives on its own schedule. Carries the
 // same guard: the mark is idle for the life of most rows.
 func (w *ChannelWidget) SetTyping(typing, animate bool) {
-	w.typingMark.SetActive(typing, animate)
+	w.typing, w.animate = typing, animate
+	w.applyTyping()
+}
+
+// Hide and Show carry the mark's animation with the row. A collapsed category
+// hides its channels, and Fyne's Visible() is per object rather than per tree — so
+// a mark left running inside one goes on moving its rectangles sixty times a
+// second, and every one of those moves asks the canvas to repaint something
+// nobody can see. What the row was told is kept, so opening the category again
+// puts the sweep back without waiting for the next event.
+func (w *ChannelWidget) Hide() {
+	w.typingMark.SetActive(false, false)
+	w.BaseWidget.Hide()
+}
+
+func (w *ChannelWidget) Show() {
+	w.BaseWidget.Show()
+	w.applyTyping()
+}
+
+func (w *ChannelWidget) applyTyping() {
+	w.typingMark.SetActive(w.typing && w.Visible(), w.animate)
 }
 
 func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {

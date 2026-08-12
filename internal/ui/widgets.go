@@ -6,6 +6,7 @@ import (
 	"math"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -15,6 +16,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
@@ -122,10 +124,110 @@ func NewColumnDivider() fyne.CanvasObject {
 
 /* Chips */
 
-// NewChip is one small rounded label in its own colour — a badge, a count, the
-// bot mark.
+// NewChip is one small rounded label in its own colour — a badge or a count.
 func NewChip(text string, tint color.Color) fyne.CanvasObject {
 	return newChip(nil, text, tint)
+}
+
+// NewTappableChip is a chip that leads somewhere. It lights under the pointer and
+// carries the pointer cursor, which is the whole of what tells it apart from the
+// plain one beside it — a mutual profile draws both, the names it resolved and a
+// "+n" for the ones it could not.
+func NewTappableChip(text string, tint color.Color, onTap func()) fyne.CanvasObject {
+	c := &tappableChip{}
+	c.content, c.background = chipParts(nil, text, tint)
+	c.onTap = onTap
+	c.ExtendBaseWidget(c)
+
+	return c
+}
+
+// tappableChip is NewChip's surface with a click on it. It is a widget rather
+// than a TappableContainer around a chip because that one hovers a square behind
+// whatever it wraps, and a square lighting up behind a rounded label is a second
+// shape appearing rather than the chip responding.
+type tappableChip struct {
+	tapBase
+
+	background *canvas.Rectangle
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*tappableChip)(nil)
+	_ desktop.Hoverable = (*tappableChip)(nil)
+)
+
+func (c *tappableChip) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(c.content)
+}
+
+func (c *tappableChip) MouseIn(*desktop.MouseEvent) {
+	c.background.FillColor = theme.Colors.ChipHoverBg
+	c.background.Refresh()
+}
+
+func (c *tappableChip) MouseOut() {
+	c.background.FillColor = theme.Colors.ChipBg
+	c.background.Refresh()
+}
+
+/* Status lines */
+
+// StatusLine is the one place a screen with no notice layer can report an
+// outcome. The login screen and the second-factor screen are both up before the
+// client — and therefore before NoticeStack — is built, so a failure there had
+// nowhere to go but a Fyne error dialog, which is the one surface in the app
+// that AppTheme does not reach.
+//
+// It is a widget.Label rather than a canvas.Text for two reasons a login screen
+// runs into immediately: a transport error is a long sentence and has to wrap,
+// and Importance is the one way to colour text without holding a colour that a
+// restyle would leave stale.
+type StatusLine struct {
+	// Content is the object to mount. The label is kept apart from it so a caller
+	// can put the line where it wants without knowing what it is made of.
+	Content fyne.CanvasObject
+
+	label *widget.Label
+}
+
+// NewStatusLine builds an empty line. It is mounted empty rather than added on
+// demand, so a message appearing does not move what is under it.
+func NewStatusLine() *StatusLine {
+	label := widget.NewLabelWithStyle("", fyne.TextAlignCenter, fyne.TextStyle{})
+	label.Wrapping = fyne.TextWrapWord
+
+	return &StatusLine{Content: label, label: label}
+}
+
+// Fail reports something that went wrong. Call on the UI thread.
+func (s *StatusLine) Fail(message string) { s.set(message, widget.DangerImportance) }
+
+// Notice reports something that did not. Call on the UI thread.
+func (s *StatusLine) Notice(message string) { s.set(message, widget.MediumImportance) }
+
+// Clear empties the line without taking its height back.
+func (s *StatusLine) Clear() { s.set("", widget.MediumImportance) }
+
+func (s *StatusLine) set(message string, importance widget.Importance) {
+	s.label.Importance = importance
+	s.label.SetText(message)
+}
+
+/* Bot mark */
+
+// NewBotMark is the glyph that says an account is a bot, drawn after its name.
+//
+// A glyph rather than a lettered chip: the word is the same on every row that
+// carries one, so a column of them reads as a column of identical labels rather
+// than as a property of the names beside them — and the mark is legible at a
+// size a three-letter chip is not.
+//
+// The side is the caller's, as a TypingMark's width is, because the two names it
+// follows are set differently: a member row's and a profile's heading.
+func NewBotMark(side float32) fyne.CanvasObject {
+	return container.NewCenter(newScaledIcon(tintedIcon(assets.BotIcon, theme.Colors.BotMark), side))
 }
 
 // RoleChip is a role drawn as a chip: a dot in the role's own colour beside its
@@ -177,6 +279,14 @@ func roleMenu(role domain.Role) []*fyne.MenuItem {
 // rounded surface. The mark is centred rather than stretched — a row layout
 // would otherwise hand a circle the full height of the text beside it.
 func newChip(mark fyne.CanvasObject, text string, tint color.Color) fyne.CanvasObject {
+	chip, _ := chipParts(mark, text, tint)
+
+	return chip
+}
+
+// chipParts builds the surface and hands its background back alongside it, which
+// is what a tappable one needs to recolour on hover.
+func chipParts(mark fyne.CanvasObject, text string, tint color.Color) (fyne.CanvasObject, *canvas.Rectangle) {
 	background := canvas.NewRectangle(theme.Colors.ChipBg)
 	background.CornerRadius = theme.Sizes.ChipRadius
 
@@ -191,7 +301,7 @@ func newChip(mark fyne.CanvasObject, text string, tint color.Color) fyne.CanvasO
 
 	padV, padH := theme.Sizes.ChipPaddingV, theme.Sizes.ChipPaddingH
 
-	return container.NewStack(background, NewInset(content, padV, padV, padH, padH))
+	return container.NewStack(background, NewInset(content, padV, padV, padH, padH)), background
 }
 
 // newChipDot is the leading dot: the one thing in a chip carrying the shared
@@ -1232,6 +1342,82 @@ func TruncateToWidth(text string, width, size float32, style fyne.TextStyle) str
 		return ""
 	}
 	return string(runes[:low]) + ellipsis
+}
+
+// WrapToWidth breaks text into lines that each measure no wider than width.
+// A word too long for a line of its own is broken mid-word: the alternative is
+// one line overhanging whatever sits beside it, which is the thing wrapping is
+// for. A width of zero or less is no room to decide anything in, so the text
+// comes back whole.
+func WrapToWidth(text string, width, size float32, style fyne.TextStyle) []string {
+	words := strings.Fields(text)
+	if width <= 0 || len(words) == 0 {
+		return []string{text}
+	}
+
+	space := spaceWidth(size, style)
+	lines := make([]string, 0, 2)
+
+	line, extent := "", float32(0)
+	for _, word := range words {
+		measured := fyne.MeasureText(word, size, style).Width
+
+		switch {
+		case line == "":
+			line, extent = word, measured
+		case extent+space+measured <= width:
+			line, extent = line+" "+word, extent+space+measured
+		default:
+			lines = append(lines, line)
+			line, extent = word, measured
+		}
+
+		// A word wider than the column itself is cut where it stops fitting and
+		// carries on filling the next line, however many that takes.
+		for extent > width {
+			head, tail := splitToWidth(line, width, size, style)
+			if tail == "" {
+				break
+			}
+			lines = append(lines, head)
+			line, extent = tail, fyne.MeasureText(tail, size, style).Width
+		}
+	}
+
+	return append(lines, line)
+}
+
+// splitToWidth cuts text at the last rune that still fits inside width, keeping
+// at least one so a column narrower than a single glyph still terminates.
+func splitToWidth(text string, width, size float32, style fyne.TextStyle) (head, tail string) {
+	runes := []rune(text)
+	for i := 1; i < len(runes); i++ {
+		if fyne.MeasureText(string(runes[:i+1]), size, style).Width > width {
+			return string(runes[:i]), string(runes[i:])
+		}
+	}
+
+	return text, ""
+}
+
+// NewWrappedText is a block of prose that wraps at width. It is canvas.Text per
+// line rather than a wrapping widget.Label because a wrapping widget cannot be
+// asked how tall it wants to be until after it has been given a width — it
+// answers with whatever it was last laid out at — so a row holding one reports
+// the wrong height for the frame it is already in. Every caller here knows its
+// width beforehand, so the break points are decided at construction and the
+// block's minimum is true from the first pass.
+func NewWrappedText(text string, width, size float32, colour color.Color) fyne.CanvasObject {
+	lines := WrapToWidth(text, width, size, fyne.TextStyle{})
+
+	objects := make([]fyne.CanvasObject, 0, len(lines))
+	for _, line := range lines {
+		object := canvas.NewText(line, colour)
+		object.TextSize = size
+		objects = append(objects, object)
+	}
+
+	return VBoxNoSpacing(objects...)
 }
 
 /* Typing mark */

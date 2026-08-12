@@ -13,7 +13,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -362,14 +361,20 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 	})
 	action.Importance = confirm.Tone.importance()
 
-	// Cancel comes first and stays plain: the weighted button is the one that
-	// does something irreversible, so it should be the one you have to aim at.
-	buttons := container.NewHBox(layout.NewSpacer(), widget.NewButton("Cancel", onClose), action)
+	// Two halves of the card's width, cancel first and plain.
+	//
+	// Full width rather than a pair in the corner: the two answers to one question
+	// should be the same size and in the same place every time, so the dialog is
+	// answered by position rather than by reading a small label — and the weighted
+	// one is still the only thing carrying colour, so which is destructive is read
+	// off that rather than off which is easier to hit.
+	buttons := container.NewGridWithColumns(2, widget.NewButton("Cancel", onClose), action)
 
 	inner := container.NewVBox(
 		confirmHeader(confirm, onClose),
 		widget.NewSeparator(),
 		body,
+		VerticalSpacer(theme.Sizes.ConfirmButtonGap),
 		buttons,
 	)
 

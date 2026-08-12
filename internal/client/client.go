@@ -67,7 +67,7 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
-	mu       sync.Mutex               // guards the three maps below
+	mu       sync.Mutex               // guards the four maps below
 	fetching map[string]bool          // channelID -> a page request is already in flight
 	slowmode map[string]time.Duration // channelID -> its send cooldown, once asked for
 
@@ -76,6 +76,14 @@ type Client struct {
 	// server IDs — and a channel and a server sharing an ID is not a thing Revolt
 	// promises will never happen.
 	fetchingMembers map[string]bool
+
+	// relations is what the client knows about a relationship that State does not.
+	// Ready fills User.Relationship for everybody it names, but nothing keeps it
+	// current afterwards: revoltgo registers no default handler for
+	// EventUserRelationship and State's caches are unexported, so there is no way
+	// to write the change back where the store would read it. This is that write,
+	// the same shape slowmode is and for the same reason.
+	relations map[string]domain.Relationship
 }
 
 // New returns a client with no session. Every read reports nothing known and
@@ -94,6 +102,7 @@ func New() *Client {
 		fetching:        make(map[string]bool),
 		slowmode:        make(map[string]time.Duration),
 		fetchingMembers: make(map[string]bool),
+		relations:       make(map[string]domain.Relationship),
 	}
 	c.store = &store{client: c}
 
@@ -124,22 +133,6 @@ func (c *Client) Open(token string) error {
 	return c.start(revoltgo.New(token))
 }
 
-// Login logs in with credentials and returns the token to persist. The token is
-// returned rather than saved here because it is only worth keeping once Ready
-// names the account it belongs to.
-func (c *Client) Login(email, password string) (token string, err error) {
-	session, resp, err := revoltgo.NewWithLogin(revoltgo.LoginParams{Email: email, Password: password})
-	if err != nil {
-		return "", fmt.Errorf("create session: %w", err)
-	}
-
-	if err := c.start(session); err != nil {
-		return "", err
-	}
-
-	return resp.Token, nil
-}
-
 // start attaches a session: it drops whatever came before, registers the gateway
 // handlers against this session's epoch, and opens the websocket.
 func (c *Client) start(session *revoltgo.Session) error {
@@ -157,6 +150,48 @@ func (c *Client) start(session *revoltgo.Session) error {
 	return nil
 }
 
+// Logout drops the session and revokes its token, which is what signing out
+// means: Close alone only forgets the token locally, leaving it valid for
+// anyone holding it — and the client writes it to disk, so "logged out" and
+// "still usable" was a real difference.
+//
+// The drop comes first and the revocation second, in that order deliberately.
+// Being logged out is a local fact and must not wait on the network or depend on
+// it succeeding: a token the server has already forgotten fails here and is no
+// less revoked for it, and one that could not be reached is no reason to leave
+// somebody's messages on screen. So the error is the caller's to report, never
+// to act on — by the time it is returned the client is logged out either way.
+//
+// Revoking through the captured session is what makes that ordering possible.
+// Close only takes the websocket down; the token and the HTTP client it is sent
+// with belong to the session value, which stays usable for exactly this.
+//
+// It blocks, like every other action.
+func (c *Client) Logout() error {
+	return c.revoke(func(session *revoltgo.Session) error { return session.Logout() })
+}
+
+// LogoutEverywhere revokes every session the account has, this one included —
+// the answer to a token that has been used somewhere it shouldn't have been.
+//
+// revokeSelf is true because the alternative is signing every other device out
+// and staying signed in here, which is not what the words mean.
+func (c *Client) LogoutEverywhere() error {
+	return c.revoke(func(session *revoltgo.Session) error { return session.SessionsDeleteAll(true) })
+}
+
+// revoke is the shared half of the two above: drop the session, then spend it on
+// the request that invalidates it.
+func (c *Client) revoke(request func(*revoltgo.Session) error) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+	c.Close()
+
+	return request(session)
+}
+
 // Close ends the session and clears everything belonging to it, leaving the
 // client reusable for another login. Bumping the epoch is what silences handlers
 // still in flight on the closed session.
@@ -170,6 +205,7 @@ func (c *Client) Close() {
 	clear(c.fetching)
 	clear(c.slowmode)
 	clear(c.fetchingMembers)
+	clear(c.relations)
 	c.mu.Unlock()
 
 	if session != nil {

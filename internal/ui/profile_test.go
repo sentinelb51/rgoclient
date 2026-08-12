@@ -58,8 +58,11 @@ func TestProfileCardsKeepTheirWidth(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			card := tc.build(testDeps(), crowdedProfile(), ProfileActions{
-				OnMessage: func() {},
-				OnClose:   func() {},
+				Buttons: []ProfileButton{
+					{Label: "Message", Do: func() {}},
+					{Label: "Remove friend", Danger: true, Do: func() {}},
+				},
+				OnClose: func() {},
 			})
 			card.SetProfile(domain.UserProfile{Bio: strings.Repeat("a bio that goes on and on and on. ", 40)})
 

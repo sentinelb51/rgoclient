@@ -145,9 +145,16 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 // same names, in the order the sidebar lists them. The home view contributes
 // none — a conversation is not something a message can link to.
 func (a *App) refreshChannelList() {
+	a.releaseChannelRows()
 	a.channelList.Objects = nil
 
 	if a.homeSelected {
+		// Rebuilt with the list rather than kept aside: the sidebar's objects are
+		// replaced wholesale, so a row held across one would be a widget in no
+		// container. What it marks is re-derived below.
+		a.friendsRow = ui.NewFriendsRow(a.showFriends)
+		a.channelList.Add(a.friendsRow)
+
 		for _, channelID := range a.dmChannels {
 			if w := a.newChannelRow(channelID); w != nil {
 				a.channelList.Add(w)
@@ -155,8 +162,11 @@ func (a *App) refreshChannelList() {
 		}
 		a.channelList.Refresh()
 		a.setMentionCandidates(ui.MentionChannel, nil)
+		a.refreshFriends()
 		return
 	}
+
+	a.friendsRow = nil
 
 	server, ok := a.currentServer()
 	if !ok {
@@ -286,6 +296,16 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		fyne.NewMenuItemWithIcon("Copy channel ID", fynetheme.ContentCopyIcon(), func() {
 			ui.CopyToClipboard(channelID)
 		}),
+	}
+
+	// An invite is to a *channel* of a server, which is why this is offered here
+	// rather than on the server icon: Revolt has no server-wide invite, only one
+	// per channel that lands the joiner in it.
+	if a.canInviteTo(channelID) {
+		items = append(items,
+			fyne.NewMenuItemWithIcon("Create invite", fynetheme.MailSendIcon(),
+				func() { a.createInvite(channelID) }),
+		)
 	}
 
 	// Only a conversation can be closed; a server's channels are not the user's
@@ -599,6 +619,22 @@ func (a *App) syncChannelList() {
 	for _, obj := range a.channelList.Objects {
 		if w, ok := obj.(*ui.ChannelWidget); ok {
 			a.applyChannelState(w, animate)
+		}
+	}
+}
+
+// releaseChannelRows stops what the rows about to be dropped are still running.
+//
+// A row is discarded by having the list forget it, which tells the row nothing:
+// Fyne destroys a renderer — and with it the animation its Destroy stops — only
+// when its own cache expires the widget, a minute after the last paint that used
+// it. A mark left sweeping in the meantime asks the canvas to repaint sixty times
+// a second on behalf of a row nothing can see, and every rebuild of a sidebar
+// somebody is typing in adds another.
+func (a *App) releaseChannelRows() {
+	for _, obj := range a.channelList.Objects {
+		if w, ok := obj.(*ui.ChannelWidget); ok {
+			w.SetTyping(false, false)
 		}
 	}
 }

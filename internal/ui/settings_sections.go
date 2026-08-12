@@ -29,8 +29,41 @@ import (
 
 /* Account */
 
+// presenceOptions are the ways to appear, in the order they are offered.
+// "Offline" is Revolt's *invisible*: there is no way to be connected and offline,
+// and appearing offline is what choosing it means — see client.fromPresence.
+var presenceOptions = []settingsOption{
+	{Label: domain.PresenceOnline.Label(), Value: "online"},
+	{Label: domain.PresenceIdle.Label(), Value: "idle"},
+	{Label: domain.PresenceFocus.Label(), Value: "focus"},
+	{Label: domain.PresenceBusy.Label(), Value: "busy"},
+	{Label: "Invisible", Value: "invisible"},
+}
+
+// presenceValues maps an option back to what it sets. Offline is the domain's
+// name for the state and Invisible is the user's name for choosing it, which is
+// the one place the two vocabularies have to be bridged.
+var presenceValues = map[string]domain.Presence{
+	"online":    domain.PresenceOnline,
+	"idle":      domain.PresenceIdle,
+	"focus":     domain.PresenceFocus,
+	"busy":      domain.PresenceBusy,
+	"invisible": domain.PresenceOffline,
+}
+
+// presenceValue is the option matching a presence, for showing the current one.
+func presenceValue(presence domain.Presence) string {
+	for value, candidate := range presenceValues {
+		if candidate == presence {
+			return value
+		}
+	}
+
+	return "online"
+}
+
 func (p *SettingsPage) accountSection() []settingsGroup {
-	groups := []settingsGroup{p.group("Signed in as", "", p.identityRow())}
+	groups := []settingsGroup{p.group("Signed in as", "", p.identityRow(), p.presenceRow(), p.statusRow())}
 
 	var cards []fyne.CanvasObject
 	for _, session := range p.hooks.Sessions() {
@@ -64,6 +97,17 @@ func (p *SettingsPage) accountSection() []settingsGroup {
 					OnConfirm: p.hooks.LogOut,
 				})
 			}),
+		p.actionRow("Log out everywhere",
+			"Signs out every device this account is signed in on, including this one, and removes its saved login here.",
+			"Log out everywhere", ToneDanger, func() {
+				p.hooks.Confirm(Confirm{
+					Title:     "Log out everywhere",
+					Body:      "Every device signed in as this account will be signed out, and this computer's saved login for it removed.",
+					Action:    "Log out everywhere",
+					Tone:      ToneDanger,
+					OnConfirm: p.hooks.LogOutEverywhere,
+				})
+			}),
 	))
 
 	return groups
@@ -78,6 +122,41 @@ func (p *SettingsPage) identityRow() fyne.CanvasObject {
 	}
 
 	return p.row(self.Name, self.Handle, newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL))
+}
+
+// presenceRow sets how the account appears to everybody else. Nothing is written
+// back to the control: the change returns through the gateway like anybody
+// else's, so the page shows what the store last said and the next open shows
+// what actually took — a presence the server refused must not be left on screen
+// as though it held.
+func (p *SettingsPage) presenceRow() fyne.CanvasObject {
+	self, ok := p.hooks.Deps.Store.Self()
+	if !ok {
+		return nil
+	}
+
+	control := newOptionControl(presenceValue(self.Presence), presenceOptions, func(picked string) {
+		if presence, known := presenceValues[picked]; known {
+			p.hooks.SetPresence(presence)
+		}
+	})
+
+	return p.row("Presence", "How you appear to everyone else.", control)
+}
+
+// statusRow is the line beside the account's name. It is written back no more
+// than presenceRow is, and for the same reason — the change returns through the
+// gateway — so what the field holds is what the store last said.
+func (p *SettingsPage) statusRow() fyne.CanvasObject {
+	self, ok := p.hooks.Deps.Store.Self()
+	if !ok {
+		return nil
+	}
+
+	entry := newCommitEntry(self.StatusText, p.hooks.SetStatusText)
+	entry.PlaceHolder = "Say something"
+
+	return p.row("Status", "The line beside your name. Clear it to remove it.", textField(entry))
 }
 
 // newSwatchlessAvatar is the round face a row shows on its trailing edge.
@@ -238,13 +317,12 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 			p.toggleRow("Hide members without roles",
 				"Shows only people the server has given a role.",
 				settings.HideRolelessMembers, func(s *config.Settings, on bool) { s.Behaviour.HideRolelessMembers = on }),
+			p.toggleRow("Show everyone when the list would be empty",
+				"If the two settings above leave nothing to show, the whole server is listed instead.",
+				settings.MemberListFallback, func(s *config.Settings, on bool) { s.Behaviour.MemberListFallback = on }),
 			p.adv(p.toggleRow("Update the list as people come and go",
 				"Off, the list only changes when you reopen the server.",
 				settings.LiveMemberPresence, func(s *config.Settings, on bool) { s.Behaviour.LiveMemberPresence = on })),
-			p.adv(p.numberRow("Presence settling time",
-				"How long to wait after a burst of status changes before redrawing the list.",
-				settings.MemberRefreshDelayMS, 0, maxMemberRefreshDelay, "ms",
-				func(s *config.Settings, v int) { s.Behaviour.MemberRefreshDelayMS = v })),
 			p.adv(p.numberRow("Extra rows drawn",
 				"How far past the visible area to draw. Higher is smoother to scroll and uses more memory.",
 				settings.MemberOverscan, 0, maxMemberOverscan, "",
@@ -262,7 +340,7 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				"Adds you to the line while you are composing, as everyone else sees it.",
 				settings.TypingShowSelf, func(s *config.Settings, on bool) { s.Behaviour.TypingShowSelf = on }),
 			p.toggleRow("Mark typing in the channel list",
-				"Puts a mark beside any channel someone is typing in.",
+				"Marks any channel someone is typing in, other than the one you are reading.",
 				settings.TypingInChannels, func(s *config.Settings, on bool) { s.Behaviour.TypingInChannels = on }),
 			p.toggleRow("Show pictures beside who is typing",
 				"Draws each person's avatar before their name.",
@@ -298,6 +376,10 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				"How long to wait before telling the server you have read a channel.",
 				settings.AckDelayMS, 0, maxDelayMS, "ms",
 				func(s *config.Settings, v int) { s.Behaviour.AckDelayMS = v })),
+			p.adv(p.numberRow("Settling time",
+				"How long to wait after a burst of changes before redrawing the sidebars.",
+				settings.RefreshDelayMS, 0, maxRefreshDelay, "ms",
+				func(s *config.Settings, v int) { s.Behaviour.RefreshDelayMS = v })),
 		),
 		p.group("Input", "",
 			p.numberRow("Scroll speed", "How far the wheel moves the conversation.",
@@ -843,8 +925,8 @@ const (
 	maxDelayMS     = 2000
 	maxScrollSpeed = 12
 
-	maxMemberRefreshDelay = 5000
-	maxMemberOverscan     = 50
+	maxRefreshDelay   = 5000
+	maxMemberOverscan = 50
 
 	// maxTypingNames is a limit on the sentence, not on the feature: past a few
 	// names the line is wider than it is worth and "and 4 others" says the same

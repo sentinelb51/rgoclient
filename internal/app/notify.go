@@ -11,6 +11,7 @@ import (
 
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
+	"RGOClient/internal/util"
 )
 
 /* Posting */
@@ -136,6 +137,157 @@ func (a *App) isConversation(channelID string) bool {
 	channel, ok := a.store.Channel(channelID)
 
 	return ok && (channel.Kind == domain.ChannelDM || channel.Kind == domain.ChannelGroup)
+}
+
+/* Sharing a channel */
+
+// canInviteTo reports whether an invite to a channel is worth offering. Only a
+// server's channels have one: a conversation is opened by naming somebody, and
+// Revolt has no code that would let a third person into it.
+func (a *App) canInviteTo(channelID string) bool {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.ServerID == "" {
+		return false
+	}
+
+	return a.store.Permissions(channelID).Has(domain.PermissionInviteOthers)
+}
+
+// createInvite makes an invite to a channel and puts the link on the clipboard,
+// which is the whole of what somebody asking for one wants.
+//
+// The code is shown in the notice as well as copied. A clipboard write is
+// invisible, and this is the one action in the client whose entire result is a
+// string the user now has to paste somewhere — so the notice is the receipt, and
+// it names the channel because the menu it was raised from may be long gone.
+func (a *App) createInvite(channelID string) {
+	name := "this channel"
+	if channel, ok := a.store.Channel(channelID); ok {
+		name = "#" + channel.Name
+	}
+
+	epoch := a.epoch
+	onFail := a.notifyFailure("create invite for "+channelID, "Could not create an invite to %s.", name)
+
+	go func() {
+		code, err := a.client.CreateInvite(channelID)
+
+		a.doOnUI(func() {
+			if err != nil {
+				onFail(err)
+				return
+			}
+			if a.stale(epoch) {
+				return
+			}
+
+			ui.CopyToClipboard(util.InviteLink(code))
+			a.notifyNotice(ui.Notice{
+				Tone:  ui.ToneInfo,
+				Title: "Invite copied",
+				Body:  fmt.Sprintf("A link to %s is on your clipboard.", name),
+			})
+		}, false)
+	}()
+}
+
+/* Relationships */
+
+// Each of these is the usual shape — fire off-thread, report the failure — with
+// one difference: nothing here has a gateway event of its own that repaints
+// anything, the card that raised it having already been dismissed. So each says
+// what it did, because otherwise a friend request would be indistinguishable
+// from a click that missed.
+
+// addFriend asks somebody to be friends. Revolt names the person by handle here
+// rather than by ID, which the client resolves — see Client.AddFriend.
+func (a *App) addFriend(userID, name string) {
+	a.relate(
+		func() error { return a.client.AddFriend(userID) },
+		"add friend "+userID, "Could not send %s a friend request.", "Friend request sent to %s.", name,
+	)
+}
+
+// acceptFriend answers a request that has already arrived.
+func (a *App) acceptFriend(userID, name string) {
+	a.relate(
+		func() error { return a.client.AcceptFriend(userID) },
+		"accept friend "+userID, "Could not accept %s's friend request.", "You and %s are now friends.", name,
+	)
+}
+
+// removeFriend covers unfriending, declining and withdrawing alike: Revolt
+// spends one route on all three, and what it means is decided by where the
+// relationship stood — which the button that raised it has already read.
+func (a *App) removeFriend(userID, name string) {
+	a.relate(
+		func() error { return a.client.RemoveFriend(userID) },
+		"remove friend "+userID, "Could not update your relationship with %s.", "%s is no longer a friend.", name,
+	)
+}
+
+func (a *App) blockUser(userID, name string) {
+	a.relate(
+		func() error { return a.client.BlockUser(userID) },
+		"block user "+userID, "Could not block %s.", "%s is blocked.", name,
+	)
+}
+
+func (a *App) unblockUser(userID, name string) {
+	a.relate(
+		func() error { return a.client.UnblockUser(userID) },
+		"unblock user "+userID, "Could not unblock %s.", "%s is unblocked.", name,
+	)
+}
+
+// relate runs one relationship change and reports either way. The success notice
+// is the receipt: the card is gone by the time this runs, so nothing else on
+// screen would change.
+func (a *App) relate(request func() error, what, failure, success, name string) {
+	onFail := a.notifyFailure(what, failure, name)
+
+	go func() {
+		err := request()
+
+		a.doOnUI(func() {
+			if err != nil {
+				onFail(err)
+				return
+			}
+
+			a.notify(ui.ToneInfo, success, name)
+		}, false)
+	}()
+}
+
+// confirmRemoveFriend asks before unfriending. Declining or withdrawing a
+// request is not put through this: neither takes anything away that asking again
+// would not restore.
+func (a *App) confirmRemoveFriend(userID, name string) {
+	a.confirm(ui.Confirm{
+		Title:  "Remove friend",
+		Body:   fmt.Sprintf("%s will be removed from your friends. Either of you can ask again.", name),
+		Action: "Remove",
+		Tone:   ui.ToneDanger,
+		OnConfirm: func() {
+			a.removeFriend(userID, name)
+		},
+	})
+}
+
+// confirmBlockUser asks before blocking. Revolt keeps the history readable and
+// takes everything else away in both directions, which is what the question has
+// to say — it is not a mute.
+func (a *App) confirmBlockUser(userID, name string) {
+	a.confirm(ui.Confirm{
+		Title:  "Block user",
+		Body:   fmt.Sprintf("Neither of you will be able to write to the other. Your conversation with %s stays readable.", name),
+		Action: "Block",
+		Tone:   ui.ToneDanger,
+		OnConfirm: func() {
+			a.blockUser(userID, name)
+		},
+	})
 }
 
 /* Removing a member */

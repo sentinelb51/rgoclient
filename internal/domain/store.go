@@ -29,6 +29,16 @@ type Store interface {
 	// nothing to answer.
 	UserName(userID string) string
 
+	// Relationships is everybody this account stands in some relation to —
+	// friends, requests in either direction, and blocks — ordered by display name.
+	// It is a walk rather than a lookup, so it belongs off the UI thread with
+	// Members.
+	//
+	// There is no list of them to read: Revolt files a relationship on the other
+	// account rather than as a collection of its own, so what this reports is
+	// whoever is both known and related.
+	Relationships() []User
+
 	Member(serverID, userID string) (Member, bool)
 	Channel(channelID string) (Channel, bool)
 	Server(serverID string) (Server, bool)
@@ -43,6 +53,13 @@ type Store interface {
 	// has no ok: a message can carry an emoji from a server the account is not in,
 	// so no local record covers it — and the CDN serves the picture regardless.
 	EmojiURL(emojiID string) string
+
+	// Emojis is every custom emoji the account may use — the emoji of every server
+	// it is in — ordered by name. Drawing one needs none of this; picking one needs
+	// all of it, and asking per server would walk the whole set once per server.
+	//
+	// It is a walk, so the picker asks when it opens rather than per entry.
+	Emojis() []Emoji
 
 	// HasUser and HasMember answer whether a record is already resolved, without
 	// resolving it. Lazy author resolution asks once per mounted message, so this

@@ -9,6 +9,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
@@ -26,6 +27,12 @@ const (
 
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
 	remountThreshold  = 200 // px from the bottom before trimmed newer rows re-mount
+
+	// maxCachedReplies bounds the quoted messages held for reply previews. Only a
+	// reply reaching further back than the message cache lands here, so it is a
+	// ceiling rather than a working size — but a session left running is a session
+	// that must not grow, and nothing else evicts these.
+	maxCachedReplies = 512
 )
 
 // The mounting budget, all four settings. They are read per use rather than
@@ -104,11 +111,19 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		dockBg.Refresh()
 	}
 
+	// The emoji button sits at the *bottom* of the entry's row rather than centred
+	// on it: the entry grows upward as lines are added, and a button that rode the
+	// middle of it would drift away from the line being typed.
+	entry := ui.NewFillRow(0,
+		ui.WithCaret(a.input),
+		container.NewVBox(layout.NewSpacer(), a.input.EmojiButton),
+	)
+
 	inner := ui.VBoxNoSpacing(
 		a.input.Mentions,
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
-		ui.WithCaret(a.input),
+		entry,
 	)
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
 	card := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
@@ -392,17 +407,115 @@ func toReplies(pending []ui.Reply) []domain.Reply {
 // A system event names whoever it is about rather than an author, and reads
 // "Someone joined" until that user is known — so it is the target that gets
 // chased. ui.MessageWidget.Author answers with it for the same reason, which is
-// what lets one refresh pass cover both.
+// what lets one refresh pass cover both. Only where the target *is* somebody:
+// Revolt files every system event's subject under one field, and a pin's is the
+// message that was pinned — see domain.SystemMessage.TargetsUser.
 func (a *App) newMessageWidget(prev, curr, next *domain.Message) *ui.MessageWidget {
 	switch {
 	case curr.System != nil:
-		a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.System.Target)
+		if curr.System.TargetsUser() {
+			a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.System.Target)
+		}
 	case curr.Webhook == nil:
 		a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.AuthorID)
+	}
+	if !continuesGroup(prev, curr) {
+		a.ensureReplies(curr)
 	}
 
 	return ui.NewMessageWidget(a.deps(), curr, dayLabel(prev, curr),
 		continuesGroup(prev, curr), continuesGroup(curr, next))
+}
+
+/* Lazy reply resolution */
+
+// ensureReplies makes a message's quoted lines renderable. A reply names a
+// message by ID and nothing else, and the message cache is only the tail of a
+// channel — a reply reaches as far back as somebody cared to answer — so a quote
+// whose target has scrolled out reads as "Unknown message reference" for the life
+// of the session unless it is asked for.
+//
+// Guarded by fetchedReplies so each target is asked for once, and the guard is
+// **kept** on failure, unlike ensureAuthor's. The usual reason a target cannot be
+// fetched is that it was deleted, which stays true — and a quoted line remounts
+// on every scroll past it, so releasing the guard would be a request per pass for
+// an answer that cannot change. The cost is that a quote missed through a dropped
+// connection stays unresolved until the channel is reopened.
+//
+// A grouped continuation draws no quotes, so the caller does not queue for one.
+// Call on the UI thread.
+func (a *App) ensureReplies(message *domain.Message) {
+	for _, replyID := range message.Replies {
+		if a.fetchedReplies[replyID] || a.ResolveMessage(message.ChannelID, replyID) != nil {
+			continue
+		}
+
+		a.fetchedReplies[replyID] = true
+		a.pendingReplies = append(a.pendingReplies, client.MessageRef{
+			ChannelID: message.ChannelID,
+			MessageID: replyID,
+		})
+	}
+	if len(a.pendingReplies) == 0 || a.replyTimer != nil {
+		return
+	}
+
+	// The same settling window author resolution uses, and deliberately not a knob
+	// of its own: both are "what this page needs and does not have", queued by the
+	// same mount and answered in the same hop.
+	a.replyTimer = time.AfterFunc(authorFetchDelay(), func() {
+		a.doOnUI(a.flushReplies, false)
+	})
+}
+
+// flushReplies fetches everything ensureReplies has queued and repaints the
+// quotes once for the whole batch. The authors behind them are queued in the same
+// pass — a quoted message names its author by ID like any other, and somebody who
+// only ever spoke that far back is nobody the page has resolved. Call on the UI
+// thread.
+func (a *App) flushReplies() {
+	a.replyTimer = nil
+
+	pending := a.pendingReplies
+	a.pendingReplies = nil
+	if len(pending) == 0 {
+		return
+	}
+	epoch := a.epoch
+
+	go func() {
+		fetched := a.client.ResolveMessages(pending)
+
+		a.doOnUI(func() {
+			if a.stale(epoch) || len(fetched) == 0 {
+				return
+			}
+
+			// The store and its guard are dropped together, so nothing is left
+			// believing a target was already asked for. A quote still on screen is
+			// simply asked for again the next time it mounts.
+			if len(a.replies) >= maxCachedReplies {
+				a.replies = make(map[string]*domain.Message)
+				a.fetchedReplies = make(map[string]bool)
+			}
+
+			resolved := make(map[string]bool, len(fetched))
+			for _, message := range fetched {
+				a.replies[message.ID] = message
+				resolved[message.ID] = true
+
+				if message.System == nil && message.Webhook == nil {
+					a.ensureAuthor(a.channelServerID(message.ChannelID), message.AuthorID)
+				}
+			}
+
+			for _, obj := range a.messageList.Objects {
+				if w, ok := obj.(*ui.MessageWidget); ok {
+					w.RefreshReplies(resolved)
+				}
+			}
+		}, false)
+	}()
 }
 
 // dayLabel returns the day separator label for curr — "" when it belongs to the
@@ -431,6 +544,10 @@ func dayLabel(prev, curr *domain.Message) string {
 // does a message on the far side of a day separator — the separator has to break
 // the group, or a pair minutes apart across midnight would render as one
 // headerless block.
+//
+// A pinned message starts one too. Its mark rides the name line, which is the one
+// thing a continuation does not draw, so grouping it would be the one way to pin
+// a message and see nothing happen.
 func continuesGroup(prev, curr *domain.Message) bool {
 	if !config.Current().Interface.GroupMessages {
 		return false
@@ -443,7 +560,7 @@ func continuesGroup(prev, curr *domain.Message) bool {
 		curr.Masquerade || prev.Masquerade {
 		return false
 	}
-	if len(curr.Replies) > 0 {
+	if len(curr.Replies) > 0 || curr.Pinned {
 		return false
 	}
 
@@ -660,10 +777,15 @@ func (a *App) rebuildSeams(seams []int) {
 	}
 }
 
-// refreshMessage rebuilds an edited message's widget in place from its updated
-// cache entry. A message the user is editing is left alone — the rebuild would
-// discard their open editor, and the cache already holds the remote update, so
-// the next rebuild renders it. Call on the UI thread.
+// refreshMessage rebuilds an updated message's widget in place from its cache
+// entry. A message the user is editing is left alone — the rebuild would discard
+// their open editor, and the cache already holds the remote update, so the next
+// rebuild renders it. Call on the UI thread.
+//
+// The row above is re-tightened because an update can change whether this message
+// groups at all: a pin breaks it out of the group it was in, and the margin that
+// closed the gap belongs to its predecessor. The row below needs nothing — what
+// decides its grouping is read off itself, not off this one.
 func (a *App) refreshMessage(channelID, messageID string) {
 	if channelID != a.currentChannelID {
 		return
@@ -682,7 +804,14 @@ func (a *App) refreshMessage(channelID, messageID string) {
 		return
 	}
 
-	a.messageList.Objects[i] = a.newMessageWidget(a.mountedMessage(i-1), message, a.mountedMessage(i+1))
+	prev := a.mountedMessage(i - 1)
+	a.messageList.Objects[i] = a.newMessageWidget(prev, message, a.mountedMessage(i+1))
+
+	if i > 0 {
+		if w, ok := a.messageList.Objects[i-1].(*ui.MessageWidget); ok {
+			w.SetFollowedByGroup(continuesGroup(prev, message))
+		}
+	}
 	a.remountMessages()
 }
 

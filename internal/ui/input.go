@@ -102,6 +102,12 @@ type MessageInput struct {
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
 
+	// EmojiButton opens the picker. It belongs to the composer rather than to the
+	// card around it so that one thing decides whether it is offered: a channel
+	// that will not take a message has a disabled entry, and a button that inserts
+	// into one is a control with nowhere to put its answer.
+	EmojiButton *IconButton
+
 	// permissions is what the account may do in the open channel. It is *pushed*
 	// by the app rather than looked up: the composer has no channel of its own, and
 	// the app already knows which one is open. Zero — the state it starts in, and
@@ -128,6 +134,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 		ReplyContainer:      container.NewVBox(),
 	}
 	m.Mentions = NewMentionPicker(deps.Images, m.acceptMention)
+	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
@@ -138,6 +145,38 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m.AttachmentContainer.Hide()
 
 	return m
+}
+
+// pickEmoji opens the picker beside the button and writes what comes back into
+// the message. The controller owns the picker, so this hands it an anchor and
+// takes an answer.
+func (m *MessageInput) pickEmoji() {
+	m.deps.Actions.OnPickEmoji(m.EmojiButton, func(choice EmojiChoice) {
+		m.insert(choice.Token() + " ")
+	})
+}
+
+// insert writes text at the caret and leaves the caret after it. The picker took
+// canvas focus to be typed at, so the entry is given it back — otherwise the next
+// keystroke after a pick would go nowhere.
+//
+// Any selection is left alone rather than replaced: Fyne exposes no way to read
+// one back, and picking from a pop-up has already blurred the entry that held it.
+func (m *MessageInput) insert(text string) {
+	if text == "" {
+		return
+	}
+
+	cursor := m.cursorOffset()
+	updated := m.Text[:cursor] + text + m.Text[cursor:]
+
+	m.SetText(updated)
+	m.CursorRow, m.CursorColumn = cursorPosition(updated, cursor+len(text))
+	m.Refresh()
+
+	if m.window != nil {
+		m.window.Canvas().Focus(m)
+	}
 }
 
 // MinSize grows the entry up to ComposerMaxLines as the user types.
@@ -152,14 +191,20 @@ func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 // Whatever was typed before the permission went away is kept. It is still the
 // user's text, the channel may hand the permission straight back, and clearing
 // it would be the client destroying work over a state it does not control.
+// The emoji button goes with it. Left showing beside a dead entry it would be
+// the only live control in the card, and the one thing it does is put text in
+// there.
 func (m *MessageInput) SetPermissions(permissions domain.Permission) {
 	m.permissions = permissions
 
 	if permissions.Has(domain.PermissionSendMessage) {
 		m.Enable()
+		m.EmojiButton.Show()
 		return
 	}
+
 	m.Disable()
+	m.EmojiButton.Hide()
 }
 
 // refuse reports an input the composer would not take. Silent when nobody is

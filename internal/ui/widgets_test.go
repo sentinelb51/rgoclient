@@ -141,6 +141,65 @@ func TestTruncateToWidth(t *testing.T) {
 	})
 }
 
+// TestWrapToWidth covers the promise a settings row makes: the prose beside a
+// control stays inside the room it was given. A line over budget is one drawn
+// under the control it was supposed to stop short of, which is the defect
+// wrapping replaced.
+func TestWrapToWidth(t *testing.T) {
+	test.NewTempApp(t)
+
+	const prose = "Signs out every device this account is signed in on, including this one."
+	style := fyne.TextStyle{}
+
+	t.Run("every line fits and nothing is lost", func(t *testing.T) {
+		width := widthOf(prose) / 3
+		lines := WrapToWidth(prose, width, 14, style)
+
+		if len(lines) < 3 {
+			t.Fatalf("a third of the width gave %d lines: %q", len(lines), lines)
+		}
+		for _, line := range lines {
+			if w := widthOf(line); w > width {
+				t.Errorf("line %q measures %v, over the %v budget", line, w, width)
+			}
+		}
+		if got := strings.Join(lines, " "); got != prose {
+			t.Errorf("rejoined lines are %q, want %q", got, prose)
+		}
+	})
+
+	t.Run("text that fits stays one line", func(t *testing.T) {
+		lines := WrapToWidth(prose, widthOf(prose)+1, 14, style)
+		if len(lines) != 1 || lines[0] != prose {
+			t.Fatalf("text that fits came back as %q", lines)
+		}
+	})
+
+	t.Run("a word wider than the column is broken", func(t *testing.T) {
+		const word = "supercalifragilisticexpialidocious"
+		width := widthOf(word) / 4
+
+		lines := WrapToWidth(word, width, 14, style)
+		if len(lines) < 4 {
+			t.Fatalf("an over-long word came back as %d lines: %q", len(lines), lines)
+		}
+		for _, line := range lines {
+			if w := widthOf(line); w > width {
+				t.Errorf("line %q measures %v, over the %v budget", line, w, width)
+			}
+		}
+		if got := strings.Join(lines, ""); got != word {
+			t.Errorf("the broken word rejoins as %q, want %q", got, word)
+		}
+	})
+
+	t.Run("no room at all", func(t *testing.T) {
+		if got := WrapToWidth(prose, 0, 14, style); len(got) != 1 || got[0] != prose {
+			t.Fatalf("a zero width gave %q, want the text whole", got)
+		}
+	})
+}
+
 // TestGradientNameKeepsItsWidth covers the per-rune split AccentText makes for a
 // gradient: the letters are drawn one object at a time, and the run has to
 // measure exactly what the same name measures as one — anything else would move
@@ -198,7 +257,10 @@ func TestNoGradientReachesATextObject(t *testing.T) {
 	profile.Accent = stops
 	profile.Roles = append(profile.Roles, domain.Role{Name: "Ops", Color: stops})
 
-	dialog := NewProfileDialog(testDeps(), profile, ProfileActions{OnMessage: func() {}, OnClose: func() {}})
+	dialog := NewProfileDialog(testDeps(), profile, ProfileActions{
+		Buttons: []ProfileButton{{Label: "Message", Do: func() {}}},
+		OnClose: func() {},
+	})
 	dialog.SetProfile(domain.UserProfile{Bio: "a bio of no particular length"})
 
 	picker := NewMentionPicker(testDeps().Images, func(MentionCandidate) {})

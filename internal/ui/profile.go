@@ -37,6 +37,11 @@ const (
 	// counting the rest into a final "+n"; the dialog lists them all.
 	profileRoleLimit = 4
 
+	// profileMutualLimit is the same for what two accounts have in common, and
+	// applies to the dialog too: roles are a fact about somebody that stops, where
+	// mutual friends on a busy account run to hundreds and would be the whole card.
+	profileMutualLimit = 6
+
 	// profileHandleShare is how much of the identity line the handle may take
 	// before it is the one being shortened. The display name is what a card is
 	// for, so it keeps the rest.
@@ -65,14 +70,54 @@ func presenceColor(presence domain.Presence) color.Color {
 
 /* Profile data */
 
-// ProfileActions are the buttons a presentation offers. A nil field leaves its
-// button out, which is how the card drops "Message" for the account's own user
-// and how the dialog — already expanded — drops "Full profile".
-type ProfileActions struct {
-	OnMessage func() // open a direct message
-	OnExpand  func() // swap the card for the dialog
-	OnClose   func() // dismiss the layer; drawn on the dialog's banner
+// ProfileButton is one thing a card offers to do about somebody. A nil Do draws
+// it disabled rather than leaving it out: "Request sent" is the state, and a card
+// that simply omitted it would say nothing about it at all.
+type ProfileButton struct {
+	Label  string
+	Danger bool // drawn in the destructive weight
+	Do     func()
 }
+
+// ProfileActions are the buttons a presentation offers. A nil field leaves its
+// button out, which is how the dialog — already expanded — drops "Full profile".
+type ProfileActions struct {
+	// Buttons is what to do about this person, most useful first. Which of them
+	// apply is entirely a question about the relationship, so it is answered by
+	// the controller and this file draws whatever it is handed.
+	//
+	// The compact card draws only the first. It names somebody; a row of ways to
+	// act on them is what expanding it is for.
+	Buttons []ProfileButton
+
+	OnExpand func() // swap the card for the dialog
+	OnClose  func() // dismiss the layer; drawn on the dialog's banner
+}
+
+// MutualEntry is one thing two accounts have in common: a server both are in, or
+// a friend both have. Open is what tapping its chip does, supplied by the
+// controller the way a ProfileButton's Do is — where a name leads is a question
+// about what is behind the dialog, which the card has no view of. A nil Open
+// draws the plain chip, which is what a name with nowhere to go should look like.
+type MutualEntry struct {
+	Name string
+	Open func()
+}
+
+// MutualProfile is what this account has in common with the person on screen,
+// resolved. The counts are apart from the entries deliberately: somebody the
+// store cannot name is still one of the people in common, so the "+n" counts them
+// rather than the total quietly shrinking to what happens to be cached.
+type MutualProfile struct {
+	Servers     []MutualEntry
+	ServerCount int
+
+	Friends     []MutualEntry
+	FriendCount int
+}
+
+// any reports whether there is anything to draw.
+func (m MutualProfile) any() bool { return m.ServerCount > 0 || m.FriendCount > 0 }
 
 /* Cards */
 
@@ -84,6 +129,7 @@ type ProfileCard struct {
 
 	deps   Deps
 	about  *fyne.Container // the About slot, empty and hidden until SetProfile
+	mutual *fyne.Container // the same for what the two accounts have in common
 	banner *fyne.Container // the accent strip, until a background lands over it
 	inner  float32         // the width a row inside the card is given
 	strip  fyne.Size       // the banner's own size, which a background is cropped to
@@ -102,8 +148,14 @@ func NewProfileDialog(deps Deps, profile domain.Profile, actions ProfileActions)
 }
 
 func newProfileCard(deps Deps, profile domain.Profile, actions ProfileActions, full bool) *ProfileCard {
-	c := &ProfileCard{deps: deps, about: container.NewStack(), full: full}
+	c := &ProfileCard{
+		deps:   deps,
+		about:  container.NewStack(),
+		mutual: container.NewStack(),
+		full:   full,
+	}
 	c.about.Hide()
+	c.mutual.Hide()
 
 	width := theme.Sizes.ProfileCardWidth
 	if full {
@@ -135,6 +187,30 @@ func newProfileCard(deps Deps, profile domain.Profile, actions ProfileActions, f
 func (c *ProfileCard) SetProfile(profile domain.UserProfile) {
 	c.setBackground(profile.BackgroundURL)
 	c.setBio(profile.Bio)
+}
+
+// SetMutual fills in what the two accounts have in common, which like the bio is
+// a request of its own and only the dialog carries — the compact card names
+// somebody, and how you already know them is what expanding it is for. The dialog
+// grows by filling one in, so the caller re-places it. Call on the UI thread.
+func (c *ProfileCard) SetMutual(mutual MutualProfile) {
+	if !c.full || !mutual.any() {
+		return
+	}
+
+	var sections []fyne.CanvasObject
+	if mutual.ServerCount > 0 {
+		sections = append(sections, profileSection("Mutual servers",
+			mutualChips(mutual.Servers, mutual.ServerCount, c.inner)))
+	}
+	if mutual.FriendCount > 0 {
+		sections = append(sections, profileSection("Mutual friends",
+			mutualChips(mutual.Friends, mutual.FriendCount, c.inner)))
+	}
+
+	c.mutual.Objects = []fyne.CanvasObject{VBoxNoSpacing(sections...)}
+	c.mutual.Show()
+	c.mutual.Refresh()
 }
 
 // setBio fills the About section, which only the dialog carries — the compact
@@ -397,6 +473,12 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 		if len(profile.Badges) > 0 {
 			rows = append(rows, profileSection("Badges", profileBadges(profile.Badges, width)))
 		}
+
+		// Empty and hidden, like the bio: mutuals are a request of their own and land
+		// after the dialog is up. Above the dates because how you already know
+		// somebody is worth more than when they turned up.
+		rows = append(rows, c.mutual)
+
 		if history := profileHistory(profile); history != nil {
 			rows = append(rows, profileSection("Member since", history))
 		}
@@ -439,7 +521,7 @@ func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.Canva
 		trailing = append(trailing, HorizontalSpacer(gap), handle)
 	}
 	if profile.Bot {
-		mark := container.NewCenter(NewChip("BOT", theme.Colors.MentionText))
+		mark := NewBotMark(theme.Sizes.ProfileBotMarkSize)
 		room -= gap + mark.MinSize().Width
 		trailing = append(trailing, HorizontalSpacer(gap), mark)
 	}
@@ -613,6 +695,33 @@ func profileRoles(roles []domain.Role, full bool, width float32) fyne.CanvasObje
 	return NewFlow(width, theme.Sizes.ChipSpacing, chips...)
 }
 
+// mutualChips draws what two accounts have in common, counting whatever is not
+// drawn into a final chip. total is the whole set rather than len(entries): the
+// overflow covers what the store could not name as well as what did not fit, so
+// the number is right either way — and it is never tappable, having nothing named
+// to lead to.
+func mutualChips(entries []MutualEntry, total int, width float32) fyne.CanvasObject {
+	shown := entries
+	if len(shown) > profileMutualLimit {
+		shown = shown[:profileMutualLimit]
+	}
+
+	chips := make([]fyne.CanvasObject, 0, len(shown)+1)
+	for _, entry := range shown {
+		if entry.Open == nil {
+			chips = append(chips, NewChip(entry.Name, theme.Colors.TimestampText))
+			continue
+		}
+
+		chips = append(chips, NewTappableChip(entry.Name, theme.Colors.TextPrimary, entry.Open))
+	}
+	if overflow := total - len(shown); overflow > 0 {
+		chips = append(chips, NewChip(fmt.Sprintf("+%d", overflow), theme.Colors.MentionText))
+	}
+
+	return NewFlow(width, theme.Sizes.ChipSpacing, chips...)
+}
+
 // profileBadges draws the platform badges an account carries.
 func profileBadges(names []string, width float32) fyne.CanvasObject {
 	chips := make([]fyne.CanvasObject, len(names))
@@ -625,16 +734,17 @@ func profileBadges(names []string, width float32) fyne.CanvasObject {
 
 /* Buttons */
 
-// buttons is the row along the bottom. They share the width evenly, so the pair
-// reads as one control however many there are; nil when there is nothing to
-// offer, so the card doesn't reserve the gap above a row it never draws.
+// buttons is the block along the bottom, nil when there is nothing to offer so
+// the card doesn't reserve the gap above a row it never draws.
 func (c *ProfileCard) buttons(profile domain.Profile, actions ProfileActions) fyne.CanvasObject {
-	var buttons []fyne.CanvasObject
+	offered := actions.Buttons
+	if !c.full && len(offered) > 1 {
+		offered = offered[:1]
+	}
 
-	if actions.OnMessage != nil {
-		message := widget.NewButton("Message", actions.OnMessage)
-		message.Importance = widget.HighImportance
-		buttons = append(buttons, message)
+	buttons := make([]fyne.CanvasObject, 0, len(offered)+1)
+	for i, action := range offered {
+		buttons = append(buttons, newProfileButton(action, i == 0))
 	}
 
 	switch {
@@ -648,5 +758,42 @@ func (c *ProfileCard) buttons(profile domain.Profile, actions ProfileActions) fy
 		return nil
 	}
 
-	return container.NewGridWithColumns(len(buttons), buttons...)
+	return profileButtonRows(buttons)
+}
+
+// newProfileButton weights one action. Only the first carries the filled weight:
+// a card whose every button is coloured says nothing about which one it is for,
+// and the destructive ones are the exception that has to keep reading as
+// destructive wherever they land.
+func newProfileButton(action ProfileButton, first bool) *widget.Button {
+	button := widget.NewButton(action.Label, action.Do)
+
+	switch {
+	case action.Do == nil:
+		button.Disable()
+	case action.Danger:
+		button.Importance = widget.DangerImportance
+	case first:
+		button.Importance = widget.HighImportance
+	}
+
+	return button
+}
+
+// profileButtonRows lays the buttons out two to a row, an odd last one taking
+// the whole width. Sharing one row between all of them would shrink every button
+// as another was offered, so the same action would be a different size depending
+// on how somebody else stood with you.
+func profileButtonRows(buttons []fyne.CanvasObject) fyne.CanvasObject {
+	var rows []fyne.CanvasObject
+
+	for i := 0; i < len(buttons); i += 2 {
+		row := buttons[i:min(i+2, len(buttons))]
+		if len(rows) > 0 {
+			rows = append(rows, VerticalSpacer(theme.Sizes.ProfileTightGap))
+		}
+		rows = append(rows, container.NewGridWithColumns(len(row), row...))
+	}
+
+	return VBoxNoSpacing(rows...)
 }

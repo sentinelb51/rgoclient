@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +118,171 @@ func (c *Client) DeleteMessage(channelID, messageID string) error {
 	}
 
 	return session.ChannelMessageDelete(channelID, messageID)
+}
+
+// PinMessage pins or unpins a message and records the result, so the menu that
+// raised it reads the other way round immediately.
+//
+// The cache update is done here rather than left to the gateway because the
+// event Revolt sends alongside cannot carry the answer: see markPinned and the
+// note in events.go. A rejected request leaves the flag exactly as it was, this
+// being written only once the server has agreed.
+func (c *Client) PinMessage(channelID, messageID string, pinned bool) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	pin := session.ChannelMessagePin
+	if !pinned {
+		pin = session.ChannelMessageUnpin
+	}
+	if err := pin(channelID, messageID); err != nil {
+		return err
+	}
+	c.markPinned(channelID, messageID, pinned)
+
+	return nil
+}
+
+// markPinned writes a message's pin state into the cache, reporting whether
+// anything moved — an unpin of a message already known to be unpinned is what a
+// caller drops rather than announcing.
+//
+// The entry is replaced with a copy: cached messages are read without the cache
+// lock, so they stay immutable.
+func (c *Client) markPinned(channelID, messageID string, pinned bool) bool {
+	current := c.messages.Find(channelID, messageID)
+	if current == nil || current.Pinned == pinned {
+		return false
+	}
+
+	updated := *current
+	updated.Pinned = pinned
+
+	return c.messages.Replace(channelID, &updated)
+}
+
+// React adds or removes this account's reaction to a message. Which of the two
+// is asked for rather than toggled: the chip that raised it has already read the
+// state to draw itself, and re-deriving it here could only disagree.
+//
+// The cache is written once the server has agreed, exactly as a pin is, and for
+// a related reason: the gateway does echo a reaction back, but nothing here may
+// depend on that. A chip the user has just clicked has to answer immediately,
+// and applyReaction reports "nothing moved" when the echo lands on what this
+// already holds, so the round trip costs one repaint rather than two.
+func (c *Client) React(channelID, messageID, emoji string, add bool) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	self := session.State.Self()
+	if self == nil {
+		return ErrNoSession
+	}
+
+	react := session.ChannelMessageReactionCreate
+	if !add {
+		react = session.ChannelMessageReactionDelete
+	}
+	if err := react(channelID, messageID, emoji); err != nil {
+		return err
+	}
+	c.applyReaction(channelID, messageID, emoji, self.ID, add)
+
+	return nil
+}
+
+// applyReaction records one person joining or leaving one reaction, reporting
+// whether anything moved — a caller drops what did not rather than announcing it.
+//
+// The entry, its reaction slice and the user list inside it are all replaced
+// rather than written into: cached messages are read without the cache lock, so
+// everything reachable from one stays immutable.
+func (c *Client) applyReaction(channelID, messageID, emoji, userID string, add bool) bool {
+	current := c.messages.Find(channelID, messageID)
+	if current == nil {
+		return false
+	}
+
+	index := slices.IndexFunc(current.Reactions, func(r domain.Reaction) bool { return r.Emoji == emoji })
+
+	var reactions []domain.Reaction
+	switch {
+	case index == -1 && !add:
+		return false
+
+	case index == -1:
+		// A reaction nobody had chosen yet, filed where toReactions would have put it.
+		reactions = slices.Insert(slices.Clone(current.Reactions), sortedIndex(current.Reactions, emoji),
+			domain.Reaction{Emoji: emoji, Users: []string{userID}})
+
+	default:
+		users, changed := withUser(current.Reactions[index].Users, userID, add)
+		if !changed {
+			return false
+		}
+
+		reactions = slices.Clone(current.Reactions)
+		if len(users) == 0 {
+			// The last person left it: a chip reading zero is not a chip.
+			reactions = slices.Delete(reactions, index, index+1)
+		} else {
+			reactions[index].Users = users
+		}
+	}
+
+	updated := *current
+	updated.Reactions = reactions
+
+	return c.messages.Replace(channelID, &updated)
+}
+
+// clearReaction drops one emoji from a message entirely, for the bulk removal a
+// moderator makes.
+func (c *Client) clearReaction(channelID, messageID, emoji string) bool {
+	current := c.messages.Find(channelID, messageID)
+	if current == nil {
+		return false
+	}
+
+	index := slices.IndexFunc(current.Reactions, func(r domain.Reaction) bool { return r.Emoji == emoji })
+	if index == -1 {
+		return false
+	}
+
+	updated := *current
+	updated.Reactions = slices.Delete(slices.Clone(current.Reactions), index, index+1)
+
+	return c.messages.Replace(channelID, &updated)
+}
+
+// withUser adds or removes one user from a reaction's list, reporting whether it
+// had to. The list is copied only when it changes, so an echo of something
+// already recorded allocates nothing.
+func withUser(users []string, userID string, add bool) ([]string, bool) {
+	index := slices.Index(users, userID)
+
+	switch {
+	case add && index != -1, !add && index == -1:
+		return users, false
+	case add:
+		return append(slices.Clone(users), userID), true
+	default:
+		return slices.Delete(slices.Clone(users), index, index+1), true
+	}
+}
+
+// sortedIndex is where emoji belongs in an already-sorted reaction slice, so a
+// reaction arriving on the gateway lands where a re-fetch of the whole message
+// would have put it — see toReactions.
+func sortedIndex(reactions []domain.Reaction, emoji string) int {
+	index, _ := slices.BinarySearchFunc(reactions, emoji,
+		func(r domain.Reaction, want string) int { return strings.Compare(r.Emoji, want) })
+
+	return index
 }
 
 // AckMessage marks a channel read up to a message.
@@ -398,6 +565,55 @@ func resolveAuthor(session *revoltgo.Session, target AuthorRef) bool {
 	return true
 }
 
+// MessageRef names one message to fetch, a channel being what a message ID is
+// addressable through.
+type MessageRef struct {
+	ChannelID string
+	MessageID string
+}
+
+// ResolveMessages fetches a batch of messages by ID, bounded by resolveWorkers,
+// and reports what came back. It is what a reply preview whose target is not in
+// the cache is filled in from: Revolt offers no route taking a list of IDs, so a
+// batch is only a batch in that the caller gets one answer for it.
+//
+// Unlike ResolveAuthors it does not report what failed, because nothing retries.
+// The usual reason a message cannot be fetched is that it was deleted, and a
+// quoted line remounts on every scroll past it.
+//
+// Nothing is written to the message cache. That cache is the contiguous tail of a
+// channel, and a reply reaches as far back as somebody cares to answer — dropping
+// one into the middle would leave a hole that loadMoreHistory would mount as
+// though it were history.
+func (c *Client) ResolveMessages(targets []MessageRef) []*domain.Message {
+	session := c.session.Load()
+	if session == nil || len(targets) == 0 {
+		return nil
+	}
+
+	var (
+		mu       sync.Mutex
+		resolved []*domain.Message
+	)
+
+	inParallel(targets, func(target MessageRef) {
+		message, err := session.ChannelMessage(target.ChannelID, target.MessageID)
+		if err != nil {
+			log.Printf("fetch message %s: %v", target.MessageID, err)
+			return
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		if message := toMessage(message); message != nil {
+			resolved = append(resolved, message)
+		}
+	})
+
+	return resolved
+}
+
 /* Conversations */
 
 // Conversations fetches the account's direct messages and groups, resolving the
@@ -550,6 +766,29 @@ func (c *Client) FetchInvite(code string) (domain.Invite, error) {
 	return toInvite(code, invite), nil
 }
 
+// CreateInvite makes an invite to a channel and returns its code. The client
+// only ever consumed invites before this; the code it hands back is what
+// util.InviteLink turns into something shareable.
+//
+// Revolt has no way to ask for a limited one — no expiry, no use count — so an
+// invite made here is permanent until somebody deletes it.
+func (c *Client) CreateInvite(channelID string) (code string, err error) {
+	session := c.session.Load()
+	if session == nil {
+		return "", ErrNoSession
+	}
+
+	invite, err := session.ChannelInviteCreate(channelID)
+	if err != nil {
+		return "", err
+	}
+	if invite == nil {
+		return "", errors.New("no invite returned")
+	}
+
+	return invite.ID, nil
+}
+
 // JoinInvite redeems an invite code.
 //
 // The joined server reaches the caller through ServerJoined rather than this
@@ -590,6 +829,201 @@ func (c *Client) KickMember(serverID, userID string) error {
 	return session.ServerMemberDelete(serverID, userID)
 }
 
+/* This account */
+
+// MaxStatusText is how long a status line may be. Revolt refuses a longer one
+// outright, so the client clamps rather than spending a round trip finding out.
+const MaxStatusText = 128
+
+// fieldStatusText names the status line in Revolt's list of fields an edit may
+// remove. An empty Text is *omitted* from the request rather than sent, so
+// clearing the line is the one change that cannot be expressed as a value.
+const fieldStatusText = "StatusText"
+
+// SetPresence publishes how this account should appear to everybody else.
+//
+// The change comes back as EventUserUpdate like anybody else's, so nothing is
+// recorded here — the store answers from State once it lands.
+func (c *Client) SetPresence(presence domain.Presence) error {
+	return c.editStatus(func(status *revoltgo.UserStatus) {
+		status.Presence = fromPresence(presence)
+	})
+}
+
+// SetStatusText publishes the line beside this account's name. Blank clears it.
+//
+// Longer than MaxStatusText is truncated by rune rather than refused: the limit
+// is Revolt's and the difference between "too long" and "as much of it as fits"
+// is not worth a failed send to the person who typed it.
+func (c *Client) SetStatusText(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = "" }, fieldStatusText)
+	}
+
+	if runes := []rune(text); len(runes) > MaxStatusText {
+		text = string(runes[:MaxStatusText])
+	}
+
+	return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = text })
+}
+
+// editStatus rewrites this account's status. Revolt models the presence and the
+// line beside it as one object and takes the whole of it, so whichever half is
+// not being changed has to be read back out of State and sent again unchanged —
+// either caller omitting the other's half would silently destroy it.
+func (c *Client) editStatus(change func(*revoltgo.UserStatus), remove ...string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	self := session.State.Self()
+	if self == nil {
+		return ErrNoSession
+	}
+
+	var status revoltgo.UserStatus
+	if self.Status != nil {
+		status = *self.Status
+	}
+	change(&status)
+
+	_, err := session.UserEdit(self.ID, revoltgo.UserEditParams{Status: &status, Remove: remove})
+
+	return err
+}
+
+/* Relationships */
+
+// relationshipWith is how this account stands with a user: what the client has
+// recorded since Ready, falling back to what Ready itself said. Somebody State
+// cannot name is a stranger, which is also what a logged-out client answers.
+//
+// The overlay is what makes a relationship survive at all past the opening
+// snapshot — see Client.relations. Safe from any goroutine; the store reads it.
+func (c *Client) relationshipWith(user *revoltgo.User) domain.Relationship {
+	if user == nil {
+		return domain.RelationshipNone
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if known, ok := c.relations[user.ID]; ok {
+		return known
+	}
+
+	return toRelationship(user.Relationship)
+}
+
+// setRelationship records a relationship, for the gateway handler and for an
+// action the server has just agreed to.
+func (c *Client) setRelationship(userID string, relationship domain.Relationship) {
+	if userID == "" {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.relations[userID] = relationship
+}
+
+// AddFriend sends a friend request.
+//
+// It is the second action to go round revoltgo's typed API, and unlike
+// FetchSlowmode it is not a missing field but a missing route: Revolt takes a
+// *sent* request at POST /users/friend, naming the person by handle, where
+// PUT /users/{id}/friend — which is what revoltgo calls FriendAdd — accepts one
+// that has already arrived. The two are not interchangeable, and asking the
+// wrong one of a stranger is a refusal with nothing to say why.
+//
+// The handle is read out of State rather than taken from the caller: it is
+// "username#0001", and the client has it for anybody it can draw.
+func (c *Client) AddFriend(userID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	user := session.State.User(userID)
+	if user == nil || user.Username == "" {
+		return errors.New("nothing known about that account")
+	}
+
+	name := user.Username
+	if user.Discriminator != "" {
+		name += "#" + user.Discriminator
+	}
+
+	body := struct {
+		Username string `json:"username"`
+	}{Username: name}
+
+	var updated revoltgo.User
+	if err := session.HTTP.Request(http.MethodPost, revoltgo.EndpointUserFriend(""), body, &updated); err != nil {
+		return err
+	}
+	c.setRelationship(userID, toRelationship(updated.Relationship))
+
+	return nil
+}
+
+// AcceptFriend accepts a request that has already arrived.
+func (c *Client) AcceptFriend(userID string) error {
+	return c.editRelationship(userID, func(session *revoltgo.Session) (*revoltgo.User, error) {
+		return session.FriendAdd(userID)
+	})
+}
+
+// RemoveFriend unfriends somebody, declines their request, or withdraws ours.
+// Revolt spends one route on all three, and so does the client: what it means is
+// decided by where the relationship stood, which the caller has already read to
+// label the button.
+func (c *Client) RemoveFriend(userID string) error {
+	return c.editRelationship(userID, func(session *revoltgo.Session) (*revoltgo.User, error) {
+		return session.FriendDelete(userID)
+	})
+}
+
+// BlockUser blocks somebody, and UnblockUser takes it back.
+func (c *Client) BlockUser(userID string) error {
+	return c.editRelationship(userID, func(session *revoltgo.Session) (*revoltgo.User, error) {
+		return session.UserBlock(userID)
+	})
+}
+
+func (c *Client) UnblockUser(userID string) error {
+	return c.editRelationship(userID, func(session *revoltgo.Session) (*revoltgo.User, error) {
+		return session.UserUnblock(userID)
+	})
+}
+
+// editRelationship is the shape the four typed routes share: make the request,
+// and record what it says the relationship now is.
+//
+// Every one of them answers with the whole user, which is the only reason the
+// client is told anything at all — the gateway's own EventUserRelationship is
+// what covers a change made somewhere else, and neither writes to State.
+func (c *Client) editRelationship(userID string, request func(*revoltgo.Session) (*revoltgo.User, error)) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	user, err := request(session)
+	if err != nil {
+		return err
+	}
+	if user == nil {
+		return errors.New("no account returned")
+	}
+	c.setRelationship(userID, toRelationship(user.Relationship))
+
+	return nil
+}
+
 /* Profiles */
 
 // UserProfile fetches the bio and the banner behind a user. They are the two
@@ -615,4 +1049,30 @@ func (c *Client) UserProfile(userID string) (domain.UserProfile, error) {
 	}
 
 	return out, nil
+}
+
+// Mutual fetches the servers and friends this account has in common with
+// somebody. Like the profile it is a request of its own, made once the dialog is
+// already up.
+//
+// It is the third thing to go round revoltgo's typed API, and the plainest: the
+// route answers with one object, and Session.UserMutual decodes into a *slice* of
+// them — a shape the response can never take, so the call could only ever fail.
+// Its struct also drops `channels`, which is the groups and conversations both
+// are in. Neither is a field this needs, so what goes round it is the whole call.
+func (c *Client) Mutual(userID string) (domain.Mutual, error) {
+	session := c.session.Load()
+	if session == nil {
+		return domain.Mutual{}, ErrNoSession
+	}
+
+	var response struct {
+		Users   []string `json:"users"`
+		Servers []string `json:"servers"`
+	}
+	if err := session.HTTP.Request(http.MethodGet, revoltgo.EndpointUserMutual(userID), nil, &response); err != nil {
+		return domain.Mutual{}, err
+	}
+
+	return domain.Mutual{UserIDs: response.Users, ServerIDs: response.Servers}, nil
 }

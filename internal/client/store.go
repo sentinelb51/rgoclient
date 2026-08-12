@@ -47,7 +47,7 @@ func (s *store) Self() (domain.User, bool) {
 		return domain.User{}, false
 	}
 
-	return toUser(state.Self())
+	return s.toUser(state.Self())
 }
 
 // SelfID is the logged-in account's ID, or "" when logged out.
@@ -85,24 +85,25 @@ func (s *store) User(userID string) (domain.User, bool) {
 		return domain.User{}, false
 	}
 
-	return toUser(state.User(userID))
+	return s.toUser(state.User(userID))
 }
 
-func toUser(user *revoltgo.User) (domain.User, bool) {
+func (s *store) toUser(user *revoltgo.User) (domain.User, bool) {
 	if user == nil {
 		return domain.User{}, false
 	}
 
 	out := domain.User{
-		ID:        user.ID,
-		Name:      displayName(user),
-		Username:  user.Username,
-		Handle:    handle(user),
-		AvatarURL: user.AvatarURL(avatarSize),
-		Presence:  toPresence(user),
-		Badges:    toBadges(user),
-		Online:    user.Online,
-		Bot:       user.Bot != nil,
+		ID:           user.ID,
+		Name:         displayName(user),
+		Username:     user.Username,
+		Handle:       handle(user),
+		AvatarURL:    user.AvatarURL(avatarSize),
+		Presence:     toPresence(user),
+		Badges:       toBadges(user),
+		Relationship: s.client.relationshipWith(user),
+		Online:       user.Online,
+		Bot:          user.Bot != nil,
 	}
 	if user.Status != nil {
 		out.StatusText = user.Status.Text
@@ -147,6 +148,49 @@ func (s *store) UserName(userID string) string {
 	}
 
 	return ""
+}
+
+// Relationships walks the cached accounts because there is no list to read:
+// Ready names everybody this account is related to and files the relation on
+// each of them, so the collection only exists as a property of the people in it.
+//
+// Somebody the gateway has since named that State has never cached is missed —
+// EventUserRelationship carries the account but nothing files it, which is what
+// Client.relations records and App.friendsChanged resolves.
+func (s *store) Relationships() []domain.User {
+	state := s.state()
+	if state == nil {
+		return nil
+	}
+
+	selfID := s.SelfID()
+
+	// The relationship is asked *before* the account is resolved: this walks every
+	// cached user, most of whom are members of a server and nothing more, and
+	// toUser builds a handle, an avatar URL and a badge list per call.
+	var related []domain.User
+	for _, raw := range state.Users() {
+		if raw.ID == selfID || !s.client.relationshipWith(raw).Known() {
+			continue
+		}
+
+		if user, ok := s.toUser(raw); ok {
+			related = append(related, user)
+		}
+	}
+
+	// Total, as Members is and for the same reason: two people sharing a display
+	// name swapping places between rebuilds would move a row out from under the
+	// pointer that was about to answer their request.
+	slices.SortFunc(related, func(x, y domain.User) int {
+		if by := strings.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.ID, y.ID)
+	})
+
+	return related
 }
 
 /* Members */
@@ -534,6 +578,58 @@ func (s *store) EmojiURL(emojiID string) string {
 	return revoltgo.EndpointAutumnFile(emojiTag, emojiID, emojiSize)
 }
 
+// Emojis is every custom emoji the account may use, ordered by name.
+//
+// No request backs this and none is wanted: Ready carries the emoji of every
+// server the account is in, ServerCreate carries a joined server's, and revoltgo
+// files the create and delete events into State itself — so what State holds is
+// already the whole set and already current. Session.ServerEmojis writes nowhere,
+// so asking it would only be a second copy to keep.
+//
+// EmojiSeq iterates State's map under its read lock, so the loop stays a copy per
+// entry and asks State nothing; the sort is outside it.
+func (s *store) Emojis() []domain.Emoji {
+	state := s.state()
+	if state == nil {
+		return nil
+	}
+
+	// The fold is carried beside each emoji rather than taken in the comparison: a
+	// sort asks a pair some log n times, so lowering there is one allocation per
+	// question rather than one per emoji.
+	type folded struct {
+		emoji domain.Emoji
+		name  string
+	}
+
+	all := make([]folded, 0, state.EmojiCount())
+	for raw := range state.EmojiSeq() {
+		emoji := domain.Emoji{ID: raw.ID, Name: raw.Name}
+		if raw.Parent != nil {
+			emoji.ServerID = raw.Parent.ID
+		}
+
+		all = append(all, folded{emoji: emoji, name: strings.ToLower(raw.Name)})
+	}
+
+	// By name, tie-broken on ID so the order is total: a map has none of its own,
+	// and a picker whose entries moved between openings could not be learned.
+	slices.SortFunc(all, func(x, y folded) int {
+		if by := strings.Compare(x.name, y.name); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.emoji.ID, y.emoji.ID)
+	})
+
+	emojis := make([]domain.Emoji, len(all))
+	for i, f := range all {
+		emojis[i] = f.emoji
+	}
+
+	return emojis
+}
+
 /* Messages */
 
 // MessageAuthor resolves the name, avatar and role colour for a message's author
@@ -615,7 +711,9 @@ func (s *store) Permissions(channelID string) domain.Permission {
 	}
 
 	if channel.ChannelType != revoltgo.ChannelTypeText && channel.ChannelType != revoltgo.ChannelTypeVoice {
-		return conversationPermissions(channel, state.User(recipientID(state, channel)), self.ID)
+		other := state.User(recipientID(state, channel))
+
+		return conversationPermissions(channel, s.client.relationshipWith(other), self.ID)
 	}
 
 	if channel.Server == nil {
@@ -630,9 +728,9 @@ func (s *store) Permissions(channelID string) domain.Permission {
 }
 
 // conversationPermissions resolves what the account may do in a channel of its
-// own: saved notes, a direct message, a group. other is the DM's opposite
-// number, or nil — nobody else's relationship comes into it.
-func conversationPermissions(channel *revoltgo.Channel, other *revoltgo.User, userID string) domain.Permission {
+// own: saved notes, a direct message, a group. other is how the account stands
+// with the DM's opposite number — nobody else's relationship comes into it.
+func conversationPermissions(channel *revoltgo.Channel, other domain.Relationship, userID string) domain.Permission {
 	switch channel.ChannelType {
 	case revoltgo.ChannelTypeSavedMessages:
 		return permissionGrantAll
@@ -651,7 +749,7 @@ func conversationPermissions(channel *revoltgo.Channel, other *revoltgo.User, us
 		// ChannelPermissions reads it for. Blocked in either direction leaves the
 		// history readable and nothing else; anyone you already have a conversation
 		// with, you may write to.
-		if blocked(other) {
+		if other.Blocked() {
 			return permissionViewOnly
 		}
 
@@ -758,18 +856,6 @@ func grantedBy(server *revoltgo.Server, roles []rankedRole) domain.Permission {
 	}
 
 	return permissions
-}
-
-// blocked reports whether a DM's other participant has blocked the account or
-// been blocked by it. Somebody State cannot name is not blocked — the
-// conversation is in the list, which is the only evidence there is.
-func blocked(user *revoltgo.User) bool {
-	if user == nil {
-		return false
-	}
-
-	return user.Relationship == revoltgo.UserRelationsTypeBlocked ||
-		user.Relationship == revoltgo.UserRelationsTypeBlockedOther
 }
 
 // applyOverwrite grants and then revokes, which is Revolt's own order: a role

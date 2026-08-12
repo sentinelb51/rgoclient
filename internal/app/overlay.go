@@ -68,6 +68,7 @@ func (a *App) closeOverlay() {
 
 	a.overlay = nil
 	a.joinDialog = nil
+	a.closeFriends()
 	a.bindKeys()
 
 	// The settings page has its own focus to keep; only the client underneath

@@ -34,7 +34,7 @@ const (
 	typingSendInterval = 3 * time.Second
 	typingIdleTimeout  = 5 * time.Second
 
-	// typingNameMaxRunes caps one name in the sentence. The line shares its row
+	// typingNameMaxRunes caps one name on the line. The line shares its row
 	// with the slowmode chip, which is pinned to the far edge and would be pushed
 	// off it by a long enough line — and five unabridged display names is long
 	// enough on a narrow window.
@@ -120,7 +120,10 @@ func (a *App) forgetSelfTyping() {
 }
 
 // showTyping repaints the one surface a channel is shown on: the line above the
-// composer while it is open, its sidebar row otherwise. Call on the UI thread.
+// composer while it is open, its sidebar row otherwise. It is one or the other and
+// never both — the open channel's row carries no mark to leave behind, see
+// isTypingIn. Call on the UI thread.
+//
 // A background channel is found by walking the sidebar, and typing arrives for
 // every channel the account can see — including those of servers the sidebar is
 // not currently showing. So the setting is asked before the walk, not after it.
@@ -157,10 +160,17 @@ func (a *App) armTypingTimer() {
 		return
 	}
 
+	// The wake answers for itself rather than for whatever timer is current. A
+	// timer that has already fired cannot be stopped, so an event landing while its
+	// hop onto the UI thread is in flight arms a replacement that the older wake
+	// would then forget it had — leaving that one running unreferenced, and a fresh
+	// one armed beside it on every lapse after.
 	epoch := a.epoch
-	a.typingTimer = time.AfterFunc(max(time.Until(next), 0), func() {
+	var timer *time.Timer
+
+	timer = time.AfterFunc(max(time.Until(next), 0), func() {
 		a.doOnUI(func() {
-			if a.stale(epoch) {
+			if a.stale(epoch) || a.typingTimer != timer {
 				return
 			}
 
@@ -171,6 +181,7 @@ func (a *App) armTypingTimer() {
 			a.armTypingTimer()
 		}, false)
 	})
+	a.typingTimer = timer
 }
 
 // pruneTyping drops everybody whose entry has lapsed, reporting the channels that
@@ -217,8 +228,21 @@ func (a *App) typistsIn(channelID string) []string {
 }
 
 // isTypingIn reports whether a channel's sidebar row should carry the mark.
+//
+// The open channel never carries one. Its line above the composer is already
+// naming who is there, and a row that could be marked while it is the open one is
+// a row nothing puts back: showTyping sends that channel to the line, so the mark
+// would sit there sweeping until some unrelated sidebar-wide sync happened to
+// clear it. Selecting a channel and leaving one both run that sync, which is what
+// takes the mark off on the way in and puts it back on the way out.
+//
+// TypingNames is the feature's off switch as well as its limit, so a row must not
+// keep a mark it was given before it was turned to zero.
 func (a *App) isTypingIn(channelID string) bool {
-	return config.Current().Behaviour.TypingInChannels && len(a.typing[channelID]) > 0
+	behaviour := config.Current().Behaviour
+
+	return behaviour.TypingNames > 0 && behaviour.TypingInChannels &&
+		channelID != a.currentChannelID && len(a.typing[channelID]) > 0
 }
 
 // refreshTyping redraws the line above the composer for the open channel. Call on
@@ -300,9 +324,14 @@ func (a *App) typistIdentity(userID string) (name, avatarURL string) {
 	return "", ""
 }
 
-// typingPhrase is the sentence the line draws. hidden counts everyone past the
-// limit as well as everyone the client cannot yet name, which is why it can be
-// non-zero with no names at all. self puts this account at the head of it.
+// typingPhrase is what the line names. It is the people and nothing else: the
+// mark sweeping beside them is what says they are typing, so a sentence saying it
+// again would be the longest part of a line that has to share its row with the
+// slowmode chip.
+//
+// hidden counts everyone past the limit as well as everyone the client cannot yet
+// name, which is why it can be non-zero with no names at all. self puts this
+// account at the head of it.
 func typingPhrase(names []string, hidden int, self bool) string {
 	if self {
 		names = append([]string{"You"}, names...)
@@ -313,31 +342,18 @@ func typingPhrase(names []string, hidden int, self bool) string {
 		case hidden == 0:
 			return ""
 		case hidden == 1:
-			return "Someone is typing…"
+			return "Someone"
 		default:
-			return "Several people are typing…"
+			return fmt.Sprintf("%d people", hidden)
 		}
 	}
 
-	// "You" takes a plural verb however alone it is, so a line this account is in is
-	// never singular — which is the whole of what naming ourselves changes.
-	verb := " are typing…"
-	if len(names)+hidden == 1 && !self {
-		verb = " is typing…"
-	}
-
+	line := strings.Join(names, ", ")
 	if hidden > 0 {
-		others := fmt.Sprintf("%d others", hidden)
-		if hidden == 1 {
-			others = "1 other"
-		}
-		return strings.Join(names, ", ") + " and " + others + verb
-	}
-	if len(names) == 1 {
-		return names[0] + verb
+		line += fmt.Sprintf(" +%d", hidden)
 	}
 
-	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1] + verb
+	return line
 }
 
 /* Sending */
@@ -436,7 +452,15 @@ func (a *App) stopTyping(channelID string) {
 
 // armTypingIdle restarts the quiet period after which a composer nobody has
 // touched stops counting as being typed in. Call on the UI thread.
+//
+// The wake decides nothing on its own: a timer that has already fired cannot be
+// called back, so a keystroke landing between the fire and the hop onto the UI
+// thread would be answered by a stop for typing still in progress — Reset there
+// re-arms a timer whose old callback is already on its way. The keystroke is
+// recorded instead, and a wake that finds a fresh one waits out the remainder.
 func (a *App) armTypingIdle() {
+	a.lastTypedAt = time.Now()
+
 	if a.typingIdleTimer != nil {
 		a.typingIdleTimer.Reset(typingIdleTimeout)
 		return
@@ -445,9 +469,18 @@ func (a *App) armTypingIdle() {
 	epoch := a.epoch
 	a.typingIdleTimer = time.AfterFunc(typingIdleTimeout, func() {
 		a.doOnUI(func() {
-			if !a.stale(epoch) {
-				a.stopTyping(a.typingChannelID)
+			// A nil timer is a composer already given up while this wake was in
+			// flight — a submit, a channel switch — and there is nothing left to stop.
+			if a.stale(epoch) || a.typingIdleTimer == nil {
+				return
 			}
+
+			if quiet := time.Since(a.lastTypedAt); quiet < typingIdleTimeout {
+				a.typingIdleTimer.Reset(typingIdleTimeout - quiet)
+				return
+			}
+
+			a.stopTyping(a.typingChannelID)
 		}, false)
 	})
 }

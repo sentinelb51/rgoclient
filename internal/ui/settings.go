@@ -28,6 +28,7 @@ import (
 	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -92,6 +93,20 @@ type SettingsHooks struct {
 	Sessions      func() []SettingsSession
 	ForgetSession func(userID string)
 	LogOut        func()
+
+	// LogOutEverywhere revokes every session the account has rather than only
+	// this one, which is why it is separate: the two read alike and one of them
+	// signs the user out of their phone.
+	LogOutEverywhere func()
+
+	// SetPresence publishes how the account appears to everybody else. The page
+	// does not hear back — the change returns as an ordinary user update and the
+	// store answers for it, exactly as it would for anybody else.
+	SetPresence func(presence domain.Presence)
+
+	// SetStatusText publishes the line beside the account's name, blank clearing
+	// it. It hears back the same way SetPresence does — not at all.
+	SetStatusText func(text string)
 
 	/* Cache */
 
@@ -609,8 +624,7 @@ func (p *SettingsPage) groupOf(caption, detail string, body *fyne.Container) set
 			NewInset(label, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
 	if detail != "" {
-		note := canvas.NewText(detail, theme.Colors.TimestampText)
-		note.TextSize = theme.Sizes.SettingsDetailSize
+		note := rowDetail(detail, cardWidth()-theme.Sizes.SettingsRowPaddingH)
 		header = append(header,
 			NewInset(note, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
@@ -650,35 +664,54 @@ func newRowSeparator() fyne.CanvasObject {
 	return NewInset(line, 0, 0, inset, inset)
 }
 
+// cardWidth is the width a group's card gives its rows. The page is centred at a
+// fixed width by construction, so this is known before anything is laid out —
+// which is what lets a row's prose be wrapped where it is built rather than by a
+// layout that would have to be given the width before it could report a height.
+func cardWidth() float32 {
+	return theme.Sizes.SettingsPageWidth - 2*theme.Sizes.SettingsPagePadding - 2*theme.Sizes.SettingsRowPaddingH
+}
+
+// rowTextWidth is the room a row's label and explanation have: the card less the
+// control at the trailing edge and the gutter between them, so wrapped prose
+// stops short of the control rather than running under it.
+func rowTextWidth(control fyne.CanvasObject) float32 {
+	return cardWidth() - theme.Sizes.SettingsRowPaddingH - control.MinSize().Width
+}
+
 // row is the shape every setting takes: a label, an optional line of
 // explanation, and one control at the trailing edge.
 func (p *SettingsPage) row(label, detail string, control fyne.CanvasObject) fyne.CanvasObject {
-	var note fyne.CanvasObject
-	if detail != "" {
-		text := canvas.NewText(detail, theme.Colors.TimestampText)
-		text.TextSize = theme.Sizes.SettingsDetailSize
-		note = text
-	}
-
-	return p.rowWith(label, note, control)
-}
-
-// rowWith is row for an explanation that has to be a widget rather than a line
-// of prose — a path shortened to whatever width the row has to give it.
-func (p *SettingsPage) rowWith(label string, detail, control fyne.CanvasObject) fyne.CanvasObject {
 	row, _ := p.markedRow(label, detail, control)
 
 	return row
 }
 
-// markedRow is rowWith plus the bar down its left edge, handed back for the
-// caller to fill. Only a toggle has anything to say with it — a row is marked
-// when its setting is on — and the toggle is built a level above this, so the
-// rectangle has to travel rather than the state.
-func (p *SettingsPage) markedRow(label string, detail, control fyne.CanvasObject) (fyne.CanvasObject, *canvas.Rectangle) {
-	name := canvas.NewText(label, theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.SettingsLabelSize
+// rowWith is row for an explanation that has to be a widget rather than a line
+// of prose — a path shortened to whatever width the row has to give it.
+func (p *SettingsPage) rowWith(label string, detail, control fyne.CanvasObject) fyne.CanvasObject {
+	row, _ := p.rowOf(rowLabel(label, rowTextWidth(control)), detail, control)
 
+	return row
+}
+
+// markedRow is row plus the bar down its left edge, handed back for the caller
+// to fill. Only a toggle has anything to say with it — a row is marked when its
+// setting is on — and the toggle is built a level above this, so the rectangle
+// has to travel rather than the state.
+func (p *SettingsPage) markedRow(label, detail string, control fyne.CanvasObject) (fyne.CanvasObject, *canvas.Rectangle) {
+	width := rowTextWidth(control)
+
+	var note fyne.CanvasObject
+	if detail != "" {
+		note = rowDetail(detail, width)
+	}
+
+	return p.rowOf(rowLabel(label, width), note, control)
+}
+
+// rowOf lays a built text column against a control.
+func (p *SettingsPage) rowOf(name fyne.CanvasObject, detail, control fyne.CanvasObject) (fyne.CanvasObject, *canvas.Rectangle) {
 	text := []fyne.CanvasObject{name}
 	if detail != nil {
 		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), detail)
@@ -693,19 +726,24 @@ func (p *SettingsPage) markedRow(label string, detail, control fyne.CanvasObject
 	return p.frame(body)
 }
 
+// rowLabel names a setting; rowDetail is the sentence under it. Both wrap at the
+// width they are given.
+func rowLabel(label string, width float32) fyne.CanvasObject {
+	return NewWrappedText(label, width, theme.Sizes.SettingsLabelSize, theme.Colors.TextPrimary)
+}
+
+func rowDetail(detail string, width float32) fyne.CanvasObject {
+	return NewWrappedText(detail, width, theme.Sizes.SettingsDetailSize, theme.Colors.TimestampText)
+}
+
 // stackedRow puts the control on a line of its own under the explanation, which
 // is the only way a slider gets width enough to be aimed with. A row whose
 // control is a switch stays one line — the switch says what it says at any size,
 // and two lines each would double the length of every section.
 func (p *SettingsPage) stackedRow(label, detail string, control fyne.CanvasObject) fyne.CanvasObject {
-	name := canvas.NewText(label, theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.SettingsLabelSize
-
-	text := []fyne.CanvasObject{name}
+	text := []fyne.CanvasObject{rowLabel(label, cardWidth())}
 	if detail != "" {
-		note := canvas.NewText(detail, theme.Colors.TimestampText)
-		note.TextSize = theme.Sizes.SettingsDetailSize
-		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), note)
+		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), rowDetail(detail, cardWidth()))
 	}
 	text = append(text, VerticalSpacer(theme.Sizes.SettingsControlGap), control)
 
@@ -745,10 +783,9 @@ func vcenter(obj fyne.CanvasObject) fyne.CanvasObject {
 // note is a row of prose on its own — the line that says a change waits for a
 // restart, or that a feature has not been built.
 func (p *SettingsPage) note(text string) fyne.CanvasObject {
-	label := canvas.NewText("ⓘ  "+text, theme.Colors.TimestampText)
-	label.TextSize = theme.Sizes.SettingsDetailSize
-
 	padH, padV := theme.Sizes.SettingsRowPaddingH, theme.Sizes.SettingsPreviewGap
+
+	label := rowDetail("ⓘ  "+text, cardWidth()-2*padH)
 
 	return NewInset(label, padV, padV, padH, padH)
 }
@@ -779,14 +816,7 @@ func (p *SettingsPage) boolRow(label, detail string, value bool, onChanged func(
 		onChanged(on)
 	})
 
-	var note fyne.CanvasObject
-	if detail != "" {
-		text := canvas.NewText(detail, theme.Colors.TimestampText)
-		text.TextSize = theme.Sizes.SettingsDetailSize
-		note = text
-	}
-
-	row, marker := p.markedRow(label, note, toggle)
+	row, marker := p.markedRow(label, detail, toggle)
 	markRow(marker, value)
 
 	return row
@@ -890,8 +920,10 @@ func (p *SettingsPage) colorControl(value string, set func(hex string)) fyne.Can
 }
 
 // textField is an entry drawn as a control: the same box a dropdown and a colour
-// row sit in, so a row that takes typing reads as one.
-func textField(entry *widget.Entry) fyne.CanvasObject {
+// row sit in, so a row that takes typing reads as one. It takes the object
+// rather than a *widget.Entry so an extended one — commitEntry — mounts as
+// itself and keeps the overrides it was extended for.
+func textField(entry fyne.CanvasObject) fyne.CanvasObject {
 	padding := theme.Sizes.SettingsRowPaddingH
 
 	return fixedControl(theme.Sizes.SettingsControlWidth, container.NewStack(

@@ -81,6 +81,15 @@ var Colors = struct {
 	TypingMark            color.Color
 	ErrorText             color.Color
 
+	/* Reactions */
+
+	ReactionBg          color.Color
+	ReactionHoverBg     color.Color
+	ReactionMineBg      color.Color
+	ReactionMineHoverBg color.Color
+	ReactionCount       color.Color
+	ReactionMine        color.Color
+
 	/* Scrolling */
 
 	ScrollIndicator color.Color
@@ -96,8 +105,13 @@ var Colors = struct {
 
 	MemberNameOffline color.Color
 	MemberSectionText color.Color
-	MemberBotTagBg    color.Color
-	MemberBotTagText  color.Color
+	MemberStatusText  color.Color
+
+	/* Bot mark */
+
+	// BotMark is the glyph following the name of an account Revolt marks as a
+	// bot, on a member row and on a profile alike.
+	BotMark color.Color
 
 	/* Invite cards */
 
@@ -110,7 +124,8 @@ var Colors = struct {
 
 	/* Chips */
 
-	ChipBg color.Color
+	ChipBg      color.Color
+	ChipHoverBg color.Color
 
 	/* Presence */
 
@@ -237,6 +252,22 @@ var Colors = struct {
 
 	ErrorText: color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 
+	// A reaction chip. The one this account is in has to be legible down a whole
+	// column at a glance, so it takes the accent twice over — as a tint behind it
+	// and again on the count — which is what keeps it apart from a chip that merely
+	// happens to be under the pointer. Both states light on hover, since a chip is
+	// a button whichever it is in.
+	// The two tints are NRGBA because they are the accent at an alpha: color.RGBA
+	// is alpha-premultiplied, so #5B7CFA written there with A=55 is not a colour at
+	// all — every channel is over the alpha — and composites as something else
+	// entirely.
+	ReactionBg:          color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142, the chip surface
+	ReactionHoverBg:     color.RGBA{R: 55, G: 62, B: 82, A: 255},    // #373E52
+	ReactionMineBg:      color.NRGBA{R: 91, G: 124, B: 250, A: 70},  // accent tint
+	ReactionMineHoverBg: color.NRGBA{R: 91, G: 124, B: 250, A: 110}, // the same, lifted
+	ReactionCount:       color.RGBA{R: 168, G: 176, B: 192, A: 255}, // #A8B0C0
+	ReactionMine:        color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, the accent as body text
+
 	// The position indicator drawn while a view moves. The same slate as the reply
 	// elbow, which is the palette's answer for a mark that has to read over the
 	// message area and over a hovered row alike. Opaque: it is only up for a
@@ -262,10 +293,13 @@ var Colors = struct {
 	MemberNameOffline: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
 	MemberSectionText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 
-	// The bot tag is the chip surface at a smaller size, so a row carrying one
-	// still reads as a row.
-	MemberBotTagBg:   color.RGBA{R: 90, G: 106, B: 176, A: 255},  // #5A6AB0
-	MemberBotTagText: color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	// What the sidebar says when it has no rows to say it with. Pitched at the
+	// section headers rather than at a name: it is furniture, not a member.
+	MemberStatusText: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
+
+	// The mark is a stroked glyph rather than a filled chip, so it takes the
+	// accent as a line colour and needs no surface behind it.
+	BotMark: color.RGBA{R: 122, G: 137, B: 205, A: 255}, // #7A89CD
 
 	InviteCaption: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	InviteDetail:  color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
@@ -278,7 +312,8 @@ var Colors = struct {
 	// A chip is a surface in its own right, so it takes the same slate the banner
 	// does and wears the shared hairline: its text is whatever colour the thing it
 	// names carries, and a coloured word alone on the card read as loose text.
-	ChipBg: color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142, lifted off the card
+	ChipBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142, lifted off the card
+	ChipHoverBg: color.RGBA{R: 55, G: 62, B: 82, A: 255}, // one step further up, for a chip that leads somewhere
 
 	// Presence reads as a ring around an avatar, so these are saturated enough to
 	// carry a few pixels of stroke against the card behind them. Offline is never
@@ -327,7 +362,21 @@ var Sizes = struct {
 
 	MemberPresenceDotSize float32
 	MemberPresenceDotRing float32
-	MemberBotTagSize      float32
+
+	// The strip drawn over the list while a membership is on its way or after it
+	// failed to arrive. The mark is the client's own sweeping line, so its width
+	// is set here the way the composer's and a channel row's are.
+	MemberStatusTextSize float32
+	MemberStatusMarkSize float32
+	MemberStatusPadding  float32
+	MemberStatusGap      float32
+
+	/* Bot mark */
+
+	// One glyph at two sizes: it follows a name, and the two names it follows are
+	// set differently.
+	MemberBotMarkSize  float32
+	ProfileBotMarkSize float32
 
 	/* Server and channel rows */
 
@@ -365,6 +414,19 @@ var Sizes = struct {
 	MessageReplyLineThickness     float32
 	MessageReplyLineGap           float32
 	MessageTimestampSize          float32
+	MessagePinMarkSize            float32
+	ReactionEmojiSize             float32
+	ReactionCountSize             float32
+	ReactionRadius                float32
+	ReactionPaddingH              float32
+	ReactionPaddingV              float32
+	ReactionSpacing               float32
+	EmojiPickerWidth              float32
+	EmojiPickerMaxHeight          float32
+	EmojiPickerCellSize           float32
+	EmojiPickerEmojiSize          float32
+	EmojiPickerCaptionSize        float32
+	EmojiPickerGap                float32
 	SystemMessageTextSize         float32
 	SystemMessageIconSize         float32
 	SystemMessagePadding          float32
@@ -501,6 +563,7 @@ var Sizes = struct {
 	NoticeCardSpacing float32
 	ConfirmWidth      float32
 	ConfirmRadius     float32
+	ConfirmButtonGap  float32
 
 	/* Login */
 
@@ -525,6 +588,18 @@ var Sizes = struct {
 	JoinDialogWidth        float32
 	JoinDialogCornerRadius float32
 	JoinDialogTextSize     float32
+
+	/* Friends dialog */
+
+	FriendsDialogWidth   float32
+	FriendsListMaxHeight float32
+	FriendsRowHeight     float32
+	FriendsAvatarSize    float32
+	FriendsNameSize      float32
+	FriendsHandleSize    float32
+	FriendsSectionSize   float32
+	FriendsPadding       float32
+	FriendsGap           float32
 
 	/* Settings */
 
@@ -579,7 +654,14 @@ var Sizes = struct {
 
 	MemberPresenceDotSize: 10,
 	MemberPresenceDotRing: 2,
-	MemberBotTagSize:      9,
+
+	MemberStatusTextSize: 12,
+	MemberStatusMarkSize: 24,
+	MemberStatusPadding:  10,
+	MemberStatusGap:      8,
+
+	MemberBotMarkSize:  14,
+	ProfileBotMarkSize: 18,
 
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
@@ -610,6 +692,27 @@ var Sizes = struct {
 	MessageReplyLineThickness:     2,
 	MessageReplyLineGap:           8,
 	MessageTimestampSize:          12,
+	MessagePinMarkSize:            11,
+
+	// A reaction chip. The emoji is drawn a little above body size — it is the
+	// whole of what the chip says, and a custom one is a picture of that side —
+	// while the count beside it is the timestamp's size, being a note about it.
+	ReactionEmojiSize: 15,
+	ReactionCountSize: 12,
+	ReactionRadius:    8,
+	ReactionPaddingH:  7,
+	ReactionPaddingV:  3,
+	ReactionSpacing:   4,
+	// The picker's grid wraps at whatever its own width allows, so the cell is the
+	// only thing deciding how many fit on a row. The cell is a target rather than a
+	// glyph, hence larger than the emoji it holds — which is itself larger than a
+	// chip's, being the thing being aimed at rather than a label.
+	EmojiPickerWidth:       324,
+	EmojiPickerMaxHeight:   260,
+	EmojiPickerCellSize:    34,
+	EmojiPickerEmojiSize:   22,
+	EmojiPickerCaptionSize: 11,
+	EmojiPickerGap:         6,
 	// A system line is one line whatever it says, so its margin is its own rather
 	// than the gap that separates two people speaking: a run of joins is a block,
 	// not a page. The mark is sized against that line, not against the avatar
@@ -778,6 +881,7 @@ var Sizes = struct {
 	NoticeCardSpacing: 8,
 	ConfirmWidth:      360,
 	ConfirmRadius:     6,
+	ConfirmButtonGap:  4,
 
 	SessionCardAvatarSize: 32,
 	WindowDefaultWidth:    1200,
@@ -796,6 +900,16 @@ var Sizes = struct {
 	JoinDialogWidth:        320,
 	JoinDialogCornerRadius: 6,
 	JoinDialogTextSize:     12,
+
+	FriendsDialogWidth:   460,
+	FriendsListMaxHeight: 420,
+	FriendsRowHeight:     52,
+	FriendsAvatarSize:    36,
+	FriendsNameSize:      15,
+	FriendsHandleSize:    12,
+	FriendsSectionSize:   12,
+	FriendsPadding:       12,
+	FriendsGap:           6,
 
 	SettingsRailWidth:     210,
 	SettingsRailRowHeight: 34,

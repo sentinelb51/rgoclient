@@ -16,6 +16,9 @@ var mentionSVG []byte
 //go:embed members.svg
 var membersSVG []byte
 
+//go:embed bot.svg
+var botSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
@@ -48,6 +51,9 @@ var (
 
 	// MembersIcon marks the message header's member-sidebar toggle.
 	MembersIcon fyne.Resource = fyne.NewStaticResource("members.svg", membersSVG)
+
+	// BotIcon follows the name of an account Revolt marks as a bot.
+	BotIcon fyne.Resource = fyne.NewStaticResource("bot.svg", botSVG)
 
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)
@@ -96,6 +102,12 @@ var (
 	ActionCopyIcon   = actionIcon("action-copy.svg")
 	ActionSaveIcon   = actionIcon("action-save.svg")
 	ActionCancelIcon = actionIcon("action-cancel.svg")
+	ActionAddIcon    = actionIcon("action-add.svg")
+
+	// ActionEmojiIcon opens the emoji picker from the composer. It is in this set
+	// rather than beside the reaction chip's mark because both open the same
+	// picker, and the composer's is the one that needs a face to say so.
+	ActionEmojiIcon = actionIcon("action-emoji.svg")
 )
 
 // settingsIcon reads one of the embedded section marks. The file list is a

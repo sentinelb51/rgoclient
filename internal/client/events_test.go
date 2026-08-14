@@ -239,3 +239,29 @@ func TestClearReaction(t *testing.T) {
 		t.Error("clearing a reaction that is already gone reported a change")
 	}
 }
+
+// clearAllReactions is the moderator's clear, and the one write the gateway can
+// never correct — the update announcing it cannot be told from an edit, so what
+// this leaves is what the client believes until the channel is re-fetched. The
+// message a reader is already holding must survive it, as everywhere else here.
+func TestClearAllReactions(t *testing.T) {
+	c, original := reactionFixture(t)
+	c.applyReaction("01CHANNEL", "01MESSAGE", "a", "01BOB", true)
+
+	if !c.clearAllReactions("01CHANNEL", "01MESSAGE") {
+		t.Fatal("clearing two reactions reported no change")
+	}
+	if got := storedReactions(c); len(got) != 0 {
+		t.Errorf("the message still carries %v", got)
+	}
+	if len(original.Reactions) != 1 {
+		t.Error("the message a reader was already holding lost its reactions")
+	}
+
+	if c.clearAllReactions("01CHANNEL", "01MESSAGE") {
+		t.Error("clearing a message that carries none reported a change")
+	}
+	if c.clearAllReactions("01CHANNEL", "01MISSING") {
+		t.Error("clearing a message that is not cached reported a change")
+	}
+}

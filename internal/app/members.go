@@ -308,7 +308,7 @@ func memberStatusFor(serverID string, loading, failed, empty bool) ui.MemberList
 	case loading:
 		return ui.MemberListStatus{Text: "Refreshing members", Busy: true}
 	case failed:
-		return ui.MemberListStatus{Text: "Couldn't load members.", Action: "Try again"}
+		return ui.MemberListStatus{Text: "Couldn't load members.", Action: "Retry"}
 	case empty:
 		return ui.MemberListStatus{Text: "Nobody to show here."}
 	}

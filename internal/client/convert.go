@@ -334,8 +334,13 @@ func toInvite(code string, invite *revoltgo.Invite) domain.Invite {
 
 /* Channels */
 
-func toChannelKind(kind revoltgo.ChannelType) domain.ChannelKind {
-	switch kind {
+// toChannelKind reads a channel's kind off the whole channel rather than off its
+// type, because "VoiceChannel" is no longer how a voice channel says so. Stoat
+// dropped the variant — voice is now a *text* channel carrying a `voice` object,
+// which is the only thing separating the two — so the type alone answers every
+// kind except the one that has to be recognised.
+func toChannelKind(channel *revoltgo.Channel) domain.ChannelKind {
+	switch channel.ChannelType {
 	case revoltgo.ChannelTypeDM:
 		return domain.ChannelDM
 	case revoltgo.ChannelTypeGroup:
@@ -343,6 +348,10 @@ func toChannelKind(kind revoltgo.ChannelType) domain.ChannelKind {
 	case revoltgo.ChannelTypeSavedMessages:
 		return domain.ChannelSavedMessages
 	case revoltgo.ChannelTypeVoice:
+		return domain.ChannelVoice
+	}
+
+	if channel.Voice != nil {
 		return domain.ChannelVoice
 	}
 

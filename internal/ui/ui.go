@@ -76,6 +76,11 @@ type MessageActions interface {
 	// account is in that reaction, having drawn itself from it.
 	OnReact(message *domain.Message, emoji string, add bool)
 
+	// OnClearReactions takes every reaction off a message, which is a moderator's
+	// action rather than a reader's — one request where unreacting for everybody
+	// would be one per person per emoji.
+	OnClearReactions(message *domain.Message)
+
 	// OnPickEmoji opens the emoji picker beside anchor and reports what is chosen.
 	// The controller opens it rather than the caller because what is on offer is a
 	// walk of every server the account is in, ordered around the open one — which
@@ -84,6 +89,12 @@ type MessageActions interface {
 
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message
+
+	// OnJumpToMessage brings a message into view, which for one older than
+	// anything mounted means fetching the page around it. Unlike ResolveMessage
+	// the caller is not told whether it worked: what a jump does about a message
+	// that cannot be found is the controller's to say.
+	OnJumpToMessage(channelID, messageID string)
 }
 
 /* UI thread */

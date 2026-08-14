@@ -34,7 +34,19 @@ func (a *App) notifyNotice(notice ui.Notice) {
 // confirm puts a question on the modal layer. The dialog closes itself whichever
 // way it is answered; only the confirming branch calls back. Call on the UI
 // thread.
+//
+// Holding Shift answers it in advance: somebody clearing out a channel is asked
+// the same question a dozen times, and a dialog answered without being read
+// protects nobody. This is the one place that decides it, so the key covers every
+// confirmation in the client rather than the ones somebody remembered to wire it
+// to. A question with no OnConfirm is never skipped — it is a statement, and
+// skipping it would say nothing at all.
 func (a *App) confirm(question ui.Confirm) {
+	if question.OnConfirm != nil && ui.ShiftHeld() {
+		question.OnConfirm()
+		return
+	}
+
 	a.showOverlay(ui.NewConfirmDialog(question, a.closeOverlay))
 }
 

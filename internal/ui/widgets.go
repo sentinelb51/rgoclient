@@ -25,8 +25,8 @@ import (
 )
 
 const (
-	// closeButtonSize is the side length of a CloseButton.
-	closeButtonSize = 24
+	// glyphButtonSize is the side length of a GlyphButton.
+	glyphButtonSize = 24
 
 	// iconRestTranslucency dims an icon button while the pointer is elsewhere.
 	// Hovering clears it, so what lights up is the icon itself rather than a plate
@@ -118,6 +118,15 @@ func Elevate(rect *canvas.Rectangle) {
 func NewColumnDivider() fyne.CanvasObject {
 	divider := canvas.NewRectangle(theme.Colors.Outline)
 	divider.SetMinSize(fyne.NewSize(theme.Sizes.OutlineWidth, 0))
+
+	return divider
+}
+
+// NewRowDivider is the same hairline lying across a column, which is what marks
+// off a group of rows from the rows under it.
+func NewRowDivider() fyne.CanvasObject {
+	divider := canvas.NewRectangle(theme.Colors.Outline)
+	divider.SetMinSize(fyne.NewSize(0, theme.Sizes.OutlineWidth))
 
 	return divider
 }
@@ -581,44 +590,52 @@ func NewSidebarSeparator() fyne.CanvasObject {
 	return container.NewCenter(bar)
 }
 
-// CloseButton is an icon-only "cancel" button for removing items.
-type CloseButton struct {
+// GlyphButton is a square, icon-only button that fills under the pointer: the
+// chrome a card wears rather than an action it offers. Closing one is what it
+// mostly is, hence the constructor that names no icon.
+type GlyphButton struct {
 	tapBase
 	background *canvas.Rectangle
 	icon       *canvas.Image
 }
 
 var (
-	_ fyne.Tappable     = (*CloseButton)(nil)
-	_ desktop.Hoverable = (*CloseButton)(nil)
+	_ fyne.Tappable     = (*GlyphButton)(nil)
+	_ desktop.Hoverable = (*GlyphButton)(nil)
 )
 
 // NewCloseButton creates a close button with the given tap handler.
-func NewCloseButton(onTap func()) *CloseButton {
+func NewCloseButton(onTap func()) *GlyphButton {
+	return NewGlyphButton(fynetheme.CancelIcon(), onTap)
+}
+
+// NewGlyphButton creates the same button wearing res — the way into a card's own
+// menu, drawn on its banner beside the way out of it.
+func NewGlyphButton(res fyne.Resource, onTap func()) *GlyphButton {
 	background := canvas.NewRectangle(color.Transparent)
 	background.CornerRadius = 4
 
-	b := &CloseButton{background: background, icon: newScaledIcon(fynetheme.CancelIcon(), 0)}
+	b := &GlyphButton{background: background, icon: newScaledIcon(res, 0)}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
 
 	return b
 }
 
-func (b *CloseButton) CreateRenderer() fyne.WidgetRenderer {
+func (b *GlyphButton) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewPadded(b.icon)))
 }
 
-func (b *CloseButton) MinSize() fyne.Size {
-	return fyne.NewSize(closeButtonSize, closeButtonSize)
+func (b *GlyphButton) MinSize() fyne.Size {
+	return fyne.NewSize(glyphButtonSize, glyphButtonSize)
 }
 
-func (b *CloseButton) MouseIn(*desktop.MouseEvent) {
+func (b *GlyphButton) MouseIn(*desktop.MouseEvent) {
 	b.background.FillColor = theme.Colors.SwiftActionHoverBg
 	b.background.Refresh()
 }
 
-func (b *CloseButton) MouseOut() {
+func (b *GlyphButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
 }
@@ -663,26 +680,60 @@ func NewTooltip() *Tooltip {
 // Show names obj, placing the label just past its right edge and centred on it.
 // An empty name hides the tooltip instead.
 func (t *Tooltip) Show(text string, obj fyne.CanvasObject) {
+	anchor, size, ok := t.prepare(text, obj)
+	if !ok {
+		return
+	}
+
+	t.place(fyne.NewPos(
+		anchor.X+obj.Size().Width+theme.Sizes.TooltipGap,
+		anchor.Y+(obj.Size().Height-size.Height)/2,
+	))
+}
+
+// ShowAbove names obj with the label centred over it rather than beside it, kept
+// inside the layer's own width and dropped below obj where there is no room over
+// it. That is what a cell in a grid needs: it has neighbours either side, so a
+// label past its right edge names the wrong one.
+func (t *Tooltip) ShowAbove(text string, obj fyne.CanvasObject) {
+	anchor, size, ok := t.prepare(text, obj)
+	if !ok {
+		return
+	}
+
+	x := clamp(anchor.X+(obj.Size().Width-size.Width)/2, 0, max(t.Layer.Size().Width-size.Width, 0))
+
+	y := anchor.Y - size.Height - theme.Sizes.TooltipGap
+	if y < 0 {
+		y = anchor.Y + obj.Size().Height + theme.Sizes.TooltipGap
+	}
+
+	t.place(fyne.NewPos(x, y))
+}
+
+// prepare labels the card and measures it, reporting where obj sits inside the
+// layer. Both positions it reads are canvas-absolute; the difference is the
+// offset inside the layer, wherever the layer itself happens to sit.
+func (t *Tooltip) prepare(text string, obj fyne.CanvasObject) (fyne.Position, fyne.Size, bool) {
 	if text == "" {
 		t.Hide()
-		return
+		return fyne.Position{}, fyne.Size{}, false
 	}
 
 	t.label.Text = text
 	t.label.Refresh()
 
-	// Both positions are canvas-absolute; the difference is the offset inside the
-	// layer, wherever the layer itself happens to sit.
 	driver := fyne.CurrentApp().Driver()
 	anchor := driver.AbsolutePositionForObject(obj).Subtract(driver.AbsolutePositionForObject(t.Layer))
 
 	size := t.card.MinSize()
 	t.card.Resize(size)
-	t.card.Move(fyne.NewPos(
-		anchor.X+obj.Size().Width+theme.Sizes.TooltipGap,
-		anchor.Y+(obj.Size().Height-size.Height)/2,
-	))
 
+	return anchor, size, true
+}
+
+func (t *Tooltip) place(pos fyne.Position) {
+	t.card.Move(pos)
 	t.card.Show()
 	t.card.Refresh() // Show alone neither lays the card out nor repaints it
 }
@@ -903,6 +954,23 @@ func (r *scrollRenderer) Destroy() {
 	}
 
 	r.WidgetRenderer.Destroy()
+}
+
+// SyncContent resizes the content to what it now measures. Fyne's scroller does
+// this from its renderer's Layout, which runs on a Refresh — and refreshing a
+// mounted message column re-wraps every body in it, which is the whole reason
+// nothing here calls Scroll.Refresh after a mount.
+//
+// Without it ScrollToOffset clamps against the size the content was laid out at
+// *before* the mount: a column that has just grown from a screenful to a page of
+// history is scrolled as though it still fitted the viewport, which zeroes the
+// offset. Only a caller that mounts and then scrolls in the same pass needs it.
+func (s *ObservableScroll) SyncContent() {
+	if s.Content == nil {
+		return
+	}
+
+	s.Content.Resize(s.Content.MinSize().Max(s.Size()))
 }
 
 // placeIndicator sizes the bar to the fraction of the content in view and moves

@@ -10,7 +10,10 @@ import (
 )
 
 const (
-	dayLayout   = "January 2, 2006"
+	dayLayout     = "January 2, 2006"
+	weekdayLayout = "Monday, January 2, 2006"
+	numericLayout = "02/01/2006"
+
 	daysInMonth = 30
 	daysInYear  = 365
 )
@@ -19,16 +22,21 @@ const (
 // resolved once: changing the format takes effect on the next repaint, and every
 // caller here is already formatting a string.
 func timeLayout() string {
-	settings := config.Current().Interface
+	return clockLayout(config.Current().Interface.ShowSeconds)
+}
 
-	twelveHour := settings.TimeFormat != config.TimeFormat24
+// clockLayout is that format with the seconds decided by the caller instead. A
+// body's own timestamp names which of the two it wants (MessageTimestamp), where
+// everything else in the client follows the setting.
+func clockLayout(seconds bool) string {
+	twelveHour := config.Current().Interface.TimeFormat != config.TimeFormat24
 
 	switch {
-	case twelveHour && settings.ShowSeconds:
+	case twelveHour && seconds:
 		return "3:04:05 PM"
 	case twelveHour:
 		return "3:04 PM"
-	case settings.ShowSeconds:
+	case seconds:
 		return "15:04:05"
 	}
 
@@ -112,6 +120,76 @@ func NiceTime(t time.Time) string {
 	}
 }
 
+// relativeNow is how near an instant has to be to count as no distance at all.
+// Below it the reader is told "just now" rather than a count of seconds, which
+// is stale by the time it is drawn and never redrawn.
+const relativeNow = 45 * time.Second
+
+// MessageTimestamp renders the instant a <t:seconds:style> in a body names. The
+// style is Revolt's — Discord's set, which it carries verbatim — and says which
+// of the same instant's faces the author asked for, so it is honoured rather
+// than flattened: "R" is the relative one, and an absent style means "f".
+//
+// Everything absolute goes through the configured clock, since a time drawn in a
+// message and a time drawn beside it must not disagree about 12- or 24-hour.
+func MessageTimestamp(t time.Time, style string) string {
+	t = t.Local()
+
+	switch style {
+	case "t":
+		return t.Format(clockLayout(false))
+	case "T":
+		return t.Format(clockLayout(true))
+	case "d":
+		return t.Format(numericLayout)
+	case "D":
+		return t.Format(dayLayout)
+	case "F":
+		return t.Format(weekdayLayout + " " + clockLayout(false))
+	case "R":
+		return RelativeTime(t)
+	}
+
+	return t.Format(dayLayout + " " + clockLayout(false))
+}
+
+// RelativeTime names how far off an instant is, in the coarsest unit that still
+// says something: "5 minutes ago", "in 2 days". It reads forwards as well as
+// back — a timestamp in a body is as often a deadline as a record — which is why
+// it is not NiceTime, that one answering for a message and so only ever looking
+// backwards.
+func RelativeTime(t time.Time) string {
+	distance := time.Until(t)
+
+	ahead := distance > 0
+	if !ahead {
+		distance = -distance
+	}
+	if distance < relativeNow {
+		return "just now"
+	}
+
+	var span string
+	switch {
+	case distance < time.Hour:
+		span = quantity(max(int(distance/time.Minute), 1), "minute")
+	case distance < 24*time.Hour:
+		span = quantity(int(distance/time.Hour), "hour")
+	case distance < daysInMonth*24*time.Hour:
+		span = quantity(int(distance/(24*time.Hour)), "day")
+	case distance < daysInYear*24*time.Hour:
+		span = quantity(int(distance/(daysInMonth*24*time.Hour)), "month")
+	default:
+		span = quantity(int(distance/(daysInYear*24*time.Hour)), "year")
+	}
+
+	if ahead {
+		return "in " + span
+	}
+
+	return span + " ago"
+}
+
 // ShortDuration names a span the way a countdown shows one: "5s", "1m 30s",
 // "2h". It rounds *up* to the next whole second, so a cooldown with a fraction
 // of a second left still reads "1s" rather than "0s" — the badge drawn from this
@@ -138,11 +216,14 @@ func ShortDuration(d time.Duration) string {
 	return fmt.Sprintf("%ds", seconds)
 }
 
-// plural renders "1 month ago" / "3 months ago".
-func plural(count int, unit string) string {
+// quantity renders "1 month" / "3 months".
+func quantity(count int, unit string) string {
 	if count == 1 {
-		return fmt.Sprintf("%d %s ago", count, unit)
+		return fmt.Sprintf("%d %s", count, unit)
 	}
 
-	return fmt.Sprintf("%d %ss ago", count, unit)
+	return fmt.Sprintf("%d %ss", count, unit)
 }
+
+// plural renders "1 month ago" / "3 months ago".
+func plural(count int, unit string) string { return quantity(count, unit) + " ago" }

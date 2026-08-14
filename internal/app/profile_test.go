@@ -7,15 +7,20 @@ import (
 	"RGOClient/internal/ui"
 )
 
-// labels is what a card would draw, in order, with a disabled button marked —
-// that difference is load-bearing for the outgoing case, where the state is the
-// whole of what the first button says.
+// labels is what a card would draw, in order, with a disabled button and one
+// filed behind the hamburger each marked. Both differences are load-bearing: the
+// outgoing case's state is the whole of what its first button says, and where an
+// action is drawn is what keeps a profile from leading with a way to block the
+// person it names.
 func labels(buttons []ui.ProfileButton) []string {
 	out := make([]string, len(buttons))
 	for i, button := range buttons {
 		out[i] = button.Label
 		if button.Do == nil {
 			out[i] += " (disabled)"
+		}
+		if button.Overflow {
+			out[i] += " (menu)"
 		}
 	}
 
@@ -28,7 +33,12 @@ func labels(buttons []ui.ProfileButton) []string {
 // it to a stranger is a button that could only fail — and offering "Add friend"
 // to a bot is one nothing would ever accept.
 func TestProfileButtons(t *testing.T) {
-	const self = "01SELF"
+	// Copying the ID is the one thing offered about anybody — including this
+	// account, whose card the relationship policy answers for with nothing.
+	const (
+		self   = "01SELF"
+		copyID = "Copy user ID (menu)"
+	)
 
 	cases := []struct {
 		name         string
@@ -37,20 +47,20 @@ func TestProfileButtons(t *testing.T) {
 		bot          bool
 		want         []string
 	}{
-		{name: "your own profile", userID: self},
+		{name: "your own profile", userID: self, want: []string{copyID}},
 		{name: "nobody", userID: ""},
-		{name: "a bot", userID: "01BOT", bot: true, want: []string{"Message"}},
-		{name: "a stranger", userID: "01U", want: []string{"Add friend", "Block"}},
+		{name: "a bot", userID: "01BOT", bot: true, want: []string{"Message", copyID}},
+		{name: "a stranger", userID: "01U", want: []string{"Add friend", "Block (menu)", copyID}},
 		{name: "a friend", userID: "01U", relationship: domain.RelationshipFriend,
-			want: []string{"Message", "Remove friend"}},
+			want: []string{"Message", "Remove (menu)", "Block (menu)", copyID}},
 		{name: "they asked", userID: "01U", relationship: domain.RelationshipIncoming,
-			want: []string{"Accept request", "Ignore"}},
+			want: []string{"Accept request", "Ignore", copyID}},
 		{name: "we asked", userID: "01U", relationship: domain.RelationshipOutgoing,
-			want: []string{"Request sent (disabled)", "Cancel request"}},
+			want: []string{"Request sent (disabled)", "Cancel request", copyID}},
 		{name: "we blocked them", userID: "01U", relationship: domain.RelationshipBlocked,
-			want: []string{"Unblock"}},
+			want: []string{"Unblock", copyID}},
 		{name: "they blocked us", userID: "01U", relationship: domain.RelationshipBlockedBy,
-			want: []string{"Block"}},
+			want: []string{"Block (menu)", copyID}},
 	}
 
 	a := &App{store: storeStub{selfID: self}}

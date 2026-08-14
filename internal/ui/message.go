@@ -23,6 +23,11 @@ const (
 	// floating action buttons so they don't flicker.
 	hoverHideDelay = 50 * time.Millisecond
 
+	// flashDuration is how long the wash marking a jumped-to message takes to
+	// fade. Long enough to find the row after the column moved under the reader,
+	// short enough not to read as a state the message is in.
+	flashDuration = 1200 * time.Millisecond
+
 	maxReplyUsernameLength = 16
 	maxReplyPreviewLength  = 80
 	replyPreviewAvatarSize = 16
@@ -103,6 +108,11 @@ type MessageWidget struct {
 	overMessage bool
 	overChild   bool
 	hideTimer   *time.Timer
+
+	// flash is the wash a jump leaves on the row it landed on, fading back to the
+	// rest fill. Kept so a second jump — or the pointer arriving, which is the
+	// reader having found the row — takes it off rather than fighting it.
+	flash *fyne.Animation
 }
 
 var (
@@ -284,6 +294,14 @@ func (w *MessageWidget) canPin(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionManageMessages)
 }
 
+// canClearReactions reports whether taking every reaction off should be offered.
+// A message carrying none is not asked about — there is nothing to clear, and the
+// item would be the only one in the menu that never does anything — which also
+// covers a system message, Revolt refusing a reaction to one.
+func (w *MessageWidget) canClearReactions(permissions domain.Permission) bool {
+	return len(w.message.Reactions) > 0 && permissions.Has(domain.PermissionManageMessages)
+}
+
 // canReact reports whether the chips under a message answer a click. A system
 // event is the channel narrating itself and Revolt refuses a reaction to one, so
 // the row is not offered there at all — which is also why nothing draws it: a
@@ -398,9 +416,20 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 		}),
 	)
 
-	if w.canDelete(permissions) {
-		items = append(items, fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItemWithIcon("Delete", tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }))
+	// The two that take something away from everybody sit together under the last
+	// separator, furthest from the copy helpers a misaimed click would otherwise
+	// land on.
+	clearable, deletable := w.canClearReactions(permissions), w.canDelete(permissions)
+	if clearable || deletable {
+		items = append(items, fyne.NewMenuItemSeparator())
+	}
+	if clearable {
+		items = append(items, fyne.NewMenuItemWithIcon("Clear reactions",
+			tintedIcon(assets.ActionEmojiIcon, theme.Colors.SwiftActionDanger), func() { act.OnClearReactions(w.message) }))
+	}
+	if deletable {
+		items = append(items, fyne.NewMenuItemWithIcon("Delete",
+			tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }))
 	}
 
 	return items
@@ -572,8 +601,73 @@ func (w *MessageWidget) ensureActions() {
 
 // setHighlighted paints (or clears) the row's hover background.
 func (w *MessageWidget) setHighlighted(on bool) {
+	w.stopFlash() // the pointer arriving is the reader having found the row
 	w.background.FillColor = w.fill(on)
 	w.background.Refresh()
+}
+
+/* The jump mark */
+
+// Flash washes the row and fades it back out, marking the message a jump landed
+// on. It is not a state the widget holds: fill() is untouched, so the row goes
+// on answering the pointer, and the last tick hands the background back to
+// whatever fill() says.
+//
+// The fade runs between two opaque colours rather than down the wash's alpha.
+// The palette writes straight alpha into color.RGBA, which Go's compositor reads
+// as premultiplied — see theme.Fade — so a wash faded that way darkens the row
+// on its way out instead of leaving it. What it fades *to* is therefore the
+// colour behind a row at rest rather than the transparency it will end on.
+func (w *MessageWidget) Flash() {
+	w.stopFlash()
+
+	from, to := theme.Colors.MessageJumpBackground, w.restBackdrop()
+	w.flash = fyne.NewAnimation(flashDuration, func(done float32) {
+		if done >= 1 {
+			w.background.FillColor = w.fill(w.overMessage || w.overChild)
+		} else {
+			w.background.FillColor = mixColor(from, to, done)
+		}
+		canvas.Refresh(w.background)
+	})
+
+	// Held, then let go: an ease-out curve would spend most of the second on a
+	// colour too faint to have found anything by.
+	w.flash.Curve = fyne.AnimationEaseIn
+	w.flash.Start()
+}
+
+func (w *MessageWidget) stopFlash() {
+	if w.flash == nil {
+		return
+	}
+
+	w.flash.Stop()
+	w.flash = nil
+}
+
+// restBackdrop is what a row at rest is seen against: its own wash where it has
+// one, and otherwise the message area behind it, a row's rest fill being
+// transparent.
+func (w *MessageWidget) restBackdrop() color.Color {
+	if w.mentioned {
+		return theme.Colors.MessageMentionBackground
+	}
+
+	return theme.Colors.MessageAreaBackground
+}
+
+// mixColor is from at 0 and to at 1, taking both as opaque.
+func mixColor(from, to color.Color, at float32) color.Color {
+	fr, fg, fb, _ := from.RGBA()
+	tr, tg, tb, _ := to.RGBA()
+
+	// RGBA reports 16-bit channels; 257 is what takes one back to 8.
+	lerp := func(a, b uint32) uint8 {
+		return uint8((float32(a) + (float32(b)-float32(a))*at) / 257)
+	}
+
+	return color.RGBA{R: lerp(fr, tr), G: lerp(fg, tg), B: lerp(fb, tb), A: 0xFF}
 }
 
 // fill is the row's background at rest and under the pointer. A message that
@@ -972,6 +1066,55 @@ func (l *daySeparatorLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(w+l.gap, h)
 }
 
+/* Status line */
+
+// NewMessageStatus is the line the column draws in place of messages. A nil mark
+// draws the sentence alone: what earns one is a state the reader is looking at
+// rather than waiting on, an empty channel being the whole of what is there.
+func NewMessageStatus(mark fyne.Resource, text string) fyne.CanvasObject {
+	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	if mark == nil {
+		return container.NewCenter(label)
+	}
+
+	side := theme.Sizes.MessageStatusMarkSize
+	icon := newScaledIcon(tintedIcon(mark, theme.Colors.MessageStatusMark), side)
+
+	// The mark is boxed at its own size before it goes in the row: a row hands
+	// every child the full height, and an unboxed image would be drawn at the
+	// height of the label's padding rather than at the size asked for.
+	box := container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), icon))
+	row := HBoxNoSpacing(box, HorizontalSpacer(theme.Sizes.MessageStatusGap), label)
+
+	return container.NewCenter(row)
+}
+
+/* Channel note */
+
+// NewChannelNote is the strip under the message header, saying what the client
+// cannot do in the channel below it. It is a standing caption rather than a
+// notice: what it says is true for as long as the channel is open, so it cannot
+// be something that fades, and it is not the message column's own status line
+// either — that one stands *in place of* messages, and a voice channel's
+// messages are still there to be read.
+//
+// The sentence is shortened rather than wrapped: it lives in a fixed-height
+// strip that must not grow the column, and NewFillRow hands it the leftover
+// width an ellipsis box needs to fit itself into.
+func NewChannelNote(mark fyne.Resource, text string) fyne.CanvasObject {
+	label := canvas.NewText(text, theme.Colors.ChannelNoteText)
+	label.TextSize = theme.Sizes.ChannelNoteTextSize
+
+	side := theme.Sizes.ChannelNoteMarkSize
+	icon := newScaledIcon(tintedIcon(mark, theme.Colors.ChannelNoteText), side)
+	box := container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), icon))
+
+	row := NewFillRow(2, box, HorizontalSpacer(theme.Sizes.ChannelNoteGap), NewEllipsisText(label))
+	padV, padH := theme.Sizes.ChannelNotePaddingV, theme.Sizes.ChannelNotePaddingH
+
+	return NewInset(row, padV, padV, padH, padH)
+}
+
 /* Reply previews */
 
 // buildReplyBlock stacks the quoted lines above the message answering them,
@@ -1065,19 +1208,25 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 	p.content = canvas.NewText("", theme.Colors.TimestampText)
 	p.content.TextSize = replyPreviewTextSize
 
+	// A line that found nothing to quote leads nowhere: everything a mounted reply
+	// names has been asked for by the time it is drawn, so one still unresolved is
+	// a message that was deleted, and a jump could only report that again.
 	quote := NewTappableContainer(HBoxNoSpacing(
 		container.NewCenter(p.avatar),
 		HorizontalSpacer(8),
 		container.NewCenter(p.author),
 		HorizontalSpacer(5),
 		container.NewCenter(p.content),
-	), func() {})
+	), func() {
+		if p.Resolved(deps) {
+			deps.Actions.OnJumpToMessage(channelID, messageID)
+		}
+	})
 	quote.onSecondaryTap = onMenu
 
 	// The elbow both indents the quote to the message content column and draws the
 	// line down to the message. The row's own horizontal margin is already applied
 	// around the block, so it only has the gutter and the gap after it to span.
-	// TODO: navigate to the referenced message on tap.
 	p.row = HBoxNoSpacing(newReplyLine(), quote)
 	p.set(deps)
 

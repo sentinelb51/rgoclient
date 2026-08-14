@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -259,6 +260,42 @@ func (c *Client) clearReaction(channelID, messageID, emoji string) bool {
 	return c.messages.Replace(channelID, &updated)
 }
 
+// ClearReactions takes every reaction off a message at once, which Revolt allows
+// only with ManageMessages.
+//
+// The cache is written here, as a pin's is, and for the same reason: Revolt
+// announces this as an ordinary message update carrying an empty reaction map,
+// and a field revoltgo did not receive arrives empty too — so the event cannot be
+// read for it. What this client clears is the only clear that reflects.
+func (c *Client) ClearReactions(channelID, messageID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	if err := session.ChannelMessageReactionClear(channelID, messageID); err != nil {
+		return err
+	}
+	c.clearAllReactions(channelID, messageID)
+
+	return nil
+}
+
+// clearAllReactions empties a cached message's reactions, reporting whether
+// anything moved. The entry is replaced with a copy, as everywhere here: cached
+// messages are read without the cache lock.
+func (c *Client) clearAllReactions(channelID, messageID string) bool {
+	current := c.messages.Find(channelID, messageID)
+	if current == nil || len(current.Reactions) == 0 {
+		return false
+	}
+
+	updated := *current
+	updated.Reactions = nil
+
+	return c.messages.Replace(channelID, &updated)
+}
+
 // withUser adds or removes one user from a reaction's list, reporting whether it
 // had to. The list is copied only when it changes, so an echo of something
 // already recorded allocates nothing.
@@ -438,6 +475,105 @@ func (c *Client) HistoryBefore(channelID, beforeID string, limit int) ([]*domain
 	}
 
 	return c.messages.Prepend(channelID, toMessages(page.Messages)), nil
+}
+
+// MessagesAround fetches a page centred on one message, for a jump to something
+// too far back to be cached. Revolt takes half the limit either side and
+// includes the message itself, so a page asked for as n comes back as n+2.
+func (c *Client) MessagesAround(channelID, messageID string, limit int) ([]*domain.Message, error) {
+	return c.messagePage(channelID, revoltgo.ChannelMessagesParams{
+		Nearby:       messageID,
+		Limit:        limit,
+		IncludeUsers: true,
+	})
+}
+
+// MessagesBefore and MessagesAfter extend such a window in either direction.
+// After sorts oldest-first deliberately: Revolt's default is newest-first, which
+// with an anchor asks for the newest messages that happen to be after it — the
+// live tail rather than what follows the window.
+func (c *Client) MessagesBefore(channelID, beforeID string, limit int) ([]*domain.Message, error) {
+	return c.messagePage(channelID, revoltgo.ChannelMessagesParams{
+		Before:       beforeID,
+		Limit:        limit,
+		IncludeUsers: true,
+	})
+}
+
+func (c *Client) MessagesAfter(channelID, afterID string, limit int) ([]*domain.Message, error) {
+	return c.messagePage(channelID, revoltgo.ChannelMessagesParams{
+		After:        afterID,
+		Sort:         revoltgo.ChannelMessagesParamsSortTypeOldest,
+		Limit:        limit,
+		IncludeUsers: true,
+	})
+}
+
+// messagePage is the request those three share, and none of them writes to the
+// cache. That cache is the contiguous tail of a channel, and a jump lands
+// wherever somebody was quoted — a page from there filed among its messages
+// would leave a hole that scrollback would mount as though it were history. The
+// caller holds what comes back for as long as it has it on screen.
+//
+// The page is sorted rather than reversed: only Before and After promise an
+// order, and the one Nearby answers in is written down nowhere. Message IDs are
+// ULIDs, so ordering them is ordering them by time.
+func (c *Client) messagePage(channelID string, params revoltgo.ChannelMessagesParams) ([]*domain.Message, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+	if !c.claim(c.fetching, channelID) {
+		return nil, ErrBusy
+	}
+	defer c.release(c.fetching, channelID)
+
+	page, err := session.ChannelMessages(channelID, params)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := toMessages(page.Messages)
+	slices.SortFunc(messages, func(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) })
+
+	return messages, nil
+}
+
+// PinnedMessages lists what is pinned in a channel, newest first. It is the only
+// way to enumerate them: a pin is a flag on the message and Revolt publishes no
+// collection of them, so the search route asked with pinned and no query is what
+// answers.
+//
+// Nothing is written to the message cache, for the reason messagePage gives — a
+// pin reaches as far back as anybody cared to keep something, while the cache is
+// a channel's contiguous tail — and nothing may ask for the users either: with
+// include_users the route answers with an object rather than an array, which is
+// a shape revoltgo's ChannelSearch cannot decode. The caller resolves the authors
+// it does not already know.
+//
+// Sort is named rather than left out. The route's default is Relevance, and with
+// no query to be relevant to that is an order nobody chose.
+func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+
+	page, err := session.ChannelSearch(channelID, revoltgo.ChannelSearchParams{
+		ChannelMessagesParams: revoltgo.ChannelMessagesParams{
+			Limit: limit,
+			Sort:  revoltgo.ChannelMessagesParamsSortTypeLatest,
+		},
+		Pinned: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	messages := toMessages(page)
+	slices.SortFunc(messages, func(a, b *domain.Message) int { return strings.Compare(b.ID, a.ID) })
+
+	return messages, nil
 }
 
 // claim reserves key in one of the in-flight guards, reporting false when another
@@ -839,6 +975,74 @@ const MaxStatusText = 128
 // remove. An empty Text is *omitted* from the request rather than sent, so
 // clearing the line is the one change that cannot be expressed as a value.
 const fieldStatusText = "StatusText"
+
+// The display name's bounds are Revolt's, which refuses anything outside them.
+const (
+	MinDisplayName = 2
+	MaxDisplayName = 32
+)
+
+// fieldDisplayName names the display name in that same list. UserEditParams
+// models it as a plain string with omitempty, so clearing it is the same shape
+// clearing the status line is.
+const fieldDisplayName = "DisplayName"
+
+// ErrDisplayNameShort reports a name too short for Revolt to take. Empty is not
+// short — it is the removal — so the two cannot share an answer.
+var ErrDisplayNameShort = errors.New("display name too short")
+
+// SetDisplayName publishes the name shown wherever this account is named. Blank
+// removes it, leaving the username to stand for the account.
+//
+// Unlike a status line the name is a single field, so nothing has to be read back
+// and sent again with it: Revolt applies the edit as a partial.
+func (c *Client) SetDisplayName(name string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	self := session.State.Self()
+	if self == nil {
+		return ErrNoSession
+	}
+
+	name, ok := cleanDisplayName(name)
+	if !ok {
+		return ErrDisplayNameShort
+	}
+
+	params := revoltgo.UserEditParams{DisplayName: name}
+	if name == "" {
+		params.Remove = []string{fieldDisplayName}
+	}
+
+	_, err := session.UserEdit(self.ID, params)
+
+	return err
+}
+
+// cleanDisplayName is what Revolt will take of a typed name, and whether it can
+// be sent at all. The characters its pattern forbids are dropped rather than
+// refused — a newline arriving with a pasted name is nobody's decision — and a
+// long name is cut, as a status line is. A name too short has no honest repair,
+// so it is the one case reported back; empty is the removal and always allowed.
+func cleanDisplayName(name string) (string, bool) {
+	name = strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\r' || r == '\u200b' { // the zero-width space Revolt's pattern forbids
+			return -1
+		}
+
+		return r
+	}, name)
+
+	name = strings.TrimSpace(name)
+	if runes := []rune(name); len(runes) > MaxDisplayName {
+		name = strings.TrimSpace(string(runes[:MaxDisplayName]))
+	}
+
+	return name, name == "" || utf8.RuneCountInString(name) >= MinDisplayName
+}
 
 // SetPresence publishes how this account should appear to everybody else.
 //

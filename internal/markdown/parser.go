@@ -3,6 +3,7 @@ package markdown
 import (
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Parse turns a raw message string into a Document.
@@ -148,6 +149,11 @@ func writePlain(b *strings.Builder, nodes []Inline) {
 			// Nothing stands in for one. Its name lives on the server, this package
 			// has no session to ask, and the ID is 26 characters of noise in a line
 			// that was asked for because there was no room for the message.
+		case *Timestamp:
+			// The reader's clock format and their "2 hours ago" are the renderer's to
+			// decide (util.MessageTimestamp), so a preview takes the plainest reading
+			// of the same instant rather than the one the body will show.
+			b.WriteString(v.Time.Local().Format("2 Jan 2006 15:04"))
 		}
 	}
 }
@@ -579,9 +585,10 @@ func matchInline(s string, prevWord bool) (Inline, int) {
 // through to literal text after a few bytes.
 const mentionIDMaxLen = 64
 
-// matchAngle matches what opens with '<': a mention, or a bracketed URL. A future
-// kind of mention — a role, a server — is one more case here and one more node in
-// markdown.go; the ID rule and everything downstream is already shared.
+// matchAngle matches what opens with '<': a mention, a timestamp, or a bracketed
+// URL. A future kind of mention — a role, a server — is one more case here and one
+// more node in markdown.go; the ID rule and everything downstream is already
+// shared.
 func matchAngle(s string) (Inline, int) {
 	if len(s) < 2 {
 		return nil, 0
@@ -592,6 +599,12 @@ func matchAngle(s string) (Inline, int) {
 		return matchReference(s, func(id string) Inline { return &UserMention{UserID: id} })
 	case '#':
 		return matchReference(s, func(id string) Inline { return &ChannelMention{ChannelID: id} })
+	case 't':
+		// Falls through on a miss rather than returning: 't' is also a scheme byte,
+		// so <tftp://host> reaches here and is a bracketed URL.
+		if node, width := matchTimestamp(s); node != nil {
+			return node, width
+		}
 	}
 
 	return matchAngleURL(s)
@@ -615,6 +628,67 @@ func matchReference(s string, build func(id string) Inline) (Inline, int) {
 	}
 
 	return nil, 0
+}
+
+// timestampMaxDigits bounds the seconds a timestamp may carry. It is what stops
+// a run of digits inside prose that opened with "<t:" from being scanned to the
+// end of the body; anything this long is not an instant anybody meant.
+const timestampMaxDigits = 20
+
+// matchTimestamp matches a <t:1700000000> or <t:1700000000:F> instant.
+//
+// The style is validated against the letters Revolt defines rather than taken
+// verbatim, because an unknown one has no rendering to fall back to: drawing it
+// as the default would silently show the wrong face of the same instant, where
+// leaving the whole thing literal shows what the author actually typed.
+func matchTimestamp(s string) (Inline, int) {
+	if !strings.HasPrefix(s, "<t:") {
+		return nil, 0
+	}
+
+	i := len("<t:")
+	if i < len(s) && s[i] == '-' {
+		i++ // an instant before the epoch
+	}
+
+	digits := i
+	for i < len(s) && i-digits < timestampMaxDigits && '0' <= s[i] && s[i] <= '9' {
+		i++
+	}
+	if i == digits {
+		return nil, 0
+	}
+
+	seconds, err := strconv.ParseInt(s[len("<t:"):i], 10, 64)
+	if err != nil {
+		return nil, 0
+	}
+
+	style := ""
+	if i < len(s) && s[i] == ':' {
+		if i+2 >= len(s) || !isTimestampStyle(s[i+1]) {
+			return nil, 0
+		}
+		style = s[i+1 : i+2]
+		i += 2
+	}
+	if i >= len(s) || s[i] != '>' {
+		return nil, 0
+	}
+
+	return &Timestamp{Time: time.Unix(seconds, 0), Style: style}, i + 1
+}
+
+// isTimestampStyle reports whether b names one of the faces an instant can be
+// drawn as: short and long clock times, a numeric and a written date, both
+// together with and without the weekday, and the relative one.
+func isTimestampStyle(b byte) bool {
+	switch b {
+	case 't', 'T', 'd', 'D', 'f', 'F', 'R':
+		return true
+	}
+
+	return false
 }
 
 // emojiIDLen is the exact length of the ULID between a custom emoji's colons.

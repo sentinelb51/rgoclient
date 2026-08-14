@@ -143,6 +143,7 @@ func newTestSettingsPage() *SettingsPage {
 		LogOutEverywhere: func() {},
 		SetPresence:      func(domain.Presence) {},
 		SetStatusText:    func(string) {},
+		SetDisplayName:   func(string) {},
 
 		CacheDir:       func() string { return "" },
 		ChooseCacheDir: func(func(string)) {},

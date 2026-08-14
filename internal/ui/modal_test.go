@@ -28,7 +28,9 @@ func (stubActions) OnEdit(*domain.Message)                     {}
 func (stubActions) OnDelete(*domain.Message)                   {}
 func (stubActions) OnPin(*domain.Message, bool)                {}
 func (stubActions) OnReact(*domain.Message, string, bool)      {}
+func (stubActions) OnClearReactions(*domain.Message)           {}
 func (stubActions) ResolveMessage(_, _ string) *domain.Message { return nil }
+func (stubActions) OnJumpToMessage(_, _ string)                {}
 
 // OnPickEmoji never opens anything: the picker is a pop-up on a canvas, which a
 // widget test has no business raising.

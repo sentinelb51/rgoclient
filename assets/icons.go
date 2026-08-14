@@ -19,6 +19,15 @@ var membersSVG []byte
 //go:embed bot.svg
 var botSVG []byte
 
+//go:embed notes.svg
+var notesSVG []byte
+
+//go:embed empty-channel.svg
+var emptyChannelSVG []byte
+
+//go:embed voice.svg
+var voiceSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
@@ -45,6 +54,14 @@ var systemIcons embed.FS
 //go:embed action-*.svg
 var actionIcons embed.FS
 
+// The marks on a profile's two dates. They are a set of their own rather than
+// borrowed from the system events, because these say what the line beside them
+// is *about* — the account, and the membership — where a system mark says which
+// event a row announces.
+//
+//go:embed profile-*.svg
+var profileIcons embed.FS
+
 var (
 	// MentionIcon marks the "also mention the author" toggle on a reply card.
 	MentionIcon fyne.Resource = fyne.NewStaticResource("mention.svg", mentionSVG)
@@ -54,6 +71,19 @@ var (
 
 	// BotIcon follows the name of an account Revolt marks as a bot.
 	BotIcon fyne.Resource = fyne.NewStaticResource("bot.svg", botSVG)
+
+	// NotesIcon prefixes Saved Notes, the one conversation that is nobody else —
+	// so the avatar every other conversation is led by would be this account's own
+	// picture standing in for a notepad.
+	NotesIcon fyne.Resource = fyne.NewStaticResource("notes.svg", notesSVG)
+
+	// EmptyChannelIcon leads the line the message column draws when a channel has
+	// nothing in it.
+	EmptyChannelIcon fyne.Resource = fyne.NewStaticResource("empty-channel.svg", emptyChannelSVG)
+
+	// VoiceIcon prefixes a server's voice channels and leads the note saying the
+	// client can only type in one.
+	VoiceIcon fyne.Resource = fyne.NewStaticResource("voice.svg", voiceSVG)
 
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)
@@ -110,6 +140,13 @@ var (
 	ActionEmojiIcon = actionIcon("action-emoji.svg")
 )
 
+// A profile's dates: when the account was made, and when it joined the server
+// the profile was opened in.
+var (
+	ProfileCreatedIcon = profileIcon("profile-created.svg")
+	ProfileJoinedIcon  = profileIcon("profile-joined.svg")
+)
+
 // settingsIcon reads one of the embedded section marks. The file list is a
 // compile-time embed, so a name that is not there is a build error rather than
 // something to report at runtime.
@@ -125,6 +162,11 @@ func systemIcon(name string) fyne.Resource {
 // actionIcon reads one of the embedded message-action marks.
 func actionIcon(name string) fyne.Resource {
 	return embedded(actionIcons, name)
+}
+
+// profileIcon reads one of the embedded profile marks.
+func profileIcon(name string) fyne.Resource {
+	return embedded(profileIcons, name)
 }
 
 // embedded reads a file out of one of the icon sets. Every set is a compile-time

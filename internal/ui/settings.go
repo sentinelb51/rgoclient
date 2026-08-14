@@ -108,6 +108,12 @@ type SettingsHooks struct {
 	// it. It hears back the same way SetPresence does — not at all.
 	SetStatusText func(text string)
 
+	// SetDisplayName publishes the name shown in place of the username, blank
+	// removing it. The controller decides what is short enough to refuse and says
+	// so itself, the limit being Revolt's and this page having no business
+	// holding it.
+	SetDisplayName func(name string)
+
 	/* Cache */
 
 	CacheDir func() string

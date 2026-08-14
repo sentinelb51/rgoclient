@@ -411,7 +411,7 @@ func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 	}
 
 	a.setHeader(a.channelHeader, channel.Name)
-	a.setChannelGlyph()
+	a.syncChannelKind()
 	a.syncComposer()
 
 	// The overwrites may have taken the channel away entirely, in which case the

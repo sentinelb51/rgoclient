@@ -63,7 +63,8 @@ func presenceValue(presence domain.Presence) string {
 }
 
 func (p *SettingsPage) accountSection() []settingsGroup {
-	groups := []settingsGroup{p.group("Signed in as", "", p.identityRow(), p.presenceRow(), p.statusRow())}
+	groups := []settingsGroup{p.group("Signed in as", "",
+		p.identityRow(), p.displayNameRow(), p.presenceRow(), p.statusRow())}
 
 	var cards []fyne.CanvasObject
 	for _, session := range p.hooks.Sessions() {
@@ -122,6 +123,25 @@ func (p *SettingsPage) identityRow() fyne.CanvasObject {
 	}
 
 	return p.row(self.Name, self.Handle, newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL))
+}
+
+// displayNameRow is the name shown wherever the account is named. The field
+// holds domain.User.DisplayName rather than Name: Name has already fallen back
+// to the username, and a field pre-filled with that would send the username back
+// as a chosen name on the first blur that followed a keystroke.
+//
+// It is written back no more than the two rows under it are, and for the same
+// reason — the change returns through the gateway.
+func (p *SettingsPage) displayNameRow() fyne.CanvasObject {
+	self, ok := p.hooks.Deps.Store.Self()
+	if !ok {
+		return nil
+	}
+
+	entry := newCommitEntry(self.DisplayName, p.hooks.SetDisplayName)
+	entry.PlaceHolder = self.Username
+
+	return p.row("Display name", "Shown instead of your username. Clear it to remove it.", textField(entry))
 }
 
 // presenceRow sets how the account appears to everybody else. Nothing is written

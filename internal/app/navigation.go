@@ -1,6 +1,7 @@
 package app
 
 import (
+	"iter"
 	"log"
 	"slices"
 	"strings"
@@ -130,10 +131,15 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	pad := theme.Sizes.ChannelSidebarPadding
 	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
 		container.NewVScroll(a.channelList))
-	content := container.NewBorder(container.NewPadded(a.serverHeader), nil, nil, nil, scroll)
+
+	// The pinned group sits outside that padding and above the scroll: it is the
+	// full width of the column, which is what says it is not one of the rows
+	// below, and it does not scroll away from what it leads to.
+	header := ui.VBoxNoSpacing(container.NewPadded(a.serverHeader), a.channelTop)
+	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
 
 	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background,
-		ui.NewFillRow(0, content, ui.NewColumnDivider()))
+		ui.NewFillRow(0, a.channelColumn, ui.NewColumnDivider()))
 }
 
 // refreshChannelList rebuilds the channel rows for the current server, grouping
@@ -153,9 +159,22 @@ func (a *App) refreshChannelList() {
 		// replaced wholesale, so a row held across one would be a widget in no
 		// container. What it marks is re-derived below.
 		a.friendsRow = ui.NewFriendsRow(a.showFriends)
-		a.channelList.Add(a.friendsRow)
+
+		// Neither of these is a conversation with somebody, so they are pinned as
+		// their own group rather than sorted among the ones that are — Saved Notes
+		// by its last message, which would move it about, and the friends list by
+		// nothing at all.
+		group := []fyne.CanvasObject{a.friendsRow}
+		saved := a.savedNotesID()
+		if w := a.newChannelRow(saved); w != nil {
+			group = append(group, w)
+		}
+		a.setChannelGroup(group)
 
 		for _, channelID := range a.dmChannels {
+			if channelID == saved {
+				continue
+			}
 			if w := a.newChannelRow(channelID); w != nil {
 				a.channelList.Add(w)
 			}
@@ -167,6 +186,7 @@ func (a *App) refreshChannelList() {
 	}
 
 	a.friendsRow = nil
+	a.setChannelGroup(nil)
 
 	server, ok := a.currentServer()
 	if !ok {
@@ -242,6 +262,37 @@ func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 	w.Menu = func() []*fyne.MenuItem { return a.channelMenu(channelID) }
 
 	return w
+}
+
+// setChannelGroup fills the block pinned above the channel list, or empties it
+// for a server, which has nothing to pin. The divider is added with the rows
+// rather than kept in the column: it is what marks the group off from the list,
+// and an empty group has nothing to mark off.
+//
+// The block's height is what the column places the list from, so the sidebar is
+// laid out again rather than merely repainted — Fyne reclaims nothing for a slot
+// whose minimum has shrunk.
+func (a *App) setChannelGroup(rows []fyne.CanvasObject) {
+	if len(rows) > 0 {
+		rows = append(rows, ui.NewRowDivider())
+	}
+
+	a.channelTop.Objects = rows
+	a.channelTop.Refresh()
+	ui.Relayout(a.channelColumn)
+}
+
+// savedNotesID is the account's own conversation, which Revolt files among the
+// direct messages like any other. Read off the kind rather than held, the list
+// being a fetched snapshot that is replaced wholesale.
+func (a *App) savedNotesID() string {
+	for _, channelID := range a.dmChannels {
+		if channel, ok := a.store.Channel(channelID); ok && channel.Kind == domain.ChannelSavedMessages {
+			return channelID
+		}
+	}
+
+	return ""
 }
 
 // applyChannelState paints a channel row from what the app currently knows about
@@ -543,7 +594,7 @@ func (a *App) selectChannel(channelID string) {
 	viewable := known && a.canViewChannel(channel)
 	a.currentChannelID = channelID
 
-	a.setChannelGlyph()
+	a.syncChannelKind()
 	if known {
 		a.setHeader(a.channelHeader, channel.Name)
 		if viewable && unread && channel.LastMessageID != "" {
@@ -590,7 +641,7 @@ func (a *App) clearChannelSelection() {
 	a.currentChannelID = ""
 	a.clearMessages()
 	a.setHeader(a.channelHeader, "")
-	a.setChannelGlyph()
+	a.syncChannelKind()
 	a.syncChannelList()
 	a.refreshSlowmode()
 	a.refreshTyping()
@@ -611,15 +662,29 @@ func (a *App) syncServerSelection(selectedID string) {
 	}
 }
 
+// channelRows walks every mounted channel row: the group pinned above the list
+// and the list itself. Saved Notes is in the first and answers to selection,
+// unread and typing exactly as the conversations under it do, so a walk that
+// knew only the list would leave one row that never repaints.
+func (a *App) channelRows() iter.Seq[*ui.ChannelWidget] {
+	return func(yield func(*ui.ChannelWidget) bool) {
+		for _, host := range [...]*fyne.Container{a.channelTop, a.channelList} {
+			for _, obj := range host.Objects {
+				if w, ok := obj.(*ui.ChannelWidget); ok && !yield(w) {
+					return
+				}
+			}
+		}
+	}
+}
+
 // syncChannelList refreshes the selection, unread and typing state of every
 // channel row.
 func (a *App) syncChannelList() {
 	animate := config.Current().Behaviour.TypingAnimation
 
-	for _, obj := range a.channelList.Objects {
-		if w, ok := obj.(*ui.ChannelWidget); ok {
-			a.applyChannelState(w, animate)
-		}
+	for w := range a.channelRows() {
+		a.applyChannelState(w, animate)
 	}
 }
 
@@ -632,10 +697,8 @@ func (a *App) syncChannelList() {
 // a second on behalf of a row nothing can see, and every rebuild of a sidebar
 // somebody is typing in adds another.
 func (a *App) releaseChannelRows() {
-	for _, obj := range a.channelList.Objects {
-		if w, ok := obj.(*ui.ChannelWidget); ok {
-			w.SetTyping(false, false)
-		}
+	for w := range a.channelRows() {
+		w.SetTyping(false, false)
 	}
 }
 
@@ -643,8 +706,8 @@ func (a *App) releaseChannelRows() {
 // Used on the per-message hot path, so an incoming message in a background
 // channel doesn't refresh the entire sidebar.
 func (a *App) refreshChannelRow(channelID string) {
-	for _, obj := range a.channelList.Objects {
-		if w, ok := obj.(*ui.ChannelWidget); ok && w.Channel.ID == channelID {
+	for w := range a.channelRows() {
+		if w.Channel.ID == channelID {
 			a.applyChannelState(w, config.Current().Behaviour.TypingAnimation)
 			return
 		}

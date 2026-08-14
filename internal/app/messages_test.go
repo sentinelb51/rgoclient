@@ -155,6 +155,28 @@ func TestSortConversations(t *testing.T) {
 	}
 }
 
+// A jump mounts a window around its target, and the one thing it cannot get
+// wrong is losing the target out of it — at either end, where the window is
+// clamped, and at every span the settings allow including zero.
+func TestWindowAround(t *testing.T) {
+	const n = 10
+
+	for _, span := range []int{0, 1, 4, 25} {
+		for i := range n {
+			from, to := windowAround(n, i, span)
+
+			switch {
+			case from < 0 || to > n || from >= to:
+				t.Fatalf("span %d, target %d: window [%d:%d] is not inside [0:%d]", span, i, from, to, n)
+			case i < from || i >= to:
+				t.Fatalf("span %d: window [%d:%d] does not contain the target", span, from, to)
+			case to-from > 2*span+1:
+				t.Fatalf("span %d, target %d: window [%d:%d] is wider than asked for", span, i, from, to)
+			}
+		}
+	}
+}
+
 func TestToReplies(t *testing.T) {
 	pending := []ui.Reply{{ID: "01A", ChannelID: "01CH", Mention: true}, {ID: "01B", ChannelID: "01CH"}}
 

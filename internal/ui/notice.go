@@ -265,7 +265,7 @@ func newNoticeCard(notice Notice, lifetime time.Duration, onDismiss func()) *not
 		HorizontalSpacer(gap),
 		VBoxNoSpacing(title, VerticalSpacer(theme.Sizes.NoticeTitleGap), newFlushContainer(body)),
 		HorizontalSpacer(gap),
-		topAligned(closeButtonSize, theme.Sizes.NoticeTitleSize, NewCloseButton(onDismiss)),
+		topAligned(glyphButtonSize, theme.Sizes.NoticeTitleSize, NewCloseButton(onDismiss)),
 	)
 
 	c := &noticeCard{countdown: countdown}
@@ -377,9 +377,28 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 		VerticalSpacer(theme.Sizes.ConfirmButtonGap),
 		buttons,
 	)
+	if hint := confirmHint(confirm); hint != nil {
+		inner.Add(hint)
+	}
 
 	return newTapSink(container.NewStack(card,
 		NewFixedWidthContainer(theme.Sizes.ConfirmWidth, container.NewPadded(inner))))
+}
+
+// confirmHint says how to skip the question next time — a shortcut nothing else
+// announces, and one nobody would find by trying. It is drawn only where the key
+// can be read (see ShiftHeld) and only on a question that does something, an
+// acknowledgement having nothing to skip.
+func confirmHint(confirm Confirm) fyne.CanvasObject {
+	if !shiftSkippable || confirm.OnConfirm == nil {
+		return nil
+	}
+
+	hint := canvas.NewText("Hold Shift to skip this confirmation.", theme.Colors.ConfirmHint)
+	hint.TextSize = theme.Sizes.ConfirmHintSize
+	hint.Alignment = fyne.TextAlignCenter
+
+	return hint
 }
 
 // confirmHeader is the dialog's title row: the tone's glyph, the title, and the

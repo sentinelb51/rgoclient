@@ -1,0 +1,210 @@
+# Known gaps
+
+What is not built, and what is limited by revoltgo or Fyne rather than by
+effort. Linked from the root `CLAUDE.md`; read it before concluding something
+is missing by accident.
+
+Simply not built, no constraint behind it: `App.createServer`,
+an attach button (files arrive by drag or paste), nothing listing who is in a
+reaction, role mentions, a notice history panel,
+code-block highlighting, a hue wheel/alpha/eyedropper in the colour picker,
+`MessageEmbedSpecial` (YouTube, Spotify, …), channel search (`ChannelSearch`
+with a query), listing or revoking the invites this client can now
+create (`ServerInvites` / `InviteDelete`), and moderation beyond the three
+destructive sidebar items (banning, role edits, nicknames, channel deletion are
+one call away but deliberately not offered).
+
+The gateway events still unregistered are the ones nothing here has to do about:
+`EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
+`State`, and the picker reads `State` as it opens, so a handler here would have
+nothing left to arrange), the webhook, voice and report events, and
+`EventUserSettingsUpdate` (revoltgo flags its msgp tuples as undecodable).
+Everything a server, role, member or channel can do is handled.
+
+Where something is limited by revoltgo or Fyne rather than by effort:
+
+- **A voice channel is a text channel here.** It is recognised — its own speaker
+  glyph in the sidebar and the header, and a standing note under that header
+  saying so — and everything a text channel does works in it, Revolt keeping
+  messages in one all the same. What is missing is the call: joining one is a
+  WebRTC session against Revolt's media server, so the signalling revoltgo
+  already models (`EventVoiceChannelJoin`/`Leave`/`Move`, the channel's voice
+  token) is the small half, and the audio devices and the media stack behind it
+  are not something Fyne offers any part of. Nobody's voice state is drawn
+  either, for the same reason: a list of who is in a call this client cannot
+  join is an invitation to a dead end.
+
+- **The member list is as complete as one request makes it.** Revolt's members
+  endpoint has no pagination, no search and no Discord-style lazy subscription to
+  the slice of the list actually on screen, so a server is one whole fetch or
+  nothing — `exclude_offline` is the only lever it offers. Nothing keeps the
+  membership current afterwards either: joins and leaves arrive on the gateway, but
+  a client left running on a very large server drifts until it re-enters. The
+  sections are Revolt's *hoisted* roles as the server defines them, with no way to
+  reorder or collapse one, and a role's icon is dropped at the boundary. Presence
+  reordering is the client's own debounce rather than anything the gateway batches.
+  Its **timeout gives up watching rather than giving up**: revoltgo takes no
+  context, so `memberFetchTimeout` only stops the strip claiming to be loading —
+  the request is still out, a retry made before it lands is refused as `ErrBusy`
+  and waits on the first, and an answer arriving after the strip has offered a
+  retry is still installed. Nothing reports progress either: the endpoint is one
+  response, so the mark sweeps rather than filling.
+- **Slowmode** runs off the client's own clock: the `InSlowmode` rejection carries
+  an authoritative `retry_after`, but revoltgo surfaces failures as a formatted
+  string. A send refused because the cooldown started elsewhere reports the generic
+  notice, and nothing hints at a cooldown outside the open channel.
+- **A jump window is read-only in the sense that nothing updates it.** The page it
+  mounts is not in the message cache, and every event handler writes there —
+  `refreshMessage` finds nothing, so an edit, a pin or a reaction made while a jump
+  is up does not reflect until the column comes back to the present. A delete does,
+  `removeMessages` walking the mounted widgets rather than the cache. Live messages
+  do not mount either, which is the behaviour any detached scrollback already has.
+  The pinned-messages panel is the second thing that opens one; channel search
+  would be a third. There is no way back to where the reader *was* — "Jump to
+  present" is the tail, not the position the jump left.
+- **The pinned-messages panel is a snapshot.** A pin is a flag on the message and
+  Revolt publishes no collection of them, so the panel is one `ChannelSearch`
+  made when it opens and nothing keeps it current: a pin made from another client
+  — or by this account, from a message the panel is covering — appears only when
+  it is reopened. The search route also cannot be asked for the users
+  (`include_users` changes the response shape past what revoltgo decodes), so the
+  authors are a second round of requests before the list can be drawn. It is
+  capped at the hundred newest pins, Revolt's own ceiling on a search, with no way
+  to page past it, and a row is a flattened one-line summary — a body with no text
+  says what it carries instead of quoting nothing.
+- **A composed mention** stays a visible `<@id>` until sent — Fyne can't draw a chip
+  inside an entry, and mapping names back to IDs at send time breaks on duplicates.
+  `markdown.PlainText` has no session, so a reply preview of a message opening with
+  one starts with a lone `@`.
+- **Text selection** only works on uniform-style bodies, which flatten to a
+  `Selectable` Label; Fyne 2.8 has no public RichText selection, so anything
+  mixed-style — including any body carrying a mention — is covered by right-click →
+  Copy message instead. Selecting *across* messages isn't possible.
+- **Markdown:** strike/underline/spoiler share one `decoratedSegment` (Fyne renders
+  neither natively), split per word since RichText only breaks rows at spaces. The
+  blockquote bar isn't drawn on wrapped continuation lines; a decoration can show a
+  one-space nub at a wrap; inline `code` inside a decorated span isn't decorated.
+  A decorated word landing at a line end overhangs the column and is clipped, as a
+  mention would without `mdBuilder.reserve`; the reserve is not extended to them.
+  A quote's bar is drawn at body size whatever the row it opens, there being no way
+  to ask a spliced segment what the row around it settled on. A nested list indents
+  with spaces in the marker segment, RichText offering nothing else that moves the
+  start of a row. `CodeBlock.Language` is parsed and unused — nothing highlights.
+  A **relative timestamp is resolved once**, when the row mounts, and nothing
+  re-reads it: "in 5 minutes" on a message left on screen stays that until a
+  scroll past it remounts the body. Nor is one hoverable — the absolute instant
+  behind an "R" is not reachable, a body carrying no tooltip.
+- **Embeds** render site line, title, description, colour and one picture. A bare
+  **video** embed is dropped at the boundary (revoltgo carries only the URL, and
+  there is no player); a bare **image** embed has the same missing dimensions, so it
+  draws against the placeholder until the picture lands.
+- **An invite card** says "server" whatever the code opens: revoltgo carries
+  `Invite.Type`, and a *group* invite resolves with no `ServerID`, so it is
+  offered as a join — which works — under the wrong noun. It draws no banner
+  (`Invite.ServerBanner` is dropped at the boundary, as a profile's is flat for
+  the same reason) and does not refresh, so a server joined from another client
+  keeps offering Join until the channel is reopened. `NewInviteCardFor` exists
+  for a caller holding a resolved invite, but nothing calls it yet — the join
+  dialog still validates a pasted code without previewing what it opens.
+- **A custom emoji** is a still: `image.Decode` takes the first frame of an
+  animated one. It has no name beside it either — nothing tooltips a message body
+  — so one whose picture fails to arrive leaves an empty square rather than the
+  `:shortcode:` other clients fall back to, and a preview of a body that is only
+  emoji (`markdown.PlainText`) is blank. A reaction chip inherits all of it, the
+  square there being all the chip has to say. The **picker** names one at a time:
+  its tooltip reads what the pointer is over, so a cell whose picture has not
+  landed can be identified but not scanned for, nothing captions the cells
+  themselves, and nothing says which one Enter would take — the caption line that
+  did is gone. It is capped at `emojiPickerLimit` drawn at once — past that
+  the field is the only way through — and it lists only what `State` holds, which
+  is the servers the account is in: an emoji from anywhere else renders in a
+  message and in a chip but is in nothing to be picked from.
+- **A reaction says how many, not who.** The names are in `domain.Reaction.Users`
+  and nothing draws them: a chip has no tooltip, so a reaction is a number.
+  Ordering is by emoji rather than by who reacted first — the payload is a map,
+  and there is no first to read. **Clearing them all is offered but only reflects
+  when this client does it:** Revolt announces a clear as a message update
+  carrying an empty reaction map, and revoltgo's `EventMessageUpdate.Data` is a
+  whole `Message`, so an empty map is also what an ordinary content edit brings —
+  the same unreadable field that keeps pin state off that event. One emoji taken
+  off wholesale is a different event and does land. `Message.Interactions` (the
+  emoji a message *restricts* reactions to) is dropped at the boundary, so a pick
+  it forbids is refused by the server rather than not offered.
+- **A typing indicator** runs off the client's own clock: Revolt sends no
+  heartbeat and no reliable stop, so an entry is carried by the events that keep
+  arriving and lapses at `typingLifetime`. Somebody who closes their client is
+  shown for up to that long. Nothing marks a channel outside the open server, the
+  sidebar being the only surface besides the open channel's line, and a name too
+  long for the row is truncated rather than the line wrapping — it shares its row
+  with the slowmode chip, which is pinned to the far edge. `TypingShowSelf` draws
+  what everyone else is shown, not what they have actually received: the local
+  echo does not know whether the announcement reached the gateway, and with
+  `SendTyping` off it is a preview of a line nobody is being sent.
+- **A system line** names only the subject — Revolt sends no actor, so a kick reads
+  "X was kicked". A rename says only that it happened.
+- **Profiles** don't refresh while open, and the banner is flat: a `canvas.Image`
+  takes no gradient mask. The About section is the dialog's alone, and scrolls, as
+  are the mutual ones. A mutual server or friend now leads somewhere, but only one
+  the store can *name* does — the rest are a "+n" that answers nothing — and
+  `channels` (the groups and conversations in common) is dropped, Revolt sending it
+  and nothing here having a place to say it.
+- **The friends list is as complete as the account cache is.** It is a walk of
+  the cached users, so somebody Ready did not name and nothing has since fetched
+  is not in it, and nothing announces an incoming request beyond the sidebar row's
+  mark — which is only visible in the home view. It does not follow presence, has
+  no search and no way to add somebody by handle: adding is offered from a
+  profile, which is a route only their message or their member row opens. A
+  relationship change made from the profile card still closes it and reports
+  through a notice, a profile not refreshing in place. A *server* relationship —
+  Revolt's own `Relations` array on the account — is dropped at the boundary, so
+  what the client holds is one value per person it has met rather than the whole
+  graph.
+- **Holding Shift skips a confirmation on Windows alone.** Fyne answers no
+  question about a modifier that is not part of an event: `desktop.Canvas`'s key
+  handlers fire only while *nothing* holds focus, and the composer holds it for
+  most of the client's life, while a context-menu item is Fyne's own widget and
+  reports no modifiers at all. So `ui.ShiftHeld` asks Win32 directly and the other
+  half of the pair answers false, where every confirmation is asked and the card
+  offers no hint that it could be skipped.
+- **A gradient role colour** spreads across a *name* only; elsewhere it fills as the
+  mean of its stops. `parseColor` reads hex stops only, so `rgb()` or a CSS name
+  falls back to the default text colour.
+- **The scroll indicator** only reports position — no drag, no track to click.
+- **Settings** that are read once while the caches are built (cache directory,
+  message cache caps, text-preview count, concurrent downloads — the last being a
+  channel sized at construction, which `SetLimits` cannot resize under the
+  goroutines holding it) need a restart, and each row says so.
+  The Advanced filter matches field names only; the curated Styles groups aren't
+  searchable. The login screen has no notice layer (it isn't built until Ready), so
+  everything it reports — a dead token, a refused password, a refused second
+  factor, a snapshot that never came — goes on its one `ui.StatusLine`, one
+  message at a time and gone at the next screen.
+- **The status line is set, not seen.** Nothing in the client draws anybody's
+  status text, this account's included, so the settings row is the only place it
+  appears and it shows what the store last said rather than what was just typed:
+  the change returns as a gateway event, and the page is not rebuilt for one.
+  Editing anything else about the account — display name, username, avatar,
+  profile — is unbuilt (`UserEdit`, `SetUsername`).
+- **A second factor is a code, and only a code.** `AuthMFA*` beyond the login
+  itself is uncovered: nothing enables or disables 2FA, generates recovery codes
+  or lists them (`AuthMFAGenerateTOTPSecret`, `AuthMFARecoveryCodes`), so an
+  account can be signed into but not configured. A security key is refused by
+  `answerFor` rather than offered — Revolt names the method, and there is no
+  WebAuthn here to answer it with.
+- **`domain.Message` drops** what nothing renders: role mentions, masquerade
+  contents (only *that* one exists survives, for grouping) and `Interactions`,
+  which is the list a message may restrict its reactions to — nothing here refuses
+  a pick against it, so the server does. `Mentions` and the one flag bit behind
+  `MentionsEveryone` are kept — they are what warms a row, as `Pinned` is what
+  marks one and `Reactions` is what hangs beneath it. `FileKind` classifies
+  video/audio/archive/PDF but only `FileImage`/`FileText` are branched on.
+- `client.Client`'s **actions** have no test — they want an HTTP fake, and
+  revoltgo's REST layer takes no injectable transport. What is testable without a
+  session is: `events_test.go` covers the pin reconciliation and the reaction
+  bookkeeping, both being cache work rather than a request, and `auth_test.go`
+  covers the login bodies, which are hand-written against the spec rather than
+  taken from revoltgo and so are the one request shape that can be wrong on its
+  own.
+- `ui.NewInviteCardFor` — the entry point for a caller already holding a resolved
+  `domain.Invite` — is built and unreferenced. The join dialog still validates a
+  pasted code without previewing what it opens, which is what it is for.

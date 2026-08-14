@@ -84,14 +84,15 @@ func (a *App) resetSessionState() {
 	a.pendingAuthors = nil
 	a.fetchedAuthors = make(map[string]bool)
 
-	// The quoted messages belong to channels the next account may not be able to
-	// read at all, and their guards to a session that can no longer retry.
+	// The messages held outside the cache belong to channels the next account may
+	// not be able to read at all, and their guards to a session that can no longer
+	// retry.
 	if a.replyTimer != nil {
 		a.replyTimer.Stop()
 		a.replyTimer = nil
 	}
 	a.pendingReplies = nil
-	a.replies = make(map[string]*domain.Message)
+	a.uncached = make(map[string]*domain.Message)
 	a.fetchedReplies = make(map[string]bool)
 
 	// A queued rebuild is of sidebars this account is about to stop having, and
@@ -167,7 +168,7 @@ func (a *App) awaitReady() {
 			log.Printf("no ready event after %s", readyTimeout)
 			a.client.Close()
 			a.showLogin()
-			a.reportLogin("Signed in, but your account never arrived. Try again.")
+			a.reportLogin("Signed in, but your account never arrived. Retry.")
 		}, false)
 	})
 	a.readyTimer = watchdog

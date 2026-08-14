@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 	"golang.design/x/clipboard"
@@ -245,6 +246,18 @@ func lineHeight(textSize float32) float32 {
 	}
 
 	return h
+}
+
+// NewComposerButtonSlot bottom-anchors a control against the growing entry
+// beside it — the entry grows upward, so one riding the middle would drift away
+// from the line being typed — and lifts it off the bottom by enough to centre on
+// that line rather than on the entry's box. The box carries InnerPadding under
+// its last line, and a control flush with it sits that far below what is being
+// written.
+func NewComposerButtonSlot(obj fyne.CanvasObject) fyne.CanvasObject {
+	lift := fynetheme.InnerPadding() + (lineHeight(fynetheme.TextSize())-obj.MinSize().Height)/2
+
+	return container.NewVBox(layout.NewSpacer(), NewInset(obj, 0, max(lift, 0), 0, 0))
 }
 
 /* Keyboard */
@@ -860,6 +873,26 @@ func (b *replyIconButton) applyState() {
 	canvas.Refresh(b.icon)
 }
 
+/* The badge row */
+
+// newDockBadgeSurface puts a pill behind one of the two things hanging over the
+// bottom of the message column. Both used to be bare text, which read against
+// whatever message happened to be passing under them; the pill is sized by its
+// content rather than by the row, so it says what it holds apart from the
+// conversation without becoming a bar above the composer.
+//
+// It accepts no pointer event, so the messages underneath stay hoverable and
+// right-clickable.
+func newDockBadgeSurface(content fyne.CanvasObject) fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.DockBadgeBg)
+	background.CornerRadius = theme.Sizes.DockBadgeRadius
+	Outline(background)
+
+	padV, padH := theme.Sizes.DockBadgePaddingV, theme.Sizes.DockBadgePaddingH
+
+	return container.NewStack(background, NewInset(content, padV, padV, padH, padH))
+}
+
 /* Slowmode */
 
 // SlowmodeBadge floats over the bottom-right of the message column, just above
@@ -871,14 +904,12 @@ func (b *replyIconButton) applyState() {
 // typed. Out here it is a marker on the conversation instead, and the entry
 // spans the card in every channel.
 //
-// Nothing is drawn behind it: like the composer card it hangs over the message
-// column, and a second filled surface a few pixels above the first read as a
-// bar growing out of the card. Bare text is instead sized up until it holds
-// itself apart from the conversation passing underneath. The stopwatch is drawn
-// from canvas primitives rather than an icon resource for the same reason the
-// channel glyphs are — a stroked shape takes a palette colour directly, so the
-// mark and the text beside it change tone as one. Nothing here accepts a pointer
-// event, so the messages behind the chip stay hoverable and right-clickable.
+// What holds it apart from the messages running underneath is the pill
+// newDockBadgeSurface puts behind it, which hugs the text: a surface spanning
+// the row would read as a bar growing out of the card below. The stopwatch is
+// drawn from canvas primitives rather than an icon resource for the same reason
+// the channel glyphs are — a stroked shape takes a palette colour directly, so
+// the mark and the text beside it change tone as one.
 type SlowmodeBadge struct {
 	widget.BaseWidget
 
@@ -918,8 +949,10 @@ func NewSlowmodeBadge() *SlowmodeBadge {
 
 	// The gap to the card below belongs to the chip, not to a spacer in the column
 	// it hangs in: a spacer would hold that room open in every channel that has no
-	// slowmode, where the chip itself simply isn't there.
-	b.content = NewInset(chip, 0, theme.Sizes.SlowmodeDockGap, 0, theme.Sizes.SlowmodeInsetH)
+	// slowmode, where the chip itself simply isn't there. The pill goes inside that
+	// gap and outside the row inset, so what the surface covers is the text and
+	// nothing else.
+	b.content = NewInset(newDockBadgeSurface(chip), 0, theme.Sizes.SlowmodeDockGap, 0, theme.Sizes.SlowmodeInsetH)
 
 	b.Hide()
 	b.ExtendBaseWidget(b)
@@ -1014,11 +1047,9 @@ func stopwatchGlyph(col color.Color) fyne.CanvasObject {
 // bottom-left of the message column at the other end of the row the slowmode
 // chip is pinned to.
 //
-// It follows the chip's rules because it is the same kind of thing: bare text
-// over the conversation with nothing drawn behind it, since a filled surface a
-// few pixels above the composer card reads as a bar growing out of it. Nothing
-// here accepts a pointer event either, so the messages passing underneath stay
-// hoverable and right-clickable.
+// It follows the chip's rules because it is the same kind of thing, pill
+// included: a name over a conversation of other names has nothing else to hold
+// it apart from them.
 //
 // The avatars are rebuilt outright rather than pooled. Who is typing changes
 // every few seconds at worst, where a member row is recycled as fast as a list
@@ -1064,7 +1095,7 @@ func NewTypingIndicator(images *cache.ImageCache) *TypingIndicator {
 	// The gap to the card belongs to the line rather than to a spacer in the
 	// column, for the same reason it does on the chip: a spacer would hold the room
 	// open in every channel where nobody is typing.
-	t.content = NewInset(line, 0, theme.Sizes.SlowmodeDockGap, theme.Sizes.TypingInsetH, 0)
+	t.content = NewInset(newDockBadgeSurface(line), 0, theme.Sizes.SlowmodeDockGap, theme.Sizes.TypingInsetH, 0)
 
 	t.Hide()
 	t.ExtendBaseWidget(t)

@@ -105,6 +105,9 @@ func (s *store) toUser(user *revoltgo.User) (domain.User, bool) {
 		Online:       user.Online,
 		Bot:          user.Bot != nil,
 	}
+	if user.DisplayName != nil {
+		out.DisplayName = *user.DisplayName
+	}
 	if user.Status != nil {
 		out.StatusText = user.Status.Text
 	}
@@ -462,7 +465,7 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 
 	out := domain.Channel{
 		ID:         channel.ID,
-		Kind:       toChannelKind(channel.ChannelType),
+		Kind:       toChannelKind(channel),
 		Name:       channel.Name,
 		Slowmode:   s.client.slowmodeOf(channel.ID),
 		Recipients: channel.Recipients,

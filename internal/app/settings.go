@@ -12,6 +12,7 @@ package app
 // slider with it. The page answers a drag with its own preview instead.
 
 import (
+	"errors"
 	"log"
 	"net/url"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/client"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
@@ -217,6 +219,7 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		LogOutEverywhere: a.logOutEverywhere,
 		SetPresence:      a.setPresence,
 		SetStatusText:    a.setStatusText,
+		SetDisplayName:   a.setDisplayName,
 
 		CacheDir:       func() string { return a.assetDir },
 		ChooseCacheDir: a.chooseCacheDir,
@@ -330,6 +333,26 @@ func (a *App) setStatusText(text string) {
 	a.background(
 		func() error { return a.client.SetStatusText(text) },
 		a.notifyFailure("set status text", "Could not change your status."),
+	)
+}
+
+// setDisplayName publishes the name shown in place of the username, on the same
+// terms as the two rows above it. Call on the UI thread.
+//
+// A name too short to send is the one failure worth naming: the client refused it
+// before the request, so "could not" would be untrue and the reader has no other
+// way to learn what the limit is.
+func (a *App) setDisplayName(name string) {
+	a.background(
+		func() error { return a.client.SetDisplayName(name) },
+		func(err error) {
+			if errors.Is(err, client.ErrDisplayNameShort) {
+				a.notify(ui.ToneWarning, "A display name needs at least %d characters.", client.MinDisplayName)
+				return
+			}
+
+			a.notifyFailure("set display name", "Could not change your display name.")(err)
+		},
 	)
 }
 

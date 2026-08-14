@@ -78,10 +78,13 @@ func (w *FriendsRow) CreateRenderer() fyne.WidgetRenderer {
 	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
 	w.refreshAppearance()
 
-	// The marker slot, the left padding and the glyph are the channel row's, so
-	// the two line up down the column despite being different widgets.
+	// The marker slot, the left padding and the glyph are the channel row's, so the
+	// two line up down the column despite being different widgets. The slot is as
+	// wide as a *selection* marker even though nothing here draws one: a channel row
+	// stacks the two markers and takes the wider, so a slot sized to the pending bar
+	// alone would stand every row above the conversations two pixels to the left.
 	leading := container.NewHBox(
-		container.NewHBox(w.pendingBar),
+		container.NewStack(HorizontalSpacer(theme.Sizes.SelectionMarkerWidth), container.NewHBox(w.pendingBar)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 		GroupIcon(),
 	)

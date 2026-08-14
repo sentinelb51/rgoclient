@@ -84,13 +84,19 @@ type App struct {
 	tooltip         *ui.Tooltip     // the hover label floating over that row
 	notices         *ui.NoticeStack // the transient messages floating over it too
 	serverList      *fyne.Container
+	channelColumn   *fyne.Container // header + pinned group over the list; relaid out when the group changes
+	channelTop      *fyne.Container // that group: what is pinned above the channels, full column width
 	channelList     *fyne.Container
 	memberList      *ui.MemberList  // virtualised: it mounts only the rows on screen
 	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
 	messageList     *fyne.Container
 	messageScroll   *ui.ObservableScroll
-	composerDock    *fyne.Container // slowmode chip + card: what the message column runs under
-	floatingDock    *fyne.Container // that stack hung over messageScroll; relaid out when the chip appears
+	messageHeader   *fyne.Container   // the channel's name row, relaid out when the jump chip appears
+	jumpChip        fyne.CanvasObject // the way back from a jump, in that row
+	messageColumn   *fyne.Container   // header + note + dock; relaid out when the note appears
+	channelNote     fyne.CanvasObject // the standing caption under that header, shown in a voice channel
+	composerDock    *fyne.Container   // slowmode chip + card: what the message column runs under
+	floatingDock    *fyne.Container   // that stack hung over messageScroll; relaid out when the chip appears
 	input           *ui.MessageInput
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
@@ -111,6 +117,16 @@ type App struct {
 	friends    *ui.FriendsDialog    // the friends list on that layer, if any
 	editing    *ui.MessageWidget    // the message being edited in place, if any
 
+	/* The pinned-messages panel, see pins.go */
+
+	// pins is the panel on the modal layer, if any, and pinned what it is drawn
+	// from — a fetched snapshot rather than anything the cache holds, kept only
+	// for as long as the panel is up. pinsChannelID is which channel was asked
+	// about, so a reply arriving after the reader moved on is dropped.
+	pins          *ui.PinsDialog
+	pinsChannelID string
+	pinned        []*domain.Message
+
 	/* Lazy author resolution, see members.go */
 
 	fetchedAuthors map[string]bool
@@ -119,11 +135,11 @@ type App struct {
 
 	/* Lazy reply resolution, see messages.go */
 
-	// replies are the messages quoted by mounted replies that the message cache
-	// could not answer for — a reply reaches as far back as somebody cared to
-	// answer, while the cache is only a channel's tail. Kept apart from that cache
-	// for exactly that reason: filed among its messages, one would read as history.
-	replies        map[string]*domain.Message
+	// uncached are the messages the channel cache cannot answer for: the targets
+	// of quotes older than its tail, and the window a jump landed in. Both reach
+	// as far back as somebody cared to answer or to name, while the cache is only
+	// a channel's tail — filed among its messages, either would read as history.
+	uncached       map[string]*domain.Message
 	fetchedReplies map[string]bool
 	pendingReplies []client.MessageRef
 	replyTimer     *time.Timer
@@ -206,9 +222,22 @@ type App struct {
 	loginStatus *ui.StatusLine
 	readyTimer  *time.Timer
 
-	pendingToken   string // stashed by a credential login until Ready names the user
-	pendingJoin    bool   // a join is in flight, so its ServerJoined should select
-	loadingHistory bool
+	pendingToken string // stashed by a credential login until Ready names the user
+	pendingJoin  bool   // a join is in flight, so its ServerJoined should select
+
+	/* The mounted window, see messages.go */
+
+	// loadingPage is a page request in flight for the open channel. One flag
+	// covers both directions: the client refuses a second request per channel
+	// anyway, so a scroll up and a scroll down could never be out at once.
+	//
+	// jumped marks the column as showing a window a jump landed in rather than
+	// the channel's tail, which is what offers the way back. atOldest records
+	// that such a window has reached the start of the channel — the cache
+	// answers that for itself, and a jump window is not in the cache.
+	loadingPage bool
+	jumped      bool
+	atOldest    bool
 }
 
 var _ ui.MessageActions = (*App)(nil)
@@ -236,6 +265,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		emojis:              cache.NewImageCache(assetDir, cache.EmojisFolder, emojiLimits(settings)),
 		texts:               cache.NewTextCache(settings.TextPreviews),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
+		channelTop:          ui.VBoxNoSpacing(),
 		channelList:         container.NewVBox(),
 		messageList:         ui.VBoxNoSpacing(),
 		tooltip:             ui.NewTooltip(),
@@ -245,7 +275,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		fetchedAuthors:      make(map[string]bool),
 		fetchedMembers:      make(map[string]bool),
 		memberFailed:        make(map[string]bool),
-		replies:             make(map[string]*domain.Message),
+		uncached:            make(map[string]*domain.Message),
 		fetchedReplies:      make(map[string]bool),
 		slowmodeUntil:       make(map[string]time.Time),
 		typing:              make(map[string]map[string]time.Time),
@@ -368,15 +398,15 @@ func (a *App) focusInput() {
 
 /* ui.MessageActions */
 
-// ResolveMessage looks a message up in the local cache, falling back to the
-// reply targets fetched for quotes the cache had scrolled past. Never the
-// network — a widget asks this while it builds.
+// ResolveMessage looks a message up in the local cache, falling back to what was
+// fetched for quotes and jumps the cache had scrolled past. Never the network —
+// a widget asks this while it builds.
 func (a *App) ResolveMessage(channelID, messageID string) *domain.Message {
 	if message := a.client.Messages().Find(channelID, messageID); message != nil {
 		return message
 	}
 
-	return a.replies[messageID]
+	return a.uncached[messageID]
 }
 
 // OnReply focuses the composer with the given message queued as a reply.
@@ -444,7 +474,13 @@ func (a *App) deleteMessage(message *domain.Message) {
 // event carries, and the handler behind it deliberately announces nothing when
 // the state it was told about is the state it holds — otherwise every pin would
 // redraw its row twice.
-func (a *App) OnPin(message *domain.Message, pinned bool) {
+func (a *App) OnPin(message *domain.Message, pinned bool) { a.setPinned(message, pinned, nil) }
+
+// setPinned is OnPin with somewhere for a second surface to hear about it: the
+// pinned-messages panel takes a pin off a message that need not be mounted at
+// all, so refreshing the row cannot be the whole answer. then runs on the UI
+// thread once the server has agreed, and only for a session still current.
+func (a *App) setPinned(message *domain.Message, pinned bool, then func()) {
 	if message == nil {
 		return
 	}
@@ -466,8 +502,13 @@ func (a *App) OnPin(message *domain.Message, pinned bool) {
 				onFail(err)
 				return
 			}
-			if !a.stale(epoch) {
-				a.refreshMessage(channelID, messageID)
+			if a.stale(epoch) {
+				return
+			}
+
+			a.refreshMessage(channelID, messageID)
+			if then != nil {
+				then()
 			}
 		}, false)
 	}()
@@ -494,6 +535,46 @@ func (a *App) OnReact(message *domain.Message, emoji string, add bool) {
 
 	go func() {
 		err := a.client.React(channelID, messageID, emoji, add)
+
+		a.doOnUI(func() {
+			if err != nil {
+				onFail(err)
+				return
+			}
+			if !a.stale(epoch) {
+				a.refreshMessage(channelID, messageID)
+			}
+		}, false)
+	}()
+}
+
+// OnClearReactions asks before taking every reaction off a message. It is
+// confirmed where adding or removing one is not: this undoes other people's
+// clicks, and nothing puts them back.
+func (a *App) OnClearReactions(message *domain.Message) {
+	if message == nil {
+		return
+	}
+
+	channelID, messageID := message.ChannelID, message.ID
+	a.confirm(ui.Confirm{
+		Title:     "Clear reactions",
+		Body:      "Every reaction on this message will be removed, for everyone.",
+		Action:    "Clear",
+		Tone:      ui.ToneDanger,
+		OnConfirm: func() { a.clearReactions(channelID, messageID) },
+	})
+}
+
+// clearReactions clears them and repaints, the repaint being made here for the
+// reason a pin's is: what Revolt sends back cannot be read for reactions, so the
+// client's own write is the only thing that knows they are gone.
+func (a *App) clearReactions(channelID, messageID string) {
+	epoch := a.epoch
+	onFail := a.notifyFailure("clear reactions on message "+messageID, "Could not clear those reactions.")
+
+	go func() {
+		err := a.client.ClearReactions(channelID, messageID)
 
 		a.doOnUI(func() {
 			if err != nil {

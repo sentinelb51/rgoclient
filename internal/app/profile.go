@@ -15,6 +15,7 @@ import (
 	"slices"
 
 	"fyne.io/fyne/v2"
+	fynetheme "fyne.io/fyne/v2/theme"
 
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
@@ -32,6 +33,7 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 	profile := a.profileOf(userID)
 	card := ui.NewProfileCard(a.deps(), profile, ui.ProfileActions{
 		Buttons:  a.profileButtons(profile),
+		OnCopied: a.copied,
 		OnExpand: func() { a.showProfileDialog(userID) },
 	})
 
@@ -44,8 +46,9 @@ func (a *App) OnUserTapped(userID string, anchor fyne.CanvasObject) {
 func (a *App) showProfileDialog(userID string) {
 	profile := a.profileOf(userID)
 	dialog := ui.NewProfileDialog(a.deps(), profile, ui.ProfileActions{
-		Buttons: a.profileButtons(profile),
-		OnClose: a.closeOverlay,
+		Buttons:  a.profileButtons(profile),
+		OnCopied: a.copied,
+		OnClose:  a.closeOverlay,
 	})
 
 	a.showOverlay(dialog.Content)
@@ -217,8 +220,34 @@ func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
 // the one that leads somewhere — asking to be friends first. A bot is the
 // exception it has to be: nobody befriends one, and writing to it is the whole
 // of what it is for.
+//
+// Copying the ID is added here rather than in relationshipButtons because it is
+// the one thing a card offers about *anybody*, this account included, where the
+// relationship policy answers with nothing for yourself. The friends list is
+// spared it: a row already leads to the profile that carries it.
 func (a *App) profileButtons(profile domain.Profile) []ui.ProfileButton {
-	return a.relationshipButtons(profile, a.closeOverlay)
+	buttons := a.relationshipButtons(profile, a.closeOverlay)
+
+	if profile.UserID == "" {
+		return buttons
+	}
+
+	return append(buttons, ui.ProfileButton{
+		Label:    "Copy user ID",
+		Overflow: true,
+		Icon:     fynetheme.ContentCopyIcon(),
+		Do: func() {
+			ui.CopyToClipboard(profile.UserID)
+			a.copied("User ID")
+		},
+	})
+}
+
+// copied is the receipt for a clipboard write the user cannot see happen. what
+// names the thing rather than quoting it: a handle read back in a notice is the
+// same string twice, and an ID is 26 characters nobody reads.
+func (a *App) copied(what string) {
+	a.notify(ui.ToneInfo, "%s copied.", what)
 }
 
 // relationshipButtons is that policy with the way out left open. A card is taken
@@ -248,12 +277,25 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		}}
 	}
 
-	block := act("Block", true, func() { a.confirmBlockUser(userID, name) })
+	// The two that cannot be taken back by the person they are done to are also the
+	// two nobody opens a profile in order to do, so both are filed behind the card's
+	// hamburger. Everything else is the point of the card it appears on: a request
+	// is answered, a block is lifted, a conversation is opened.
+	overflow := func(button ui.ProfileButton, icon fyne.Resource) ui.ProfileButton {
+		button.Overflow, button.Icon = true, icon
+
+		return button
+	}
+
+	block := overflow(act("Block", true, func() { a.confirmBlockUser(userID, name) }),
+		fynetheme.VisibilityOffIcon())
 
 	switch profile.Relationship {
 	case domain.RelationshipFriend:
 		return []ui.ProfileButton{message,
-			act("Remove friend", true, func() { a.confirmRemoveFriend(userID, name) })}
+			overflow(act("Remove", true, func() { a.confirmRemoveFriend(userID, name) }),
+				fynetheme.ContentRemoveIcon()),
+			block}
 
 	case domain.RelationshipIncoming:
 		// Neither of these is drawn as destructive, for the same reason neither is

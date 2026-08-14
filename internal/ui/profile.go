@@ -22,6 +22,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -77,6 +78,19 @@ type ProfileButton struct {
 	Label  string
 	Danger bool // drawn in the destructive weight
 	Do     func()
+
+	// Overflow files the action behind the card's hamburger instead of drawing it
+	// under the card. Blocking somebody, dropping them and copying their ID are
+	// not what a profile is opened for, and a row of buttons that leads with them
+	// says the wrong thing about the person on screen.
+	//
+	// Icon marks it there, already in the colour it is to be drawn: a menu in this
+	// client always carries marks, and which one names an action — and whether it
+	// is the destructive weight — is decided beside the action itself. Only the
+	// menu reads either field, so a surface that draws its own rows (the friends
+	// dialog) ignores both and draws the lot.
+	Overflow bool
+	Icon     fyne.Resource
 }
 
 // ProfileActions are the buttons a presentation offers. A nil field leaves its
@@ -89,6 +103,13 @@ type ProfileActions struct {
 	// The compact card draws only the first. It names somebody; a row of ways to
 	// act on them is what expanding it is for.
 	Buttons []ProfileButton
+
+	// OnCopied names what a click on the card has just put on the clipboard, so
+	// the controller can say so. A clipboard write is invisible, and the handle is
+	// the one thing here copied by clicking the thing itself rather than by
+	// picking it out of a menu — with no receipt, nothing distinguishes it from a
+	// click that missed.
+	OnCopied func(what string)
 
 	OnExpand func() // swap the card for the dialog
 	OnClose  func() // dismiss the layer; drawn on the dialog's banner
@@ -375,13 +396,24 @@ func (c *ProfileCard) header(profile domain.Profile, actions ProfileActions) fyn
 	c.banner = profileBanner(profile.Accent, height)
 	c.strip = fyne.NewSize(c.inner+2*theme.Sizes.ProfilePadding, height)
 
-	banner := fyne.CanvasObject(c.banner)
+	// Laid over the banner rather than beside it, so the card's own chrome costs it
+	// no height. The menu comes before the close button in the row, so the way out
+	// stays in the corner it is in on every other card here.
+	var chrome []fyne.CanvasObject
+	if items := profileMenuItems(actions); len(items) > 0 {
+		menu := NewGlyphButton(tintedIcon(assets.ActionMoreIcon, theme.Colors.TextPrimary), nil)
+		menu.onTap = func() { ShowContextMenu(menu, items, AnchorBelow(menu)) }
+		chrome = append(chrome, menu)
+	}
 	if actions.OnClose != nil {
-		// Laid over the banner rather than beside it, so the way out costs the card
-		// no height of its own.
+		chrome = append(chrome, NewCloseButton(actions.OnClose))
+	}
+
+	banner := fyne.CanvasObject(c.banner)
+	if len(chrome) > 0 {
 		inset := theme.Sizes.ProfileTightGap
 		banner = container.NewStack(banner,
-			container.New(&overlayLayout{yOffset: inset, rightOffset: inset}, NewCloseButton(actions.OnClose)))
+			container.New(&overlayLayout{yOffset: inset, rightOffset: inset}, HBoxNoSpacing(chrome...)))
 	}
 
 	// Raised by half its own height — ring included, so the picture itself is
@@ -453,7 +485,7 @@ func presenceRing(presence domain.Presence, side float32) fyne.CanvasObject {
 // details is everything under the header. width is the room the rows have, which
 // the chip flow needs given rather than measured — see NewFlow.
 func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, width float32) fyne.CanvasObject {
-	rows := []fyne.CanvasObject{c.identity(profile, width)}
+	rows := []fyne.CanvasObject{c.identity(profile, actions, width)}
 
 	if profile.Status != "" {
 		rows = append(rows, VerticalSpacer(theme.Sizes.ProfileTightGap), profileStatus(profile.Status))
@@ -480,11 +512,11 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 		rows = append(rows, c.mutual)
 
 		if history := profileHistory(profile); history != nil {
-			rows = append(rows, profileSection("Member since", history))
+			rows = append(rows, VerticalSpacer(theme.Sizes.ProfileGap), history)
 		}
 	}
 
-	if buttons := c.buttons(profile, actions); buttons != nil {
+	if buttons := c.buttons(actions); buttons != nil {
 		rows = append(rows, VerticalSpacer(theme.Sizes.ProfileGap), buttons)
 	}
 
@@ -496,7 +528,7 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 // line the second reads as qualifying the first. The name carries the role
 // colour, as it does on a message, and gives up its width first, so neither can
 // widen the card.
-func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.CanvasObject {
+func (c *ProfileCard) identity(profile domain.Profile, actions ProfileActions, width float32) fyne.CanvasObject {
 	size := theme.Sizes.ProfileNameSize
 	if c.full {
 		size = theme.Sizes.ProfileDialogNameSize
@@ -516,7 +548,7 @@ func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.Canva
 
 	var trailing []fyne.CanvasObject
 	if profile.Handle != "" {
-		handle := profileHandle(profile.Handle, width*profileHandleShare, size)
+		handle := profileHandle(profile.Handle, width*profileHandleShare, size, actions.OnCopied)
 		room -= gap + handle.MinSize().Width
 		trailing = append(trailing, HorizontalSpacer(gap), handle)
 	}
@@ -546,8 +578,8 @@ func (c *ProfileCard) identity(profile domain.Profile, width float32) fyne.Canva
 // height, which would centre the handle against the name rather than seat it on
 // the same line, so the tag takes exactly its own height and is pushed down onto
 // the name's baseline instead — less the padding above the text inside it.
-func profileHandle(handle string, limit, nameSize float32) fyne.CanvasObject {
-	tag := newHandleTag(handle, limit)
+func profileHandle(handle string, limit, nameSize float32, onCopied func(string)) fyne.CanvasObject {
+	tag := newHandleTag(handle, limit, onCopied)
 
 	return VBoxNoSpacing(
 		VerticalSpacer(max(baselineOffset(nameSize, tag.text.TextSize)-theme.Sizes.ProfileHandlePaddingV, 0)),
@@ -572,7 +604,7 @@ var (
 	_ desktop.Hoverable = (*handleTag)(nil)
 )
 
-func newHandleTag(handle string, limit float32) *handleTag {
+func newHandleTag(handle string, limit float32, onCopied func(string)) *handleTag {
 	text := canvas.NewText(handle, theme.Colors.TimestampText)
 	text.TextSize = theme.Sizes.ProfileHandleSize
 
@@ -587,7 +619,12 @@ func newHandleTag(handle string, limit float32) *handleTag {
 		text:       text,
 		content:    NewInset(NewFixedWidthContainer(width, NewEllipsisText(text)), padV, padV, padH, padH),
 	}
-	t.onTap = func() { CopyToClipboard(handle) }
+	t.onTap = func() {
+		CopyToClipboard(handle)
+		if onCopied != nil {
+			onCopied("Username")
+		}
+	}
 	t.ExtendBaseWidget(t)
 
 	return t
@@ -641,29 +678,44 @@ func profileSection(title string, content fyne.CanvasObject) fyne.CanvasObject {
 	)
 }
 
-// profileDetail is one muted line of fact, as the dates are set.
-func profileDetail(text string) fyne.CanvasObject {
+// profileDetail is one muted line of fact behind its own mark, as the dates are
+// set. The mark is what tells two dates apart: under a caption they would differ
+// only in the word opening each, which is not what a line of small grey text is
+// read for.
+func profileDetail(mark fyne.Resource, text string) fyne.CanvasObject {
 	line := canvas.NewText(text, theme.Colors.TimestampText)
 	line.TextSize = theme.Sizes.ProfileDetailSize
 
-	return NewEllipsisText(line)
+	side := theme.Sizes.ProfileDetailIconSize
+	icon := container.NewGridWrap(fyne.NewSize(side, side),
+		newScaledIcon(tintedIcon(mark, theme.Colors.TimestampText), side))
+
+	// A fill row rather than an HBox: an ellipsis box reports no width of its own —
+	// it shortens to whatever it is given — so a layout handing every child its
+	// minimum would hand the text nothing and draw the mark alone. The mark is
+	// centred rather than sharing the text's box, the row stretching every child to
+	// its own height.
+	return NewFillRow(2,
+		container.NewCenter(icon),
+		HorizontalSpacer(theme.Sizes.ProfileTightGap),
+		NewEllipsisText(line),
+	)
 }
 
-// profileHistory is the dates block: when they joined the open server, and when
-// the account itself was made. Nil when neither is known — a conversation has no
+// profileHistory is the dates block: when the account was made, and when they
+// joined the open server. Nil when neither is known — a conversation has no
 // server to have been joined, and an ID that isn't a ULID carries no date.
+//
+// It carries no caption. "Member since" named only the second of the two, and
+// nothing covers both that is shorter than reading them.
 func profileHistory(profile domain.Profile) fyne.CanvasObject {
 	var lines []fyne.CanvasObject
 
-	if !profile.Joined.IsZero() {
-		where := "this server"
-		if profile.ServerName != "" {
-			where = profile.ServerName
-		}
-		lines = append(lines, profileDetail(fmt.Sprintf("Joined %s on %s", where, util.FullDate(profile.Joined))))
-	}
 	if !profile.Created.IsZero() {
-		lines = append(lines, profileDetail("Account created "+util.FullDate(profile.Created)))
+		lines = append(lines, profileDetail(assets.ProfileCreatedIcon, "Created "+util.FullDate(profile.Created)))
+	}
+	if !profile.Joined.IsZero() {
+		lines = append(lines, profileDetail(assets.ProfileJoinedIcon, "Joined "+util.FullDate(profile.Joined)))
 	}
 
 	if len(lines) == 0 {
@@ -734,12 +786,37 @@ func profileBadges(names []string, width float32) fyne.CanvasObject {
 
 /* Buttons */
 
+// profileMenuItems is what the hamburger offers: every action filed off the
+// button row, in the order the controller gave them. One drawn disabled is left
+// out rather than greyed — a menu item that says "Request sent" is a line of
+// state in a list of verbs, and the button row is already showing it.
+func profileMenuItems(actions ProfileActions) []*fyne.MenuItem {
+	var items []*fyne.MenuItem
+
+	for _, action := range actions.Buttons {
+		if !action.Overflow || action.Do == nil {
+			continue
+		}
+
+		items = append(items, fyne.NewMenuItemWithIcon(action.Label, action.Icon, action.Do))
+	}
+
+	return items
+}
+
 // buttons is the block along the bottom, nil when there is nothing to offer so
 // the card doesn't reserve the gap above a row it never draws.
-func (c *ProfileCard) buttons(profile domain.Profile, actions ProfileActions) fyne.CanvasObject {
-	offered := actions.Buttons
-	if !c.full && len(offered) > 1 {
-		offered = offered[:1]
+func (c *ProfileCard) buttons(actions ProfileActions) fyne.CanvasObject {
+	var offered []ProfileButton
+	for _, action := range actions.Buttons {
+		if action.Overflow {
+			continue
+		}
+
+		offered = append(offered, action)
+		if !c.full {
+			break // the compact card draws one; expanding it is what the rest are for
+		}
 	}
 
 	buttons := make([]fyne.CanvasObject, 0, len(offered)+1)
@@ -747,11 +824,8 @@ func (c *ProfileCard) buttons(profile domain.Profile, actions ProfileActions) fy
 		buttons = append(buttons, newProfileButton(action, i == 0))
 	}
 
-	switch {
-	case actions.OnExpand != nil:
+	if actions.OnExpand != nil {
 		buttons = append(buttons, widget.NewButton("Full profile", actions.OnExpand))
-	case c.full:
-		buttons = append(buttons, widget.NewButton("Copy user ID", func() { CopyToClipboard(profile.UserID) }))
 	}
 
 	if len(buttons) == 0 {

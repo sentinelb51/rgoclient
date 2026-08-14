@@ -136,11 +136,11 @@ type emojiPicker struct {
 	list   *fyne.Container // the sections, replaced wholesale on every query
 	empty  *canvas.Text
 
-	// previewBox is the line naming what the pointer is over. The string is kept
-	// beside it because the box shortens what it draws to the width it is given, so
-	// reading the text object back would compare against whatever last fitted.
-	previewBox  *fyne.Container
-	previewText string
+	// tip is what names a cell. It is the picker's own rather than the app's:
+	// the app's tooltip is a layer in the window's content, and a pop-up is a
+	// canvas overlay drawn over all of that, so a label mounted there would be
+	// covered by the grid it is naming.
+	tip *Tooltip
 
 	// cells memoises one widget per emoji, so narrowing a query reorders objects
 	// that already exist rather than rebuilding them — and a custom emoji's picture
@@ -168,14 +168,11 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 		onPick:   onPick,
 		list:     VBoxNoSpacing(),
 		empty:    canvas.NewText("No emoji match that.", theme.Colors.TimestampText),
+		tip:      NewTooltip(),
 		cells:    make(map[string]fyne.CanvasObject),
 	}
 	p.empty.TextSize = theme.Sizes.EmojiPickerCaptionSize
 	p.empty.Hide()
-
-	preview := canvas.NewText("", theme.Colors.TimestampText)
-	preview.TextSize = theme.Sizes.EmojiPickerCaptionSize
-	p.previewBox = NewEllipsisText(preview)
 
 	p.search = newEmojiSearch(p.fill, p.acceptTop, func() { p.popUp.Hide() })
 
@@ -183,16 +180,22 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 	background.CornerRadius = fynetheme.Size(fynetheme.SizeNameMenuRadius)
 	Outline(background)
 
+	// The grid is held off the right edge by the width the position indicator is
+	// drawn in, so a bar reporting where the list has got to does not land on the
+	// last cell of every row.
+	gutter := theme.Sizes.ScrollIndicatorWidth + theme.Sizes.ScrollIndicatorInset*2
+	scrolled := NewInset(p.list, 0, 0, 0, gutter)
+
 	// The scroller cannot be asked how tall it wants to be — container.Scroll
 	// reports its own current height as its minimum — so the list is measured and
 	// the ceiling applied here.
 	viewport := container.New(
-		&cappedHeightLayout{content: p.list, max: theme.Sizes.EmojiPickerMaxHeight},
-		NewPlainVScroll(p.list))
+		&cappedHeightLayout{content: scrolled, max: theme.Sizes.EmojiPickerMaxHeight},
+		NewObservableVScroll(scrolled))
 
 	gap := theme.Sizes.EmojiPickerGap
-	body := VBoxNoSpacing(p.searchField(), VerticalSpacer(gap), p.empty, viewport, p.previewLine())
-	p.content = container.NewStack(background, NewInset(body, gap, gap, gap, gap))
+	body := VBoxNoSpacing(p.searchField(), VerticalSpacer(gap), p.empty, viewport)
+	p.content = container.NewStack(background, NewInset(body, gap, gap, gap, gap), p.tip.Layer)
 
 	p.fill("")
 
@@ -237,49 +240,30 @@ func (p *emojiPicker) searchField() fyne.CanvasObject {
 	))
 }
 
-// previewLine names whatever the pointer is over, and what Enter would take when
-// it is over nothing. It is what gives a cell a name at all: the grid is pictures,
-// and one whose picture has not arrived is otherwise an anonymous square.
+// setHovered records what the pointer is over and names it. A cell reports
+// leaving with the choice it reported entering with, so a stale leave from the
+// cell just left cannot take down the label of the one just entered.
 //
-// The ellipsis box is what pins it to one line — it reports the font's height
-// whatever it holds, so an empty line is as tall as a full one and a name as long
-// as somebody made it cannot widen the pop-up under the pointer.
-func (p *emojiPicker) previewLine() fyne.CanvasObject {
-	return VBoxNoSpacing(VerticalSpacer(theme.Sizes.EmojiPickerGap), p.previewBox)
-}
-
-// setHovered records what the pointer is over. A cell reports leaving with the
-// choice it reported entering with, so a stale leave from the cell just left
-// cannot blank the name of the one just entered.
-func (p *emojiPicker) setHovered(choice EmojiChoice, over bool) {
+// The name is a tooltip rather than a line under the grid: it is what a *cell*
+// is called, and read off a caption at the far end of the pop-up it was a name
+// with nothing beside it saying which square it belonged to.
+func (p *emojiPicker) setHovered(choice EmojiChoice, cell fyne.CanvasObject, over bool) {
 	if !over && (!p.over || p.hovered.Value() != choice.Value()) {
 		return
 	}
 
 	p.hovered, p.over = choice, over
-	p.showPreview()
-}
 
-// showPreview writes the line: what is hovered, or failing that what Enter takes.
-func (p *emojiPicker) showPreview() {
-	text := ""
-	switch {
-	case p.over:
-		text = previewName(p.hovered)
-	case p.found:
-		text = previewName(p.top)
-	}
-
-	if p.previewText == text {
+	if !over {
+		p.tip.Hide()
 		return
 	}
 
-	p.previewText = text
-	SetEllipsisText(p.previewBox, text)
+	p.tip.ShowAbove(previewName(choice), cell)
 }
 
 // previewName is what one emoji is called. A custom one is written the way a
-// message carries it, so the line doubles as what typing it by hand would look
+// message carries it, so the label doubles as what typing it by hand would look
 // like; a character has no such form and is named plainly.
 func previewName(choice EmojiChoice) string {
 	if choice.Name == "" {
@@ -351,10 +335,10 @@ func (p *emojiPicker) fill(query string) {
 		p.empty.Show()
 	}
 
-	// The pointer is in the field, not the grid, so what a query changes is what
-	// Enter would take.
+	// The pointer is in the field, not the grid, so whatever a cell was naming has
+	// been reordered out from under it.
 	p.over = false
-	p.showPreview()
+	p.tip.Hide()
 }
 
 // grid wraps the cells at whatever the picker's width allows, so the cell size is
@@ -372,10 +356,11 @@ func (p *emojiPicker) cell(choice EmojiChoice) fyne.CanvasObject {
 		return cell
 	}
 
-	cell := newEmojiCell(p.deps, choice, func() {
+	var cell *emojiCell
+	cell = newEmojiCell(p.deps, choice, func() {
 		p.popUp.Hide()
 		p.onPick(choice)
-	}, func(over bool) { p.setHovered(choice, over) })
+	}, func(over bool) { p.setHovered(choice, cell, over) })
 	p.cells[value] = cell
 
 	return cell

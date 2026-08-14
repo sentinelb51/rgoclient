@@ -36,6 +36,8 @@ func inlineString(nodes []Inline) string {
 			fmt.Fprintf(&b, "#(%s)", v.ChannelID)
 		case *Emoji:
 			fmt.Fprintf(&b, ":(%s)", v.EmojiID)
+		case *Timestamp:
+			fmt.Fprintf(&b, "t(%d|%s)", v.Time.Unix(), v.Style)
 		}
 	}
 	return b.String()
@@ -82,6 +84,22 @@ func TestParseInline(t *testing.T) {
 		"<@>":               "<@>",         // no ID
 		"<# general>":       "<# general>", // not an ID
 		"a < b # c":         "a < b # c",
+
+		// Timestamps. The style is validated rather than taken verbatim: an unknown
+		// letter has no rendering, and drawing it as the default would show the
+		// wrong face of the right instant instead of what was typed. 't' is also a
+		// scheme byte, so a miss has to fall through to the bracketed-URL match.
+		"due <t:1700000000:R>":  "due t(1700000000|R)",
+		"<t:1700000000>":        "t(1700000000|)",
+		"<t:0:F>":               "t(0|F)",
+		"<t:-86400:d>":          "t(-86400|d)", // before the epoch
+		"<t:1700000000:Q>":      "<t:1700000000:Q>",
+		"<t:1700000000:>":       "<t:1700000000:>",
+		"<t:>":                  "<t:>",
+		"<t:soon>":              "<t:soon>",
+		"<tftp://host/x>":       "a(tftp://host/x|tftp://host/x)",
+		`\<t:1700000000:R>`:     "<t:1700000000:R>",
+		"see <t:1700000000:R> ": "see t(1700000000|R) ",
 
 		// Custom emoji. A colon is ordinary punctuation, so only an exact ULID
 		// between two of them is one — everything else has to survive untouched, or

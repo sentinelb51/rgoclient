@@ -103,7 +103,7 @@ func TestMemberStatusFor(t *testing.T) {
 		{name: "a retry outranks the failure it clears", serverID: "01S", loading: true, failed: true, empty: true,
 			text: "Loading members", busy: true},
 		{name: "a failure outranks an empty list", serverID: "01S", failed: true, empty: true,
-			text: "Couldn't load members.", action: "Try again"},
+			text: "Couldn't load members.", action: "Retry"},
 		{name: "genuinely empty", serverID: "01S", empty: true, text: "Nobody to show here."},
 		{name: "nothing to say", serverID: "01S"},
 	}

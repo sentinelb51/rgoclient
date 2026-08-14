@@ -580,6 +580,10 @@ type User struct {
 	Username string
 	Handle   string // "@username#0001" — what tells two identical display names apart
 
+	// DisplayName is the chosen name and nothing else, empty where there is
+	// none — which Name cannot say, having already fallen back to the username.
+	DisplayName string
+
 	AvatarURL  string
 	Presence   Presence
 	StatusText string

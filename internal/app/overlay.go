@@ -69,6 +69,7 @@ func (a *App) closeOverlay() {
 	a.overlay = nil
 	a.joinDialog = nil
 	a.closeFriends()
+	a.closePins()
 	a.bindKeys()
 
 	// The settings page has its own focus to keep; only the client underneath
@@ -147,7 +148,7 @@ func (a *App) joinServer(code string) {
 		}
 
 		if a.joinDialog != nil {
-			a.joinDialog.Fail("Could not join. Check the invite and try again.")
+			a.joinDialog.Fail("Could not join. Check the invite and retry.")
 		}
 	})
 }

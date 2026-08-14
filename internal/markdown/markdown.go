@@ -9,6 +9,8 @@
 // Rendering the AST to Fyne widgets lives in internal/ui.
 package markdown
 
+import "time"
+
 /* Blocks */
 
 // Document is the root of a parsed message.
@@ -117,6 +119,15 @@ type (
 	// for the same reason the mentions do — the picture is served from a CDN this
 	// package has no business naming.
 	Emoji struct{ EmojiID string }
+
+	// Timestamp is a <t:1700000000:F> instant. Style is the letter the author
+	// named, or "" for the default — which of the instant's faces to draw is a
+	// question about the reader's clock and locale, and this package has neither,
+	// so it is carried rather than resolved.
+	Timestamp struct {
+		Time  time.Time
+		Style string
+	}
 )
 
 func (*Text) isInline()           {}
@@ -131,3 +142,4 @@ func (*Link) isInline()           {}
 func (*UserMention) isInline()    {}
 func (*ChannelMention) isInline() {}
 func (*Emoji) isInline()          {}
+func (*Timestamp) isInline()      {}

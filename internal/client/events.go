@@ -332,8 +332,10 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		}
 	})
 
-	// One emoji taken off a message wholesale, whoever had chosen it — what a
-	// moderator's clear sends, one event per emoji.
+	// One emoji taken off a message wholesale, whoever had chosen it. Taking off
+	// *every* reaction is not this event: Revolt sends that as a message update
+	// carrying an empty map, which cannot be told from an update that never
+	// mentioned reactions — see Client.ClearReactions.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageRemoveReaction) {
 		if c.clearReaction(event.ChannelID, event.ID, event.EmojiID) {
 			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})

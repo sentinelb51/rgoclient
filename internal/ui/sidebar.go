@@ -10,6 +10,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
@@ -197,7 +198,7 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 	label.Alignment = fyne.TextAlignLeading
 
 	height := theme.Sizes.ChannelItemHeight
-	if channel.Kind.IsConversation() {
+	if avatarLed(channel.Kind) {
 		height = theme.Sizes.ConversationItemHeight
 	}
 
@@ -494,11 +495,19 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
+// avatarLed reports whether a channel's row is led by a picture rather than by a
+// glyph, which is also what makes it the taller card. Every conversation but
+// Saved Notes is: that one is the account's own, so its picture would be this
+// user's avatar standing in for a notepad.
+func avatarLed(kind domain.ChannelKind) bool {
+	return kind.IsConversation() && kind != domain.ChannelSavedMessages
+}
+
 // channelLeading returns what precedes a channel's name in its sidebar row: a
 // conversation is led by its avatar, everything else by its type glyph. Centred,
 // because the row is taller than either.
 func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
-	if !channel.Kind.IsConversation() {
+	if !avatarLed(channel.Kind) {
 		return ChannelGlyph(channel.Kind)
 	}
 
@@ -509,16 +518,20 @@ func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
 }
 
 // ChannelGlyph returns the glyph that prefixes a channel's name, both in the
-// sidebar row and in the message-area header: "#" for a server text channel,
-// "@" for a direct message, and a two-head mark for a group. Anything else —
-// including the zero value, meaning nothing is selected yet — falls back to the
-// hashtag.
+// sidebar row and in the message-area header: "#" for a server text channel, a
+// speaker for a voice one, "@" for a direct message, and a two-head mark for a
+// group. Anything else — including the zero value, meaning nothing is selected
+// yet — falls back to the hashtag.
 func ChannelGlyph(kind domain.ChannelKind) fyne.CanvasObject {
 	switch kind {
-	case domain.ChannelDM, domain.ChannelSavedMessages:
+	case domain.ChannelVoice:
+		return VoiceIcon()
+	case domain.ChannelDM:
 		return AtIcon()
 	case domain.ChannelGroup:
 		return GroupIcon()
+	case domain.ChannelSavedMessages:
+		return NotesIcon()
 	}
 
 	return HashtagIcon()
@@ -559,6 +572,28 @@ func AtIcon() fyne.CanvasObject {
 	glyph.Alignment = fyne.TextAlignCenter
 
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewCenter(glyph)))
+}
+
+// VoiceIcon returns the speaker glyph prefixing a voice channel, one of the
+// client's own marks tinted like the drawn glyphs beside it. A voice channel is
+// still a channel this client can only type in, so the row it leads is the same
+// row as a text channel's — the mark is the whole of what tells them apart.
+func VoiceIcon() fyne.CanvasObject {
+	size := theme.Sizes.HashtagIconSize
+	icon := newScaledIcon(tintedIcon(assets.VoiceIcon, theme.Colors.HashtagIcon), size)
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), icon))
+}
+
+// NotesIcon returns the notepad glyph prefixing Saved Notes. It is one of the
+// client's own marks rather than a drawn one because a page with lines on it is
+// more strokes than the sidebar's glyphs are worth in canvas objects; it is
+// tinted to the same colour as they are, so the four read as one set.
+func NotesIcon() fyne.CanvasObject {
+	size := theme.Sizes.HashtagIconSize
+	icon := newScaledIcon(tintedIcon(assets.NotesIcon, theme.Colors.HashtagIcon), size)
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), icon))
 }
 
 // GroupIcon returns the two-head glyph prefixing group channels: a pair of

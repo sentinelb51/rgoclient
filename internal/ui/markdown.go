@@ -17,6 +17,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 // renderMessageBody renders a message's body. A body whose whole content shares
@@ -322,7 +323,7 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			if !flattenInlines(b, n.Children, next, size, dim, merge) {
 				return false
 			}
-		default: // Underline, Strike, Spoiler, Link, both mentions and an emoji need custom visuals
+		default: // Underline, Strike, Spoiler, Link, both mentions, an emoji and a timestamp need custom visuals
 			return false
 		}
 	}
@@ -547,12 +548,19 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 			})
 		case *markdown.Emoji:
 			b.emoji(n.EmojiID, base)
+		case *markdown.Timestamp:
+			// Drawn as a mention is, and for the same reason: it is a fact the client
+			// resolved rather than something the author typed, so it has to read as
+			// standing apart from the sentence around it. It opens nothing — there is
+			// nowhere for an instant to lead — hence the nil tap.
+			b.mention(util.MessageTimestamp(n.Time, n.Style), em, base, nil)
 		}
 	}
 }
 
 // mention renders an already-marked "@Name" or "#channel" as bold, accent-
-// coloured text that opens what it names when tapped.
+// coloured text that opens what it names when tapped. A nil onTap draws the same
+// highlight with nothing behind it, which is what a rendered timestamp is.
 //
 // It is inline text rather than the tinted pill other clients use: a pill needs
 // a background bleeding behind the row's line spacing, and RichText gives a
@@ -691,6 +699,17 @@ func (w *mentionText) SetText(text string) {
 
 func (w *mentionText) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(w.textObj)
+}
+
+// Cursor keeps tapBase's hand for a mention that opens something, and the
+// ordinary pointer for one that does not: a timestamp is drawn as a highlight
+// but leads nowhere, and a hand over it would promise a click that does nothing.
+func (w *mentionText) Cursor() desktop.Cursor {
+	if w.onTap == nil {
+		return desktop.DefaultCursor
+	}
+
+	return desktop.PointerCursor
 }
 
 /* Custom emoji */

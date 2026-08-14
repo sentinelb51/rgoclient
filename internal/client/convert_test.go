@@ -216,3 +216,34 @@ func TestToReactionsIsOrdered(t *testing.T) {
 		t.Error("a message with no reactions converted to a slice")
 	}
 }
+
+// A voice channel no longer says so in its type: Stoat dropped the VoiceChannel
+// variant and a voice channel now arrives as a TextChannel carrying a `voice`
+// object. Reading the type alone files every one of them under text, which is a
+// wrong answer that looks like a right one — the channel works, it just stops
+// being recognisable.
+func TestToChannelKindReadsVoiceOffTheChannel(t *testing.T) {
+	tests := []struct {
+		name    string
+		channel *revoltgo.Channel
+		want    domain.ChannelKind
+	}{
+		{"text", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeText}, domain.ChannelText},
+		{"voice by field", &revoltgo.Channel{
+			ChannelType: revoltgo.ChannelTypeText,
+			Voice:       &revoltgo.ChannelVoiceInformation{},
+		}, domain.ChannelVoice},
+		{"voice by type", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeVoice}, domain.ChannelVoice},
+		{"dm", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeDM}, domain.ChannelDM},
+		{"group", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeGroup}, domain.ChannelGroup},
+		{"notes", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeSavedMessages}, domain.ChannelSavedMessages},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := toChannelKind(test.channel); got != test.want {
+				t.Errorf("kind is %v, want %v", got, test.want)
+			}
+		})
+	}
+}

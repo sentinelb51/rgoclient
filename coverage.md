@@ -5,16 +5,20 @@
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` (module cache:
 `revoltgo@v0.0.0-20260810192541-889490ef5cb5/session.go`) exposes ~110 REST methods plus the
-socket pair. The client calls **36** of them, and registers **31** of revoltgo's 49 gateway
+socket pair. The client calls **38** of them, and registers **31** of revoltgo's 49 gateway
 event types. Four routes are reached without revoltgo's types at all, because revoltgo
 cannot express them — see *Round the typed API* below.
+
+`ChannelMessages` counts once but is now asked four ways: the newest page, `Before` into
+the cache, and `Nearby` / `After` / an uncached `Before` for a jump window, which is why
+`ChannelMessagesParams` no longer has an unused field.
 
 This is a map, kept so targets can be picked from it. Anything moved out of *Not covered*
 is built and working, not merely planned.
 
 ---
 
-## Covered today (36 calls)
+## Covered today (38 calls)
 
 | Area | revoltgo call | Client action |
 |---|---|---|
@@ -22,14 +26,18 @@ is built and working, not merely planned.
 | | `Logout` | `Client.Logout` |
 | | `SessionsDeleteAll(true)` | `Client.LogoutEverywhere` |
 | This account | `UserEdit` (`Status`) | `Client.SetPresence`, `Client.SetStatusText` |
+| | `UserEdit` (`DisplayName`) | `Client.SetDisplayName` |
 | Files | `AttachmentUpload` | `uploadAttachments` (inside `SendMessage`) |
 | Messages | `ChannelMessageSend` | `SendMessage` |
 | | `ChannelMessageEdit` | `EditMessage` |
 | | `ChannelMessageDelete` | `DeleteMessage` |
 | | `ChannelMessagePin` / `ChannelMessageUnpin` | `PinMessage` |
 | | `ChannelMessageReactionCreate` / `…Delete` | `React` |
+| | `ChannelMessageReactionClear` | `ClearReactions` (a moderator's, confirmed) |
 | | `ChannelMessages` (latest + `Before`) | `LatestMessages`, `HistoryBefore` |
+| | `ChannelMessages` (`Nearby`, `After`, uncached `Before`) | `MessagesAround`, `MessagesAfter`, `MessagesBefore` (jump windows) |
 | | `ChannelMessage` | `ResolveMessages` (reply targets) |
+| | `ChannelSearch` (`Pinned`) | `PinnedMessages` (the pinned-messages panel) |
 | Read state | `MessageAck`, `ServerAck` | `AckMessage`, `AckServer` |
 | Typing | `ChannelBeginTyping`, `ChannelEndTyping` | `BeginTyping`, `EndTyping` |
 | Channels | `Channel` | `OpenConversation` (State backfill) |
@@ -105,6 +113,17 @@ Pinning needs `ManageMessages` even over your own message — a pin is a change 
 not to the message — which is why `canPin` does not fall back to authorship the way `canDelete`
 does.
 
+**Listing the pins** is the one read that has to be a *search*. Revolt publishes no
+collection of them — the pin is a flag on the message — so `ChannelSearch` asked with
+`pinned` and no query is the only route that enumerates them, and `Sort` is named because the
+route's default is `Relevance`, which with nothing to be relevant to is an order nobody chose.
+It also may not ask for the users: `include_users` turns the response from an array into an
+object and revoltgo's method decodes only the array, so `Client.PinnedMessages` hands back
+author IDs and `app/pins.go` resolves what the store cannot name, in the worker that fetched
+them. Nothing is cached — the panel is a snapshot for as long as it is up — and taking a pin
+off from it goes through `App.setPinned`, `OnPin` with a hook, the message being one the
+column need not be holding at all.
+
 **Logout** drops the session before it revokes, deliberately: being logged out is a local fact
 that must not wait on the network or depend on it succeeding. `Session.Logout` is a REST call,
 so the captured session stays usable for it after `Close` has taken the websocket down.
@@ -123,11 +142,44 @@ its reaction slice and the user list inside it — since all three are read on t
 without the cache lock. Ordering is the client's own (`toReactions`, by emoji): reactions
 arrive as a JSON object, so there is no order in the payload to keep.
 
+**Clearing them all** is the same write for a harder reason. Revolt announces it as an
+ordinary message *update* carrying an empty reaction map — not `MessageRemoveReaction`,
+which is one emoji taken off wholesale — and `EventMessageUpdate.Data` is a whole `Message`,
+so an empty map is equally what a content edit brings. Nothing can read it, exactly as
+nothing can read `Pinned` there, which is why `Client.ClearReactions` writes the cache
+itself and a clear made from another client does not reflect. It is the one reaction
+action that is confirmed, undoing other people's clicks rather than this account's, and
+it is offered in the context menu alone under `ManageMessages`.
+
 **Presence and the status line** are one object to Revolt, which takes the whole of it — so
 whichever half is not being changed is read back out of `State` and sent again unchanged,
 either setter omitting the other's half being enough to destroy it. `editStatus` is that
 read-and-resend, shared by both. Clearing the line is the one change that cannot be a value:
 an empty `Text` is omitted from the request, so it goes as `Remove: ["StatusText"]`.
+
+**The display name** is the same route asked a third way and needs none of that: it is a
+single field and Revolt applies the edit as a partial, so `SetDisplayName` sends it alone.
+Clearing takes the same `Remove` shape (`"DisplayName"`), `UserEditParams` modelling it as a
+plain string with `omitempty`. Revolt's bounds are 2–32 characters and its pattern forbids
+newlines and the zero-width space, so `cleanDisplayName` drops those and cuts a long name —
+nobody chose the newline that arrived with a paste — and reports back only the case with no
+honest repair, a name of one character. That refusal is the one thing the client says out
+loud about the row: the request was never made, so "could not" would be untrue.
+`domain.User.DisplayName` is the raw name kept apart from `Name`, which has already fallen
+back to the username — a field pre-filled with *that* would send the username back as a
+chosen name at the first blur.
+
+**A jump window** is the second thing kept out of the message cache, and for the same
+reason a reply target is: it is a page from wherever somebody was quoted, and the cache is
+a channel's contiguous tail. So `MessagesAround` / `MessagesBefore` / `MessagesAfter` share
+one helper that fetches, sorts and hands back — writing nothing — and `App.uncached` holds
+what they return, which also lets a quote *inside* such a window resolve without a request
+of its own. Whether the mounted column is in the cache is then read off the cache rather
+than off a flag, which is what makes deep scrollback — the same situation reached by
+scrolling rather than by jumping — stop prepending non-contiguous pages into it.
+`Nearby` decides its own bounds (half the limit either side, the message included) and
+answers in no documented order, hence the sort; `After` must be asked with `Sort: Oldest`,
+Revolt's default with an anchor being the newest messages that happen to be after it.
 
 **A reply target** is fetched one at a time and kept **out** of the message cache. That
 cache is the contiguous tail of a channel; a reply reaches as far back as somebody cared to
@@ -179,10 +231,7 @@ users are a member of some server and nothing more.
 
 | Call(s) | What it unlocks | Also needs |
 |---|---|---|
-| `ChannelMessageReactionClear` | Taking every reaction off a message at once, for a moderator. The event it produces is already handled, so one made elsewhere lands here — nothing can make one. | A menu item under `ManageMessages`. |
-| `ChannelMessages` with `Nearby` / `After` | Reply-preview tap navigation (a named gap) and jump-to-message. `ChannelMessagesParams` already carries both fields; only `Before` is used. The quoted message itself is now fetched, so what is missing is only the jump. | A window rebuild around a target ID in `app/messages.go`. |
-| `ChannelSearch` with `Pinned: true` | **Listing** a channel's pinned messages. Pinning exists now, so the pins are real and there is nowhere to see them together. | A panel; the search route is the only way to enumerate them. |
-| `UserEdit` (`DisplayName`, `Avatar`, `Profile`), `SetUsername` | Editing your own account: name, picture, bio. The status line is the only part of it that can be changed from here. | Rows in the Account section; an avatar needs the upload path `SendMessage` already has. |
+| `UserEdit` (`Avatar`, `Profile`), `SetUsername` | The rest of editing your own account: picture, bio, username. The name, the presence and the status line are all that can be changed from here. | An avatar needs the upload path `SendMessage` already has; a bio needs `UserProfile` fetched before the row can be filled, the account's own not being in `State`; a username change needs the password. |
 | `Emoji` (metadata by ID) | Naming an emoji the picker cannot: one from a server the account is not in renders in a message and in a chip, and `State` has no record of it. Marginal — the ID draws the picture regardless. | Somewhere to say a name; nothing tooltips one today. |
 
 ### Tier 2 — new but ordinary user-client features
@@ -276,9 +325,14 @@ channel visit rather than trusting the event now that the event is listened to.
 
 ## Known limits of what is built
 
-- **A pinned message is marked, not collected.** The mark rides the name line, so
-  `continuesGroup` refuses to group a pinned message — grouped, it would have nowhere to draw.
-  There is no pinned-messages panel: enumerating them is `ChannelSearch(Pinned: true)`, above.
+- **A pinned message is marked in the column and collected in a panel.** The mark rides the
+  name line, so `continuesGroup` refuses to group a pinned message — grouped, it would have
+  nowhere to draw. The panel is opened from the channel header and is a **snapshot**: it is
+  one search, nothing keeps it current, so a pin made anywhere while it is open — this
+  account's own from another client included — does not appear until it is reopened. A row
+  is a flattened one-line summary and leads to the message; a body with no text says what it
+  carries instead. It is capped at the hundred newest, Revolt's own ceiling on a search, with
+  no way to page past it.
 - **An unpin made from another client is believed only through its system message.** If
   Revolt ever stops emitting one, the flag would go stale until the channel is re-fetched;
   the partial update alongside it cannot be read for the reason given above.
@@ -294,16 +348,31 @@ channel visit rather than trusting the event now that the event is listened to.
   security key is refused by `answerFor` rather than offered — Revolt names the method, and
   there is no WebAuthn here to answer it with. The ticket is short-lived and there is no
   resend: an expired one is a failure notice and a trip back to the login screen.
-- **A reply is resolved, not navigable.** The quoted message is fetched when the cache
-  cannot answer for it, so the line names what it quotes; tapping it still does nothing
-  (`ChannelMessages{Nearby}`, Tier 1). A failed fetch keeps its guard rather than releasing
-  it the way an author's does: the usual reason is that the message was deleted, which stays
-  true, and a quote remounts on every scroll past it. So a quote missed through a dropped
-  connection keeps its placeholder until the channel is reopened.
+- **A quote leads somewhere, and a jump window is a dead copy while it is up.** Tapping a
+  reply preview mounts the page around what it names, which is a request when the message
+  is older than the cache. That page is deliberately *not* cached, so nothing keeps it
+  current: every event handler writes to the cache, and `refreshMessage` finds nothing —
+  an edit, a pin or a reaction made while a jump is showing does not reflect until "Jump
+  to present" brings the tail back. A delete does, `removeMessages` walking the mounted
+  widgets instead. There is no way back to the *position* the jump left, only to the tail.
+  The pinned-messages panel is now a second way in — a row leads to its message the way a
+  quote does — and channel search would be a third.
+  A quote that resolved to nothing is not tappable, a failed fetch keeping its guard rather
+  than releasing it the way an author's does — the usual reason is that the message was
+  deleted, which stays true, and a quote remounts on every scroll past it. So a quote
+  missed through a dropped connection keeps its placeholder, and stays a dead end, until
+  the channel is reopened.
 - **A reaction says how many, not who.** The names are carried (`domain.Reaction.Users`) and
   what is drawn is a count; a chip has no tooltip to name them in. The chips are ordered by
   emoji rather than by who reacted first, there being no first in a JSON object, so a busy
-  message reads in an order nobody chose.
+  message reads in an order nobody chose. **A clear made from another client does not
+  reflect**, for the reason above — the update announcing it cannot be told from an edit.
+- **A confirmation is skipped by holding Shift, on Windows only.** Fyne answers no question
+  about a modifier outside an event it delivers: a canvas key handler fires only while
+  nothing holds focus, and a context-menu item reports no modifiers at all — so `ui.ShiftHeld`
+  asks Win32 and the other half of the pair answers false. `App.confirm` is the single place
+  that reads it, so it covers every destructive action rather than the ones wired to it, and
+  the card names the key only where it works (`shiftSkippable`).
 - **The friends list is as complete as the account cache is.** It is a walk of the cached
   users, so somebody Ready did not name and nothing has since fetched is not in it. It does
   not follow presence, has no search, and offers no way to add somebody by handle — adding is

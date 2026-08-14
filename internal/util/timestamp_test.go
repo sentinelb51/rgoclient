@@ -69,6 +69,61 @@ func TestShortDuration(t *testing.T) {
 	}
 }
 
+// TestRelativeTime covers the boundaries, which is where a coarsening span reads
+// wrongly: the unit has to change before its count would, and it has to answer
+// forwards as well as back — a timestamp in a body is as often a deadline as a
+// record.
+func TestRelativeTime(t *testing.T) {
+	cases := []struct {
+		name string
+		d    time.Duration
+		want string
+	}{
+		{"a moment either way is no distance", 10 * time.Second, "just now"},
+		{"just under a minute still rounds to one", 50 * time.Second, "in 1 minute"},
+		{"minutes below the hour", 45 * time.Minute, "in 45 minutes"},
+		{"the hour changes the unit", time.Hour, "in 1 hour"},
+		{"hours below the day", 23 * time.Hour, "in 23 hours"},
+		{"the day changes the unit", 24 * time.Hour, "in 1 day"},
+		{"a month is thirty days", 30 * 24 * time.Hour, "in 1 month"},
+		{"a year is three hundred and sixty five", 365 * 24 * time.Hour, "in 1 year"},
+		{"and it looks backwards too", -2 * time.Hour, "2 hours ago"},
+		{"backwards past a year", -800 * 24 * time.Hour, "2 years ago"},
+	}
+
+	for _, c := range cases {
+		if got := RelativeTime(time.Now().Add(c.d)); got != c.want {
+			t.Errorf("RelativeTime(now%+v) = %q, want %q [%s]", c.d, got, c.want, c.name)
+		}
+	}
+}
+
+// TestMessageTimestamp pins that each style draws a different face of the same
+// instant. The clock half follows the configured format, so only what the style
+// itself decides is asserted — the date, the weekday, and that "R" is the one
+// that does not name a date at all.
+func TestMessageTimestamp(t *testing.T) {
+	moment := time.Date(2026, 7, 13, 15, 4, 5, 0, time.Local)
+	clock := moment.Format(clockLayout(false))
+
+	cases := []struct {
+		style string
+		want  string
+	}{
+		{"d", "13/07/2026"},
+		{"D", "July 13, 2026"},
+		{"F", "Monday, July 13, 2026 " + clock},
+		{"", "July 13, 2026 " + clock},
+		{"R", RelativeTime(moment)},
+	}
+
+	for _, c := range cases {
+		if got := MessageTimestamp(moment, c.style); got != c.want {
+			t.Errorf("MessageTimestamp(%q) = %q, want %q", c.style, got, c.want)
+		}
+	}
+}
+
 func TestDayLabel(t *testing.T) {
 	now := time.Now().Local()
 

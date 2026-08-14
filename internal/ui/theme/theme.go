@@ -25,6 +25,8 @@ var Colors = struct {
 	MessageMentionBackground      color.Color
 	MessageMentionHoverBackground color.Color
 
+	MessageJumpBackground color.Color
+
 	ChannelHoverBackground color.Color
 	ChannelSelectedBg      color.Color
 	ServerDefaultBg        color.Color
@@ -76,9 +78,12 @@ var Colors = struct {
 	MentionText           color.Color
 	MentionHandleText     color.Color
 	SlowmodeText          color.Color
+	DockBadgeBg           color.Color
 	SlowmodeWaiting       color.Color
 	TypingText            color.Color
 	TypingMark            color.Color
+	MessageStatusMark     color.Color
+	ChannelNoteText       color.Color
 	ErrorText             color.Color
 
 	/* Reactions */
@@ -140,6 +145,13 @@ var Colors = struct {
 	NoticeInfo    color.Color
 	NoticeWarning color.Color
 	NoticeDanger  color.Color
+
+	/* Confirmations */
+
+	// ConfirmHint is the line under the buttons naming the key that skips the
+	// question. It sits below the body it follows, being an aside rather than part
+	// of what is being asked.
+	ConfirmHint color.Color
 }{
 	// Cool blue-slate ramp, darkest to lightest.
 	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255}, // #13151C
@@ -155,6 +167,12 @@ var Colors = struct {
 	// the hairline of any card inside them, read exactly as they do elsewhere.
 	MessageMentionBackground:      color.RGBA{R: 53, G: 38, B: 15, A: 255}, // #35260F
 	MessageMentionHoverBackground: color.RGBA{R: 68, G: 48, B: 20, A: 255}, // #443014
+
+	// What a jump washes the row it landed on with, on the way back to whatever
+	// that row's rest colour is. It leans on the accent rather than the warm ramp:
+	// the wash says "here", where the mention wash says "you", and a message can
+	// be both at once.
+	MessageJumpBackground: color.RGBA{R: 45, G: 55, B: 92, A: 255}, // #2D375C
 
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},   // #262B3A
 	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
@@ -244,11 +262,26 @@ var Colors = struct {
 
 	// Who is typing is the quietest thing in the client: it is true for a few
 	// seconds and then it is not, and nothing is lost by missing it. So the line
-	// takes the same grey a slowmode rule does, and the dots are lifted only far
-	// enough to be seen moving — a mark in the channel list has no text beside it
-	// to be read against.
-	TypingText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	// takes the grey a slowmode rule does, lifted one step now that it has a
+	// ground of its own to be read against rather than whatever message is
+	// passing under it.
+	TypingText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	TypingMark: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
+	// The pill both the typing line and the slowmode chip wear. It is the
+	// composer's own fill rather than a lighter surface, so the two read as part
+	// of the dock below rather than as two more cards over the conversation.
+	DockBadgeBg: color.RGBA{R: 31, G: 35, B: 48, A: 255}, // #1F2330, == ComposerBg
+
+	// The mark leading the line an empty column draws. Quieter than the sentence
+	// beside it: it says what the line is about, and a column holding one short
+	// sentence should not be led by the loudest thing on screen.
+	MessageStatusMark: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
+	// The strip under the header saying what the client cannot do in the channel
+	// below it. Quiet in the same way: it is a standing caption rather than a
+	// notice, so it must not compete with the messages it sits over.
+	ChannelNoteText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
 	ErrorText: color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 
@@ -330,6 +363,8 @@ var Colors = struct {
 	NoticeInfo:    color.RGBA{R: 91, G: 124, B: 250, A: 255}, // #5B7CFA accent
 	NoticeWarning: color.RGBA{R: 201, G: 138, B: 42, A: 255}, // #C98A2A
 	NoticeDanger:  color.RGBA{R: 199, G: 62, B: 66, A: 255},  // #C73E42
+
+	ConfirmHint: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 }
 
 // Sizes is the application's size table. Never express one size as an offset
@@ -437,6 +472,17 @@ var Sizes = struct {
 	DaySeparatorGap               float32
 	SwiftActionSize               float32
 
+	// The line the column draws in place of messages, and the mark leading it.
+	MessageStatusMarkSize float32
+	MessageStatusGap      float32
+
+	// The strip under the message header, and the mark leading it.
+	ChannelNoteTextSize float32
+	ChannelNoteMarkSize float32
+	ChannelNoteGap      float32
+	ChannelNotePaddingV float32
+	ChannelNotePaddingH float32
+
 	/* Edges */
 
 	OutlineWidth   float32
@@ -496,6 +542,9 @@ var Sizes = struct {
 	TypingGap           float32
 	TypingInsetH        float32
 	ChannelTypingSize   float32
+	DockBadgeRadius     float32
+	DockBadgePaddingV   float32
+	DockBadgePaddingH   float32
 
 	/* User profiles */
 
@@ -515,6 +564,7 @@ var Sizes = struct {
 	ProfileHandlePaddingH     float32
 	ProfileStatusSize         float32
 	ProfileDetailSize         float32
+	ProfileDetailIconSize     float32
 	ProfileBioMaxHeight       float32
 	ProfileBioRadius          float32
 	ProfileBioPadding         float32
@@ -564,6 +614,7 @@ var Sizes = struct {
 	ConfirmWidth      float32
 	ConfirmRadius     float32
 	ConfirmButtonGap  float32
+	ConfirmHintSize   float32
 
 	/* Login */
 
@@ -600,6 +651,17 @@ var Sizes = struct {
 	FriendsSectionSize   float32
 	FriendsPadding       float32
 	FriendsGap           float32
+
+	/* Pinned-messages panel */
+
+	PinsDialogWidth   float32
+	PinsListMaxHeight float32
+	PinsRowHeight     float32
+	PinsAvatarSize    float32
+	PinsNameSize      float32
+	PinsPreviewSize   float32
+	PinsPadding       float32
+	PinsGap           float32
 
 	/* Settings */
 
@@ -727,6 +789,22 @@ var Sizes = struct {
 	DaySeparatorGap:           8,
 	SwiftActionSize:           32,
 
+	// The status line's mark is set against the sentence beside it rather than
+	// against a message: it is the only thing in an otherwise empty column, so it
+	// is large enough to be the shape somebody reads first.
+	MessageStatusMarkSize: 30,
+	MessageStatusGap:      4,
+
+	// The note's own mark is set against the sentence rather than against the
+	// header above it: the strip is a caption on the channel, and a mark the size
+	// of the header's glyph would read as a second title. Its horizontal padding
+	// matches the header's, so the sentence starts under the channel's name.
+	ChannelNoteTextSize: 12,
+	ChannelNoteMarkSize: 14,
+	ChannelNoteGap:      6,
+	ChannelNotePaddingV: 2,
+	ChannelNotePaddingH: 8,
+
 	// A hairline, everywhere: a card's outline and a column seam are the same
 	// stroke, so a card never reads as more framed than the column beside it.
 	//
@@ -797,10 +875,8 @@ var Sizes = struct {
 	MentionNameSize:     13,
 	MentionHandleSize:   11,
 
-	// The chip is bare text over the message column, so it is set larger than the
-	// gutter type it sits near: with no pill behind it, size is all it has to hold
-	// itself apart from the conversation running underneath. The inset keeps it off
-	// the card's rounded top-right corner, which it would otherwise sit against.
+	// The inset keeps the chip off the card's rounded top-right corner, which it
+	// would otherwise sit against.
 	SlowmodeGlyphSize: 15,
 	SlowmodeTextSize:  14,
 	SlowmodeGap:       6,
@@ -817,6 +893,13 @@ var Sizes = struct {
 	TypingGap:         6,
 	TypingInsetH:      10,
 	ChannelTypingSize: 18,
+
+	// The pill each of the two wears. Tight enough that it hugs what it holds
+	// rather than reading as a second bar above the composer, which is what a
+	// full-width surface there would.
+	DockBadgeRadius:   6,
+	DockBadgePaddingV: 3,
+	DockBadgePaddingH: 8,
 
 	// The avatar overhangs the banner by half its height, so the banner is sized
 	// against it: too short and the avatar hangs off the card's top edge.
@@ -836,6 +919,7 @@ var Sizes = struct {
 	ProfileHandlePaddingH:     6,
 	ProfileStatusSize:         12,
 	ProfileDetailSize:         12,
+	ProfileDetailIconSize:     13,
 	ProfileBioMaxHeight:       160,
 	ProfileBioRadius:          6,
 	ProfileBioPadding:         10,
@@ -882,6 +966,7 @@ var Sizes = struct {
 	ConfirmWidth:      360,
 	ConfirmRadius:     6,
 	ConfirmButtonGap:  4,
+	ConfirmHintSize:   11,
 
 	SessionCardAvatarSize: 32,
 	WindowDefaultWidth:    1200,
@@ -910,6 +995,15 @@ var Sizes = struct {
 	FriendsSectionSize:   12,
 	FriendsPadding:       12,
 	FriendsGap:           6,
+
+	PinsDialogWidth:   480,
+	PinsListMaxHeight: 420,
+	PinsRowHeight:     54,
+	PinsAvatarSize:    32,
+	PinsNameSize:      14,
+	PinsPreviewSize:   12,
+	PinsPadding:       12,
+	PinsGap:           6,
 
 	SettingsRailWidth:     210,
 	SettingsRailRowHeight: 34,

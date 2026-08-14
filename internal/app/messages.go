@@ -9,7 +9,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
@@ -28,11 +27,12 @@ const (
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
 	remountThreshold  = 200 // px from the bottom before trimmed newer rows re-mount
 
-	// maxCachedReplies bounds the quoted messages held for reply previews. Only a
-	// reply reaching further back than the message cache lands here, so it is a
+	// maxUncachedMessages bounds what is held outside the message cache: quoted
+	// messages older than a channel's cached tail, and the window a jump landed
+	// in. Only what reaches further back than the cache lands here, so it is a
 	// ceiling rather than a working size — but a session left running is a session
 	// that must not grow, and nothing else evicts these.
-	maxCachedReplies = 512
+	maxUncachedMessages = 512
 )
 
 // The mounting budget, all four settings. They are read per use rather than
@@ -111,12 +111,11 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		dockBg.Refresh()
 	}
 
-	// The emoji button sits at the *bottom* of the entry's row rather than centred
-	// on it: the entry grows upward as lines are added, and a button that rode the
-	// middle of it would drift away from the line being typed.
+	// The emoji button rides the entry's last line rather than the middle of it —
+	// see ui.NewComposerButtonSlot, which is what decides where in the row it lands.
 	entry := ui.NewFillRow(0,
 		ui.WithCaret(a.input),
-		container.NewVBox(layout.NewSpacer(), a.input.EmojiButton),
+		ui.NewComposerButtonSlot(a.input.EmojiButton),
 	)
 
 	inner := ui.VBoxNoSpacing(
@@ -160,14 +159,40 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.channelHeader = widget.NewLabelWithStyle(a.channelName(), fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.channelGlyph = container.NewStack(ui.ChannelGlyph(a.channelKind()))
 	title := container.NewHBox(a.channelGlyph, a.channelHeader)
+
+	// The way back from a jump goes in the header rather than over the column: the
+	// badge row above the composer is bare text with nothing behind it and nothing
+	// in it accepting a pointer, and this is a button. It also belongs beside the
+	// channel's name, being about which part of that channel is on screen.
+	a.jumpChip = ui.NewTappableChip("Jump to present", theme.Colors.TextPrimary, a.returnToPresent)
+	a.jumpChip.Hide()
+
+	// The way into the pins sits beside the member toggle: both are about the
+	// channel on screen rather than about anything in the column, and a pin's own
+	// mark is what the message row already carries.
+	pins := ui.NewIconButton(assets.SystemPinnedIcon, a.showPinnedMessages, nil)
+
 	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
-	header := container.NewPadded(container.NewBorder(nil, nil, title, members))
+	a.messageHeader = container.NewBorder(nil, nil, title, container.NewHBox(a.jumpChip, pins, members))
+	header := container.NewPadded(a.messageHeader)
+
+	// The note hangs under the header rather than over the column: it is about the
+	// channel, not about what is in it, and the column below carries messages the
+	// reader is here for. It is built once and shown per channel — there is one
+	// note, and a strip rebuilt per selection would be a widget per channel switch.
+	// Its visibility comes from the open channel rather than starting hidden: a
+	// restyle rebuilds this tree under a standing selection, and a note that came
+	// back down would leave a voice channel looking like a text one.
+	a.channelNote = ui.NewChannelNote(assets.VoiceIcon, voiceNote)
+	if a.channelKind() != domain.ChannelVoice {
+		a.channelNote.Hide()
+	}
 
 	a.floatingDock = ui.NewFloatingDock(a.messageScroll, a.composerDock)
-	layout := ui.NewFillColumn(1, header, a.floatingDock)
+	a.messageColumn = ui.NewFillColumn(2, header, a.channelNote, a.floatingDock)
 
 	floor := fyne.NewSize(theme.Sizes.MessageAreaMinWidth, theme.Sizes.MessageAreaMinHeight)
-	return ui.NewFixedSizeContainer(floor, container.NewStack(background, layout))
+	return ui.NewFixedSizeContainer(floor, container.NewStack(background, a.messageColumn))
 }
 
 // resizeDock re-hangs the floating stack after something in it appeared or
@@ -491,17 +516,13 @@ func (a *App) flushReplies() {
 				return
 			}
 
-			// The store and its guard are dropped together, so nothing is left
-			// believing a target was already asked for. A quote still on screen is
-			// simply asked for again the next time it mounts.
-			if len(a.replies) >= maxCachedReplies {
-				a.replies = make(map[string]*domain.Message)
-				a.fetchedReplies = make(map[string]bool)
-			}
+			// holdUncached drops the store and its guard together, so nothing is
+			// left believing a target was already asked for. A quote still on
+			// screen is simply asked for again the next time it mounts.
+			a.holdUncached(fetched)
 
 			resolved := make(map[string]bool, len(fetched))
 			for _, message := range fetched {
-				a.replies[message.ID] = message
 				resolved[message.ID] = true
 
 				if message.System == nil && message.Webhook == nil {
@@ -582,16 +603,31 @@ func (a *App) channelKind() domain.ChannelKind {
 	return channel.Kind
 }
 
-// setChannelGlyph repoints the message header's prefix mark at the open
-// channel's type, so a DM reads "@name" rather than "#name". Call on the UI
-// thread.
-func (a *App) setChannelGlyph() {
+// voiceNote is what the strip under the header says in a voice channel. Revolt's
+// voice channels carry messages like any other, so what is missing is the call —
+// which is the half the sentence has to name, a mark saying "voice" over an empty
+// composer being how a channel that refuses messages looks.
+const voiceNote = "Voice chat isn't supported yet. You can still send messages here."
+
+// syncChannelKind matches the message header to the open channel's type: the
+// prefix mark, so a DM reads "@name" rather than "#name", and the note under it,
+// which only a voice channel draws. Hiding a child reclaims nothing on its own,
+// so the column is relaid out either way. Call on the UI thread.
+func (a *App) syncChannelKind() {
 	if a.channelGlyph == nil {
 		return
 	}
 
-	a.channelGlyph.Objects = []fyne.CanvasObject{ui.ChannelGlyph(a.channelKind())}
+	kind := a.channelKind()
+	a.channelGlyph.Objects = []fyne.CanvasObject{ui.ChannelGlyph(kind)}
 	a.channelGlyph.Refresh()
+
+	if kind == domain.ChannelVoice {
+		a.channelNote.Show()
+	} else {
+		a.channelNote.Hide()
+	}
+	ui.Relayout(a.messageColumn)
 }
 
 /* Loading and rendering */
@@ -621,7 +657,7 @@ func (a *App) loadChannelMessages(channelID string) {
 				return
 			}
 			if count == 0 {
-				a.showStatus("No messages in this channel")
+				a.showStatusMark(assets.EmptyChannelIcon, "No messages in this channel")
 				return
 			}
 
@@ -643,10 +679,21 @@ func (a *App) displayCached() {
 // by loadMoreHistory's cache tier. Call on the UI thread.
 func (a *App) displayMessages(messages []*domain.Message) {
 	a.cancelActiveEdit()
+	a.setJumped(false) // the tail is what this mounts, so there is nowhere to go back to
 	if mount := initialMountCount(); len(messages) > mount {
 		messages = messages[len(messages)-mount:]
 	}
 
+	a.messageList.Objects = a.buildWindow(messages)
+	a.remountMessages()
+	a.scrollToBottom()
+}
+
+// buildWindow builds the widgets for a contiguous run of messages, oldest first,
+// each seeing its true neighbours. The ends see none, which is what makes the
+// oldest render as a full message and the newest as one nothing follows —
+// whatever is mounted around them afterwards re-derives both seams.
+func (a *App) buildWindow(messages []*domain.Message) []fyne.CanvasObject {
 	widgets := make([]fyne.CanvasObject, len(messages))
 	for i, message := range messages {
 		var prev, next *domain.Message
@@ -659,15 +706,20 @@ func (a *App) displayMessages(messages []*domain.Message) {
 		widgets[i] = a.newMessageWidget(prev, message, next)
 	}
 
-	a.messageList.Objects = widgets
-	a.remountMessages()
-	a.scrollToBottom()
+	return widgets
 }
 
 // showStatus replaces the message list with a single centred line.
-func (a *App) showStatus(text string) {
+func (a *App) showStatus(text string) { a.showStatusMark(nil, text) }
+
+// showStatusMark is the same line led by one of the client's own marks. Only a
+// channel that is simply empty carries one: it is the one status that is not a
+// wait or a refusal, so the mark is what the column is showing rather than a
+// decoration on an apology.
+func (a *App) showStatusMark(mark fyne.Resource, text string) {
 	a.cancelActiveEdit()
-	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
+	a.setJumped(false)
+	line := ui.NewMessageStatus(mark, text)
 
 	// Centred on what can be seen, so the room held for the dock doesn't push the
 	// line low and leave the column scrollable by exactly that much.
@@ -678,7 +730,7 @@ func (a *App) showStatus(text string) {
 		}
 	}
 
-	a.messageList.Objects = []fyne.CanvasObject{ui.NewMinHeightContainer(height, container.NewCenter(label))}
+	a.messageList.Objects = []fyne.CanvasObject{ui.NewMinHeightContainer(height, line)}
 	a.messageList.Refresh()
 
 	// The inner list refresh alone doesn't repaint the scroll viewport until an
@@ -692,6 +744,7 @@ func (a *App) showStatus(text string) {
 // clearMessages empties the message list.
 func (a *App) clearMessages() {
 	a.cancelActiveEdit()
+	a.setJumped(false)
 	a.messageList.Objects = nil
 	a.messageList.Refresh()
 	a.scrollToBottom()
@@ -709,6 +762,205 @@ func (a *App) jumpToLatest() {
 	}
 
 	a.displayCached()
+}
+
+/* Jumping to a message */
+
+// OnJumpToMessage brings a quoted message into view. Three answers, cheapest
+// first: it may already be mounted, it may be in the channel's cached tail, and
+// otherwise it is somewhere further back and the page around it is a request.
+//
+// Only the open channel is ever asked about. A reply names a message in the
+// channel it was written in, so the two are the same by construction — and a
+// jump that could also change channel would have to wait on that channel's own
+// first page before it knew where to land.
+func (a *App) OnJumpToMessage(channelID, messageID string) {
+	if channelID != a.currentChannelID || messageID == "" {
+		return
+	}
+	if a.scrollToMounted(messageID) || a.jumpWithinCache(messageID) {
+		return
+	}
+
+	a.loadJumpWindow(channelID, messageID)
+}
+
+// scrollToMounted reveals a message that already has a widget, reporting whether
+// it had one. Call on the UI thread.
+func (a *App) scrollToMounted(messageID string) bool {
+	i := a.messageWidgetIndex(messageID)
+	if i == -1 {
+		return false
+	}
+
+	a.revealMounted(i)
+	return true
+}
+
+// jumpWithinCache mounts a window around a message the channel cache still
+// holds, reporting whether it did. Nothing is detached here — the window is part
+// of the cached tail, so scrolling either way is served from the cache exactly as
+// ordinary scrollback is. Call on the UI thread.
+func (a *App) jumpWithinCache(messageID string) bool {
+	cached := a.client.Messages().Get(a.currentChannelID)
+	i, ok := slices.BinarySearchFunc(cached, messageID, cache.CompareMessageID)
+	if !ok {
+		return false
+	}
+
+	from, to := windowAround(len(cached), i, historyPageSize()/2)
+	a.mountJumpWindow(cached[from:to], messageID)
+
+	return true
+}
+
+// windowAround is the slice of n messages to mount around index i, span either
+// side. It is a function of its own because the clamping is the whole of it: a
+// window running off either end must still contain the message the jump was
+// for, that being the one thing a jump cannot get wrong.
+func windowAround(n, i, span int) (from, to int) {
+	return max(i-span, 0), min(i+span+1, n)
+}
+
+// loadJumpWindow fetches the page around a message the cache cannot answer for
+// and mounts it. What comes back is deliberately not cached — see
+// Client.MessagesAround — and is held in a.uncached instead, which is what lets
+// the quotes inside the window resolve without a request each.
+//
+// The column is left alone until the page lands. Blanking it for a status line
+// would throw away wherever the reader had scrolled to, which is the one thing a
+// failed jump must not cost them: a message that cannot be fetched was almost
+// always deleted, so the notice is the whole of what happens.
+func (a *App) loadJumpWindow(channelID, messageID string) {
+	if a.loadingPage {
+		return
+	}
+	a.loadingPage = true
+	epoch := a.epoch
+
+	go func() {
+		page, err := a.client.MessagesAround(channelID, messageID, historyPageSize())
+
+		a.doOnUI(func() {
+			a.loadingPage = false
+			if a.stale(epoch) || a.currentChannelID != channelID {
+				return
+			}
+			if err != nil || len(page) == 0 {
+				if err != nil && !errors.Is(err, client.ErrBusy) {
+					log.Printf("jump to message %s: %v", messageID, err)
+				}
+				a.notify(ui.ToneWarning, "Couldn't find that message.")
+				return
+			}
+
+			a.holdUncached(page)
+			a.mountJumpWindow(page, messageID)
+		}, false)
+	}()
+}
+
+// mountJumpWindow replaces the column with a window and reveals the message it
+// was fetched for. Call on the UI thread.
+func (a *App) mountJumpWindow(messages []*domain.Message, targetID string) {
+	a.cancelActiveEdit()
+
+	// The way back goes up first: it is in the header, and a header that changed
+	// height after the column was measured would move everything measured against
+	// it.
+	a.setJumped(true)
+
+	a.messageList.Objects = a.buildWindow(messages)
+	a.remountMessages()
+
+	// The column has grown under a scroller that has not been laid out since, and
+	// an offset is clamped against the size the content was last given.
+	a.messageScroll.SyncContent()
+	a.revealMounted(a.messageWidgetIndex(targetID))
+}
+
+// revealMounted scrolls the widget at i to the middle of the viewport and
+// flashes it. The offset is a walk of what is above it — affordable here because
+// it is once per jump, where the same measurement on the scroll path would be
+// once per frame.
+func (a *App) revealMounted(i int) {
+	objects := a.messageList.Objects
+	if i < 0 || i >= len(objects) || a.messageScroll == nil {
+		return
+	}
+
+	var top float32
+	for _, obj := range objects[:i] {
+		top += obj.MinSize().Height
+	}
+
+	// Centred rather than pinned to the top: a message is read with what was said
+	// around it, and what was said before it is half of that. The room held for
+	// the composer dock is not viewport, so it does not count towards the middle.
+	view := a.messageScroll.Size().Height - ui.DockReserve(a.composerDock)
+	top -= max(view-objects[i].MinSize().Height, 0) / 2
+
+	a.messageScroll.ScrollToOffset(fyne.NewPos(0, max(top, 0)))
+
+	if w, ok := objects[i].(*ui.MessageWidget); ok {
+		w.Flash()
+	}
+}
+
+// returnToPresent leaves a jump window for the live tail. The cache is where it
+// comes back from, that being what the tail is; a channel whose cache has been
+// evicted underneath the window asks for it again.
+func (a *App) returnToPresent() {
+	channelID := a.currentChannelID
+	if channelID == "" {
+		return
+	}
+
+	if len(a.client.Messages().Get(channelID)) > 0 {
+		a.displayCached()
+		a.focusInput()
+		return
+	}
+
+	a.showStatus("Loading messages...")
+	a.loadChannelMessages(channelID)
+}
+
+// setJumped records whether the column is showing a window a jump landed in, and
+// shows or hides the way back. The header is relaid out rather than refreshed:
+// the chip appearing changes the width the row's trailing slot asks for, which
+// only its own layout can give it. Call on the UI thread.
+func (a *App) setJumped(jumped bool) {
+	a.atOldest = false
+	if a.jumped == jumped {
+		return
+	}
+	a.jumped = jumped
+
+	if a.jumpChip == nil {
+		return
+	}
+	if jumped {
+		a.jumpChip.Show()
+	} else {
+		a.jumpChip.Hide()
+	}
+	ui.Relayout(a.messageHeader)
+}
+
+// holdUncached files a fetched window where ResolveMessage can find it, beside
+// the quoted messages already held there. It is what lets a reply inside the
+// window draw its quote when the quoted message is in the window too, rather
+// than asking for each of them again one at a time.
+func (a *App) holdUncached(messages []*domain.Message) {
+	if len(a.uncached)+len(messages) > maxUncachedMessages {
+		a.uncached = make(map[string]*domain.Message, len(messages))
+		a.fetchedReplies = make(map[string]bool)
+	}
+
+	for _, message := range messages {
+		a.uncached[message.ID] = message
+	}
 }
 
 // removeMessages unmounts deleted messages in one pass, re-evaluating grouping at
@@ -919,12 +1171,22 @@ func (a *App) appendMessage(message, prev *domain.Message) {
 }
 
 // loadMoreHistory mounts older messages when the user scrolls to the top. It is
-// two-tier: messages already cached but not mounted prepend synchronously; past
-// that, an older page comes from the network. Both tiers anchor on the oldest
-// mounted message, so cache trimming can never cause a refetch loop.
+// three-tier: messages already cached but not mounted prepend synchronously;
+// past that an older page comes from the network; and a window standing outside
+// the cache altogether asks for its page without writing one.
+//
+// Which of the last two applies is read off the cache rather than off a flag,
+// because both ways of getting there are the same situation. A jump mounts a
+// window from wherever somebody was quoted, and deep scrollback runs off the end
+// of a cache bounded per channel — in both, the top mounted message is not in
+// the cache, and prepending a page to it would leave a hole this same path would
+// later mount as though it were history.
+//
+// Every tier anchors on the oldest mounted message, so cache trimming can never
+// cause a refetch loop.
 func (a *App) loadMoreHistory() {
 	channelID := a.currentChannelID
-	if a.loadingHistory || channelID == "" {
+	if a.loadingPage || channelID == "" {
 		return
 	}
 
@@ -935,18 +1197,22 @@ func (a *App) loadMoreHistory() {
 
 	messages := a.client.Messages()
 	cached := messages.Get(channelID)
-	if i, ok := slices.BinarySearchFunc(cached, top.ID, cache.CompareMessageID); ok && i > 0 {
+	i, inCache := slices.BinarySearchFunc(cached, top.ID, cache.CompareMessageID)
+
+	switch {
+	case inCache && i > 0:
 		a.prependMessages(cached[max(0, i-historyPageSize()):i])
 		return
-	}
-
-	if messages.IsDepleted(channelID) {
+	case !inCache:
+		a.loadOlderPage(channelID, top)
+		return
+	case messages.IsDepleted(channelID):
 		return
 	}
-	a.loadingHistory = true
+	a.loadingPage = true
 
 	go func() {
-		defer a.doOnUI(func() { a.loadingHistory = false }, true)
+		defer a.doOnUI(func() { a.loadingPage = false }, true)
 
 		older, err := a.client.HistoryBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
@@ -960,6 +1226,42 @@ func (a *App) loadMoreHistory() {
 			if a.currentChannelID == channelID && a.mountedMessage(0) == top {
 				a.prependMessages(older)
 			}
+		}, true)
+	}()
+}
+
+// loadOlderPage extends a window that stands outside the cache. atOldest is what
+// the cache's own depleted flag is for a window that is not in it: without it,
+// resting at the top of a channel's first page would re-ask on every scroll
+// event for a page that cannot exist.
+func (a *App) loadOlderPage(channelID string, top *domain.Message) {
+	if a.atOldest {
+		return
+	}
+	a.loadingPage = true
+
+	go func() {
+		defer a.doOnUI(func() { a.loadingPage = false }, true)
+
+		older, err := a.client.MessagesBefore(channelID, top.ID, historyPageSize())
+		if err != nil {
+			if !errors.Is(err, client.ErrBusy) {
+				log.Printf("load page before %s: %v", top.ID, err)
+			}
+			return
+		}
+
+		a.doOnUI(func() {
+			if a.currentChannelID != channelID || a.mountedMessage(0) != top {
+				return
+			}
+			if len(older) == 0 {
+				a.atOldest = true
+				return
+			}
+
+			a.holdUncached(older)
+			a.prependMessages(older)
 		}, true)
 	}()
 }
@@ -1013,12 +1315,14 @@ func (a *App) prependMessages(older []*domain.Message) {
 	a.trimMountedBottom()
 }
 
-// mountNewerFromCache re-mounts cached messages below the bottom-most mounted one
-// — the downward counterpart of loadMoreHistory's cache tier. It never needs the
-// network: trimming only ever drops a channel's oldest messages, so everything
-// below the mounted window is always cached.
+// mountNewerFromCache re-mounts messages below the bottom-most mounted one — the
+// downward counterpart of loadMoreHistory. Scrolling down out of the cache's own
+// window never needs the network: trimming only ever drops a channel's oldest
+// messages, so everything below a cached row is cached too. A window that is not
+// in the cache at all is the case that does, and it is the same one the upward
+// path answers for.
 func (a *App) mountNewerFromCache() {
-	if a.currentChannelID == "" {
+	if a.currentChannelID == "" || a.loadingPage {
 		return
 	}
 
@@ -1028,12 +1332,56 @@ func (a *App) mountNewerFromCache() {
 	}
 
 	cached := a.client.Messages().Get(a.currentChannelID)
-	i, ok := slices.BinarySearchFunc(cached, bottom.ID, cache.CompareMessageID)
-	if !ok || i+1 == len(cached) {
-		return // bottom is the live tail, or no longer cached
+	i, inCache := slices.BinarySearchFunc(cached, bottom.ID, cache.CompareMessageID)
+	if !inCache {
+		a.loadNewerPage(a.currentChannelID, bottom)
+		return
+	}
+	if i+1 == len(cached) {
+		// The column has caught up with the tail, so live messages mount again and
+		// there is nothing left to jump back to.
+		a.setJumped(false)
+		return
 	}
 
 	a.appendMessages(cached[i+1:min(i+1+historyPageSize(), len(cached))], bottom)
+}
+
+// loadNewerPage extends a window that stands outside the cache downwards. It
+// needs no counterpart to atOldest: a page that comes back empty means the
+// bottom row is the newest message there is, which is the live tail, so the
+// column goes back to the cache and mounts it.
+func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
+	a.loadingPage = true
+
+	go func() {
+		defer a.doOnUI(func() { a.loadingPage = false }, true)
+
+		newer, err := a.client.MessagesAfter(channelID, bottom.ID, historyPageSize())
+		if err != nil {
+			if !errors.Is(err, client.ErrBusy) {
+				log.Printf("load page after %s: %v", bottom.ID, err)
+			}
+			return
+		}
+
+		a.doOnUI(func() {
+			last := len(a.messageList.Objects) - 1
+			if a.currentChannelID != channelID || a.mountedMessage(last) != bottom {
+				return
+			}
+			if len(newer) == 0 {
+				a.displayCached()
+				return
+			}
+
+			// Nothing re-attaches explicitly: a page that reaches into the cached
+			// tail leaves the bottom row inside it, and the tier above serves every
+			// scroll after that.
+			a.holdUncached(newer)
+			a.appendMessages(newer, bottom)
+		}, true)
+	}()
 }
 
 // appendMessages mounts newer messages below the current view, preserving the

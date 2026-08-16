@@ -33,6 +33,43 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   either, for the same reason: a list of who is in a call this client cannot
   join is an invitation to a dead end.
 
+- **There is no desktop notification, and Revolt's own push is unreachable.**
+  `/push/subscribe` takes a `WebPushSubscription` — a browser service worker's
+  endpoint and its VAPID keys — so there is nothing a Go desktop client can
+  receive on, and nothing it would gain: the gateway is already open and the ping
+  has already arrived. The *local* half is a toast, and that is left unbuilt on
+  purpose. `fyne.App.SendNotification` spawns a PowerShell process per
+  notification, and it raises the toast under `CreateToastNotifier(appID)` with
+  the app's UniqueID — which Windows drops unless a Start Menu shortcut carries
+  that AppUserModelID, and an unpackaged, unsigned build has none. Its template
+  also has no way to mark the toast silent, so it would sound Windows' own chime
+  over the client's. What is built instead is `ui.FlashTaskbar`, which answers for
+  any window with a handle. **On anything but Windows nothing is signalled at
+  all** — the settings group is dropped rather than drawn.
+- **A sound is a WAV or an MP3, and the built-ins are synthesised.** Nothing ships
+  as an asset: `audio/synth.go` renders each default, so there is no licence, no
+  binary and no missing-file state, and a custom file replaces one rather than
+  filling an empty slot. The decoder reads WAV (8/16/24/32-bit PCM, 32/64-bit
+  float, extensible) and MP3, and nothing else — no OGG, no FLAC, no Opus — each
+  being another decoder in the tree. A file is capped at 16 MiB on disk and 30
+  seconds decoded, and resampling to the device's rate is linear, which is
+  inaudible on a click and not what anybody should master music through. **Only
+  the volume is configurable, not the pitch**: a take is a rendered buffer, so
+  varying pitch per play would mean resampling at the moment of the keystroke —
+  the built-in typing clicks are four takes rotated with a gain jitter instead,
+  and a custom file gets the jitter alone, so a run of one repeats exactly.
+  Overlap is bounded (six voices for a keystroke, two for anything else) and the
+  engine drops a play its queue cannot take rather than blocking the UI thread, so
+  a stalled device loses clicks instead of stuttering the client. `oto` allows one
+  audio device per process and it is never given back — `Engine.Close` releases
+  the players and leaves the context, there being nothing else in the process that
+  wants it.
+- **Two sounds have no honest trigger.** Revolt sends no "reconnecting", and
+  revoltgo surfaces only a *fatal* drop, so `offline` is a session that ended and
+  `online` is the next Ready after one — not a flaky connection recovering, which
+  the client never learns about. A reaction is announced only for a message this
+  client can still resolve: `alertReaction` reads the author out of the cache, so
+  a reaction to something scrolled far enough back sounds nothing.
 - **The member list is as complete as one request makes it.** Revolt's members
   endpoint has no pagination, no search and no Discord-style lazy subscription to
   the slice of the list actually on screen, so a server is one whole fetch or

@@ -86,6 +86,13 @@ type MessageInput struct {
 	// the clearest "stopped" there is, and arrives on the same path as the rest.
 	OnTyping func(typing bool)
 
+	// OnKeystroke reports which *kind* of key landed, for the click under it. It is
+	// apart from OnTyping because the two answer different questions — one is about
+	// the gateway announcement, which does not care what was pressed, and the other
+	// cannot be answered by "is there text now". It names the kind rather than
+	// playing anything: this package has no business knowing there is audio.
+	OnKeystroke func(Keystroke)
+
 	// Mentions is the autocomplete list, mounted above the reply cards and hidden
 	// until the caret sits inside a mention. mentionStart is the marker's byte
 	// offset, or -1, and mentionKind what it opened — together only used to notice
@@ -318,6 +325,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 		m.Entry.TypedKey(key)
 	case key.Name == fyne.KeyBackspace || key.Name == fyne.KeyDelete:
 		m.Entry.TypedKey(key)
+		m.reportKeystroke(KeystrokeErase)
 		m.Refresh()
 	case key.Name != fyne.KeyReturn && key.Name != fyne.KeyEnter:
 		m.Entry.TypedKey(key)
@@ -325,6 +333,7 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 		m.TypedRune('\n')
 		m.Refresh()
 	default:
+		m.reportKeystroke(KeystrokeSend)
 		if m.OnSubmit != nil {
 			m.OnSubmit(m.Text)
 		}
@@ -347,6 +356,12 @@ func (m *MessageInput) TypedRune(r rune) {
 	m.Refresh()
 	m.syncMentions()
 	m.reportTyping()
+
+	if r == ' ' {
+		m.reportKeystroke(KeystrokeSpace)
+		return
+	}
+	m.reportKeystroke(KeystrokeKey)
 }
 
 // reportTyping tells the app a keystroke landed and whether anything survived it.
@@ -355,6 +370,28 @@ func (m *MessageInput) TypedRune(r rune) {
 func (m *MessageInput) reportTyping() {
 	if m.OnTyping != nil {
 		m.OnTyping(m.Text != "")
+	}
+}
+
+// Keystroke is which kind of key a composer keystroke was — as much as anything
+// listening needs to tell one click from another, and no more. Navigation keys
+// are not among them: nothing moves in the composer, so nothing should sound.
+type Keystroke int
+
+const (
+	KeystrokeKey   Keystroke = iota // an ordinary character, a newline included
+	KeystrokeSpace                  // the widest key, and the one a typist hears differently
+	KeystrokeErase                  // backspace or delete
+	KeystrokeSend                   // the Enter that submitted
+)
+
+// reportKeystroke names the key that landed. Unlike reportTyping this is called
+// per branch rather than deferred over the whole method: the Shift+Enter branch
+// delegates to TypedRune, which reports for itself, and a blanket defer would
+// make one newline two keystrokes.
+func (m *MessageInput) reportKeystroke(kind Keystroke) {
+	if m.OnKeystroke != nil {
+		m.OnKeystroke(kind)
 	}
 }
 

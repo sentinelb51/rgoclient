@@ -12,6 +12,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
+	"RGOClient/internal/audio"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
@@ -80,6 +81,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.OnEditLast = a.editLastOwnMessage
 	a.input.OnRefused = func(reason string) { a.notify(ui.ToneWarning, "%s", reason) }
 	a.input.OnTyping = a.noteTyping
+	a.input.OnKeystroke = a.noteKeystroke
 	a.input.RegisterDropHandler()
 
 	// Floating composer dock: mention picker, reply and attachment rows and the
@@ -268,6 +270,11 @@ func (a *App) handleSubmit(text string) {
 	a.jumpToLatest()
 	a.startSlowmode(channelID)
 	a.stopTyping(channelID) // emptying the entry from here raises no keystroke to notice
+
+	// Sounded here rather than on the echo: this is feedback for the key that was
+	// just pressed, and a round trip later it would land on whatever the user had
+	// moved on to. A refusal is announced by its own notice.
+	a.playSound(audio.Send)
 
 	// The cooldown starts optimistically, so a second Enter cannot outrun the
 	// request — and is given back when the message never landed.

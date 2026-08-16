@@ -155,6 +155,9 @@ naming and the test policy.
   on every offset write. `Container.Add` is the same trap one child at a time — it
   refreshes the whole container per call — so a list is built into a slice and
   written to `Objects` once. Nothing in this repo fills a container in a loop.
+  One level below all of that, `Canvas.dirty` is a single bool: **any** `Refresh`
+  anywhere repaints the whole window, framebuffer clear included. There is no
+  such thing as a cheap one — see `docs/performance.md`.
 - **A recycled widget must own nothing it captured.** `ui.MemberRow` is reused for
   a different person as the list scrolls, so every callback on it reads the field
   it needs at the moment it fires rather than closing over a value — a menu that
@@ -233,4 +236,13 @@ naming and the test policy.
   `ui.ShiftHeld`, a Win32 `GetAsyncKeyState` asked at the moment of the click, with
   a `!windows` half answering false and `shiftSkippable` telling the confirmation
   card whether to name the key.
+- **A window cannot ask for attention through Fyne.** There is no API for it, so
+  `ui.FlashTaskbar` is a Win32 `FlashWindowEx` on the HWND `driver.NativeWindow`
+  hands back — the same route `StyleTitlebar` takes — with a `!windows` half doing
+  nothing and `alertSupported` keeping the settings group off a page where it
+  would draw switches that do nothing. `FLASHW_TIMERNOFG` is what makes it a
+  message waiting rather than a blink: it flashes until the window is brought
+  forward, and Windows itself no-ops the call for a window that already has
+  focus, so no caller checks.
+  `fyne.App.SendNotification` is deliberately not used — see the known gap.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.

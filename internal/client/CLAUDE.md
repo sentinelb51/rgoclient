@@ -58,6 +58,12 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   positions, not bits — so its `MentionsOnline` collides with
   `SuppressNotifications|MentionsEveryone` and can never be read for what it is.
   `client/convert.go` names the two bits it wants itself.
+- **`EventMessageReact` is the only update worth announcing, and it has to say so
+  itself.** By the time the app sees `MessageUpdated` the cache holds the new
+  state, so a reaction and a content edit are the same event — hence
+  `MessageUpdated.ReactedBy`, filled from the react handler alone. Unreacting and
+  `EventMessageRemoveReaction` leave it empty: nothing is worth a sound for a
+  reaction going away.
 - **`EventMessageUpdate.Data` is a whole `Message`, not a partial one.** Every
   field arrives at its zero value when the update did not mention it, so a
   `bool` there cannot be read at all: `Pinned` false means *either* "now

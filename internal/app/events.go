@@ -11,6 +11,7 @@ import (
 	"slices"
 	"time"
 
+	"RGOClient/internal/audio"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
@@ -102,7 +103,7 @@ func (a *App) dispatch(event client.Event) {
 	case client.MessageCreated:
 		a.doOnUI(func() { a.onMessageCreated(e) }, false)
 	case client.MessageUpdated:
-		a.doOnUI(func() { a.refreshMessage(e.ChannelID, e.MessageID) }, false)
+		a.doOnUI(func() { a.onMessageUpdated(e) }, false)
 	case client.MessageDeleted:
 		a.doOnUI(func() { a.removeMessages(e.ChannelID, e.MessageIDs) }, false)
 	case client.ServerJoined:
@@ -147,6 +148,13 @@ func (a *App) dispatch(event client.Event) {
 func (a *App) onReady(event client.Ready) {
 	a.stopAwaitingReady()
 	a.savePendingToken()
+
+	// Only a session that follows one this run already lost is worth a sound. The
+	// first Ready of a launch is the client starting, which the user is watching.
+	if a.reconnected {
+		a.reconnected = false
+		a.playSound(audio.Online)
+	}
 
 	for _, channelID := range event.UnreadChannelIDs {
 		a.unreadChannels[channelID] = true
@@ -202,6 +210,9 @@ func (a *App) onDisconnected(event client.Disconnected) {
 		return
 	}
 
+	a.reconnected = true
+	a.playSound(audio.Offline)
+
 	if userID := a.store.SelfID(); userID != "" {
 		if err := RemoveSession(userID); err != nil {
 			log.Printf("remove session: %v", err)
@@ -233,6 +244,8 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 	// lapse the line would name somebody under the message they just posted.
 	a.forgetTyping(channelID, event.Message.AuthorID)
 
+	a.alertMessage(event.Message)
+
 	if channelID == a.currentChannelID {
 		a.appendMessage(event.Message, event.Previous)
 		a.scheduleAck(channelID, event.Message.ID)
@@ -241,6 +254,18 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 
 	a.unreadChannels[channelID] = true
 	a.refreshChannelRow(channelID)
+}
+
+// onMessageUpdated repaints a message the cache has already replaced. The event
+// carries who reacted when that is what moved, which is the only kind of update
+// worth announcing — and the only one the reader could not otherwise tell apart,
+// an edit and a reaction both arriving as the same "this message changed".
+func (a *App) onMessageUpdated(event client.MessageUpdated) {
+	a.refreshMessage(event.ChannelID, event.MessageID)
+
+	if event.ReactedBy != "" {
+		a.alertReaction(event.ChannelID, event.MessageID, event.ReactedBy)
+	}
 }
 
 /* Read acknowledgement */
@@ -537,6 +562,7 @@ func (a *App) onUserUpdated(event client.UserUpdated) {
 // up, and a member row says nothing about a relationship.
 func (a *App) onRelationshipChanged(event client.RelationshipChanged) {
 	a.friendsChanged(event.UserID)
+	a.alertRelationship(event.UserID)
 
 	channel, ok := a.currentChannel()
 	if !ok || channel.Kind != domain.ChannelDM {

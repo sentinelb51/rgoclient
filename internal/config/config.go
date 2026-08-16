@@ -132,14 +132,62 @@ type Behaviour struct {
 	EnterSends  bool `json:"enter_sends"`
 }
 
-// Notifications configures the transient notice layer.
+// Notifications configures the transient notice layer, what the client does
+// about a message the reader is not looking at, and every sound it makes.
 type Notifications struct {
+	/* The notice layer */
+
 	LifetimeSeconds int `json:"lifetime_seconds"`
 	MaxStacked      int `json:"max_stacked"`
 
 	ShowInfo    bool `json:"show_info"`
 	ShowWarning bool `json:"show_warning"`
 	ShowDanger  bool `json:"show_danger"`
+
+	/* Reaching the user outside the window */
+
+	// FlashTaskbar flashes the window's taskbar button. It is the whole of the
+	// out-of-app half — see docs/known-gaps.md on why there is no toast — and does
+	// nothing while the window already has focus, so the two flags below decide
+	// only what is worth a flash when it does not.
+	FlashTaskbar   bool `json:"flash_taskbar"`
+	AlertOnMention bool `json:"alert_on_mention"`
+	AlertOnDirect  bool `json:"alert_on_direct"`
+
+	/* Sounds */
+
+	// Sounds is the master switch and the off switch both: with it off no sound is
+	// asked for, so the client never opens an audio device at all.
+	Sounds bool `json:"sounds"`
+
+	// SoundVolume scales everything but a keystroke, 0-100. Typing has its own
+	// because it plays hundreds of times a minute against a ping's handful.
+	SoundVolume int `json:"sound_volume"`
+
+	// SoundsWhenFocused plays them while the window is in front. Off makes the
+	// whole set an away-from-keyboard signal.
+	SoundsWhenFocused bool `json:"sounds_when_focused"`
+
+	PlayMention    bool `json:"play_mention"`
+	PlayDirect     bool `json:"play_direct"`
+	PlayMessage    bool `json:"play_message"`
+	PlayAmbient    bool `json:"play_ambient"`
+	PlaySend       bool `json:"play_send"`
+	PlayFriend     bool `json:"play_friend"`
+	PlayReaction   bool `json:"play_reaction"`
+	PlayError      bool `json:"play_error"`
+	PlayConnection bool `json:"play_connection"`
+
+	/* Typing */
+
+	TypingSounds bool `json:"typing_sounds"`
+	TypingVolume int  `json:"typing_volume"`
+
+	// SoundFiles holds only the sounds pointed at a file of their own, keyed by the
+	// sound's name — the same reason Styles stores overrides rather than the whole
+	// table. An absent key is the built-in, which is synthesised rather than read,
+	// so a sound named in a later version arrives audible instead of silent.
+	SoundFiles map[string]string `json:"sound_files,omitempty"`
 }
 
 // Cache configures the on-disk and in-memory caches. AssetDir, TextPreviews,
@@ -226,6 +274,26 @@ func Default() Settings {
 			ShowInfo:        true,
 			ShowWarning:     true,
 			ShowDanger:      true,
+
+			FlashTaskbar:   true,
+			AlertOnMention: true,
+			AlertOnDirect:  true,
+
+			// What is on by default is what the user did not choose to hear: being
+			// named, being written to directly, an action of theirs failing, and the
+			// connection going. Every sound that fires for somebody else's ordinary
+			// message is off — a client that chimes at every message in every server is
+			// one whose sounds get turned off wholesale.
+			Sounds:            true,
+			SoundVolume:       70,
+			SoundsWhenFocused: true,
+			PlayMention:       true,
+			PlayDirect:        true,
+			PlayFriend:        true,
+			PlayError:         true,
+			PlayConnection:    true,
+
+			TypingVolume: 45,
 		},
 		Cache: Cache{
 			ImageDiskMiB:       512,
@@ -368,6 +436,11 @@ func (s *Settings) sanitise() {
 	floor(&s.Notifications.LifetimeSeconds, 1)
 	floor(&s.Notifications.MaxStacked, 1)
 
+	// A volume is a percentage the file may name anything at, and a negative one
+	// would be silence reported as a number.
+	s.Notifications.SoundVolume = clamp(s.Notifications.SoundVolume, 0, 100)
+	s.Notifications.TypingVolume = clamp(s.Notifications.TypingVolume, 0, 100)
+
 	floor(&s.Cache.ImageDiskMiB, 1)
 	floor(&s.Cache.ImageMemoryMiB, 1)
 	floor(&s.Cache.MaxImageEdge, 64)
@@ -379,6 +452,11 @@ func (s *Settings) sanitise() {
 	if s.Interface.FontSize < 1 {
 		s.Interface.FontSize = Default().Interface.FontSize
 	}
+}
+
+// clamp holds a value inside a range, for the settings whose floor is not zero.
+func clamp(value, lowest, highest int) int {
+	return min(max(value, lowest), highest)
 }
 
 // Save writes the current settings immediately, cancelling any pending delayed
@@ -438,6 +516,7 @@ func (s *Settings) clone() *Settings {
 	next := *s
 	next.Styles.Sizes = maps.Clone(s.Styles.Sizes)
 	next.Styles.Colors = maps.Clone(s.Styles.Colors)
+	next.Notifications.SoundFiles = maps.Clone(s.Notifications.SoundFiles)
 
 	return &next
 }

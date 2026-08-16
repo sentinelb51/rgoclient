@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -15,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
+	"RGOClient/internal/audio"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
@@ -60,6 +62,19 @@ type App struct {
 	// settings page names the directory in use rather than the configured one — a
 	// change to it only takes effect at the next start.
 	assetDir string
+
+	/* Alerts, see alerts.go */
+
+	// sounds is the audio engine; it holds no device until something is played.
+	// focused is whether the window is in front, written by Fyne's foreground hooks
+	// from the driver's own goroutine rather than the UI thread — hence the atomic,
+	// the one field here that is not UI-thread confined.
+	sounds  *audio.Engine
+	focused atomic.Bool
+
+	// reconnected marks a session that follows one this run already lost, which is
+	// the difference between the connection coming back and the client starting.
+	reconnected bool
 
 	/* View state */
 
@@ -288,6 +303,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		images:              cache.NewImageCache(assetDir, cache.ImagesFolder, imageLimits(settings)),
 		emojis:              cache.NewImageCache(assetDir, cache.EmojisFolder, emojiLimits(settings)),
 		texts:               cache.NewTextCache(settings.TextPreviews),
+		sounds:              audio.NewEngine(),
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelTop:          ui.VBoxNoSpacing(),
 		channelList:         container.NewVBox(),
@@ -317,6 +333,7 @@ func New(fyneApp fyne.App, info Info) *App {
 func (a *App) Run() {
 	go a.pumpEvents()
 
+	a.startAlerts()
 	a.showLogin()
 	a.styleNativeChrome(a.window)
 	a.window.ShowAndRun()
@@ -384,6 +401,7 @@ func (a *App) showMainUI() {
 
 		a.images.Shutdown()
 		a.emojis.Shutdown()
+		a.sounds.Close()
 		a.client.Shutdown()
 	})
 }

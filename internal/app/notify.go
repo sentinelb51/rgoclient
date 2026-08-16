@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 
+	"RGOClient/internal/audio"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/util"
@@ -27,6 +28,13 @@ func (a *App) notify(tone ui.Tone, format string, args ...any) {
 // rather than the one its tone would give it. Call on the UI thread.
 func (a *App) notifyNotice(notice ui.Notice) {
 	log.Printf("notice: %s", notice.Body)
+
+	// Only a refusal sounds. An info notice is a receipt for something the user
+	// just did — the clipboard write, the friend request — and a chime for each
+	// would put a sound on every successful click in the client.
+	if notice.Tone == ui.ToneDanger || notice.Tone == ui.ToneWarning {
+		a.playSound(audio.Error)
+	}
 
 	a.notices.PushNotice(notice)
 }

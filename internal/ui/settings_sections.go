@@ -496,7 +496,7 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 func (p *SettingsPage) notificationsSection() []settingsGroup {
 	settings := config.Current().Notifications
 
-	return []settingsGroup{
+	groups := []settingsGroup{
 		p.group("Notices", "The cards that appear in the top-right corner.",
 			p.numberRow("Dismiss after", "How long a notice stays before it fades.",
 				settings.LifetimeSeconds, 1, maxNoticeLifetime, "s",
@@ -514,6 +514,118 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 				settings.ShowDanger, func(s *config.Settings, on bool) { s.Notifications.ShowDanger = on }),
 		),
 	}
+
+	// The alert group is dropped entirely where the platform has no way to signal a
+	// window that is not in front, rather than drawn as switches that do nothing.
+	if alertSupported {
+		groups = append(groups, p.group("When you're away",
+			"The taskbar button flashes until you come back to the window.",
+			p.toggleRow("Flash the taskbar", "",
+				settings.FlashTaskbar,
+				func(s *config.Settings, on bool) { s.Notifications.FlashTaskbar = on }),
+			p.toggleRow("For a mention", "Somebody named you, or addressed everyone.",
+				settings.AlertOnMention,
+				func(s *config.Settings, on bool) { s.Notifications.AlertOnMention = on }),
+			p.toggleRow("For a direct message", "Anything sent to you or to a group you're in.",
+				settings.AlertOnDirect,
+				func(s *config.Settings, on bool) { s.Notifications.AlertOnDirect = on }),
+		))
+	}
+
+	return append(groups,
+		p.group("Sound", "",
+			p.toggleRow("Play sounds", "With this off the client never opens an audio device.",
+				settings.Sounds, func(s *config.Settings, on bool) { s.Notifications.Sounds = on }),
+			p.numberRow("Volume", "", settings.SoundVolume, 0, 100, "%",
+				func(s *config.Settings, v int) { s.Notifications.SoundVolume = v }),
+			p.toggleRow("Play while the window is in focus",
+				"Off makes an incoming message silent until you look away.",
+				settings.SoundsWhenFocused,
+				func(s *config.Settings, on bool) { s.Notifications.SoundsWhenFocused = on }),
+		),
+		p.group("Play a sound for", "",
+			p.toggleRow("A mention", "Somebody named you, or addressed everyone.",
+				settings.PlayMention, func(s *config.Settings, on bool) { s.Notifications.PlayMention = on }),
+			p.toggleRow("A direct message", "A message in a conversation you aren't reading.",
+				settings.PlayDirect, func(s *config.Settings, on bool) { s.Notifications.PlayDirect = on }),
+			p.toggleRow("Any other message", "A message in any channel you aren't reading.",
+				settings.PlayMessage, func(s *config.Settings, on bool) { s.Notifications.PlayMessage = on }),
+			p.toggleRow("A message here", "A message in the channel that's open.",
+				settings.PlayAmbient, func(s *config.Settings, on bool) { s.Notifications.PlayAmbient = on }),
+			p.toggleRow("Sending", "A message of yours going out.",
+				settings.PlaySend, func(s *config.Settings, on bool) { s.Notifications.PlaySend = on }),
+			p.toggleRow("A friend request", "Somebody asked to be friends, or accepted.",
+				settings.PlayFriend, func(s *config.Settings, on bool) { s.Notifications.PlayFriend = on }),
+			p.toggleRow("A reaction", "Somebody reacted to a message of yours.",
+				settings.PlayReaction, func(s *config.Settings, on bool) { s.Notifications.PlayReaction = on }),
+			p.toggleRow("Something failing", "An action of yours was refused.",
+				settings.PlayError, func(s *config.Settings, on bool) { s.Notifications.PlayError = on }),
+			p.toggleRow("The connection", "The session dropping, and a new one coming back.",
+				settings.PlayConnection,
+				func(s *config.Settings, on bool) { s.Notifications.PlayConnection = on }),
+		),
+		p.group("Typing", "A click under each keystroke in the composer.",
+			p.toggleRow("Typing sounds", "",
+				settings.TypingSounds,
+				func(s *config.Settings, on bool) { s.Notifications.TypingSounds = on }),
+			p.numberRow("Typing volume",
+				"Separate from the volume above: these play far more often than anything else.",
+				settings.TypingVolume, 0, 100, "%",
+				func(s *config.Settings, v int) { s.Notifications.TypingVolume = v }),
+		),
+		p.soundFileGroup("Sounds",
+			"Point one at a WAV or MP3 file of your own, or keep the built-in.", false),
+		p.soundFileGroup("Typing sounds", "", true),
+	)
+}
+
+// soundFileGroup lists the sounds of one kind and what can be done about each.
+// Two groups rather than one list: the four keystrokes are a different question
+// from the ten events, and a caption is cheaper than a divider nobody reads. The
+// second carries no sentence — it sits directly under the first's, which is
+// about both.
+func (p *SettingsPage) soundFileGroup(caption, detail string, typing bool) settingsGroup {
+	var rows []fyne.CanvasObject
+
+	for _, sound := range p.hooks.Sounds() {
+		if sound.Typing != typing {
+			continue
+		}
+		rows = append(rows, p.soundRow(sound))
+	}
+
+	return p.group(caption, detail, rows...)
+}
+
+// soundRow is one sound: what it is for, what it is currently playing, and the
+// three things that can be done to it. The file is the row's *explanation* — it
+// needs the width, and shortening a path from the front hides the drive it is
+// on — which is why the summary is the group's caption's job and not the row's.
+func (p *SettingsPage) soundRow(sound SettingsSound) fyne.CanvasObject {
+	detail := sound.Summary
+	if sound.File != "" {
+		detail = sound.File
+	}
+
+	label := newText(detail, theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
+
+	play := widget.NewButton("Play", func() { p.hooks.PlaySound(sound.Key) })
+	choose := widget.NewButton("Change…", func() {
+		p.hooks.ChooseSound(sound.Key, p.reload)
+	})
+
+	controls := []fyne.CanvasObject{play, HorizontalSpacer(theme.Sizes.ChipSpacing), choose}
+	if sound.File != "" {
+		// Offered only once there is something to go back from, so a row does not
+		// advertise a built-in nobody has moved away from.
+		reset := widget.NewButton("Built-in", func() {
+			p.hooks.ResetSound(sound.Key)
+			p.reload()
+		})
+		controls = append(controls, HorizontalSpacer(theme.Sizes.ChipSpacing), reset)
+	}
+
+	return p.rowWith(sound.Title, NewEllipsisText(label), HBoxNoSpacing(controls...))
 }
 
 /* Cache */

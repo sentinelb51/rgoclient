@@ -896,3 +896,39 @@ DAG and conventions.
     goes is a question about the widget being hovered. `clearMessages` takes it
     down, as `refreshServerList` does — a chip about to be dropped never reports
     the pointer leaving.
+32. **Alerts.** Revolt's own push is unreachable — `/push/subscribe` takes a Web
+    Push subscription, which needs a browser's service worker and a push service
+    to deliver through — and it would answer nothing here anyway: this client
+    holds an open gateway, so a ping has already arrived. What `alerts.go` adds is
+    the *noticing*: a sound, and the taskbar button flashing
+    (`ui.FlashTaskbar`, Windows-only — see the known gap on why there is no toast).
+    `soundCatalogue` is the one table binding a sound to the flag that turns it on
+    and the copy the settings page lists it under. `playSound` is where **every**
+    decision about audibility lives — the master switch, the sound's own flag, the
+    focus gate, the volume — so a handler says what happened and nothing more.
+    Only what somebody *else* caused is focus-gated (`soundEntry.gated`): a send,
+    a refusal and a lost connection are answers to the user's own action, and they
+    happen while the window is in front by definition, so gating them would be
+    gating them off.
+    What a message is worth is `messageAlert`, ordered by how much it is *about*
+    the reader — named, then the conversation it arrived in, then whether it is
+    the channel on screen. Our own messages are not announced: `audio.Send` plays
+    in `handleSubmit`, at the keystroke, rather than on the echo, where it would
+    land on whatever the user had moved to.
+    Three events needed something they did not carry. A **reaction** arrives as
+    `MessageUpdated`, indistinguishable from an edit once the cache is written —
+    hence `MessageUpdated.ReactedBy`, the one field on it the reader could not
+    work out afterwards. **Reconnection** has no event at all: revoltgo emits only
+    a fatal drop, so `App.reconnected` is what makes the *next* Ready a reconnect
+    rather than a launch, the first Ready of a run being the client starting up
+    while the user watches. And a **keystroke** is `ui.Keystroke`, named by the
+    composer rather than sounded there — `ui` does not import `audio`.
+    `App.focused` is the one field on `App` that is not UI-thread confined: Fyne's
+    foreground hooks fire from the driver's own goroutine, hence `atomic.Bool`.
+    The engine is built in `New`, not `startAlerts` — a nil one is a panic on the
+    first notice — and holds no audio device until something is actually played,
+    so a client with sounds off never takes one. Loading is a worker
+    (`loadSounds`): a custom file is decoded there, and the built-ins are
+    *synthesised*, which is not free either. A file that cannot be read falls back
+    to its built-in and says so, a client that quietly stops pinging being one the
+    user believes is broken.

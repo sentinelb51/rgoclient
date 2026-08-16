@@ -152,6 +152,16 @@ func newTestSettingsPage() *SettingsPage {
 		SetBio:           func(string) {},
 		LoadProfile:      func(func(domain.UserProfile)) {},
 
+		Sounds: func() []SettingsSound {
+			return []SettingsSound{
+				{Key: "mention", Title: "Mention", Summary: "Somebody named you."},
+				{Key: "key", Title: "Key", Summary: "An ordinary character.", Typing: true},
+			}
+		},
+		ChooseSound: func(string, func()) {},
+		ResetSound:  func(string) {},
+		PlaySound:   func(string) {},
+
 		CacheDir:       func() string { return "" },
 		ChooseCacheDir: func(func(string)) {},
 		CacheStats:     func(func(cache.ImageStats)) {},

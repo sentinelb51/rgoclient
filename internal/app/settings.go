@@ -225,6 +225,11 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		SetBio:       a.setBio,
 		LoadProfile:  a.loadSelfProfile,
 
+		Sounds:      settingsSounds,
+		ChooseSound: a.chooseSound,
+		ResetSound:  a.resetSound,
+		PlaySound:   a.previewSound,
+
 		CacheDir:       func() string { return a.assetDir },
 		ChooseCacheDir: a.chooseCacheDir,
 		CacheStats:     a.cacheStats,
@@ -536,12 +541,17 @@ func usernameFailure(err error) string {
 }
 
 // choosePicture asks for an image file and reports what was picked, or nothing.
-// Fyne's picker is a canvas overlay, so it draws *over* the settings layer — as
-// the folder picker below does.
 func (a *App) choosePicture(title string, onPicked func(path, name string)) {
+	a.chooseFile(title, pictureExtensions, onPicked)
+}
+
+// chooseFile asks for a file of the given kinds and reports what was picked, or
+// nothing. Fyne's picker is a canvas overlay, so it draws *over* the settings
+// layer — as the folder picker below does.
+func (a *App) chooseFile(title string, extensions []string, onPicked func(path, name string)) {
 	picker := dialog.NewFileOpen(func(file fyne.URIReadCloser, err error) {
 		if err != nil {
-			log.Printf("choose picture: %v", err)
+			log.Printf("choose file: %v", err)
 			a.notify(ui.ToneWarning, "Couldn't open the file picker.")
 			return
 		}
@@ -549,16 +559,16 @@ func (a *App) choosePicture(title string, onPicked func(path, name string)) {
 			return
 		}
 
-		// Re-opened by the upload, off this thread: the client takes a path, as it does
-		// for an attachment, and a reader held across a request nobody has made yet is
-		// a handle with nothing to close it.
+		// Re-opened by whatever reads it, off this thread: every caller takes a path,
+		// and a reader held across work nobody has started yet is a handle with
+		// nothing to close it.
 		uri := file.URI()
 		_ = file.Close()
 
 		onPicked(uri.Path(), uri.Name())
 	}, a.window)
 
-	picker.SetFilter(storage.NewExtensionFileFilter(pictureExtensions))
+	picker.SetFilter(storage.NewExtensionFileFilter(extensions))
 	picker.SetTitleText(title)
 	picker.Show()
 }

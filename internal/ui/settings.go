@@ -131,6 +131,23 @@ type SettingsHooks struct {
 	// controller already holds, and it may never answer at all.
 	LoadProfile func(onLoaded func(profile domain.UserProfile))
 
+	/* Sounds */
+
+	// Sounds is every sound the client can make, in the order they are listed.
+	// Which they are is the controller's to say: the audio package is below app and
+	// above nothing this one imports, and what a sound is *for* is a question about
+	// events rather than about widgets.
+	Sounds func() []SettingsSound
+
+	// ChooseSound asks for a file and points a sound at it; ResetSound puts the
+	// built-in back. Both play the result — a sound is chosen by hearing it — and
+	// neither reports here, the page reloading to redraw the row.
+	ChooseSound func(key string, onPicked func())
+	ResetSound  func(key string)
+
+	// PlaySound sounds one whatever its own switch says, for the row's button.
+	PlaySound func(key string)
+
 	/* Cache */
 
 	CacheDir func() string
@@ -151,6 +168,20 @@ type SettingsSession struct {
 	UserID    string
 	Username  string
 	AvatarURL string
+}
+
+// SettingsSound is one sound as the Notifications section lists it. File is what
+// it has been pointed at, empty for the built-in — which is not a missing file
+// but a synthesised one, so no row is ever unset.
+type SettingsSound struct {
+	Key     string
+	Title   string
+	Summary string
+	File    string
+
+	// Typing marks the four the composer fires per keystroke, which are listed
+	// under their own caption and answer to their own volume.
+	Typing bool
 }
 
 // SettingsPage is the settings surface and its state. The controller keeps one

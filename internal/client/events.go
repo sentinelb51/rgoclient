@@ -50,9 +50,17 @@ type MessageCreated struct {
 
 // MessageUpdated names a message whose cached copy has been replaced with the
 // edited one.
+//
+// ReactedBy names who, when the change was a reaction being *added* — the one
+// thing about an update a reader might want announcing, and not something the
+// reader could work out afterwards: the cache already holds the new state by the
+// time this arrives, so an edit and a reaction are otherwise the same event.
+// Empty for everything else, a reaction taken off included.
 type MessageUpdated struct {
 	ChannelID string
 	MessageID string
+
+	ReactedBy string
 }
 
 // MessageDeleted names messages already dropped from the cache. A moderation
@@ -314,7 +322,7 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	// recorded — the echo is what applyReaction reports as nothing moved.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageReact) {
 		if c.applyReaction(event.ChannelID, event.ID, event.EmojiID, event.UserID, true) {
-			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
+			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID, ReactedBy: event.UserID})
 		}
 	})
 

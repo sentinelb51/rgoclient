@@ -23,16 +23,19 @@ written against the domain. The dependency graph is a strict DAG:
 
 ```
 domain, markdown, config       no internal dependencies
+audio                          no internal dependencies    (+ oto, go-mp3)
 util       -> config
 cache      -> domain
 client     -> cache, config, domain          (+ revoltgo)
 ui         -> cache, config, domain, markdown, util
-app        -> cache, client, config, domain, ui, util
+app        -> audio, cache, client, config, domain, ui, util
 ```
 
-`config` is a leaf so everything above can read a setting. `cache` deliberately
-does *not* import it — budgets and directory arrive as constructor arguments, so
-a cache can be built in a test with no settings file anywhere.
+`config` is a leaf so everything above can read a setting. `cache` and `audio`
+deliberately do *not* import it — budgets, directories, volumes and file paths
+arrive as arguments, so either can be built in a test with no settings file
+anywhere. `ui` does not import `audio` either: the composer names the *kind* of
+keystroke (`ui.Keystroke`) and `app` decides what it sounds like.
 
 The seam is not tidiness: `revoltgo.State`'s caches are unexported and
 `newState()` is package-private, so nothing holding a `*revoltgo.Session` can be
@@ -78,6 +81,8 @@ change in `markdown/` does not pay for the Fyne footguns:
 - `internal/ui/CLAUDE.md` — the Fyne footguns.
 - `docs/known-gaps.md` — what is not built, and what revoltgo or Fyne prevents
   rather than effort.
+- `docs/performance.md` — what a frame costs, which levers are reachable and
+  which need a fork of Fyne. Read it before optimising anything.
 
 A directory's `CLAUDE.md` arrives on its own when a file in that directory is
 touched. **Read the others by hand when a change crosses a boundary** — a new
@@ -123,9 +128,13 @@ internal/
   client/                client.go, auth.go, convert.go, store.go, events.go,
                          actions.go
   cache/                 cache.go (LRU + TextCache), message.go, image.go
+  audio/                 audio.go (the engine, one device, a voice pool per sound),
+                         decode.go (WAV + MP3 -> the device's format),
+                         synth.go (the built-in sounds, rendered rather than shipped)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
-                         pins.go, search.go, emoji.go, notify.go, settings.go
+                         pins.go, search.go, emoji.go, notify.go, alerts.go,
+                         settings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, reactions.go, emoji.go, embed.go, invite.go,
                          markdown.go, attachment.go, input.go, modal.go,
@@ -155,6 +164,11 @@ Where things live that the filename doesn't tell you:
 - `app/pins.go` and `app/search.go` are the two message panels, and the summary a
   row is drawn from (`messageEntry`, `messagePreview`, `messageWhen`) lives in the
   first: a pin list and a search result are the same row reached two ways.
+- `app/alerts.go` is everything the client does about something the reader did
+  not ask to be told — the sound and the taskbar flash — and the catalogue
+  binding a sound to the setting that turns it on and the copy it is listed
+  under. One table, because playing one, listing them all and pointing one at a
+  file are three walks of the same set.
 - `app/typing.go` holds both halves of the typing indicator — the expiry map and
   its timer, and the throttle that announces this account — one feature with one
   setting group, neither legible without the other.
@@ -253,7 +267,8 @@ Where things live that the filename doesn't tell you:
   here, data flow and `App` fields in `internal/app/CLAUDE.md`, a revoltgo bug
   or missing route in `internal/client/CLAUDE.md`, a widget or a Fyne
   constraint in `internal/ui/CLAUDE.md`, a limit worked around rather than
-  fixed in `docs/known-gaps.md`. Keep them *terse* — the constraint and the
+  fixed in `docs/known-gaps.md`, a measured cost or a rejected optimisation in
+  `docs/performance.md`. Keep them *terse* — the constraint and the
   reason, not the mechanics or the history. A note in the wrong file is paid for
   by every task that does not need it.
 

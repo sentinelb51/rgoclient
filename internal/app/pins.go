@@ -1,14 +1,13 @@
 package app
 
-// The pinned-messages panel — the one surface that shows a channel's pins as a
-// set rather than one mark on one row. Pinning has been built for some time and
-// there was nowhere to see the result of it.
+// The pinned-messages panel — the one surface showing a channel's pins as a set
+// rather than one mark on one row.
 //
-// Unlike the friends list this is a request: a pin is a flag on the message, and
-// Revolt publishes no collection of them, so Client.PinnedMessages searches the
-// channel for them. What comes back is held here for as long as the panel is up
-// and is not put in the message cache — a pin reaches as far back as anybody
-// cared to keep something, and the cache is a channel's contiguous tail.
+// It is a request: a pin is a flag on the message and Revolt publishes no
+// collection of them, so Client.PinnedMessages searches the channel. What comes
+// back is held here while the panel is up and never enters the message cache — a
+// pin reaches as far back as anybody cared to keep something, and the cache is a
+// channel's contiguous tail.
 
 import (
 	"log"
@@ -27,9 +26,10 @@ const (
 	// hundred of it.
 	pinsLimit = 100
 
-	// pinPreviewRunes is how much of a message a row summarises. Long enough to
-	// recognise which pin it is, short enough that the row stays one line.
-	pinPreviewRunes = 120
+	// previewRunes is how much of a message a panel row summarises: enough to
+	// recognise it, short enough that the row stays one line. Channel search draws
+	// the same rows, hence the shared name.
+	previewRunes = 120
 )
 
 /* Opening it */
@@ -68,11 +68,10 @@ func (a *App) closePins() {
 	a.pinned = nil
 }
 
-// loadPinned fetches the list and fills the panel with it. The authors are
-// resolved in the same worker rather than through ensureAuthor's queue: the
-// search route cannot be asked for the users (see Client.PinnedMessages), and a
-// panel that mounted a column of raw IDs and filled them in a moment later would
-// be doing that on every open.
+// loadPinned fetches the list and fills the panel. Authors are resolved in the
+// same worker rather than through ensureAuthor's queue: the search route cannot
+// be asked for the users (see Client.PinnedMessages), so the panel would mount a
+// column of raw IDs and fill them in a moment later, on every open.
 func (a *App) loadPinned(channelID string) {
 	serverID := a.channelServerID(channelID)
 	epoch := a.epoch
@@ -100,9 +99,8 @@ func (a *App) loadPinned(channelID string) {
 }
 
 // unknownAuthors is who among a page of messages the store cannot yet name. Safe
-// off the UI thread: the store's reads are, and unlike ensureAuthor this touches
-// none of the controller's own guards — the panel is opened by a click and asks
-// once, so a second resolution of the same person is not worth a map for.
+// off the UI thread — the store's reads are, and unlike ensureAuthor this touches
+// none of the controller's guards: the panel is opened by a click and asks once.
 func (a *App) unknownAuthors(serverID string, messages []*domain.Message) []client.AuthorRef {
 	var targets []client.AuthorRef
 
@@ -131,8 +129,8 @@ func (a *App) showPinned() {
 		return
 	}
 
-	// Asked once for the whole list rather than per row: it is one walk of the
-	// channel's roles, and every row would get the same answer.
+	// Once for the whole list rather than per row: it is a walk of the channel's
+	// roles, and every row would get the same answer.
 	manage := a.store.Permissions(a.pinsChannelID).Has(domain.PermissionManageMessages)
 
 	entries := make([]ui.PinEntry, 0, len(a.pinned))
@@ -141,30 +139,15 @@ func (a *App) showPinned() {
 	}
 	a.pins.SetEntries(entries)
 
-	// The card is centred and sized from its own minimum, and a row gained or lost
-	// changes that minimum; neither re-runs on its own.
+	// The card is centred and sized from its own minimum, which a row gained or lost
+	// changes; neither re-runs on its own.
 	a.repositionOverlay()
 }
 
-// pinEntry builds one row. The panel closes on the way to a message: a jump moves
-// the column underneath it, and a panel left over what it just led to would be
-// covering the thing the reader asked to see.
+// pinEntry builds one row: the shared summary, plus the way to take the pin off
+// where the account may.
 func (a *App) pinEntry(message *domain.Message, manage bool) ui.PinEntry {
-	author := a.store.MessageAuthor(message)
-	channelID, messageID := message.ChannelID, message.ID
-
-	entry := ui.PinEntry{
-		Author:    author.Name,
-		AvatarURL: author.AvatarURL,
-		Preview:   pinPreview(message),
-		When:      pinWhen(messageID),
-
-		Jump: func() {
-			a.closeOverlay()
-			a.OnJumpToMessage(channelID, messageID)
-		},
-	}
-
+	entry := ui.PinEntry{MessageEntry: a.messageEntry(message)}
 	if manage {
 		entry.Unpin = func() { a.unpinFromPanel(message) }
 	}
@@ -172,12 +155,33 @@ func (a *App) pinEntry(message *domain.Message, manage bool) ui.PinEntry {
 	return entry
 }
 
-// pinPreview flattens a message onto one line. A pin need not be text at all —
-// a picture is one of the things most worth keeping — so a body with nothing in
-// it says what it carries instead of drawing an empty row.
-func pinPreview(message *domain.Message) string {
+// messageEntry summarises one message for a panel row, shared with channel search
+// — both list messages the column need not be holding. The panel closes on the
+// way to one: a jump moves the column underneath, and a panel left standing would
+// cover the thing the reader asked to see.
+func (a *App) messageEntry(message *domain.Message) ui.MessageEntry {
+	author := a.store.MessageAuthor(message)
+	channelID, messageID := message.ChannelID, message.ID
+
+	return ui.MessageEntry{
+		Author:    author.Name,
+		AvatarURL: author.AvatarURL,
+		Preview:   messagePreview(message),
+		When:      messageWhen(messageID),
+
+		Jump: func() {
+			a.closeOverlay()
+			a.OnJumpToMessage(channelID, messageID)
+		},
+	}
+}
+
+// messagePreview flattens a message onto one line. A pin need not be text — a
+// picture is among the things most worth keeping — so an empty body says what it
+// carries instead of drawing an empty row.
+func messagePreview(message *domain.Message) string {
 	if content := strings.Join(strings.Fields(message.Content), " "); content != "" {
-		return util.Truncate(content, pinPreviewRunes)
+		return util.Truncate(content, previewRunes)
 	}
 
 	switch {
@@ -192,10 +196,10 @@ func pinPreview(message *domain.Message) string {
 	}
 }
 
-// pinWhen dates a row off the message ID, ULIDs carrying the instant they were
-// made. An ID that cannot be parsed leaves the slot empty rather than dating the
-// row to the epoch.
-func pinWhen(messageID string) string {
+// messageWhen dates a row off the message ID, ULIDs carrying the instant they
+// were made. An ID that cannot be parsed leaves the slot empty rather than
+// dating the row to the epoch.
+func messageWhen(messageID string) string {
 	when, err := util.Timestamp(messageID)
 	if err != nil {
 		return ""
@@ -207,11 +211,9 @@ func pinWhen(messageID string) string {
 /* Taking one off */
 
 // unpinFromPanel unpins from the list rather than from the message. Nothing is
-// dropped before the server agrees, as everywhere else, and the row goes when it
-// has: the panel is a snapshot, so nothing else would take it away.
-//
-// It is not confirmed. Every other destructive action here cannot be undone by
-// repeating it, and this one is a click away from being put back.
+// dropped before the server agrees, and the row goes when it has — the panel is a
+// snapshot, so nothing else would take it away. Not confirmed: every other
+// destructive action here cannot be undone by repeating it, and this one can.
 func (a *App) unpinFromPanel(message *domain.Message) {
 	messageID := message.ID
 

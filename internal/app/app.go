@@ -114,18 +114,42 @@ type App struct {
 
 	overlay    *ui.Overlay          // nil when nothing is showing
 	joinDialog *ui.JoinServerDialog // the invite dialog on the modal layer, if any
+	prompt     *ui.PromptDialog     // the field-and-a-button card on that layer, if any
 	friends    *ui.FriendsDialog    // the friends list on that layer, if any
 	editing    *ui.MessageWidget    // the message being edited in place, if any
 
+	/* What the settings page draws about this account, see settings.go */
+
+	// selfProfile is this account's bio and banner, selfProfileOK whether they have
+	// been fetched. A profile is not on the user record and no event announces one,
+	// so it is asked for once and dropped after an edit.
+	selfProfile   domain.UserProfile
+	selfProfileOK bool
+
+	// selfAvatarURL and selfHandle are what the open Account section was drawn from,
+	// so a user update naming this account can be told from one that moved something
+	// else and the section rebuilt only when it must be.
+	selfAvatarURL string
+	selfHandle    string
+
 	/* The pinned-messages panel, see pins.go */
 
-	// pins is the panel on the modal layer, if any, and pinned what it is drawn
-	// from — a fetched snapshot rather than anything the cache holds, kept only
-	// for as long as the panel is up. pinsChannelID is which channel was asked
-	// about, so a reply arriving after the reader moved on is dropped.
+	// pins is the panel on the modal layer, pinned what it is drawn from — a fetched
+	// snapshot rather than anything cached, kept only while the panel is up.
+	// pinsChannelID is which channel was asked about, so an answer arriving after
+	// the reader moved on is dropped.
 	pins          *ui.PinsDialog
 	pinsChannelID string
 	pinned        []*domain.Message
+
+	/* Channel search, see search.go */
+
+	// search is the panel on the modal layer, if any, and searchQuery the query
+	// it is waiting on — an answer to an older one is dropped rather than drawn
+	// under a newer. searchChannelID is what pins' own is, for the same reason.
+	search          *ui.SearchDialog
+	searchChannelID string
+	searchQuery     string
 
 	/* Lazy author resolution, see members.go */
 
@@ -135,10 +159,10 @@ type App struct {
 
 	/* Lazy reply resolution, see messages.go */
 
-	// uncached are the messages the channel cache cannot answer for: the targets
-	// of quotes older than its tail, and the window a jump landed in. Both reach
-	// as far back as somebody cared to answer or to name, while the cache is only
-	// a channel's tail — filed among its messages, either would read as history.
+	// uncached are the messages the channel cache cannot answer for: quote targets
+	// older than its tail, and the window a jump landed in. Both reach as far back
+	// as somebody cared to answer or to name, where the cache is a contiguous tail —
+	// filed among its messages, either would read as history.
 	uncached       map[string]*domain.Message
 	fetchedReplies map[string]bool
 	pendingReplies []client.MessageRef
@@ -196,16 +220,16 @@ type App struct {
 
 	/* Invite cards, see overlay.go */
 
-	// invites is what a code resolved to, kept because a card is rebuilt every
-	// time its message scrolls back into view and the answer never changes within
-	// a session. pendingInvites holds the cards waiting on a request already in
-	// flight, so the same invite posted twice costs one.
+	// invites is what a code resolved to, kept because a card is rebuilt every time
+	// its message scrolls back into view and the answer never changes within a
+	// session. pendingInvites holds the cards waiting on a request already out, so
+	// the same invite posted twice costs one.
 	invites        map[string]inviteResult
 	pendingInvites map[string][]func(domain.Invite, error)
 
-	// epoch counts logins. A worker captures it before it leaves the UI thread and
+	// epoch counts logins. A worker captures it before leaving the UI thread and
 	// checks it on the way back, so a response that outlived a logout is dropped
-	// instead of painting the previous account's data into the new one's view.
+	// rather than painting the old account's data into the new one's view.
 	epoch uint64
 
 	info Info // version and build, for the About section
@@ -281,7 +305,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		typing:              make(map[string]map[string]time.Time),
 	}
 
-	// Built here rather than on first open so the layer is a fixed object buildUI
+	// Built here rather than on first open, so the layer is a fixed object buildUI
 	// can stack: the page has to survive the rebuild a style change asks for.
 	a.settings = ui.NewSettingsPage(a.settingsHooks())
 
@@ -304,15 +328,34 @@ func (a *App) doOnUI(fn func(), wait bool) {
 	a.fyne.Driver().DoFromGoroutine(fn, wait)
 }
 
-// background runs fn off the UI thread and, when it fails, posts onFail on the
-// UI thread. It is the shape every action here takes: the request goes to the
-// client, the outcome comes back as a notice, and the UI itself is updated by
-// the gateway event that follows.
+// background runs fn off the UI thread and posts onFail there when it fails. The
+// shape every action here takes: the request goes to the client, a failure comes
+// back as a notice, and the UI is updated by the gateway event that follows.
 func (a *App) background(fn func() error, onFail func(err error)) {
+	a.backgroundThen(fn, onFail, nil)
+}
+
+// backgroundThen is background with somewhere to hear about a success, for the
+// actions the gateway cannot be trusted to announce. then runs on the UI thread
+// and only for a session still current; a failure is reported whatever the
+// epoch, an error being worth saying either way.
+func (a *App) backgroundThen(fn func() error, onFail func(err error), then func()) {
+	epoch := a.epoch
+
 	go func() {
-		if err := fn(); err != nil {
-			a.doOnUI(func() { onFail(err) }, false)
+		err := fn()
+		if err == nil && then == nil {
+			return
 		}
+
+		a.doOnUI(func() {
+			switch {
+			case err != nil:
+				onFail(err)
+			case !a.stale(epoch):
+				then()
+			}
+		}, false)
 	}()
 }
 
@@ -322,7 +365,10 @@ func (a *App) stale(epoch uint64) bool { return a.epoch != epoch }
 
 // deps returns the dependency bundle handed to widgets.
 func (a *App) deps() ui.Deps {
-	return ui.Deps{Store: a.store, Images: a.images, Emojis: a.emojis, Texts: a.texts, Actions: a}
+	return ui.Deps{
+		Store: a.store, Images: a.images, Emojis: a.emojis, Texts: a.texts,
+		Actions: a, Tooltip: a.tooltip,
+	}
 }
 
 // showMainUI swaps the window to the main layout and wires up shutdown.
@@ -343,13 +389,10 @@ func (a *App) showMainUI() {
 }
 
 // styleNativeChrome recolours a window's native title bar to match the palette.
-// The platform handle isn't available until the event loop has created the
-// window, so it retries briefly until the styling lands. Every window the client
-// opens goes through here, so none shows default chrome against our colours.
-//
-// Turned off in the settings, the window keeps whatever chrome the system gives
-// it — which is the only way back, since the recolouring cannot be undone
-// without restarting.
+// The platform handle is not available until the event loop has created the
+// window, so it retries briefly. Every window goes through here, so none shows
+// default chrome against our colours. Turned off in the settings the window keeps
+// the system's — the only way back, the recolouring not being undoable in place.
 func (a *App) styleNativeChrome(window fyne.Window) {
 	if !config.Current().Interface.ThemeTitleBar {
 		return
@@ -398,9 +441,9 @@ func (a *App) focusInput() {
 
 /* ui.MessageActions */
 
-// ResolveMessage looks a message up in the local cache, falling back to what was
-// fetched for quotes and jumps the cache had scrolled past. Never the network —
-// a widget asks this while it builds.
+// ResolveMessage looks a message up in the cache, falling back to what was
+// fetched for quotes and jumps past its tail. Never the network — a widget asks
+// this while it builds.
 func (a *App) ResolveMessage(channelID, messageID string) *domain.Message {
 	if message := a.client.Messages().Find(channelID, messageID); message != nil {
 		return message
@@ -426,9 +469,9 @@ func (a *App) OnAttachmentTapped(attachment *domain.File) {
 
 // OnUserTapped opens a profile; it lives in profile.go with the rest of them.
 
-// OnDelete asks before deleting a message. Whether the action is offered at all
-// is decided by the widget; the confirmation is here because deleting is
-// irreversible and the quick actions put it one click from the pointer.
+// OnDelete asks before deleting. Whether the action is offered is the widget's
+// decision; the confirmation is here because deleting is irreversible and the
+// quick actions put it one click from the pointer.
 func (a *App) OnDelete(message *domain.Message) {
 	if message == nil {
 		return
@@ -444,8 +487,8 @@ func (a *App) OnDelete(message *domain.Message) {
 }
 
 // deletePrompt quotes what is about to go, so a misaimed delete shows itself
-// before it happens rather than after. The quoted text is flattened onto one
-// line: the card asks a question, it isn't a second copy of the message.
+// beforehand. Flattened onto one line: the card asks a question rather than being
+// a second copy of the message.
 func deletePrompt(message *domain.Message) string {
 	content := strings.Join(strings.Fields(message.Content), " ")
 	if content == "" {
@@ -456,8 +499,7 @@ func deletePrompt(message *domain.Message) string {
 }
 
 // deleteMessage deletes without waiting: the message leaves the view through the
-// MessageDeleted event. The server is the final authority, so a rejected delete
-// leaves it where it is and says so.
+// MessageDeleted event, so a refused delete leaves it where it is and says so.
 func (a *App) deleteMessage(message *domain.Message) {
 	a.background(
 		func() error { return a.client.DeleteMessage(message.ChannelID, message.ID) },
@@ -465,21 +507,17 @@ func (a *App) deleteMessage(message *domain.Message) {
 	)
 }
 
-// OnPin pins or unpins a message. Nothing is applied optimistically — the client
-// records the new state only once the server has agreed, so a refused pin leaves
-// the row exactly as it was and says so.
-//
-// The repaint is made here rather than left to the gateway. Revolt does echo the
-// pin back as a system message, but the client has already written what that
-// event carries, and the handler behind it deliberately announces nothing when
-// the state it was told about is the state it holds — otherwise every pin would
-// redraw its row twice.
+// OnPin pins or unpins a message. Nothing is applied optimistically — the state
+// is recorded only once the server agrees — and the repaint is made here rather
+// than left to the gateway: Revolt does echo the pin back, but the client has
+// already written what that event carries, and the handler announces nothing when
+// what it is told is what it holds. Otherwise every pin would redraw twice.
 func (a *App) OnPin(message *domain.Message, pinned bool) { a.setPinned(message, pinned, nil) }
 
 // setPinned is OnPin with somewhere for a second surface to hear about it: the
-// pinned-messages panel takes a pin off a message that need not be mounted at
-// all, so refreshing the row cannot be the whole answer. then runs on the UI
-// thread once the server has agreed, and only for a session still current.
+// pins panel takes a pin off a message that need not be mounted at all, so
+// refreshing the row cannot be the whole answer. then runs on the UI thread once
+// the server agrees, and only for a session still current.
 func (a *App) setPinned(message *domain.Message, pinned bool, then func()) {
 	if message == nil {
 		return
@@ -491,34 +529,20 @@ func (a *App) setPinned(message *domain.Message, pinned bool, then func()) {
 		what, failure = "unpin message ", "Could not unpin that message."
 	}
 
-	epoch := a.epoch
-	onFail := a.notifyFailure(what+messageID, "%s", failure)
-
-	go func() {
-		err := a.client.PinMessage(channelID, messageID, pinned)
-
-		a.doOnUI(func() {
-			if err != nil {
-				onFail(err)
-				return
-			}
-			if a.stale(epoch) {
-				return
-			}
-
+	a.backgroundThen(
+		func() error { return a.client.PinMessage(channelID, messageID, pinned) },
+		a.notifyFailure(what+messageID, "%s", failure),
+		func() {
 			a.refreshMessage(channelID, messageID)
 			if then != nil {
 				then()
 			}
-		}, false)
-	}()
+		},
+	)
 }
 
-// OnReact adds or removes this account's reaction. Like a pin, nothing is
-// applied before the server agrees and the repaint is made here: the gateway
-// does echo a reaction back, but the client has already written what that event
-// carries, and the handler behind it announces nothing when the state it is told
-// about is the state it holds — otherwise every chip would redraw twice.
+// OnReact adds or removes this account's reaction. As with a pin, nothing is
+// applied before the server agrees and the repaint is made here — see OnPin.
 func (a *App) OnReact(message *domain.Message, emoji string, add bool) {
 	if message == nil || emoji == "" {
 		return
@@ -530,27 +554,16 @@ func (a *App) OnReact(message *domain.Message, emoji string, add bool) {
 		what, failure = "unreact to message ", "Could not remove that reaction."
 	}
 
-	epoch := a.epoch
-	onFail := a.notifyFailure(what+messageID, "%s", failure)
-
-	go func() {
-		err := a.client.React(channelID, messageID, emoji, add)
-
-		a.doOnUI(func() {
-			if err != nil {
-				onFail(err)
-				return
-			}
-			if !a.stale(epoch) {
-				a.refreshMessage(channelID, messageID)
-			}
-		}, false)
-	}()
+	a.backgroundThen(
+		func() error { return a.client.React(channelID, messageID, emoji, add) },
+		a.notifyFailure(what+messageID, "%s", failure),
+		func() { a.refreshMessage(channelID, messageID) },
+	)
 }
 
-// OnClearReactions asks before taking every reaction off a message. It is
-// confirmed where adding or removing one is not: this undoes other people's
-// clicks, and nothing puts them back.
+// OnClearReactions asks before taking every reaction off a message — confirmed
+// where adding or removing one is not, because this undoes other people's clicks
+// and nothing puts them back.
 func (a *App) OnClearReactions(message *domain.Message) {
 	if message == nil {
 		return
@@ -566,26 +579,15 @@ func (a *App) OnClearReactions(message *domain.Message) {
 	})
 }
 
-// clearReactions clears them and repaints, the repaint being made here for the
-// reason a pin's is: what Revolt sends back cannot be read for reactions, so the
-// client's own write is the only thing that knows they are gone.
+// clearReactions clears them and repaints here for the reason a pin does: what
+// Revolt sends back cannot be read for reactions, so the client's own write is
+// the only thing that knows they are gone.
 func (a *App) clearReactions(channelID, messageID string) {
-	epoch := a.epoch
-	onFail := a.notifyFailure("clear reactions on message "+messageID, "Could not clear those reactions.")
-
-	go func() {
-		err := a.client.ClearReactions(channelID, messageID)
-
-		a.doOnUI(func() {
-			if err != nil {
-				onFail(err)
-				return
-			}
-			if !a.stale(epoch) {
-				a.refreshMessage(channelID, messageID)
-			}
-		}, false)
-	}()
+	a.backgroundThen(
+		func() error { return a.client.ClearReactions(channelID, messageID) },
+		a.notifyFailure("clear reactions on message "+messageID, "Could not clear those reactions."),
+		func() { a.refreshMessage(channelID, messageID) },
+	)
 }
 
 // OnEdit opens the in-place editor on the message's mounted widget. Only one edit

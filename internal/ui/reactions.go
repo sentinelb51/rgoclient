@@ -1,13 +1,12 @@
 package ui
 
-// The reaction row under a message: a chip that is a button, and an emoji that is
-// a picture or a character depending on what the server sent. Adding one opens
-// the shared picker (ui/emoji.go) through the controller, which is what knows
-// which server's emoji are on offer.
+// The reaction row under a message. Adding one opens the shared picker
+// (ui/emoji.go) through the controller, which knows what is on offer.
 
 import (
 	"image/color"
 	"strconv"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -23,12 +22,9 @@ import (
 
 /* The row */
 
-// buildReactions is the chip row that hangs under a message, one chip per emoji
-// plus the one that adds another. Nil when there is nothing to draw and nothing
-// to offer, which is the overwhelming majority of messages.
-//
-// canReact gates both halves: without it the chips still say who chose what —
-// that is what they are for — but nothing here answers a click.
+// buildReactions is the chip row under a message, one chip per emoji plus the
+// one that adds another. Nil when there is nothing to draw and nothing to offer.
+// Without canReact the chips still report who chose what, but answer no click.
 func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu func(*fyne.PointEvent), onHover func(bool)) fyne.CanvasObject {
 	if len(message.Reactions) == 0 && !canReact {
 		return nil
@@ -37,30 +33,33 @@ func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu fu
 	self := deps.Store.SelfID()
 
 	chips := make([]fyne.CanvasObject, 0, len(message.Reactions)*2+1)
+	add := func(chip fyne.CanvasObject) {
+		if len(chips) > 0 {
+			chips = append(chips, HorizontalSpacer(theme.Sizes.ReactionSpacing))
+		}
+		chips = append(chips, chip)
+	}
+
 	for i := range message.Reactions {
 		reaction := &message.Reactions[i]
 
-		// The emoji is read now rather than captured as the reaction: the widget
-		// outlives nothing here, but the closure is what the click arrives through
-		// and a pointer into a message that has since been replaced is a stale read.
-		emoji, mine := reaction.Emoji, reaction.By(self)
+		// Read out now rather than captured: the click arrives through the closure,
+		// and a pointer into a message since replaced is a stale read.
+		emoji, mine, users := reaction.Emoji, reaction.By(self), reaction.Users
 
 		var onTap func()
 		if canReact {
 			onTap = func() { deps.Actions.OnReact(message, emoji, !mine) }
 		}
 
-		if len(chips) > 0 {
-			chips = append(chips, HorizontalSpacer(theme.Sizes.ReactionSpacing))
-		}
-		chips = append(chips, newReactionChip(deps, emoji, reaction.Count(), mine, onTap, onMenu, onHover))
+		// Names folded on hover rather than now: a page carries hundreds of chips
+		// and nobody is over more than one.
+		chip := newReactionChip(deps, emoji, reaction.Count(), mine, onTap, onMenu, onHover)
+		add(chip.saying(deps.Tooltip, func() string { return reactorNames(deps.Store, users) }))
 	}
 
 	if canReact {
-		if len(chips) > 0 {
-			chips = append(chips, HorizontalSpacer(theme.Sizes.ReactionSpacing))
-		}
-		chips = append(chips, newAddReactionChip(deps, message, onMenu, onHover))
+		add(newAddReactionChip(deps, message, onMenu, onHover))
 	}
 
 	return HBoxNoSpacing(chips...)
@@ -68,17 +67,19 @@ func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu fu
 
 /* The chip */
 
-// reactionChip is one emoji on a message and how many people chose it.
-//
-// It declares hover for itself, which takes hover from the message row beneath —
-// innermost wins — so it reports back through onHover the same way the row's own
-// quick-action group does. Without that the actions would vanish the moment the
-// pointer crossed a chip on the way to them.
+// reactionChip is one emoji on a message and how many people chose it. Declaring
+// hover takes it from the message row beneath (innermost wins), so it reports
+// back through onHover — otherwise the row's quick actions vanish the moment the
+// pointer crosses a chip on the way to them.
 type reactionChip struct {
 	tapBase
 
 	background *canvas.Rectangle
 	content    fyne.CanvasObject
+
+	// tip is asked at the moment of the hover — see saying.
+	tooltip *Tooltip
+	tip     func() string
 
 	mine    bool
 	hovered bool
@@ -91,8 +92,7 @@ var (
 )
 
 func newReactionChip(deps Deps, emoji string, count int, mine bool, onTap func(), onMenu func(*fyne.PointEvent), onHover func(bool)) *reactionChip {
-	number := canvas.NewText(strconv.Itoa(count), theme.Colors.ReactionCount)
-	number.TextSize = theme.Sizes.ReactionCountSize
+	number := newText(strconv.Itoa(count), theme.Colors.ReactionCount, theme.Sizes.ReactionCountSize)
 	if mine {
 		number.Color = theme.Colors.ReactionMine
 	}
@@ -104,9 +104,8 @@ func newReactionChip(deps Deps, emoji string, count int, mine bool, onTap func()
 	), mine, onTap, onMenu, onHover)
 }
 
-// newAddReactionChip is the chip at the end of the row: the one that opens the
-// picker. It carries a mark rather than an emoji, since what it stands for is
-// every emoji rather than any one of them.
+// newAddReactionChip is the chip at the end of the row that opens the picker; it
+// carries a mark rather than an emoji since it stands for all of them.
 func newAddReactionChip(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent), onHover func(bool)) *reactionChip {
 	mark := newScaledIcon(tintedIcon(assets.ActionAddIcon, theme.Colors.ReactionCount), theme.Sizes.ReactionEmojiSize)
 
@@ -117,7 +116,7 @@ func newAddReactionChip(deps Deps, message *domain.Message, onMenu func(*fyne.Po
 		})
 	}, onMenu, onHover)
 
-	return chip
+	return chip.saying(deps.Tooltip, func() string { return "Add a reaction" })
 }
 
 // newChipOf is the surface both chips share.
@@ -144,6 +143,14 @@ func (c *reactionChip) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(c.content)
 }
 
+// saying gives the chip what to say while hovered. A func rather than a string:
+// the text is a walk of the people in the reaction, paid for only on the hover.
+func (c *reactionChip) saying(tooltip *Tooltip, tip func() string) *reactionChip {
+	c.tooltip, c.tip = tooltip, tip
+
+	return c
+}
+
 func (c *reactionChip) MouseIn(*desktop.MouseEvent) { c.setHovered(true) }
 func (c *reactionChip) MouseOut()                   { c.setHovered(false) }
 
@@ -156,14 +163,18 @@ func (c *reactionChip) setHovered(on bool) {
 	c.background.FillColor = c.fill()
 	c.background.Refresh()
 
-	if c.onHover != nil {
-		c.onHover(on)
+	// Above rather than beside: a label past the right edge names the next chip.
+	if on {
+		c.tooltip.ShowAbove(c.tip(), c)
+	} else {
+		c.tooltip.Hide()
 	}
+
+	reportHover(c.onHover, on)
 }
 
-// fill is the chip's surface, on the same four-way rule a mentioned row's
-// background follows: the accent is a rest state, so hovering lifts it rather
-// than replacing it with the ordinary hover fill.
+// fill follows the same rule as a mentioned row: the accent is a rest state, so
+// hovering lifts it rather than replacing it with the ordinary hover fill.
 func (c *reactionChip) fill() color.Color {
 	switch {
 	case c.mine && c.hovered:
@@ -177,21 +188,55 @@ func (c *reactionChip) fill() color.Color {
 	return theme.Colors.ReactionBg
 }
 
+/* Who is in one */
+
+// reactionTipNames is how many people a chip's tooltip names before the rest
+// become a count.
+const reactionTipNames = 10
+
+// reactorNames is who chose an emoji, in the typing indicator's line: names then
+// a count of the rest. Someone the store cannot name is counted, not named — a
+// reaction reaches accounts nothing on the page has resolved.
+func reactorNames(store domain.Store, users []string) string {
+	names := make([]string, 0, min(len(users), reactionTipNames))
+
+	hidden := 0
+	for _, userID := range users {
+		name := store.UserName(userID)
+		if name == "" || len(names) == reactionTipNames {
+			hidden++
+			continue
+		}
+		names = append(names, name)
+	}
+
+	if len(names) == 0 {
+		if hidden == 1 {
+			return "Someone"
+		}
+
+		return strconv.Itoa(hidden) + " people"
+	}
+
+	line := strings.Join(names, ", ")
+	if hidden > 0 {
+		line += " +" + strconv.Itoa(hidden)
+	}
+
+	return line
+}
+
 /* The emoji */
 
-// newReactionEmoji draws one emoji at chip size: the picture for a custom one,
-// the character itself for everything else.
-//
-// A custom emoji is loaded into a square reserved before the request starts, so
-// one arriving repaints its own cell rather than moving the chips beside it. The
-// unicode half is a plain canvas.Text — Fyne falls back to the platform's emoji
-// font for glyphs the client's own font has none of, which is every emoji.
+// newReactionEmoji draws one emoji at chip size: a picture for a custom one, the
+// character itself otherwise. The square is reserved before the request starts,
+// so one arriving repaints its own cell rather than moving the chips beside it.
+// Unicode goes through canvas.Text — Fyne falls back to the platform's emoji font.
 func newReactionEmoji(deps Deps, emoji string) fyne.CanvasObject {
 	side := theme.Sizes.ReactionEmojiSize
 
 	if !util.IsEmojiID(emoji) {
-		text := canvas.NewText(emoji, theme.Colors.TextPrimary)
-		text.TextSize = side
+		text := newText(emoji, theme.Colors.TextPrimary, side)
 
 		return vcenter(text)
 	}

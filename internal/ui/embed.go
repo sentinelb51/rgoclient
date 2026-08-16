@@ -1,15 +1,12 @@
 package ui
 
-// Embeds — the cards drawn beneath a message: a link the server unfurled into a
-// preview, or one an integration composed itself. One builder covers both,
-// branching on what the embed actually carries rather than on its kind, because
-// the two shapes overlap almost entirely.
+// Embeds — the cards under a message: a link the server unfurled, or one an
+// integration composed. One builder covers both, branching on what the embed
+// carries rather than on its kind, the two shapes overlapping almost entirely.
 //
-// The card is sized to what it says. A wrapping body has no natural width — it
-// takes whatever it is given — so the width is measured from the text as a
-// single line and capped at EmbedMaxWidth, which is what stops a two-word
-// preview drawing a card the width of the message area and a paragraph refusing
-// to wrap at all.
+// The card is sized to what it says. A wrapping body has no natural width, so it
+// is measured as a single line and capped at EmbedMaxWidth — which is what stops
+// a two-word preview drawing a card the width of the message area.
 
 import (
 	"image/color"
@@ -26,30 +23,30 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// buildEmbeds stacks a message's embeds, separated by the same small gap that
-// separates its attachments. Each row is boxed horizontally so the card keeps
-// its own width instead of being stretched to the message column's.
+// buildEmbeds stacks a message's embeds, separated by the gap that separates its
+// attachments. Each row is boxed horizontally so the card keeps its own width
+// rather than stretching to the message column's.
 func buildEmbeds(deps Deps, embeds []*domain.Embed, onMenu func(*fyne.PointEvent)) *fyne.Container {
-	box := container.NewVBox()
+	rows := make([]fyne.CanvasObject, 0, max(len(embeds)*2-1, 0))
 
 	for i, embed := range embeds {
 		if i > 0 {
-			box.Add(VerticalSpacer(theme.Sizes.EmbedSpacing))
+			rows = append(rows, VerticalSpacer(theme.Sizes.EmbedSpacing))
 		}
-		box.Add(HBoxNoSpacing(buildEmbed(deps, embed, onMenu)))
+		rows = append(rows, HBoxNoSpacing(buildEmbed(deps, embed, onMenu)))
 	}
 
-	return box
+	return container.NewVBox(rows...)
 }
 
-// buildEmbed renders one embed. An embed with nothing to say — Revolt's bare
-// image kind, or an unfurl that found only a picture — is drawn as the picture
-// alone: a card around it would be an empty frame with a stripe down the side.
+// buildEmbed renders one embed. One with nothing to say — a bare image kind, or
+// an unfurl that found only a picture — is the picture alone: a card around it is
+// an empty frame with a stripe down the side.
 //
-// The card itself is inert: it is drawn from plain containers, so hover and
-// right-click both pass straight through to the message row it belongs to. Only
-// the parts that actually do something — the title, the picture — are widgets,
-// and each takes onMenu so a right-click on one still raises the message's menu.
+// The card is inert, drawn from plain containers, so hover and right-click pass
+// through to the message row. Only the parts that do something — the title, the
+// picture — are widgets, and each takes onMenu so a right-click still raises the
+// message's menu.
 func buildEmbed(deps Deps, embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	if embed.Title == "" && embed.Description == "" && embed.SiteName == "" && embed.Image != nil {
 		return buildEmbedImage(deps, embed.Image, theme.Sizes.EmbedMaxWidth, onMenu)
@@ -58,20 +55,17 @@ func buildEmbed(deps Deps, embed *domain.Embed, onMenu func(*fyne.PointEvent)) f
 	width := embedContentWidth(embed)
 	padV, padH := theme.Sizes.EmbedPaddingV, theme.Sizes.EmbedPaddingH
 
-	// The hairline is what keeps the card's shape when the row underneath is
-	// hovered: the fill alone is a couple of steps off the message area, which a
-	// highlight can close, but the shared outline is darker than either state and
-	// cannot be washed out by one. It is drawn as the background's own stroke
-	// rather than stacked over the card, since everything inside sits within the
-	// card's padding and so never paints over its edge.
+	// The hairline keeps the card's shape when the row underneath is hovered: the
+	// fill alone is a couple of steps off the message area, which a highlight can
+	// close. It is the background's own stroke rather than stacked over the card,
+	// everything inside sitting within the padding.
 	background := canvas.NewRectangle(theme.Colors.EmbedBg)
 	background.CornerRadius = theme.Sizes.EmbedRadius
-	background.StrokeColor = theme.Colors.Outline
-	background.StrokeWidth = theme.Sizes.OutlineWidth
+	Outline(background)
 
-	// The stripe is inset with the content rather than run flush down the card's
-	// edge, so it needs no corner of its own to meet the rounded ones: a pill
-	// beside the text, which is also what keeps it off the message hover fill.
+	// The stripe is inset with the content rather than run flush down the edge, so
+	// it needs no corner of its own to meet the rounded ones — a pill beside the
+	// text, which also keeps it off the message hover fill.
 	accent := canvas.NewRectangle(embedAccent(embed))
 	accent.SetMinSize(fyne.NewSize(theme.Sizes.EmbedAccentWidth, 0))
 	accent.CornerRadius = theme.Sizes.EmbedAccentWidth / 2
@@ -81,8 +75,8 @@ func buildEmbed(deps Deps, embed *domain.Embed, onMenu func(*fyne.PointEvent)) f
 	return container.NewStack(background, NewInset(row, padV, padV, padH, padH))
 }
 
-// embedAccent is the colour of the stripe: the embed's own where it named one
-// the conversion could parse, the palette's default otherwise.
+// embedAccent is the stripe's colour: the embed's own where the conversion could
+// parse one, the palette's default otherwise.
 func embedAccent(embed *domain.Embed) color.Color {
 	if embed.Color != nil {
 		return embed.Color
@@ -110,8 +104,8 @@ func buildEmbedBody(deps Deps, embed *domain.Embed, width float32, onMenu func(*
 		add(buildEmbedTitle(embed, onMenu))
 	}
 	if embed.Description != "" {
-		// The same renderer a message body goes through, so an embed's markdown,
-		// mentions and text selection all behave exactly as a message's do.
+		// The message body renderer, so markdown, mentions and selection behave here
+		// exactly as they do in a message.
 		add(newFlushContainer(renderMessageBody(deps, embed.Description, onMenu)))
 	}
 	if embed.Image != nil {
@@ -124,12 +118,10 @@ func buildEmbedBody(deps Deps, embed *domain.Embed, width float32, onMenu func(*
 // buildEmbedSite is the provenance line: the site's own mark, then its name, in
 // the small muted type a caption is set in.
 func buildEmbedSite(images *cache.ImageCache, embed *domain.Embed) fyne.CanvasObject {
-	name := canvas.NewText(embed.SiteName, theme.Colors.EmbedSite)
-	name.TextSize = theme.Sizes.EmbedSiteTextSize
+	name := newText(embed.SiteName, theme.Colors.EmbedSite, theme.Sizes.EmbedSiteTextSize)
 
-	// The name absorbs the leftover width and shortens into it; an ellipsis text
-	// reports no width of its own, so it has to be the row's filling child or it
-	// would be handed none at all.
+	// The name absorbs the leftover width: an ellipsis text reports none of its own,
+	// so it has to be the row's filling child or it is handed nothing.
 	if embed.IconURL == "" {
 		return NewFillRow(0, NewEllipsisText(name))
 	}
@@ -142,17 +134,12 @@ func buildEmbedSite(images *cache.ImageCache, embed *domain.Embed) fyne.CanvasOb
 	return NewFillRow(2, container.NewCenter(icon), HorizontalSpacer(theme.Sizes.EmbedIconGap), NewEllipsisText(name))
 }
 
-// buildEmbedTitle is the headline. It leads to the page the embed was unfurled
-// from when there is one, and is drawn in the accent either way — a title with
-// nowhere to go still heads its card.
-//
-// It is one line that shortens rather than a wrapping paragraph: a card is a
-// summary, and a title long enough to wrap is one the description already says
-// more usefully.
+// buildEmbedTitle is the headline, leading to the unfurled page where there is
+// one and drawn in the accent either way. One line that shortens rather than a
+// wrapping paragraph: a card is a summary, and a title long enough to wrap is one
+// the description already says more usefully.
 func buildEmbedTitle(embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	title := canvas.NewText(embed.Title, theme.Colors.EmbedTitle)
-	title.TextSize = theme.Sizes.EmbedTitleTextSize
-	title.TextStyle = fyne.TextStyle{Bold: true}
+	title := newBoldText(embed.Title, theme.Colors.EmbedTitle, theme.Sizes.EmbedTitleTextSize)
 
 	line := NewFillRow(0, NewEllipsisText(title))
 	if embed.URL == "" {
@@ -162,13 +149,10 @@ func buildEmbedTitle(embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.Ca
 	return newEmbedLink(line, embed.URL, onMenu)
 }
 
-// embedLink is the tappable title.
-//
-// It is a widget of its own rather than a TappableContainer because that one is
-// hoverable, and Fyne delivers hover to the innermost hoverable object: a title
-// accepting hover would take it off the message row and drop the row's quick
-// actions every time the pointer crossed the card. ui.Avatar is left
-// unhoverable for exactly the same reason.
+// embedLink is the tappable title — a widget of its own rather than a
+// TappableContainer, which is hoverable: innermost wins, so a title accepting
+// hover would drop the message row's quick actions whenever the pointer crossed
+// the card. ui.Avatar is unhoverable for the same reason.
 type embedLink struct {
 	tapBase
 	content fyne.CanvasObject
@@ -192,13 +176,13 @@ func (l *embedLink) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(l.content)
 }
 
-// buildEmbedImage renders the embed's picture, which opens in the lightbox when
-// tapped like an attachment does. width is the column it has to fit inside; a
-// picture smaller than that is never enlarged to fill it.
+// buildEmbedImage renders the embed's picture, opening in the lightbox as an
+// attachment does. width is the column it fits inside; a smaller picture is never
+// enlarged to fill it.
 func buildEmbedImage(deps Deps, file *domain.File, width float32, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	size := fitWithin(file.Width, file.Height, width, theme.Sizes.EmbedImageMaxHeight)
 	if size.Width == 0 || size.Height == 0 {
-		// Revolt carries no dimensions for a bare image embed, so reserve a wide,
+		// Revolt carries no dimensions for a bare image embed: reserve a wide
 		// half-height box and let the row settle once the picture arrives.
 		size = fyne.NewSize(width, theme.Sizes.EmbedImageMaxHeight/2)
 	}
@@ -217,13 +201,10 @@ func buildEmbedImage(deps Deps, file *domain.File, width float32, onMenu func(*f
 /* Width */
 
 // embedContentWidth is the room the text column gets: the widest thing the embed
-// has to draw, capped at EmbedMaxWidth.
-//
-// The text is measured as one unbroken line, which is what it would occupy if
-// nothing made it wrap — so a short embed asks for exactly its own width and a
-// long one asks for more than the cap and is cut back to it, wrapping inside
-// what is left. Wrapping text cannot be asked how wide it wants to be: it
-// answers with whatever it was last given.
+// draws, capped at EmbedMaxWidth. Text is measured as one unbroken line, so a
+// short embed asks for exactly its own width and a long one is cut back to the
+// cap and wraps inside it. Wrapping text cannot be asked how wide it wants to be
+// — it answers with whatever it was last given.
 func embedContentWidth(embed *domain.Embed) float32 {
 	var width float32
 
@@ -238,8 +219,8 @@ func embedContentWidth(embed *domain.Embed) float32 {
 		width = max(width, fyne.MeasureText(embed.Title, theme.Sizes.EmbedTitleTextSize, fyne.TextStyle{Bold: true}).Width)
 	}
 	if embed.Description != "" {
-		// Flattened first: the width of the markdown source counts characters the
-		// reader never sees, and a card sized for its asterisks is a wide one.
+		// Flattened first: the source's width counts characters the reader never sees,
+		// and a card sized for its asterisks is a wide one.
 		text := markdown.DocumentText(markdown.Parse(embed.Description))
 		width = max(width, fyne.MeasureText(text, fynetheme.TextSize(), fyne.TextStyle{}).Width)
 	}

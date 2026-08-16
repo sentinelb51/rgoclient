@@ -5,6 +5,7 @@ import (
 	"image/draw"
 	"image/png"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -124,7 +125,6 @@ type ImageCache struct {
 
 	dir      string
 	client   *http.Client
-	ticker   *time.Ticker
 	flushNow chan struct{} // nudged when unwritten images are blocking eviction
 	stop     chan struct{}
 }
@@ -162,7 +162,6 @@ func NewImageCache(root, folder string, limits ImageLimits) *ImageCache {
 		log.Printf("image cache: create dir: %v", err)
 	}
 
-	c.ticker = time.NewTicker(flushInterval)
 	go c.flushLoop()
 
 	return c
@@ -188,22 +187,41 @@ func (c *ImageCache) Stats() ImageStats {
 	stats := ImageStats{MemoryBytes: c.bytes}
 	c.mu.RUnlock()
 
-	entries, err := os.ReadDir(c.dir)
-	if err != nil {
-		return stats
+	for _, file := range c.diskFiles() {
+		stats.Files++
+		stats.DiskBytes += file.size
 	}
 
+	return stats
+}
+
+// diskFile is one persisted image, as the directory reports it.
+type diskFile struct {
+	name     string
+	size     int64
+	modified time.Time
+}
+
+// diskFiles lists the cache directory, skipping subdirectories and anything
+// unreadable. It is the one walk Stats, Clear and trimDiskCache share.
+func (c *ImageCache) diskFiles() []diskFile {
+	entries, err := os.ReadDir(c.dir)
+	if err != nil {
+		log.Printf("image cache: read dir: %v", err)
+		return nil
+	}
+
+	files := make([]diskFile, 0, len(entries))
 	for _, entry := range entries {
 		info, err := entry.Info()
 		if err != nil || info.IsDir() {
 			continue
 		}
 
-		stats.Files++
-		stats.DiskBytes += info.Size()
+		files = append(files, diskFile{entry.Name(), info.Size(), info.ModTime()})
 	}
 
-	return stats
+	return files
 }
 
 // Clear drops everything the cache holds, in memory and on disk. Images queued
@@ -219,18 +237,9 @@ func (c *ImageCache) Clear() {
 	c.bytes = 0
 	c.mu.Unlock()
 
-	entries, err := os.ReadDir(c.dir)
-	if err != nil {
-		log.Printf("image cache: read dir: %v", err)
-		return
-	}
-
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(c.dir, entry.Name())); err != nil {
-			log.Printf("image cache: remove %s: %v", entry.Name(), err)
+	for _, file := range c.diskFiles() {
+		if err := os.Remove(filepath.Join(c.dir, file.name)); err != nil {
+			log.Printf("image cache: remove %s: %v", file.name, err)
 		}
 	}
 }
@@ -590,6 +599,9 @@ func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
 // only lose an image the client can fetch again, but there is no reason to allow
 // it.
 func (c *ImageCache) flushLoop() {
+	flush := time.NewTicker(flushInterval)
+	defer flush.Stop()
+
 	trim := time.NewTicker(trimInterval)
 	defer trim.Stop()
 
@@ -599,14 +611,13 @@ func (c *ImageCache) flushLoop() {
 
 	for {
 		select {
-		case <-c.ticker.C:
+		case <-flush.C:
 			c.flush()
 		case <-c.flushNow:
 			c.flush()
 		case <-trim.C:
 			c.trimDiskCache()
 		case <-c.stop:
-			c.ticker.Stop()
 			return
 		}
 	}
@@ -661,27 +672,11 @@ func (c *ImageCache) writeToDisk(id string, img image.Image) {
 //
 // Call from flushLoop only: it reads and sorts the whole directory.
 func (c *ImageCache) trimDiskCache() {
-	entries, err := os.ReadDir(c.dir)
-	if err != nil {
-		log.Printf("image cache: read dir: %v", err)
-		return
-	}
+	files := c.diskFiles()
 
-	type diskFile struct {
-		name     string
-		size     int64
-		modified time.Time
-	}
-
-	files := make([]diskFile, 0, len(entries))
 	var total int64
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil || info.IsDir() {
-			continue
-		}
-		files = append(files, diskFile{entry.Name(), info.Size(), info.ModTime()})
-		total += info.Size()
+	for _, file := range files {
+		total += file.size
 	}
 
 	budget := c.maxDisk.Load()
@@ -711,7 +706,7 @@ func circleClip(src image.Image) image.Image {
 	bounds := src.Bounds()
 	size := min(bounds.Dx(), bounds.Dy())
 
-	// Flatten the crop region once so the pixel loop copies raw bytes instead of
+	// Flatten the crop region once so the row copies move raw bytes instead of
 	// paying an image.Image interface call plus a colour conversion per pixel.
 	flat := image.NewRGBA(image.Rect(0, 0, size, size))
 	origin := image.Pt(bounds.Min.X+(bounds.Dx()-size)/2, bounds.Min.Y+(bounds.Dy()-size)/2)
@@ -721,17 +716,23 @@ func circleClip(src image.Image) image.Image {
 	center := float64(size) / 2
 	radiusSq := center * center
 
+	// Solving the circle for x gives the span inside it, so each row is one copy
+	// rather than a distance test and a four-byte copy per pixel.
 	for y := range size {
 		dy := float64(y) - center + 0.5
-		srcRow := flat.Pix[y*flat.Stride:]
-		dstRow := dst.Pix[y*dst.Stride:]
-
-		for x := range size {
-			dx := float64(x) - center + 0.5
-			if dx*dx+dy*dy <= radiusSq {
-				copy(dstRow[x*4:x*4+4], srcRow[x*4:x*4+4])
-			}
+		if dy*dy > radiusSq {
+			continue
 		}
+
+		half := math.Sqrt(radiusSq - dy*dy)
+		first := max(int(math.Ceil(center-0.5-half)), 0)
+		last := min(int(math.Floor(center-0.5+half)), size-1)
+		if first > last {
+			continue
+		}
+
+		lo, hi := first*4, (last+1)*4
+		copy(dst.Pix[y*dst.Stride+lo:y*dst.Stride+hi], flat.Pix[y*flat.Stride+lo:y*flat.Stride+hi])
 	}
 
 	return dst

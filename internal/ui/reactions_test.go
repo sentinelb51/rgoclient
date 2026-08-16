@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"strconv"
+	"strings"
 	"testing"
 
 	"fyne.io/fyne/v2"
@@ -93,6 +95,53 @@ func TestReactionRowWithoutPermission(t *testing.T) {
 	if row := buildReactions(deps, testMessage("01TESTMESSAGE00000000000A1", "hi"), false, nil, nil); row != nil {
 		t.Error("a message with nothing to show built a row anyway")
 	}
+}
+
+// TestReactorNames covers the one rule in a chip's tooltip: who is named, who is
+// only counted, and what is left when nobody can be named at all. A reaction
+// reaches accounts nothing on the page has resolved, so the unnamed half is the
+// ordinary case rather than the edge one.
+func TestReactorNames(t *testing.T) {
+	known := &fakeStore{users: map[string]domain.User{
+		"a": {Name: "Alice"},
+		"b": {Name: "Bob"},
+	}}
+
+	crowd := make([]string, 0, reactionTipNames+2)
+	for i := range cap(crowd) {
+		id := strconv.Itoa(i)
+		known.users[id] = domain.User{Name: "P" + id}
+		crowd = append(crowd, id)
+	}
+
+	cases := []struct {
+		name  string
+		users []string
+		want  string
+	}{
+		{name: "named", users: []string{"a", "b"}, want: "Alice, Bob"},
+		{name: "one unknown counted", users: []string{"a", "?"}, want: "Alice +1"},
+		{name: "nobody known", users: []string{"?"}, want: "Someone"},
+		{name: "nobody known, several", users: []string{"?", "!"}, want: "2 people"},
+		{name: "past the limit", users: crowd, want: namesOf(known, crowd[:reactionTipNames]) + " +2"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := reactorNames(known, c.users); got != c.want {
+				t.Errorf("reactorNames(%v) = %q, want %q", c.users, got, c.want)
+			}
+		})
+	}
+}
+
+func namesOf(store *fakeStore, users []string) string {
+	names := make([]string, 0, len(users))
+	for _, userID := range users {
+		names = append(names, store.UserName(userID))
+	}
+
+	return strings.Join(names, ", ")
 }
 
 func reactionChipsIn(row fyne.CanvasObject) []*reactionChip {

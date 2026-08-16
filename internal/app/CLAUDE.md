@@ -406,12 +406,12 @@ DAG and conventions.
     **A gradient must never reach a `canvas.Text`.** Fyne keys its glyph-run
     texture cache on the text object's fields, colour included, so a fill that
     can't be a map key panics the painter on the frame it is first drawn — off the
-    UI thread, where no recover of ours is on. Every colour of unknown origin goes
-    through `ui.solidColor` on the way into a text object (`newChip`,
-    `AccentText.newText`, `mentionRow.set`); a shape needs nothing, its texture
-    being keyed by the object. `widgets_test.go` asserts this over the built tree,
-    the software painter a render test uses taking a different path and not
-    noticing.
+    UI thread, where no recover of ours is on. That is **structural** rather than
+    remembered: `ui.newText` / `newBoldText` are how a text object is built here
+    and both flatten through `ui.solidColor`, so a call site cannot forget. A
+    shape needs nothing, its texture being keyed by the object. `widgets_test.go`
+    still asserts it over the built tree, the software painter a render test uses
+    taking a different path and not noticing.
 17. **Permissions.** `Store.Permissions(channelID)` / `ServerPermissions(serverID)`
     hand back a whole `domain.Permission` bitfield rather than a `CanX` per
     question: a call site asking three things should walk the roles once, and the
@@ -706,6 +706,24 @@ DAG and conventions.
     long name the way a status line is cut; a one-character name is the only thing
     it refuses, and `App.setDisplayName` names that limit in a warning rather than
     letting `notifyFailure` say "could not" about a request never made.
+    **The picture, the banner, the description and the username** are the rest of
+    it, and only the first is an ordinary edit: `SetAvatar` uploads into the
+    *avatars* bucket (see the revoltgo note) and the new picture arrives as a user
+    update like anybody else's. The **profile** half arrives as nothing at all —
+    it is not on the user record and no event announces it — so `App.selfProfile`
+    is a snapshot `loadSelfProfile` fetches once per session, dropped after each
+    edit and re-read through `App.editProfile`, which is also what tells the
+    Banner row it now has something to remove. `ui.SettingsPage.SetProfile` fills
+    those two rows the way a profile card is filled, and `commitEntry.Fill`
+    refuses to overwrite a field somebody has already typed in.
+    The **username** is a `ui.PromptDialog` on the modal layer, not a row: Revolt
+    takes the account password with the new name, which is two answers at once and
+    one of them not something to leave sitting on a page that stays open. The card
+    is the same one that creates a server, now a field per answer.
+    `refreshSettingsAccount` is what rebuilds the section afterwards, and it
+    compares before it does: a picture or a handle that moved is a rebuild, a
+    display name is not, that field being on the section and Enter leaving the
+    cursor in it.
     `Client.revoke` is the shape both logouts share — drop the session, then spend
     the captured one on the request that invalidates it. `logOutEverywhere`
     additionally removes this computer's saved login, which plain logout keeps:
@@ -848,3 +866,33 @@ DAG and conventions.
     `ObservableScroll.SyncContent` is what makes the scroll land: an offset is
     clamped against the size the content was last *laid out* at, and only a
     `Scroll.Refresh` updates that — which would re-wrap every mounted body.
+29. **Channel search** is the pins panel with a query, and `search.go` is what is
+    left once that is said: the same `ChannelSearch` route (`Client.SearchMessages`,
+    the two being mutually exclusive on the wire — Revolt refuses `query` and
+    `pinned` together), the same rows through `messageEntry`, the same refusal to
+    cache what comes back, and the same author resolution in the fetching worker.
+    It asks for **nothing** until Enter: a search is a request per query, so the
+    field reports on submit rather than on every keystroke, and `App.searchQuery`
+    is what drops the answer to a superseded one — a second Enter while the first
+    is still out is the ordinary case, and the two can land in either order.
+    `refillSearch` wraps every change to the panel in a `repositionOverlay`,
+    unlike the pins one: replacing a list of results with "Searching..." is a
+    change of height, and a centred card sized from its own minimum re-places for
+    neither.
+30. **Creating a server** is `ui.PromptDialog` — one field, because a name is all
+    Revolt takes at creation — and it *replaces* the join dialog rather than
+    stacking on it, the modal layer holding one card. Nothing in the response can
+    be believed (see the revoltgo note), so the created server arrives exactly as
+    a joined one does: `pendingJoin` marks the request and `onServerJoined`
+    selects what the gateway brings.
+31. **What a reaction chip says on hover** is who is in it, `domain.Reaction.Users`
+    having carried the names all along with nothing drawing them. It is folded at
+    the moment of the hover (`ui.reactorNames`), not at construction: a chip draws
+    a count, a mounted page carries hundreds of them, and nobody is over more than
+    one. The line is the typing indicator's — names, then `+n` for the rest —
+    since somebody the store cannot name is still one of the people in it, and a
+    row of raw IDs answers nothing. The label is the app's own `ui.Tooltip`,
+    reached through `Deps.Tooltip` rather than through an action: where a label
+    goes is a question about the widget being hovered. `clearMessages` takes it
+    down, as `refreshServerList` does — a chip about to be dropped never reports
+    the pointer leaving.

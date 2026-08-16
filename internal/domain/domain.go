@@ -1,12 +1,11 @@
 // Package domain holds the value types the client is written in terms of, plus
 // the one interface at the boundary between talking to Revolt and drawing it.
 //
-// Nothing here imports revoltgo or fyne. internal/client converts the wire types
-// into these once, on the way in; internal/ui draws them without ever seeing
-// what they came from. That is the point of the package rather than a tidiness
-// exercise: revoltgo.State's caches are unexported and its constructor is
-// package-private, so nothing holding a Session can be built in a test. A value
-// can, and so can anything written against Store.
+// Nothing here imports revoltgo or fyne: internal/client converts the wire types
+// in once, internal/ui draws them without seeing what they came from. That seam
+// is load-bearing, not tidiness — revoltgo.State's caches are unexported and its
+// constructor package-private, so nothing holding a Session can be built in a
+// test. A value can, and so can anything written against Store.
 package domain
 
 import (
@@ -18,14 +17,12 @@ import (
 
 /* Colours */
 
-// Gradient is a colour of more than one stop. A Revolt role colour is a CSS
-// colour value, and the presets the server itself offers include gradients, so
-// what arrives for a role is not always one colour.
+// Gradient is a colour of more than one stop: a role colour is a CSS colour
+// value and Revolt's own presets include gradients.
 //
 // It is a color.Color in its own right — the mean of its stops — so everything
-// filling a single shape with a role's colour (a chip's dot, a reply's accent
-// bar, a picker row) keeps working without knowing gradients exist. Only what can
-// spread one, a run of text, asks for the stops.
+// filling one shape with a role's colour keeps working without knowing gradients
+// exist. Only what can spread one, a run of text, asks for the stops.
 type Gradient []color.Color
 
 // RGBA averages the stops, in the premultiplied space color.Color is defined in.
@@ -46,8 +43,7 @@ func (g Gradient) RGBA() (uint32, uint32, uint32, uint32) {
 }
 
 // At samples the gradient at t in [0,1], interpolating between the two stops it
-// falls between. Stops are evenly spaced: Revolt's own presets place none of
-// them, and a stop position nothing sends is not worth carrying.
+// falls between. Stops are evenly spaced — Revolt's presets place none of them.
 func (g Gradient) At(t float64) color.Color {
 	if len(g) == 0 {
 		return color.Transparent
@@ -68,18 +64,18 @@ func blend(first, second color.Color, t float64) color.Color {
 	fr, fg, fb, fa := first.RGBA()
 	sr, sg, sb, sa := second.RGBA()
 
-	// RGBA reports 16-bit premultiplied channels; color.RGBA holds 8-bit
-	// premultiplied ones, so the mix is taken wide and narrowed once.
-	channel := func(x, y uint32) uint8 {
-		return uint8(uint32(float64(x)*(1-t)+float64(y)*t) >> 8)
-	}
-
 	return color.RGBA{
-		R: channel(fr, sr),
-		G: channel(fg, sg),
-		B: channel(fb, sb),
-		A: channel(fa, sa),
+		R: mixChannel(fr, sr, t),
+		G: mixChannel(fg, sg, t),
+		B: mixChannel(fb, sb, t),
+		A: mixChannel(fa, sa, t),
 	}
+}
+
+// mixChannel interpolates one channel. RGBA reports 16-bit premultiplied values
+// and color.RGBA holds 8-bit ones, so the mix is taken wide and narrowed once.
+func mixChannel(x, y uint32, t float64) uint8 {
+	return uint8(uint32(float64(x)*(1-t)+float64(y)*t) >> 8)
 }
 
 /* Files */
@@ -97,10 +93,9 @@ const (
 	FilePDF
 )
 
-// FileKindOf classifies a filename by its extension, avoiding an allocation when
-// the extension is already lowercase (the common case for web content). It is
-// what a locally picked file is classified by; one that came from Revolt carries
-// the server's own answer, which the conversion prefers.
+// FileKindOf classifies a filename by extension, without allocating when it is
+// already lowercase. It classifies a locally picked file; one from Revolt
+// carries the server's own answer, which the conversion prefers.
 func FileKindOf(filename string) FileKind {
 	dot := strings.LastIndexByte(filename, '.')
 	if dot == -1 || dot == len(filename)-1 {
@@ -134,12 +129,8 @@ func FileKindOf(filename string) FileKind {
 }
 
 // File is an uploaded file — an attachment, an avatar, an icon — already
-// resolved to the URL it is served from.
-//
-// Width and Height are zero when Revolt could not introspect the file: its
-// metadata is optional, and that is the whole of the difference here. Callers
-// test the dimensions rather than a pointer, which is what the old
-// AttachmentDimensions helper existed to spare them.
+// resolved to the URL it is served from. Width and Height are zero when Revolt
+// could not introspect it, so callers test the dimensions rather than a pointer.
 type File struct {
 	ID   string
 	Name string
@@ -164,48 +155,40 @@ type Message struct {
 	Embeds      []*Embed
 	Replies     []string // IDs of the messages this one answers
 
-	// Mentions is who this message pings, as Revolt resolved it — a reply with its
-	// mention toggle on lands here too, and a <@id> the author typed for somebody
-	// who cannot see the channel does not. So the client asks this rather than
-	// re-reading the content.
-	//
-	// MentionsEveryone is the channel-wide ping — Revolt's @everyone and @online,
-	// which arrive as a flag with nobody named in Mentions at all.
+	// Mentions is who this message pings as Revolt resolved it, so the client asks
+	// this rather than re-reading the content: a reply with its mention toggle on
+	// lands here, a <@id> for somebody who cannot see the channel does not.
+	// MentionsEveryone is @everyone/@online, which arrive as a flag with nobody
+	// named in Mentions at all.
 	Mentions         []string
 	MentionsEveryone bool
 
 	Edited *time.Time
 
-	// System is set when the server generated the message rather than anyone
-	// typing it, and Webhook when an integration posted it. Masquerade only
-	// records that the message carries one: the client does not render a
-	// masquerade, but a masqueraded message must never group under the account
-	// behind it.
+	// System is set when the server generated the message and Webhook when an
+	// integration posted it. Masquerade only records that the message carries one:
+	// the client does not render it, but a masqueraded message must never group
+	// under the account behind it.
 	System     *SystemMessage
 	Webhook    *Webhook
 	Masquerade bool
 
-	// Pinned is kept by the channel rather than by the message: it changes without
-	// the message being edited, and the pin/unpin system event is what announces it
-	// — see client/events.go, where the partial update Revolt sends alongside can't
-	// be read for it.
+	// Pinned is kept by the channel, not the message: it changes without an edit,
+	// and the pin/unpin system event announces it — see client/events.go, where
+	// the partial update Revolt sends alongside can't be read for it.
 	Pinned bool
 
-	// Reactions are in the order client/convert.go put them in, which is not one
-	// Revolt has an opinion about — see toReactions.
+	// Reactions are in the order client/convert.go put them in; Revolt has no
+	// opinion about it — see toReactions.
 	Reactions []Reaction
 }
 
-// Reaction is one emoji on a message and everybody who chose it.
+// Reaction is one emoji on a message and everybody who chose it. Emoji is a
+// literal unicode emoji or a custom one's ULID — Revolt uses one field for both.
 //
-// Emoji is either a literal unicode emoji or the ULID of a custom one: Revolt
-// uses the one field for both and says nothing about which, so whoever draws it
-// has to decide from the value.
-//
-// The people are carried rather than a count because the count is the lesser
-// half of the question — a chip is drawn differently for the account that is in
-// it, and that is answered here rather than by the client having to fold its own
-// ID into the conversion.
+// The people are carried rather than a count because a chip is drawn differently
+// for the account that is in it, which is answered here rather than by folding
+// the self ID into the conversion.
 type Reaction struct {
 	Emoji string
 	Users []string
@@ -221,9 +204,8 @@ func (r *Reaction) By(userID string) bool {
 func (r *Reaction) Count() int { return len(r.Users) }
 
 // MentionsUser reports whether the message pings userID, by name or by pinging
-// everyone who can see the channel. Logged out — no self ID — is nobody, not
-// everybody, which is why the guard comes first: an @everyone addresses every
-// reader, and with no account there is no reader to address.
+// everyone. Logged out is nobody rather than everybody — hence the guard first:
+// an @everyone addresses every reader, and with no account there is none.
 func (m *Message) MentionsUser(userID string) bool {
 	if userID == "" {
 		return false
@@ -238,9 +220,8 @@ type Webhook struct {
 	AvatarURL string
 }
 
-// SystemKind is Revolt's own vocabulary for what a system message announces,
-// carried verbatim so an event the platform adds later reads as unknown rather
-// than as something else.
+// SystemKind is Revolt's own vocabulary, carried verbatim so an event the
+// platform adds later reads as unknown rather than as something else.
 type SystemKind string
 
 const (
@@ -266,40 +247,35 @@ type SystemMessage struct {
 	Target string
 }
 
-// TargetsUser reports whether Target names an account, which is what decides
-// whether resolving it is worth a fetch.
-//
-// Revolt files every system event's subject under the one "id" field whatever
-// kind of thing it is, and for a pin it is the *message* that was pinned. Asked
-// for that as a user, the server can only answer 404 — and since a failed author
-// fetch drops its guard so a later message can retry, the request came back on
-// every remount of the row.
-func (s *SystemMessage) TargetsUser() bool {
-	if s.Target == "" {
-		return false
-	}
-
-	return s.Kind != SystemMessagePinned && s.Kind != SystemMessageUnpinned
+// isPin reports whether the event's subject is a message rather than a user.
+// Revolt files every system event's subject under one "id" field whatever kind
+// of thing it is.
+func (s *SystemMessage) isPin() bool {
+	return s.Kind == SystemMessagePinned || s.Kind == SystemMessageUnpinned
 }
 
-// PinnedMessageID is the message a pin or unpin event announces, or "" for any
-// other kind.
+// TargetsUser reports whether Target names an account, deciding whether
+// resolving it is worth a fetch. Asked for a pinned message's ID as a user the
+// server can only 404, and a failed author fetch drops its guard — so the
+// request came back on every remount of the row.
+func (s *SystemMessage) TargetsUser() bool {
+	return s.Target != "" && !s.isPin()
+}
+
+// PinnedMessageID is the message a pin or unpin event announces, else "".
 func (s *SystemMessage) PinnedMessageID() string {
-	if s.Kind != SystemMessagePinned && s.Kind != SystemMessageUnpinned {
+	if !s.isPin() {
 		return ""
 	}
 
 	return s.Target
 }
 
-// TextParts renders the event as a line of prose, in the two pieces the client
-// draws it in: the name it opens with, and the rest of the sentence. The name is
-// kept apart because it is tappable, exactly as a mention in a message body is.
-//
-// who is Target's display name, which the caller resolves —
-// Store.SystemTextParts is the one that does, and this stays pure so the wording
-// can be tested without one. An event about the channel rather than about
-// somebody names nobody: the name is empty and the whole sentence is the rest.
+// TextParts renders the event in the two pieces the client draws it in: the name
+// it opens with, kept apart because it is tappable like a mention, and the rest
+// of the sentence. who is Target's display name, resolved by the caller
+// (Store.SystemTextParts) so the wording stays testable without one; an event
+// about the channel names nobody and is all rest.
 func (s *SystemMessage) TextParts(who string) (name, rest string) {
 	if who == "" {
 		who = "Someone"
@@ -352,13 +328,10 @@ const (
 )
 
 // Embed is a card drawn beneath a message. One shape covers every kind Revolt
-// sends, because they overlap almost entirely: a link preview names the site and
-// quotes the page, an integration's card sets its own title, colour and picture,
-// and a bare image carries nothing but the picture. So a renderer branches on
-// what is filled in rather than on Kind, which is kept only for the cases where
-// two embeds carrying the same fields mean different things.
-//
-// Description is markdown and is rendered exactly as a message body is.
+// sends because they overlap almost entirely, so a renderer branches on what is
+// filled in rather than on Kind — kept only for where two embeds carrying the
+// same fields mean different things. Description is markdown, rendered as a
+// message body is.
 type Embed struct {
 	Kind EmbedKind
 	URL  string // where the title leads; "" leaves it plain text
@@ -375,13 +348,9 @@ type Embed struct {
 /* Permissions */
 
 // Permission is a set of the things an account may do somewhere. The bit
-// positions are Revolt's own, carried verbatim the way SystemKind carries its
-// vocabulary: they arrive from the server as one number and are compared here
-// without a translation table in between.
-//
-// Only the bits the client actually asks about are named. The rest still survive
-// a round trip — a Permission holds whatever the server sent — they simply have
-// nothing here to ask them.
+// positions are Revolt's own, compared without a translation table in between.
+// Only the bits the client asks about are named; the rest still survive a round
+// trip, they simply have nothing here to ask them.
 type Permission int64
 
 // Channel-scoped permissions, asked of Store.Permissions.
@@ -394,9 +363,8 @@ const (
 	PermissionUploadFiles        Permission = 1 << 27
 	PermissionReact              Permission = 1 << 29
 
-	// PermissionBypassSlowmode is missing from revoltgo's constants — they stop at
-	// MentionRoles — which is the reason every bit is named here rather than
-	// imported from there.
+	// PermissionBypassSlowmode is missing from revoltgo's constants, which stop at
+	// MentionRoles — the reason every bit is named here rather than imported.
 	PermissionBypassSlowmode Permission = 1 << 39
 )
 
@@ -422,19 +390,17 @@ const (
 	ChannelSavedMessages
 )
 
-// IsConversation reports whether the channel is one of the user's own — a direct
-// message, a group, or their saved notes — as opposed to a channel belonging to
-// a server. Those are the home view's rows, they are the only ones that can be
-// closed, and they are drawn as taller cards led by a picture rather than a
-// glyph.
+// IsConversation reports whether the channel is one of the user's own — a DM, a
+// group, or saved notes — rather than a server's. Those are the home view's
+// rows, the only ones that can be closed, and are drawn as taller picture-led
+// cards.
 func (k ChannelKind) IsConversation() bool {
 	return k == ChannelDM || k == ChannelGroup || k == ChannelSavedMessages
 }
 
-// Channel is a channel with everything a row or a header needs already
-// resolved. Name and AvatarURL are the resolution: a direct message has no name
-// of its own — it is titled after the other participant — and saved notes are
-// titled for what they are rather than after the account reading them.
+// Channel is a channel with everything a row or header needs resolved. Name and
+// AvatarURL are that resolution: a DM has no name of its own and is titled after
+// the other participant, saved notes after what they are.
 type Channel struct {
 	ID       string
 	ServerID string // "" for a conversation
@@ -443,8 +409,7 @@ type Channel struct {
 	Name      string
 	AvatarURL string // the conversation's picture; "" for a server channel
 
-	// Slowmode is how long a member must wait between messages here, 0 when the
-	// channel has none. Only a server's text channels carry one.
+	// Slowmode is the wait between messages, 0 for none. Server text channels only.
 	Slowmode time.Duration
 
 	Recipients    []string
@@ -474,14 +439,12 @@ type Category struct {
 	Channels []string
 }
 
-// Invite is what an invite code opens, described as Revolt describes it to
-// someone who is not a member yet.
+// Invite is what an invite code opens, as Revolt describes it to a non-member.
 //
 // It is the one server-shaped value that cannot come from a Store: an invite is
 // interesting precisely when it names a server the account has never seen, so
-// there is nothing local to resolve it against and it only ever arrives from a
-// request. ServerID is still worth carrying — when the account *is* already in
-// the server, that is what turns the card's action from joining into going there.
+// only a request answers it. ServerID still matters — when the account *is*
+// already in the server, it turns the card's action from joining into going.
 type Invite struct {
 	Code string
 
@@ -489,8 +452,7 @@ type Invite struct {
 	ServerName string
 	IconURL    string
 
-	// ChannelName is where the code lands and InviterName who created it. Revolt
-	// sends both and either may be missing, so neither is load-bearing.
+	// Either may be missing, so neither is load-bearing.
 	ChannelName string
 	InviterName string
 
@@ -499,10 +461,9 @@ type Invite struct {
 
 /* Emoji */
 
-// Emoji is one custom emoji a server defines. The picture is derived from the ID
-// alone (Store.EmojiURL), so nothing here is needed to *draw* one — what this
-// carries is the two things a picker needs and a rendered message does not: the
-// name it is searched by, and the server it is filed under.
+// Emoji is one custom emoji a server defines. The picture derives from the ID
+// alone (Store.EmojiURL), so this carries only what a picker needs and a
+// rendered message does not: the name it is searched by and where it is filed.
 type Emoji struct {
 	ID       string
 	Name     string
@@ -523,8 +484,7 @@ const (
 )
 
 // IsOnline reports whether the presence is any of the ways of being here.
-// Invisible is deliberately not one of them — toPresence resolves it to Offline,
-// which is what it is for.
+// Invisible is not one: toPresence resolves it to Offline, which is the point.
 func (p Presence) IsOnline() bool { return p != PresenceOffline }
 
 // Label names the presence in words.
@@ -544,9 +504,8 @@ func (p Presence) Label() string {
 }
 
 // Relationship is how this account stands with another one. Revolt files it on
-// the *other* user rather than as an edge between two, and it is directional:
-// Blocked and BlockedBy are the same wall seen from either side, as Outgoing and
-// Incoming are the same request.
+// the *other* user rather than as an edge, and it is directional: Blocked and
+// BlockedBy are one wall from either side, Outgoing and Incoming one request.
 type Relationship uint8
 
 const (
@@ -560,15 +519,13 @@ const (
 )
 
 // Known reports whether this is a relationship at all. The account's own record
-// is not one — it is how Revolt marks which user is you — so listing
-// relationships means excluding it as well as everybody there is nothing between.
+// is not one — it is how Revolt marks which user is you.
 func (r Relationship) Known() bool {
 	return r != RelationshipNone && r != RelationshipSelf
 }
 
-// Blocked reports whether messages cannot pass, whichever side put the wall up.
-// Revolt leaves the history readable and takes everything else away in both
-// directions, so the two are one answer everywhere the client asks.
+// Blocked reports whether messages cannot pass, whichever side put the wall up:
+// Revolt leaves history readable and takes the rest away in both directions.
 func (r Relationship) Blocked() bool {
 	return r == RelationshipBlocked || r == RelationshipBlockedBy
 }
@@ -580,8 +537,8 @@ type User struct {
 	Username string
 	Handle   string // "@username#0001" — what tells two identical display names apart
 
-	// DisplayName is the chosen name and nothing else, empty where there is
-	// none — which Name cannot say, having already fallen back to the username.
+	// DisplayName is the chosen name alone, empty where there is none — which Name
+	// cannot say, having already fallen back to the username.
 	DisplayName string
 
 	AvatarURL  string
@@ -589,8 +546,8 @@ type User struct {
 	StatusText string
 	Badges     []string
 
-	// Relationship is how this account stands with them, which is what decides
-	// whether a profile offers to write to them or to ask to be friends first.
+	// Relationship decides whether a profile offers to write to them or to ask to
+	// be friends first.
 	Relationship Relationship
 
 	Online bool
@@ -598,12 +555,11 @@ type User struct {
 }
 
 // Member is a user's membership of one server, resolved the way the sidebar and
-// a message header show them: the nickname, the per-server avatar and the
-// most-senior coloured role override the account's own.
+// a message header show them: nickname, per-server avatar and most-senior
+// coloured role override the account's own.
 //
-// Roles are deliberately absent — only a profile draws them, and resolving every
-// member's roles to build a sidebar would allocate a slice per row. Ask
-// Store.MemberRoles for the one member whose profile is open.
+// Roles are absent — only a profile draws them, and resolving every member's to
+// build a sidebar would allocate a slice per row. Ask Store.MemberRoles instead.
 type Member struct {
 	ServerID string
 	UserID   string
@@ -613,29 +569,26 @@ type Member struct {
 	AvatarURL string
 	Color     color.Color // most-senior coloured role; nil when none applies
 
-	// HoistRoleID is the most senior *hoisted* role the member holds, or "" — the
-	// section the member sidebar files them under. One ID rather than the roles
-	// themselves for the same reason the roles are absent: the sidebar needs a
-	// bucket per member, and a slice per row is what that costs.
+	// HoistRoleID is the most senior *hoisted* role held, or "" — the section the
+	// member sidebar files them under. One ID rather than the roles for the reason
+	// above: the sidebar needs a bucket per member, not a slice per row.
 	HoistRoleID string
 
 	JoinedAt time.Time
 	Presence Presence
 
-	// HasRoles is whether the member holds any role at all, counting one the
-	// server has not published to us — HoistRoleID answers a narrower question
-	// and is empty for a member whose only role is not hoisted.
+	// HasRoles counts any role at all, including one the server has not published
+	// to us — HoistRoleID is empty for a member whose only role is not hoisted.
 	HasRoles bool
 	Bot      bool
 }
 
-// Role is a server role the way a profile card shows one: its name, in its own
-// colour. The ID is carried because a chip offers it for copying — nothing else
-// resolves a role by it.
+// Role is a server role as a profile card shows one: its name, in its own
+// colour. The ID is carried because a chip offers it for copying.
 //
-// Rank and Hoist are the server's own display rules rather than anything a chip
-// draws: Revolt ranks the most senior lowest, and a hoisted role is one the
-// member list gives a section of its own.
+// Rank and Hoist are the server's display rules rather than anything a chip
+// draws: Revolt ranks the most senior lowest, and a hoisted role gets a section
+// of its own in the member list.
 type Role struct {
 	ID    string
 	Name  string
@@ -660,18 +613,16 @@ type UserProfile struct {
 	BackgroundURL string // the profile banner; "" leaves the accent colour showing
 }
 
-// Mutual is what this account has in common with somebody else — the servers
-// both are in, and the friends both have. Like UserProfile it is a request of
-// its own, and it is IDs alone: what they are called is a lookup the controller
-// makes, since the account holds both sides already.
+// Mutual is what this account has in common with somebody else. Like
+// UserProfile it is a request of its own, and IDs alone: naming them is a lookup
+// the controller makes, since the account holds both sides already.
 type Mutual struct {
 	UserIDs   []string
 	ServerIDs []string
 }
 
 // Profile is everything the two profile presentations draw, resolved in one
-// pass. UserProfile is the exception: it is a request of its own, so it arrives
-// after the card is already on screen.
+// pass — bar UserProfile, which arrives after the card is on screen.
 type Profile struct {
 	UserID string
 	Name   string // the server nickname where there is one, else the display name

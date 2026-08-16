@@ -1,14 +1,13 @@
 package theme
 
-// User overrides for the two tables. The settings page stores what the user
-// changed as field names and values rather than as a whole palette, so a size
-// added to the table later arrives with its default intact instead of being
-// silently pinned to whatever the file was written with.
+// User overrides for the two tables. What changed is stored as field names and
+// values rather than as a whole palette, so a size added later arrives with its
+// default intact rather than pinned to whatever the file was written with.
 //
-// Fields are reached by reflection because the alternative is a switch with 174
-// cases that has to be extended by hand every time a name is added — the one
-// place the tables would fall out of step with what the client can configure.
-// Apply runs once per change, never on a read path.
+// Fields are reached by reflection: the alternative is a switch with 174 cases
+// extended by hand every time a name is added, the one place the tables would
+// fall out of step with what the client can configure. Apply runs once per
+// change, never on a read path.
 
 import (
 	"fmt"
@@ -40,12 +39,10 @@ const selectionAlpha = 90
 const accentTint = 0.35
 
 // Apply resets both tables to their defaults and writes the named overrides over
-// them. A name that no longer exists, or a value that will not parse, is logged
-// and skipped: the settings file is meant to be hand-editable, so it must not be
-// able to stop the client starting.
-//
-// Call on the UI thread, and rebuild the widget tree afterwards — the tables are
-// read at construction, so nothing already drawn changes on its own.
+// them. An unknown name or an unparseable value is logged and skipped: the
+// settings file is hand-editable, so it must not be able to stop the client
+// starting. Call on the UI thread and rebuild the widget tree afterwards — the
+// tables are read at construction, so nothing already drawn changes on its own.
 func Apply(colors map[string]string, sizes map[string]float32) {
 	Colors = defaultColors
 	Sizes = defaultSizes

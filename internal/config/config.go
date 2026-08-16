@@ -1,15 +1,10 @@
-// Package config is the client's persisted settings: what the user has changed
-// away from the defaults, and the accessor every other package reads it through.
+// Package config is the client's persisted settings and the accessor every other
+// package reads them through. It imports nothing internal so everything above it
+// can read a setting.
 //
-// It sits at the bottom of the dependency graph with domain and util, importing
-// nothing internal, because everything above it needs to read a setting —
-// internal/cache sizes its budgets from here, internal/client decides whether to
-// sort members, internal/ui builds widgets from it and internal/app writes it.
-//
-// The current settings are held behind an atomic pointer and handed out as a
+// The current settings live behind an atomic pointer and are handed out as a
 // snapshot. Update clones, mutates and republishes, so a reader never observes a
-// half-written value and callers off the UI thread — Store.Members is one — need
-// no lock.
+// half-written value and callers off the UI thread need no lock.
 package config
 
 import (
@@ -68,9 +63,7 @@ type Interface struct {
 	/* Disclosure */
 
 	// AdvancedMode reveals the settings that tune the client rather than describe
-	// it: the timings, the mount caps, the cache budgets and the raw size and
-	// colour tables. Off, the page shows what a setting changes; on, it shows
-	// everything that can be changed.
+	// it: timings, mount caps, cache budgets and the raw size and colour tables.
 	AdvancedMode bool `json:"advanced_mode"`
 }
 
@@ -86,10 +79,9 @@ type Styles struct {
 // Behaviour is what the client does rather than how it looks: the work it takes
 // on per event, and how much of the conversation it keeps mounted.
 type Behaviour struct {
-	// Members. The member list is the one part of the client whose cost scales
-	// with somebody else's server rather than with anything the user did, so each
-	// of these is a lever on that: what is fetched, what is drawn, and how often a
-	// list of thousands is rebuilt.
+	// Members. The one part of the client whose cost scales with somebody else's
+	// server rather than with anything the user did: what is fetched, what is
+	// drawn, and how often a list of thousands is rebuilt.
 
 	SortMembers         bool `json:"sort_members"`
 	GroupByPresence     bool `json:"group_by_presence"`
@@ -129,11 +121,9 @@ type Behaviour struct {
 	AuthorFetchDelayMS int `json:"author_fetch_delay_ms"`
 	AckDelayMS         int `json:"ack_delay_ms"`
 
-	// RefreshDelayMS is the settling window every gateway event that invalidates
-	// a whole sidebar is coalesced over. One knob rather than one per surface: a
-	// rank reorder arrives as an event per role and a channel added to a server
-	// arrives as two events, so what the user is choosing is how long a burst is
-	// allowed to gather — not which burst.
+	// RefreshDelayMS is the settling window every sidebar-invalidating gateway
+	// event is coalesced over. One knob rather than one per surface: the user is
+	// choosing how long a burst may gather, not which burst.
 	RefreshDelayMS int `json:"refresh_delay_ms"`
 
 	/* Input */
@@ -269,10 +259,9 @@ func (b Behaviour) AckDelay() time.Duration {
 	return time.Duration(b.AckDelayMS) * time.Millisecond
 }
 
-// RefreshDelay is how long a queued sidebar rebuild waits for more changes
-// before running. A busy server changes presence continuously and each change
-// reorders the member list, so this is the difference between one rebuild and
-// hundreds.
+// RefreshDelay is how long a queued sidebar rebuild waits for more changes. A
+// busy server reorders its member list on every presence change, so this is the
+// difference between one rebuild and hundreds.
 func (b Behaviour) RefreshDelay() time.Duration {
 	return time.Duration(b.RefreshDelayMS) * time.Millisecond
 }

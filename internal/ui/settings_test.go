@@ -144,6 +144,13 @@ func newTestSettingsPage() *SettingsPage {
 		SetPresence:      func(domain.Presence) {},
 		SetStatusText:    func(string) {},
 		SetDisplayName:   func(string) {},
+		ChangeUsername:   func() {},
+		ChangeAvatar:     func() {},
+		ChangeBanner:     func() {},
+		RemoveAvatar:     func() {},
+		RemoveBanner:     func() {},
+		SetBio:           func(string) {},
+		LoadProfile:      func(func(domain.UserProfile)) {},
 
 		CacheDir:       func() string { return "" },
 		ChooseCacheDir: func(func(string)) {},

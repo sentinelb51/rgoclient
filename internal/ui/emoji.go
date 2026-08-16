@@ -1,14 +1,11 @@
 package ui
 
-// The emoji picker: one pop-up serving both the composer and a reaction, since
-// the two are picking from the same set and only differ in what they do with the
-// answer. It is the only surface in the client that draws a server's own emoji
-// as a set — everywhere else one is a picture derived from an ID.
+// The emoji picker: one pop-up serving both the composer and a reaction, the two
+// picking from the same set and differing only in what they do with the answer.
 //
 // Nothing here is fetched. Ready carries the emoji of every server the account is
-// in and revoltgo files the create and delete events into State itself, so what
-// the controller walks (Store.Emojis) is already the whole set and already
-// current; the picker asks once as it opens.
+// in and revoltgo files create/delete into State itself, so Store.Emojis is
+// already the whole set and already current; the picker asks once as it opens.
 
 import (
 	"image/color"
@@ -24,25 +21,23 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// emojiPickerLimit is how many cells the grid will draw at once. A server may
-// define hundreds and an account may be in many, so the whole set is a page
-// nobody reads and a widget per entry nobody sees — the search field is what
-// reaches past it.
+// emojiPickerLimit is how many cells the grid draws at once. A server may define
+// hundreds and an account may be in many, so the whole set is a page nobody reads
+// and a widget per entry nobody sees — the search field is what reaches past it.
 const emojiPickerLimit = 120
 
 /* What can be picked */
 
 // EmojiChoice is one pickable emoji: a character, or a custom one that is a
 // picture and an ID. Which it is decides both how it draws and what it is worth
-// to a caller, so the two questions are answered here rather than at each of them.
+// to a caller, so both are answered here rather than at each call site.
 type EmojiChoice struct {
 	ID   string // the custom emoji's ULID; "" for a unicode character
 	Name string // what the preview line reads, and the first thing search matches
 	Char string // the character itself; "" for a custom emoji
 
-	// Keywords are the other words this answers to, searched and never drawn. A
-	// character has no shortcode of its own, so "no" has to reach 👎 without the
-	// preview line reading "thumbs down no".
+	// Keywords are the other words this answers to, searched and never drawn: "no"
+	// has to reach 👎 without the preview line reading "thumbs down no".
 	Keywords string
 }
 
@@ -73,10 +68,9 @@ type EmojiGroup struct {
 	Choices []EmojiChoice
 }
 
-// UnicodeEmoji is the set that works in every channel a message can be in,
-// conversations included, where a server's own emoji do not exist. Each carries a
-// name so the search field reaches it: without one the field would filter the
-// custom half of the picker and leave this half standing.
+// UnicodeEmoji is the set that works in every channel, conversations included,
+// where a server's own emoji do not exist. Each carries a name so the search
+// field reaches it — otherwise typing would filter one half of the picker only.
 var UnicodeEmoji = []EmojiChoice{
 	{Char: "👍", Name: "thumbs up", Keywords: "yes ok agree"},
 	{Char: "👎", Name: "thumbs down", Keywords: "no disagree"},
@@ -121,12 +115,10 @@ type emojiSection struct {
 	entries []emojiEntry
 }
 
-// emojiPicker is the pop-up itself, wearing the client's hairline the way
-// contextMenu does and for the same reason: nothing in Fyne's own pop-up draws
-// one, and a floating surface with no edge reads as part of what is behind it.
-//
-// It is a plain struct rather than a widget: everything it draws is a container,
-// and nothing here answers a pointer or a key that its own children do not.
+// emojiPicker is the pop-up itself, wearing the hairline as contextMenu does:
+// nothing in Fyne's pop-up draws one, and a floating surface with no edge reads
+// as part of what is behind it. A plain struct rather than a widget — everything
+// it draws is a container, and nothing here answers an event its children do not.
 type emojiPicker struct {
 	deps     Deps
 	sections []emojiSection
@@ -136,20 +128,18 @@ type emojiPicker struct {
 	list   *fyne.Container // the sections, replaced wholesale on every query
 	empty  *canvas.Text
 
-	// tip is what names a cell. It is the picker's own rather than the app's:
-	// the app's tooltip is a layer in the window's content, and a pop-up is a
-	// canvas overlay drawn over all of that, so a label mounted there would be
-	// covered by the grid it is naming.
+	// tip names a cell. The picker's own rather than the app's: the app's is a layer
+	// in the window's content, and a pop-up is a canvas overlay over all of it, so a
+	// label mounted there would be covered by the grid it is naming.
 	tip *Tooltip
 
 	// cells memoises one widget per emoji, so narrowing a query reorders objects
-	// that already exist rather than rebuilding them — and a custom emoji's picture
-	// is asked of the cache once rather than once per keystroke. Built lazily, so a
-	// set larger than the limit never costs a widget for what is never shown.
+	// that already exist and a picture is asked of the cache once rather than once
+	// per keystroke. Lazy, so a set past the limit costs nothing for what is unseen.
 	cells map[string]fyne.CanvasObject
 
-	// top is what Enter picks: the first match of the current query, which is the
-	// whole of why the field is worth typing into rather than scrolling past.
+	// top is what Enter picks: the first match of the current query, which is why
+	// the field is worth typing into rather than scrolling past.
 	top   EmojiChoice
 	found bool
 
@@ -167,11 +157,10 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 		sections: foldGroups(groups),
 		onPick:   onPick,
 		list:     VBoxNoSpacing(),
-		empty:    canvas.NewText("No emoji match that.", theme.Colors.TimestampText),
+		empty:    newText("No emoji match that.", theme.Colors.TimestampText, theme.Sizes.EmojiPickerCaptionSize),
 		tip:      NewTooltip(),
 		cells:    make(map[string]fyne.CanvasObject),
 	}
-	p.empty.TextSize = theme.Sizes.EmojiPickerCaptionSize
 	p.empty.Hide()
 
 	p.search = newEmojiSearch(p.fill, p.acceptTop, func() { p.popUp.Hide() })
@@ -180,9 +169,8 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 	background.CornerRadius = fynetheme.Size(fynetheme.SizeNameMenuRadius)
 	Outline(background)
 
-	// The grid is held off the right edge by the width the position indicator is
-	// drawn in, so a bar reporting where the list has got to does not land on the
-	// last cell of every row.
+	// Held off the right edge by the indicator's own width, so the bar does not land
+	// on the last cell of every row.
 	gutter := theme.Sizes.ScrollIndicatorWidth + theme.Sizes.ScrollIndicatorInset*2
 	scrolled := NewInset(p.list, 0, 0, 0, gutter)
 
@@ -205,9 +193,9 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 	return p
 }
 
-// foldGroups lowers every name and its keywords once, when the picker opens. The
-// walk is the one the grid is about to make anyway; what it saves is repeating it
-// per keystroke over a set that can run to thousands.
+// foldGroups lowers every name and its keywords once as the picker opens — the
+// walk the grid is about to make anyway, saving one per keystroke over a set that
+// can run to thousands.
 func foldGroups(groups []EmojiGroup) []emojiSection {
 	sections := make([]emojiSection, 0, len(groups))
 
@@ -241,12 +229,10 @@ func (p *emojiPicker) searchField() fyne.CanvasObject {
 }
 
 // setHovered records what the pointer is over and names it. A cell reports
-// leaving with the choice it reported entering with, so a stale leave from the
-// cell just left cannot take down the label of the one just entered.
-//
-// The name is a tooltip rather than a line under the grid: it is what a *cell*
-// is called, and read off a caption at the far end of the pop-up it was a name
-// with nothing beside it saying which square it belonged to.
+// leaving with the choice it entered with, so a stale leave cannot take down the
+// label of the cell just entered. A tooltip rather than a caption under the grid:
+// read off the far end of the pop-up, a name says nothing about which square it
+// belongs to.
 func (p *emojiPicker) setHovered(choice EmojiChoice, cell fyne.CanvasObject, over bool) {
 	if !over && (!p.over || p.hovered.Value() != choice.Value()) {
 		return
@@ -263,8 +249,7 @@ func (p *emojiPicker) setHovered(choice EmojiChoice, cell fyne.CanvasObject, ove
 }
 
 // previewName is what one emoji is called. A custom one is written the way a
-// message carries it, so the label doubles as what typing it by hand would look
-// like; a character has no such form and is named plainly.
+// message carries it, so the label doubles as what typing it by hand looks like.
 func previewName(choice EmojiChoice) string {
 	if choice.Name == "" {
 		return ""
@@ -285,10 +270,9 @@ func (p *emojiPicker) fill(query string) {
 	p.found = false
 	drawn := 0
 
-	// One widget stands for one emoji, so the same one twice in a pass would be the
-	// same object asked to sit in two cells — which Fyne answers by drawing it in
-	// neither. Nothing should offer a duplicate; dropping one is what keeps that
-	// from being a hole in the grid rather than a missing entry.
+	// One widget per emoji, so the same one twice in a pass is one object asked to
+	// sit in two cells — which Fyne answers by drawing it in neither. Nothing should
+	// offer a duplicate; dropping one keeps that a missing entry, not a hole.
 	placed := make(map[string]bool, emojiPickerLimit)
 
 	var rows []fyne.CanvasObject
@@ -329,11 +313,7 @@ func (p *emojiPicker) fill(query string) {
 	p.list.Objects = rows
 	p.list.Refresh()
 
-	if p.found {
-		p.empty.Hide()
-	} else {
-		p.empty.Show()
-	}
+	showIf(p.empty, !p.found)
 
 	// The pointer is in the field, not the grid, so whatever a cell was naming has
 	// been reordered out from under it.
@@ -379,9 +359,8 @@ func (p *emojiPicker) acceptTop() {
 }
 
 // showBeside puts the picker under anchor, pulled back inside the canvas where it
-// would otherwise hang off an edge — a PopUp shows wherever it is put, half off
-// the screen included. Both things that open one sit low in the window, so the
-// bottom edge is the one this is usually doing something about.
+// would hang off an edge — a PopUp shows wherever it is put, half off the screen
+// included. Both things that open one sit low, so the bottom edge is the usual case.
 func (p *emojiPicker) showBeside(anchor fyne.CanvasObject) {
 	pos := AnchorBelow(anchor)
 	size := p.popUp.Content.MinSize()
@@ -391,34 +370,31 @@ func (p *emojiPicker) showBeside(anchor fyne.CanvasObject) {
 		pos.X = max(area.Width-size.Width, 0)
 	}
 	if pos.Y+size.Height > area.Height {
-		// Above the anchor rather than merely shoved up, so what opened it is not the
-		// thing it covers.
+		// Above the anchor rather than merely shoved up, so it does not cover what
+		// opened it.
 		pos.Y = max(pos.Y-anchor.Size().Height-size.Height, 0)
 	}
 
 	p.popUp.ShowAtPosition(pos)
 
-	// The field takes focus rather than the pop-up, so the picker can be typed at
-	// the moment it opens — which is the only way past the drawn limit.
+	// The field takes focus, not the pop-up, so the picker can be typed at the moment
+	// it opens — the only way past the drawn limit.
 	p.canvas.Focus(p.search)
 }
 
 // emojiCaption names a group, in the small caps the sidebar's categories are set
 // in.
 func emojiCaption(title string) fyne.CanvasObject {
-	text := canvas.NewText(strings.ToUpper(title), theme.Colors.CategoryText)
-	text.TextSize = theme.Sizes.EmojiPickerCaptionSize
-	text.TextStyle = fyne.TextStyle{Bold: true}
+	text := newBoldText(strings.ToUpper(title), theme.Colors.CategoryText, theme.Sizes.EmojiPickerCaptionSize)
 
 	return NewInset(NewEllipsisText(text), 0, theme.Sizes.EmojiPickerGap, 0, 0)
 }
 
 /* The search field */
 
-// emojiSearch is the field at the top of the picker. It is a widget of its own
-// only because Enter and Escape have to mean something here: an Entry inside a
-// pop-up otherwise swallows both, and the pop-up behind it never hears the key
-// that should close it.
+// emojiSearch is the field at the top of the picker, a widget of its own only
+// because Enter and Escape have to mean something here: an Entry inside a pop-up
+// swallows both, and the pop-up never hears the key that should close it.
 type emojiSearch struct {
 	widget.Entry
 
@@ -493,28 +469,20 @@ func (c *emojiCell) MouseOut() {
 	c.onHover(false)
 }
 
-// newPickerEmoji draws one emoji at picker size: the picture for a custom one,
-// the character itself for everything else.
-//
-// The square is reserved before the request starts, so a picture arriving repaints
-// its own cell rather than moving the grid around it. The unicode half is a plain
-// canvas.Text — Fyne falls back to the platform's emoji font for glyphs the
-// client's own font has none of, which is every emoji.
+// newPickerEmoji draws one emoji at picker size: a picture for a custom one, the
+// character itself otherwise. The square is reserved before the request starts,
+// so one arriving repaints its own cell rather than moving the grid.
 func newPickerEmoji(deps Deps, choice EmojiChoice) fyne.CanvasObject {
 	side := theme.Sizes.EmojiPickerEmojiSize
 
 	if choice.ID == "" {
-		text := canvas.NewText(choice.Char, theme.Colors.TextPrimary)
-		text.TextSize = side
-
-		return text
+		return newText(choice.Char, theme.Colors.TextPrimary, side)
 	}
 
-	// The square is outlined rather than left clear, unlike a chip's: a chip has a
-	// surface of its own behind the emoji, where a grid of transparent squares is
-	// an empty panel until the pictures land — and how many there are is the first
-	// thing the picker has to say. It is the hairline rather than a fill because a
-	// filled tile at rest is what a hovered cell looks like.
+	// Outlined rather than clear, unlike a chip's: a chip has its own surface behind
+	// the emoji, where a grid of transparent squares is an empty panel until the
+	// pictures land. The hairline rather than a fill — a filled tile at rest is what
+	// a hovered cell looks like.
 	placeholder := canvas.NewRectangle(color.Transparent)
 	placeholder.CornerRadius = theme.Sizes.ReactionRadius
 	Outline(placeholder)

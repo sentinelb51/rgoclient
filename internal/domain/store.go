@@ -1,109 +1,91 @@
 package domain
 
-// Store is the read side of a Revolt session: everything the client needs to
-// turn an ID into something it can draw, answered from what is already known and
-// never from the network. A miss reports ok=false rather than blocking — the
-// caller decides whether to show a placeholder, queue a fetch, or both.
+// Store is the read side of a Revolt session: everything needed to turn an ID
+// into something drawable, answered from what is already known and never from
+// the network. A miss reports ok=false rather than blocking — the caller decides
+// between a placeholder, a queued fetch, or both.
 //
 // internal/client implements it over revoltgo.State; a test implements it with a
-// struct of maps. That is the whole reason it exists: State's caches are
-// unexported, so code written against a *revoltgo.Session cannot be given known
-// contents to answer from.
+// struct of maps. That is why it exists: State's caches are unexported, so code
+// written against a *revoltgo.Session cannot be given contents to answer from.
 //
-// Everything here returns resolved domain values. A Member already carries the
-// nickname, per-server avatar and role colour the sidebar shows; a Channel
-// already carries the name a direct message is titled under. Handing back the
-// wire types instead would only move the resolution to the call sites and put
-// revoltgo back inside internal/ui.
+// Everything here returns resolved domain values. Handing back the wire types
+// would only move the resolution to the call sites and put revoltgo back inside
+// internal/ui.
 type Store interface {
-	// Self is the logged-in account. SelfID is the same question without the
-	// resolution, for the many places that only want to know whether something
-	// belongs to the user.
+	// Self is the logged-in account; SelfID the same question unresolved, for the
+	// many places that only ask whether something belongs to the user.
 	Self() (User, bool)
 	SelfID() string
 
 	User(userID string) (User, bool)
 
-	// UserName is the name to show for a user, or "" when they are unknown. It is
-	// the whole of what a rendered mention needs, and unlike User it allocates
-	// nothing to answer.
+	// UserName is the name to show for a user, or "" when unknown — all a rendered
+	// mention needs, and unlike User it allocates nothing.
 	UserName(userID string) string
 
-	// Relationships is everybody this account stands in some relation to —
-	// friends, requests in either direction, and blocks — ordered by display name.
-	// It is a walk rather than a lookup, so it belongs off the UI thread with
-	// Members.
-	//
-	// There is no list of them to read: Revolt files a relationship on the other
-	// account rather than as a collection of its own, so what this reports is
-	// whoever is both known and related.
+	// Relationships is everybody this account stands in some relation to, ordered
+	// by display name. A walk rather than a lookup, so it belongs off the UI
+	// thread with Members: Revolt files a relationship on the other account rather
+	// than as a collection, so this reports whoever is both known and related.
 	Relationships() []User
 
 	Member(serverID, userID string) (Member, bool)
 	Channel(channelID string) (Channel, bool)
 	Server(serverID string) (Server, bool)
 
-	// ChannelName is UserName's counterpart for a rendered <#id>: the name to show
-	// for a channel, or "" when it is unknown. Like UserName it allocates nothing,
-	// where Channel would resolve a picture and a slowmode nobody asked for.
+	// ChannelName is UserName's counterpart for a rendered <#id>, allocating
+	// nothing where Channel would resolve a picture and slowmode nobody asked for.
 	ChannelName(channelID string) string
 
 	// EmojiURL is where a custom emoji's picture is served from, or "" for an
-	// empty ID. It is *derived* from the ID rather than looked up, which is why it
-	// has no ok: a message can carry an emoji from a server the account is not in,
-	// so no local record covers it — and the CDN serves the picture regardless.
+	// empty ID. Derived from the ID rather than looked up — hence no ok: a message
+	// can carry an emoji from a server the account is not in, and the CDN serves
+	// it regardless.
 	EmojiURL(emojiID string) string
 
-	// Emojis is every custom emoji the account may use — the emoji of every server
-	// it is in — ordered by name. Drawing one needs none of this; picking one needs
-	// all of it, and asking per server would walk the whole set once per server.
-	//
-	// It is a walk, so the picker asks when it opens rather than per entry.
+	// Emojis is every custom emoji the account may use, ordered by name. A walk,
+	// so the picker asks once when it opens rather than per entry.
 	Emojis() []Emoji
 
-	// HasUser and HasMember answer whether a record is already resolved, without
-	// resolving it. Lazy author resolution asks once per mounted message, so this
-	// pair is on the render hot path and must not allocate.
+	// HasUser and HasMember answer whether a record is resolved without resolving
+	// it. Lazy author resolution asks once per mounted message, so this pair is on
+	// the render hot path and must not allocate.
 	HasUser(userID string) bool
 	HasMember(serverID, userID string) bool
 
 	// Members lists everyone the client knows of in a server, ordered by display
-	// name unless the settings say otherwise. That is whoever has been fetched —
-	// the whole membership once the client has asked for it, otherwise the
-	// gateway's members plus whoever lazy author resolution has pulled in.
+	// name unless the settings say otherwise — the whole membership once fetched,
+	// otherwise the gateway's plus whoever lazy author resolution pulled in.
 	//
-	// It resolves a nickname, an avatar, a presence and a role colour per member,
-	// so it is the most expensive read here. Call it off the UI thread.
+	// It resolves a nickname, avatar, presence and role colour per member, so it
+	// is the most expensive read here. Call it off the UI thread.
 	Members(serverID string) []Member
 
 	// MemberRoles resolves one member's roles, most senior first. Kept off Member
-	// because only a profile draws them and building a sidebar would otherwise
-	// allocate a slice per row.
+	// because only a profile draws them.
 	MemberRoles(serverID, userID string) []Role
 
 	// HoistedRoles lists the roles a server displays as sections of their own,
-	// most senior first. Separate from MemberRoles because the member list needs
-	// the server's sections once, not every member's roles once per member.
+	// most senior first — the sections once, not every member's roles per member.
 	HoistedRoles(serverID string) []Role
 
-	// MessageAuthor resolves a message's author in one pass — channel to member to
-	// user — preferring the per-server member and falling back to the raw user.
+	// MessageAuthor resolves an author in one pass — channel to member to user —
+	// preferring the per-server member and falling back to the raw user.
 	MessageAuthor(message *Message) Author
 
-	// SystemTextParts renders a system message, resolving whoever it is about and
-	// handing the name back apart from the sentence around it — the client draws
-	// that name as a mention, so it cannot arrive already folded into prose.
+	// SystemTextParts renders a system message, handing the resolved name back
+	// apart from the sentence around it: the client draws that name as a mention,
+	// so it cannot arrive folded into prose.
 	SystemTextParts(system *SystemMessage) (name, rest string)
 
 	// Permissions is everything the account may do in a channel, and
-	// ServerPermissions the same question at server scope. Both report the empty
-	// set when there is nothing to resolve against — logged out, or an ID nothing
-	// is known about — which callers read as "assume nothing is allowed".
+	// ServerPermissions the same at server scope. Both report the empty set when
+	// there is nothing to resolve against, which callers read as "allow nothing".
 	//
-	// A whole bitfield rather than a question per permission because a call site
-	// asking three things should walk the roles once, and because the interface
-	// would otherwise grow a method for every bit Revolt defines. Ask it with
-	// Permission.Has.
+	// A bitfield rather than a question per permission: a call site asking three
+	// things walks the roles once, and the interface does not grow a method per
+	// bit Revolt defines. Ask it with Permission.Has.
 	Permissions(channelID string) Permission
 	ServerPermissions(serverID string) Permission
 }

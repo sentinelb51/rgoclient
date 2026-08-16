@@ -38,6 +38,38 @@ func (s *store) state() *revoltgo.State {
 	return nil
 }
 
+/* Ordering */
+
+// keyed pairs a resolved value with what it sorts by. The fold is taken once per
+// element rather than inside the comparator, which a sort would ask O(log n)
+// times per element and allocate on every one.
+type keyed[T any] struct {
+	value T
+	name  string // case-folded
+	id    string
+}
+
+// sortedByName orders entries by their folded name, tie-broken on ID so the
+// order is total: the UI buckets these slices without re-sorting them, and two
+// equal names swapping places between rebuilds would move a row out from under
+// the pointer about to tap it.
+func sortedByName[T any](entries []keyed[T]) []T {
+	slices.SortFunc(entries, func(x, y keyed[T]) int {
+		if by := strings.Compare(x.name, y.name); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.id, y.id)
+	})
+
+	values := make([]T, len(entries))
+	for i := range entries {
+		values[i] = entries[i].value
+	}
+
+	return values
+}
+
 /* Users */
 
 // Self returns the logged-in account.
@@ -171,29 +203,18 @@ func (s *store) Relationships() []domain.User {
 	// The relationship is asked *before* the account is resolved: this walks every
 	// cached user, most of whom are members of a server and nothing more, and
 	// toUser builds a handle, an avatar URL and a badge list per call.
-	var related []domain.User
+	var related []keyed[domain.User]
 	for _, raw := range state.Users() {
 		if raw.ID == selfID || !s.client.relationshipWith(raw).Known() {
 			continue
 		}
 
 		if user, ok := s.toUser(raw); ok {
-			related = append(related, user)
+			related = append(related, keyed[domain.User]{user, strings.ToLower(user.Name), user.ID})
 		}
 	}
 
-	// Total, as Members is and for the same reason: two people sharing a display
-	// name swapping places between rebuilds would move a row out from under the
-	// pointer that was about to answer their request.
-	slices.SortFunc(related, func(x, y domain.User) int {
-		if by := strings.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)); by != 0 {
-			return by
-		}
-
-		return strings.Compare(x.ID, y.ID)
-	})
-
-	return related
+	return sortedByName(related)
 }
 
 /* Members */
@@ -241,35 +262,13 @@ func (s *store) Members(serverID string) []domain.Member {
 		return members
 	}
 
-	// The sort key is resolved alongside the member rather than lowered inside the
-	// comparator, which would redo that work O(n log n) times on a large server.
-	//
-	// The user ID breaks a tie so the order is total: the member list buckets this
-	// slice without re-sorting it, and two people sharing a display name swapping
-	// places between rebuilds would move a row out from under the pointer.
-	type entry struct {
-		member domain.Member
-		key    string
-	}
-	entries := make([]entry, len(raw))
+	entries := make([]keyed[domain.Member], len(raw))
 	for i, member := range raw {
 		resolved := toMember(state, member, server)
-		entries[i] = entry{member: resolved, key: strings.ToLower(resolved.Name)}
-	}
-	slices.SortFunc(entries, func(x, y entry) int {
-		if by := strings.Compare(x.key, y.key); by != 0 {
-			return by
-		}
-
-		return strings.Compare(x.member.UserID, y.member.UserID)
-	})
-
-	members := make([]domain.Member, len(entries))
-	for i := range entries {
-		members[i] = entries[i].member
+		entries[i] = keyed[domain.Member]{resolved, strings.ToLower(resolved.Name), resolved.UserID}
 	}
 
-	return members
+	return sortedByName(entries)
 }
 
 // toMember resolves the display fields of a membership. server may be nil — a
@@ -567,12 +566,11 @@ func (s *store) channelServerID(channelID string) string {
 
 /* Emojis */
 
-// EmojiURL is where a custom emoji's picture is served from. It is built from
-// the ID and asks State nothing, deliberately: State holds the emoji of the
-// servers the account is in, and a message routinely names one from a server it
-// is not — Revolt sends the ID either way, and Autumn serves the picture either
-// way. A lookup here would blank out exactly the emoji nobody could otherwise
-// see. It is therefore the one read here that answers while logged out.
+// EmojiURL is where a custom emoji's picture is served from, built from the ID
+// and asking State nothing: State holds only the emoji of servers the account is
+// in, while a message routinely names one from a server it is not. A lookup
+// would blank out exactly the emoji nobody could otherwise see. It is the one
+// read here that answers while logged out.
 func (s *store) EmojiURL(emojiID string) string {
 	if emojiID == "" {
 		return ""
@@ -583,54 +581,30 @@ func (s *store) EmojiURL(emojiID string) string {
 
 // Emojis is every custom emoji the account may use, ordered by name.
 //
-// No request backs this and none is wanted: Ready carries the emoji of every
-// server the account is in, ServerCreate carries a joined server's, and revoltgo
-// files the create and delete events into State itself — so what State holds is
-// already the whole set and already current. Session.ServerEmojis writes nowhere,
-// so asking it would only be a second copy to keep.
-//
-// EmojiSeq iterates State's map under its read lock, so the loop stays a copy per
-// entry and asks State nothing; the sort is outside it.
+// No request backs this and none is wanted: Ready carries every server's emoji
+// and revoltgo files the create and delete events into State itself, so what
+// State holds is already the whole set and already current. EmojiSeq iterates
+// under State's read lock, so the loop stays a copy per entry; the sort is
+// outside it.
 func (s *store) Emojis() []domain.Emoji {
 	state := s.state()
 	if state == nil {
 		return nil
 	}
 
-	// The fold is carried beside each emoji rather than taken in the comparison: a
-	// sort asks a pair some log n times, so lowering there is one allocation per
-	// question rather than one per emoji.
-	type folded struct {
-		emoji domain.Emoji
-		name  string
-	}
-
-	all := make([]folded, 0, state.EmojiCount())
+	// A map has no order of its own, and a picker whose entries moved between
+	// openings could not be learned.
+	all := make([]keyed[domain.Emoji], 0, state.EmojiCount())
 	for raw := range state.EmojiSeq() {
 		emoji := domain.Emoji{ID: raw.ID, Name: raw.Name}
 		if raw.Parent != nil {
 			emoji.ServerID = raw.Parent.ID
 		}
 
-		all = append(all, folded{emoji: emoji, name: strings.ToLower(raw.Name)})
+		all = append(all, keyed[domain.Emoji]{emoji, strings.ToLower(raw.Name), raw.ID})
 	}
 
-	// By name, tie-broken on ID so the order is total: a map has none of its own,
-	// and a picker whose entries moved between openings could not be learned.
-	slices.SortFunc(all, func(x, y folded) int {
-		if by := strings.Compare(x.name, y.name); by != 0 {
-			return by
-		}
-
-		return strings.Compare(x.emoji.ID, y.emoji.ID)
-	})
-
-	emojis := make([]domain.Emoji, len(all))
-	for i, f := range all {
-		emojis[i] = f.emoji
-	}
-
-	return emojis
+	return sortedByName(all)
 }
 
 /* Messages */
@@ -678,30 +652,16 @@ const (
 )
 
 // Permissions is everything the account may do in a channel, or none at all when
-// there is no session or nothing is known about the channel — which a caller
-// reads as "assume nothing is allowed".
+// there is no session or the channel is unknown — which a caller reads as
+// "assume nothing is allowed".
 //
-// It resolves the whole thing here rather than calling revoltgo's
-// State.ChannelPermissions, which gets four things wrong that land on exactly
-// what this is for:
+// The whole calculation is done here rather than through revoltgo's
+// State.ChannelPermissions, whose five mistakes all land on exactly what this is
+// for — see internal/client/CLAUDE.md.
 //
-//   - It ignores Channel.RolePermissions. A channel denied to everyone and handed
-//     back to one role is how a private channel is actually built, and without the
-//     overwrites every member of that role is told they cannot see it.
-//   - It applies a member's roles in whatever order the member carries them, so
-//     of two roles disagreeing about one permission the winner is arbitrary.
-//     Revolt ranks them, most senior lowest, and the most senior has the last word.
-//   - It clamps a timed-out member *before* the channel's overwrites rather than
-//     after, so an overwrite can hand back what the timeout took.
-//   - It decides a DM from Channel.Permissions, a field Revolt sends only on a
-//     group — so every DM comes back view-only. See conversationPermissions.
-//
-// It also returns an error for a server the account is not a member of, which is
-// a state the client is routinely in — see rankRoles.
-//
-// The State lookups happen here and the arithmetic in the two resolvers below,
-// which take plain values: State's caches are unexported, so nothing reaching
-// through a session could be given a known server to answer about.
+// The State lookups happen here and the arithmetic in the resolvers below, which
+// take plain values: State's caches are unexported, so nothing reaching through
+// a session could be given a known server to answer about.
 func (s *store) Permissions(channelID string) domain.Permission {
 	state := s.state()
 	if state == nil {
@@ -747,11 +707,9 @@ func conversationPermissions(channel *revoltgo.Channel, other domain.Relationshi
 
 		return permissionInConversation
 	case revoltgo.ChannelTypeDM:
-		// Revolt decides a DM from the *relationship*, not from the channel: a direct
-		// message carries no permissions field at all, whatever revoltgo's own
-		// ChannelPermissions reads it for. Blocked in either direction leaves the
-		// history readable and nothing else; anyone you already have a conversation
-		// with, you may write to.
+		// Revolt decides a DM from the *relationship*: a direct message carries no
+		// permissions field at all. Blocked either way leaves the history readable
+		// and nothing else; anyone else you have a conversation with, you may write to.
 		if other.Blocked() {
 			return permissionViewOnly
 		}
@@ -824,16 +782,14 @@ type rankedRole struct {
 	overwrite revoltgo.PermissionOverwrite
 }
 
-// rankRoles resolves a member's roles *least* senior first: that is the order
-// overwrites apply in, so the most senior role lands last and has the last word.
-// Revolt ranks the most senior lowest, which makes this descending rank.
+// rankRoles resolves a member's roles *least* senior first — descending Rank,
+// Revolt ranking the most senior lowest — so the most senior applies last and
+// has the last word.
 //
-// A nil member — a membership State has not heard of yet — resolves as one
-// holding no roles rather than as no access at all. That is not leniency for its
-// own sake: it is what Revolt itself computes for someone carrying only the
-// default role, and it is what revoltgo fabricates on ServerCreate for a server
-// joined while the client is running. Answering "no access" instead would empty
-// the channel sidebar of a server the account had just joined.
+// A nil member resolves as one holding no roles rather than as no access: that
+// is what Revolt computes for someone carrying only the default role, and what
+// revoltgo fabricates on ServerCreate. Answering "no access" would empty the
+// channel sidebar of a server the account had just joined.
 func rankRoles(server *revoltgo.Server, member *revoltgo.ServerMember) []rankedRole {
 	if member == nil {
 		return nil

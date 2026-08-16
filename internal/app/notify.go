@@ -1,9 +1,9 @@
 package app
 
 // The notification system's controller half: notify posts a transient message,
-// confirm asks a question that has to be answered before something irreversible
-// happens, and the destructive actions themselves live here because each is the
-// same shape — confirm, fire off-thread, report the failure.
+// confirm asks before something irreversible, and the destructive actions
+// themselves live here because each is one shape — confirm, fire off-thread,
+// report the outcome.
 
 import (
 	"fmt"
@@ -32,15 +32,13 @@ func (a *App) notifyNotice(notice ui.Notice) {
 }
 
 // confirm puts a question on the modal layer. The dialog closes itself whichever
-// way it is answered; only the confirming branch calls back. Call on the UI
-// thread.
+// way it is answered; only the confirming branch calls back.
 //
 // Holding Shift answers it in advance: somebody clearing out a channel is asked
-// the same question a dozen times, and a dialog answered without being read
-// protects nobody. This is the one place that decides it, so the key covers every
-// confirmation in the client rather than the ones somebody remembered to wire it
-// to. A question with no OnConfirm is never skipped — it is a statement, and
-// skipping it would say nothing at all.
+// the same question a dozen times, and a dialog answered unread protects nobody.
+// Deciding it here covers every confirmation rather than the ones somebody
+// remembered to wire it to. A question with no OnConfirm is never skipped — it is
+// a statement, and skipping it would say nothing. Call on the UI thread.
 func (a *App) confirm(question ui.Confirm) {
 	if question.OnConfirm != nil && ui.ShiftHeld() {
 		question.OnConfirm()
@@ -50,10 +48,9 @@ func (a *App) confirm(question ui.Confirm) {
 	a.showOverlay(ui.NewConfirmDialog(question, a.closeOverlay))
 }
 
-// notifyFailure is the standard failure handler for an action whose only visible
-// outcome is a notice: the API error goes to the log under what, the user gets
-// the sentence. It is what App.background's onFail wants nearly everywhere, so an
-// action that needs more should wrap this rather than restate it.
+// notifyFailure is the standard onFail for an action whose only visible outcome
+// is a notice: the API error goes to the log under what, the user gets the
+// sentence. An action needing more should wrap it rather than restate it.
 func (a *App) notifyFailure(what string, format string, args ...any) func(error) {
 	return func(err error) {
 		log.Printf("%s: %v", what, err)
@@ -82,9 +79,8 @@ func (a *App) confirmLeaveServer(serverID string) {
 	})
 }
 
-// leaveServer leaves without waiting for the response to update the sidebar: the
-// server disappears through the ServerLeft event, which is also what covers being
-// kicked or the server being deleted out from under us.
+// leaveServer leaves without waiting for the response: the server disappears
+// through ServerLeft, which also covers being kicked or the server being deleted.
 func (a *App) leaveServer(serverID, name string) {
 	a.background(
 		func() error { return a.client.LeaveServer(serverID) },
@@ -92,9 +88,8 @@ func (a *App) leaveServer(serverID, name string) {
 	)
 }
 
-// canLeaveServer reports whether leaving is something to offer. The owner is
-// excluded: for them the same endpoint deletes the server outright, which is a
-// different question needing a much sterner one than this.
+// canLeaveServer excludes the owner: for them the same endpoint deletes the
+// server outright, a different question needing a much sterner one than this.
 func (a *App) canLeaveServer(serverID string) bool {
 	server, ok := a.store.Server(serverID)
 	self := a.store.SelfID()
@@ -105,8 +100,8 @@ func (a *App) canLeaveServer(serverID string) bool {
 /* Closing a conversation */
 
 // confirmCloseChannel asks before closing a DM or leaving a group. Neither
-// destroys any messages — the conversation just leaves the sidebar — so the
-// question is a warning rather than a danger.
+// destroys messages — the conversation leaves the sidebar — so a DM is a warning
+// rather than a danger.
 func (a *App) confirmCloseChannel(channelID string) {
 	channel, ok := a.store.Channel(channelID)
 	if !ok {
@@ -153,9 +148,8 @@ func (a *App) isConversation(channelID string) bool {
 
 /* Sharing a channel */
 
-// canInviteTo reports whether an invite to a channel is worth offering. Only a
-// server's channels have one: a conversation is opened by naming somebody, and
-// Revolt has no code that would let a third person into it.
+// canInviteTo: only a server's channels have an invite. A conversation is opened
+// by naming somebody, and Revolt has no code that lets a third person into one.
 func (a *App) canInviteTo(channelID string) bool {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || channel.ServerID == "" {
@@ -165,13 +159,10 @@ func (a *App) canInviteTo(channelID string) bool {
 	return a.store.Permissions(channelID).Has(domain.PermissionInviteOthers)
 }
 
-// createInvite makes an invite to a channel and puts the link on the clipboard,
-// which is the whole of what somebody asking for one wants.
-//
-// The code is shown in the notice as well as copied. A clipboard write is
-// invisible, and this is the one action in the client whose entire result is a
-// string the user now has to paste somewhere — so the notice is the receipt, and
-// it names the channel because the menu it was raised from may be long gone.
+// createInvite makes an invite and puts the link on the clipboard, which is the
+// whole of what asking for one wants. The notice is the receipt — a clipboard
+// write is invisible — and names the channel because the menu it was raised from
+// is long gone.
 func (a *App) createInvite(channelID string) {
 	name := "this channel"
 	if channel, ok := a.store.Channel(channelID); ok {
@@ -205,16 +196,14 @@ func (a *App) createInvite(channelID string) {
 
 /* Relationships */
 
-// Each of these is the usual shape — fire off-thread, report the failure — with
-// one difference: nothing here has a gateway event of its own that repaints
-// anything, the card that raised it having already been dismissed. So each says
-// what it did, because otherwise a friend request would be indistinguishable
-// from a click that missed.
+// Nothing here has a gateway event that repaints anything, the card that raised
+// it having been dismissed — so each says what it did, a friend request being
+// otherwise indistinguishable from a click that missed.
 
 // addFriend asks somebody to be friends. Revolt names the person by handle here
 // rather than by ID, which the client resolves — see Client.AddFriend.
 func (a *App) addFriend(userID, name string) {
-	a.relate(
+	a.reportAction(
 		func() error { return a.client.AddFriend(userID) },
 		"add friend "+userID, "Could not send %s a friend request.", "Friend request sent to %s.", name,
 	)
@@ -222,40 +211,40 @@ func (a *App) addFriend(userID, name string) {
 
 // acceptFriend answers a request that has already arrived.
 func (a *App) acceptFriend(userID, name string) {
-	a.relate(
+	a.reportAction(
 		func() error { return a.client.AcceptFriend(userID) },
 		"accept friend "+userID, "Could not accept %s's friend request.", "You and %s are now friends.", name,
 	)
 }
 
-// removeFriend covers unfriending, declining and withdrawing alike: Revolt
-// spends one route on all three, and what it means is decided by where the
-// relationship stood — which the button that raised it has already read.
+// removeFriend covers unfriending, declining and withdrawing alike: Revolt spends
+// one route on all three, and which it is depends on where the relationship
+// stood, which the button that raised it has already read.
 func (a *App) removeFriend(userID, name string) {
-	a.relate(
+	a.reportAction(
 		func() error { return a.client.RemoveFriend(userID) },
 		"remove friend "+userID, "Could not update your relationship with %s.", "%s is no longer a friend.", name,
 	)
 }
 
 func (a *App) blockUser(userID, name string) {
-	a.relate(
+	a.reportAction(
 		func() error { return a.client.BlockUser(userID) },
 		"block user "+userID, "Could not block %s.", "%s is blocked.", name,
 	)
 }
 
 func (a *App) unblockUser(userID, name string) {
-	a.relate(
+	a.reportAction(
 		func() error { return a.client.UnblockUser(userID) },
 		"unblock user "+userID, "Could not unblock %s.", "%s is unblocked.", name,
 	)
 }
 
-// relate runs one relationship change and reports either way. The success notice
-// is the receipt: the card is gone by the time this runs, so nothing else on
-// screen would change.
-func (a *App) relate(request func() error, what, failure, success, name string) {
+// reportAction runs one request about somebody and says so either way, both
+// messages taking their name. The success notice is the receipt: whatever raised
+// it — a profile card, a menu — is gone by the time this runs.
+func (a *App) reportAction(request func() error, what, failure, success, name string) {
 	onFail := a.notifyFailure(what, failure, name)
 
 	go func() {
@@ -272,9 +261,8 @@ func (a *App) relate(request func() error, what, failure, success, name string) 
 	}()
 }
 
-// confirmRemoveFriend asks before unfriending. Declining or withdrawing a
-// request is not put through this: neither takes anything away that asking again
-// would not restore.
+// confirmRemoveFriend asks before unfriending. Declining or withdrawing is not
+// put through it: neither takes away anything asking again would not restore.
 func (a *App) confirmRemoveFriend(userID, name string) {
 	a.confirm(ui.Confirm{
 		Title:  "Remove friend",
@@ -288,8 +276,8 @@ func (a *App) confirmRemoveFriend(userID, name string) {
 }
 
 // confirmBlockUser asks before blocking. Revolt keeps the history readable and
-// takes everything else away in both directions, which is what the question has
-// to say — it is not a mute.
+// takes everything else away *both* ways, which is what the question has to say:
+// it is not a mute.
 func (a *App) confirmBlockUser(userID, name string) {
 	a.confirm(ui.Confirm{
 		Title:  "Block user",
@@ -306,8 +294,8 @@ func (a *App) confirmBlockUser(userID, name string) {
 
 // confirmKickMember asks before removing someone from the open server.
 func (a *App) confirmKickMember(serverID, userID string) {
-	// The member record carries the nickname the sidebar shows them under, which
-	// is the name to ask about; the raw user is the fallback.
+	// The member record carries the nickname the sidebar shows them under, which is
+	// the name to ask about; the raw user is the fallback.
 	name := a.store.UserName(userID)
 	if member, ok := a.store.Member(serverID, userID); ok {
 		name = member.Name
@@ -324,23 +312,17 @@ func (a *App) confirmKickMember(serverID, userID string) {
 	})
 }
 
-// kickMember removes a member. The member sidebar is repainted by the
-// MembersChanged event, which arrives for any departure however it was caused.
+// kickMember removes a member. The sidebar is repainted by the MembersChanged
+// event, which arrives for any departure however it was caused.
 func (a *App) kickMember(serverID, userID, name string) {
-	go func() {
-		if err := a.client.KickMember(serverID, userID); err != nil {
-			log.Printf("kick member %s from server %s: %v", userID, serverID, err)
-			a.doOnUI(func() { a.notify(ui.ToneDanger, "Could not remove %s.", name) }, false)
-			return
-		}
-
-		a.doOnUI(func() { a.notify(ui.ToneInfo, "%s was removed.", name) }, false)
-	}()
+	a.reportAction(
+		func() error { return a.client.KickMember(serverID, userID) },
+		"kick member "+userID+" from server "+serverID, "Could not remove %s.", "%s was removed.", name,
+	)
 }
 
-// canKickMember reports whether removing this member is something to offer:
-// permission to kick, and a target who is neither the user themselves nor the
-// owner, whom the server will refuse to remove anyway.
+// canKickMember: permission to kick, and a target who is neither the user
+// themselves nor the owner, whom the server refuses to remove anyway.
 func (a *App) canKickMember(serverID, userID string) bool {
 	server, ok := a.store.Server(serverID)
 	if !ok || server.OwnerID == userID {

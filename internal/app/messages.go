@@ -67,11 +67,10 @@ func messageGroupWindow() time.Duration { return config.Current().Behaviour.Grou
 
 // buildMessageArea builds the message list, header, and composer.
 //
-// The column reports a fixed minimum rather than what it is holding. It is the
-// one section whose contents are somebody else's — a long display name, a wide
-// attachment, a mention picker over a tall composer — and Fyne grows a window the
-// frame its content's minimum outgrows it, without ever giving the room back. Left
-// to report honestly, the window resized itself as messages mounted.
+// The column reports a fixed minimum rather than what it holds. Its contents are
+// somebody else's — a long display name, a wide attachment — and Fyne grows a
+// window the frame its content's minimum outgrows it without ever giving the room
+// back, so reporting honestly resized the window as messages mounted.
 func (a *App) buildMessageArea() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.MessageAreaBackground)
 
@@ -83,22 +82,17 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.OnTyping = a.noteTyping
 	a.input.RegisterDropHandler()
 
-	// Floating composer dock: the mention picker, reply and attachment rows and the
-	// entry stack inside one rounded card. Its fill is the entry's own input
-	// background, so the entry's box disappears into it and the outline draws the
-	// boundary instead — taking the accent on focus, the composer's only "you are
-	// typing here" cue. The padding is thin because everything in the stack already
-	// carries its own inset, and it goes through ui.NewInset because NewPadded and
-	// Border would each add theme padding on top of what is asked for.
+	// Floating composer dock: mention picker, reply and attachment rows and the
+	// entry stack in one rounded card. Its fill is the entry's own background, so
+	// the entry's box disappears into it and the outline draws the boundary
+	// instead — taking the accent on focus, the composer's only "typing here" cue.
+	// ui.NewInset rather than NewPadded, which would add theme padding on top.
 	//
-	// What makes it float is that the messages run *under* it: ui.NewFloatingDock
-	// hangs it over a column taller than itself, so there is no cut above the card
-	// to read as the top of a bar, and ui.Elevate's shadow darkens the content
-	// disappearing beneath it. The gap around it is only a gutter.
-	//
-	// Which is why AppTheme answers ColorNameShadow with nothing: Fyne's ambient
-	// shadow is a scroll-edge gradient that would land in this same gap and draw
-	// the bar straight back on. One deliberate cast shadow, no ambient ones.
+	// What makes it float is that the messages run *under* it (ui.NewFloatingDock),
+	// so there is no cut above the card to read as the top of a bar and Elevate's
+	// shadow darkens what disappears beneath it. Which is why AppTheme answers
+	// ColorNameShadow with nothing: Fyne's ambient shadow would land in the same
+	// gutter and draw the bar straight back on.
 	dockBg := canvas.NewRectangle(theme.Colors.ComposerBg)
 	dockBg.CornerRadius = theme.Sizes.ComposerRadius
 	ui.Outline(dockBg)
@@ -127,16 +121,13 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
 	card := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
 
-	// The slowmode chip rides above the card rather than inside it, flush with its
-	// right edge: what floats over the message column is the whole stack, so
-	// NewDockReserve holds room for the chip too and the newest message still comes
-	// to rest clear of it. A zero-width spacer takes the row's fill, which is what
-	// pins the chip to the trailing edge at its own minimum — and that row's layout
-	// is the one it re-runs each time it is relabelled.
-	// The typing line hangs at the leading end of that same row. The spacer stays
+	// The slowmode chip rides above the card, flush with its right edge — the whole
+	// stack floats, so NewDockReserve holds room for the chip too. A zero-width
+	// spacer takes the row's fill, which pins the chip to the trailing edge at its
+	// own minimum, and the typing line hangs at the leading end. The spacer keeps
 	// the fill rather than the line taking it: a hidden child is skipped by the
-	// row's layout, so a fill slot that can disappear would leave the chip placed
-	// from the left in every channel where nobody is typing.
+	// layout, so a disappearing fill slot would place the chip from the left in
+	// every channel where nobody is typing.
 	a.slowmodeBadge = ui.NewSlowmodeBadge()
 	a.typingIndicator = ui.NewTypingIndicator(a.images)
 	badgeRow := ui.NewFillRow(1, a.typingIndicator, ui.HorizontalSpacer(0), a.slowmodeBadge)
@@ -167,13 +158,14 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.jumpChip = ui.NewTappableChip("Jump to present", theme.Colors.TextPrimary, a.returnToPresent)
 	a.jumpChip.Hide()
 
-	// The way into the pins sits beside the member toggle: both are about the
-	// channel on screen rather than about anything in the column, and a pin's own
-	// mark is what the message row already carries.
+	// The ways into the two message panels sit beside the member toggle: all three
+	// are about the channel on screen rather than about anything in the column,
+	// and a pin's own mark is what the message row already carries.
+	search := ui.NewIconButton(assets.SearchIcon, a.showChannelSearch, nil)
 	pins := ui.NewIconButton(assets.SystemPinnedIcon, a.showPinnedMessages, nil)
 
 	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
-	a.messageHeader = container.NewBorder(nil, nil, title, container.NewHBox(a.jumpChip, pins, members))
+	a.messageHeader = container.NewBorder(nil, nil, title, container.NewHBox(a.jumpChip, search, pins, members))
 	header := container.NewPadded(a.messageHeader)
 
 	// The note hangs under the header rather than over the column: it is about the
@@ -196,13 +188,11 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 }
 
 // resizeDock re-hangs the floating stack after something in it appeared or
-// disappeared — the slowmode chip, the typing line. Fyne re-lays out for a growing
-// minimum on its own but leaves a shrinking one reserved, and here the stack
-// stands on its own height twice over: the card is placed from the bottom up, and
-// ui.DockReserve is how much of the message column it costs. Laying out the
-// floating dock resizes the stack, which re-runs the stack's own layout in turn;
-// the scroll is refreshed because the room it holds for the dock is part of the
-// height it scrolls through. Call on the UI thread.
+// disappeared. Fyne re-lays out for a growing minimum but leaves a shrinking one
+// reserved, and the stack stands on its own height twice over: the card is placed
+// from the bottom up, and ui.DockReserve is what it costs the message column. The
+// scroll is refreshed because that room is part of the height it scrolls through.
+// Call on the UI thread.
 func (a *App) resizeDock() {
 	ui.Relayout(a.floatingDock)
 	a.messageScroll.Refresh()
@@ -379,13 +369,9 @@ func (a *App) refreshSlowmode() {
 }
 
 // loadSlowmode re-reads a channel's cooldown in the background and repaints the
-// badge if it is still the open one.
-//
-// It asks on every visit rather than once. Revolt announces a changed slowmode
-// through ChannelUpdate and revoltgo models neither that field nor the one on
-// the channel itself, so opening the channel is the only moment the client can
-// learn the number — or learn that it moved. It is one small request alongside
-// the message page the same switch already fetches.
+// badge if it is still the open one. It asks on every visit: revoltgo models
+// neither the field nor its ChannelUpdate, so opening the channel is the only
+// moment the client can learn the number, or learn that it moved.
 func (a *App) loadSlowmode(channelID string) {
 	epoch := a.epoch
 
@@ -420,21 +406,16 @@ func toReplies(pending []ui.Reply) []domain.Reply {
 
 // newMessageWidget builds a message widget, drawing curr as a grouped
 // continuation of prev when they belong together, tightening its bottom margin
-// when next continues it, and heading it with a day separator when it opens a new
-// calendar day.
+// when next continues it, and heading it with a day separator on a new day.
 //
 // Every mount path funnels through here, so this is also where an unresolved
-// author is chased down: whether the message came from the gateway, the initial
-// page, or scrollback, the widget can't render a name until State knows the user.
-// ensureAuthor is a no-op once it does, so this costs two map lookups per widget
-// in the common case.
+// author is chased down — ensureAuthor is a no-op once State knows the user, so
+// it costs two map lookups per widget in the common case.
 //
-// A system event names whoever it is about rather than an author, and reads
-// "Someone joined" until that user is known — so it is the target that gets
-// chased. ui.MessageWidget.Author answers with it for the same reason, which is
-// what lets one refresh pass cover both. Only where the target *is* somebody:
-// Revolt files every system event's subject under one field, and a pin's is the
-// message that was pinned — see domain.SystemMessage.TargetsUser.
+// A system event names whoever it is about rather than an author, so it is the
+// *target* that gets chased, and ui.MessageWidget.Author answers with it — which
+// lets one refresh pass cover both. Only where the target is somebody: see
+// domain.SystemMessage.TargetsUser.
 func (a *App) newMessageWidget(prev, curr, next *domain.Message) *ui.MessageWidget {
 	switch {
 	case curr.System != nil:
@@ -455,16 +436,12 @@ func (a *App) newMessageWidget(prev, curr, next *domain.Message) *ui.MessageWidg
 /* Lazy reply resolution */
 
 // ensureReplies makes a message's quoted lines renderable. A reply names a
-// message by ID and nothing else, and the message cache is only the tail of a
-// channel — a reply reaches as far back as somebody cared to answer — so a quote
-// whose target has scrolled out reads as "Unknown message reference" for the life
-// of the session unless it is asked for.
+// message by ID alone and the cache is only a channel's tail, so a quote whose
+// target has scrolled out reads as "Unknown message reference" unless asked for.
 //
-// Guarded by fetchedReplies so each target is asked for once, and the guard is
-// **kept** on failure, unlike ensureAuthor's. The usual reason a target cannot be
-// fetched is that it was deleted, which stays true — and a quoted line remounts
-// on every scroll past it, so releasing the guard would be a request per pass for
-// an answer that cannot change. The cost is that a quote missed through a dropped
+// The fetchedReplies guard is **kept** on failure, unlike ensureAuthor's: the
+// usual reason is that the target was deleted, which stays true, and a quote
+// remounts on every scroll past it. The cost is that one missed through a dropped
 // connection stays unresolved until the channel is reopened.
 //
 // A grouped continuation draws no quotes, so the caller does not queue for one.
@@ -560,15 +537,14 @@ func dayLabel(prev, curr *domain.Message) string {
 }
 
 // continuesGroup reports whether curr should render as a continuation of prev:
-// same author, neither a system/webhook/masqueraded message, on the same calendar
-// day, and within messageGroupWindow. A reply always starts a fresh group, and so
-// does a message on the far side of a day separator — the separator has to break
-// the group, or a pair minutes apart across midnight would render as one
-// headerless block.
+// same author, neither system, webhook nor masqueraded, same calendar day, and
+// within messageGroupWindow. A reply starts a fresh group, and so does a message
+// across a day separator — a pair minutes apart over midnight must not render as
+// one headerless block.
 //
-// A pinned message starts one too. Its mark rides the name line, which is the one
-// thing a continuation does not draw, so grouping it would be the one way to pin
-// a message and see nothing happen.
+// A pinned message starts one too: its mark rides the name line, the one thing a
+// continuation does not draw, so grouping it would be the way to pin a message
+// and see nothing happen.
 func continuesGroup(prev, curr *domain.Message) bool {
 	if !config.Current().Interface.GroupMessages {
 		return false
@@ -684,19 +660,19 @@ func (a *App) displayMessages(messages []*domain.Message) {
 		messages = messages[len(messages)-mount:]
 	}
 
-	a.messageList.Objects = a.buildWindow(messages)
+	a.messageList.Objects = a.buildRun(messages, nil, nil)
 	a.remountMessages()
 	a.scrollToBottom()
 }
 
-// buildWindow builds the widgets for a contiguous run of messages, oldest first,
-// each seeing its true neighbours. The ends see none, which is what makes the
-// oldest render as a full message and the newest as one nothing follows —
-// whatever is mounted around them afterwards re-derives both seams.
-func (a *App) buildWindow(messages []*domain.Message) []fyne.CanvasObject {
+// buildRun builds the widgets for a contiguous run of messages, oldest first,
+// each seeing its true neighbours. before and after are what the column already
+// holds either side of the run, so the seams group correctly; nil makes an end
+// render as one nothing joins.
+func (a *App) buildRun(messages []*domain.Message, before, after *domain.Message) []fyne.CanvasObject {
 	widgets := make([]fyne.CanvasObject, len(messages))
 	for i, message := range messages {
-		var prev, next *domain.Message
+		prev, next := before, after
 		if i > 0 {
 			prev = messages[i-1]
 		}
@@ -707,6 +683,37 @@ func (a *App) buildWindow(messages []*domain.Message) []fyne.CanvasObject {
 	}
 
 	return widgets
+}
+
+// setFollowedByGroup tightens or releases the bottom margin of the widget at i.
+// That margin belongs to the message above a seam rather than below it, so every
+// re-grouping touches the predecessor through here.
+func (a *App) setFollowedByGroup(i int, grouped bool) {
+	if i < 0 || i >= len(a.messageList.Objects) {
+		return
+	}
+
+	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+		w.SetFollowedByGroup(grouped)
+	}
+}
+
+// rebuildAt replaces the widget at i with one built from message, and re-derives
+// the grouping of the row above. The row below needs nothing — what decides its
+// grouping is read off itself. Call on the UI thread.
+func (a *App) rebuildAt(i int, message *domain.Message) {
+	prev := a.mountedMessage(i - 1)
+	a.messageList.Objects[i] = a.newMessageWidget(prev, message, a.mountedMessage(i+1))
+
+	a.setFollowedByGroup(i-1, continuesGroup(prev, message))
+}
+
+// logPageError reports a page request's failure, ignoring the one that only says
+// a request for the same channel was already out.
+func logPageError(what string, err error) {
+	if !errors.Is(err, client.ErrBusy) {
+		log.Printf("%s: %v", what, err)
+	}
 }
 
 // showStatus replaces the message list with a single centred line.
@@ -741,10 +748,13 @@ func (a *App) showStatusMark(mark fyne.Resource, text string) {
 	}
 }
 
-// clearMessages empties the message list.
+// clearMessages empties the message list. Any tooltip goes with it, as the
+// server sidebar's does on a rebuild: a reaction chip naming who is in it is
+// about to be dropped, so it will never report the pointer leaving.
 func (a *App) clearMessages() {
 	a.cancelActiveEdit()
 	a.setJumped(false)
+	a.tooltip.Hide()
 	a.messageList.Objects = nil
 	a.messageList.Refresh()
 	a.scrollToBottom()
@@ -847,8 +857,8 @@ func (a *App) loadJumpWindow(channelID, messageID string) {
 				return
 			}
 			if err != nil || len(page) == 0 {
-				if err != nil && !errors.Is(err, client.ErrBusy) {
-					log.Printf("jump to message %s: %v", messageID, err)
+				if err != nil {
+					logPageError("jump to message "+messageID, err)
 				}
 				a.notify(ui.ToneWarning, "Couldn't find that message.")
 				return
@@ -870,7 +880,7 @@ func (a *App) mountJumpWindow(messages []*domain.Message, targetID string) {
 	// it.
 	a.setJumped(true)
 
-	a.messageList.Objects = a.buildWindow(messages)
+	a.messageList.Objects = a.buildRun(messages, nil, nil)
 	a.remountMessages()
 
 	// The column has grown under a scroller that has not been laid out since, and
@@ -1017,15 +1027,14 @@ func (a *App) rebuildSeams(seams []int) {
 		}
 		last = i
 
-		prev, next := a.mountedMessage(i-1), a.mountedMessage(i)
-		if next != nil {
-			a.messageList.Objects[i] = a.newMessageWidget(prev, next, a.mountedMessage(i+1))
+		if moved := a.mountedMessage(i); moved != nil {
+			a.rebuildAt(i, moved)
+			continue
 		}
-		if i > 0 {
-			if w, ok := a.messageList.Objects[i-1].(*ui.MessageWidget); ok {
-				w.SetFollowedByGroup(continuesGroup(prev, next))
-			}
-		}
+
+		// The run reached the end of the list, so nothing moved up into the seam and
+		// the row above it simply stops continuing.
+		a.setFollowedByGroup(i-1, false)
 	}
 }
 
@@ -1033,11 +1042,6 @@ func (a *App) rebuildSeams(seams []int) {
 // entry. A message the user is editing is left alone — the rebuild would discard
 // their open editor, and the cache already holds the remote update, so the next
 // rebuild renders it. Call on the UI thread.
-//
-// The row above is re-tightened because an update can change whether this message
-// groups at all: a pin breaks it out of the group it was in, and the margin that
-// closed the gap belongs to its predecessor. The row below needs nothing — what
-// decides its grouping is read off itself, not off this one.
 func (a *App) refreshMessage(channelID, messageID string) {
 	if channelID != a.currentChannelID {
 		return
@@ -1056,14 +1060,7 @@ func (a *App) refreshMessage(channelID, messageID string) {
 		return
 	}
 
-	prev := a.mountedMessage(i - 1)
-	a.messageList.Objects[i] = a.newMessageWidget(prev, message, a.mountedMessage(i+1))
-
-	if i > 0 {
-		if w, ok := a.messageList.Objects[i-1].(*ui.MessageWidget); ok {
-			w.SetFollowedByGroup(continuesGroup(prev, message))
-		}
-	}
+	a.rebuildAt(i, message)
 	a.remountMessages()
 }
 
@@ -1156,7 +1153,9 @@ func (a *App) appendMessage(message, prev *domain.Message) {
 	if continuesGroup(prev, message) {
 		a.tightenBottomWidget()
 	}
-	a.messageList.Add(a.newMessageWidget(prev, message, nil))
+	// Appended rather than added: Container.Add refreshes the whole column, and
+	// remountMessages below is what actually lays the new row out.
+	a.messageList.Objects = append(a.messageList.Objects, a.newMessageWidget(prev, message, nil))
 
 	if over := len(a.messageList.Objects) - renderedCap(); over > 0 {
 		a.trimMountedTop(over, atBottom)
@@ -1216,9 +1215,7 @@ func (a *App) loadMoreHistory() {
 
 		older, err := a.client.HistoryBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
-			if !errors.Is(err, client.ErrBusy) {
-				log.Printf("load history for %s: %v", channelID, err)
-			}
+			logPageError("load history for "+channelID, err)
 			return
 		}
 
@@ -1245,9 +1242,7 @@ func (a *App) loadOlderPage(channelID string, top *domain.Message) {
 
 		older, err := a.client.MessagesBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
-			if !errors.Is(err, client.ErrBusy) {
-				log.Printf("load page before %s: %v", top.ID, err)
-			}
+			logPageError("load page before "+top.ID, err)
 			return
 		}
 
@@ -1280,27 +1275,12 @@ func (a *App) prependMessages(older []*domain.Message) {
 	oldHeight := a.messageList.MinSize().Height
 
 	// The newest prepended message lands directly above the previously topmost
-	// message, so that existing row is each one's neighbour at the seam.
+	// message, so that existing row is the run's neighbour at the seam.
 	topMessage, topNext := a.mountedMessage(0), a.mountedMessage(1)
+	widgets := a.buildRun(older, nil, topMessage)
 
-	// The oldest message has no loaded predecessor, so it renders as a full
-	// message; every other one sees its true neighbours for grouping.
-	widgets := make([]fyne.CanvasObject, len(older))
-	for i, msg := range older {
-		var prev, next *domain.Message
-		if i > 0 {
-			prev = older[i-1]
-		}
-		if i+1 < len(older) {
-			next = older[i+1]
-		} else {
-			next = topMessage
-		}
-		widgets[i] = a.newMessageWidget(prev, msg, next)
-	}
-
-	// The previously-topmost message now has a predecessor above it, so re-evaluate
-	// its grouping; its successor is unchanged.
+	// That row now has a predecessor above it, so re-evaluate its grouping; its
+	// successor is unchanged.
 	if topMessage != nil {
 		a.messageList.Objects[0] = a.newMessageWidget(older[len(older)-1], topMessage, topNext)
 	}
@@ -1359,9 +1339,7 @@ func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
 
 		newer, err := a.client.MessagesAfter(channelID, bottom.ID, historyPageSize())
 		if err != nil {
-			if !errors.Is(err, client.ErrBusy) {
-				log.Printf("load page after %s: %v", bottom.ID, err)
-			}
+			logPageError("load page after "+bottom.ID, err)
 			return
 		}
 
@@ -1397,15 +1375,9 @@ func (a *App) appendMessages(page []*domain.Message, bottom *domain.Message) {
 		a.tightenBottomWidget()
 	}
 
-	prev := bottom
-	for i, msg := range page {
-		var next *domain.Message
-		if i+1 < len(page) {
-			next = page[i+1]
-		}
-		a.messageList.Add(a.newMessageWidget(prev, msg, next))
-		prev = msg
-	}
+	// Appended in one go rather than through Container.Add, which refreshes the
+	// whole column per child.
+	a.messageList.Objects = append(a.messageList.Objects, a.buildRun(page, bottom, nil)...)
 
 	if over := len(a.messageList.Objects) - mountedCap(); over > 0 {
 		a.trimMountedTop(over, false)
@@ -1464,14 +1436,7 @@ func (a *App) trimMountedBottom() {
 // marking it as the head of a group that continues into the row about to be
 // appended.
 func (a *App) tightenBottomWidget() {
-	n := len(a.messageList.Objects)
-	if n == 0 {
-		return
-	}
-
-	if w, ok := a.messageList.Objects[n-1].(*ui.MessageWidget); ok {
-		w.SetFollowedByGroup(true)
-	}
+	a.setFollowedByGroup(len(a.messageList.Objects)-1, true)
 }
 
 // scrollToBottom scrolls the message view to the newest message.
@@ -1481,15 +1446,11 @@ func (a *App) scrollToBottom() {
 	}
 }
 
-// remountMessages repaints the column after the *set* of mounted widgets changed
-// — an append, a prepend, a trim, a widget swapped in place.
+// remountMessages repaints the column after the *set* of mounted widgets changed.
 //
-// Container.Refresh would also call Refresh on every child, and widget.RichText's
-// Refresh drops its cached minimum size and re-runs updateRowBounds, i.e. re-wraps
-// its text. So telling the list that one widget arrived re-flowed every mounted
-// message body. Only the container's own geometry changed, and ui.Relayout is
-// exactly that: re-run this layout, repaint, don't walk the children. Widgets
-// built during the mutation are new and already carry their content.
+// Container.Refresh would refresh every child, and widget.RichText's Refresh
+// re-wraps its text — so announcing one arrival re-flowed every mounted body.
+// Only the container's geometry changed, which is what ui.Relayout does.
 func (a *App) remountMessages() {
 	ui.Relayout(a.messageList)
 }

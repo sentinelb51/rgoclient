@@ -18,20 +18,15 @@ import (
 
 /* The modal layer */
 
-// Overlay is a modal layer drawn over the whole window: a backdrop with content
-// placed on it. Fyne sizes an overlay to the canvas when it is pushed onto
-// Canvas().Overlays() and routes every pointer event to the top-most overlay, so
-// the backdrop both dims and blocks the UI underneath. Tapping it dismisses the
-// overlay.
+// Overlay is a modal layer over the whole window: a backdrop with content on it.
+// Fyne sizes an overlay to the canvas and routes every pointer event to the
+// top-most one, so the backdrop both dims and blocks what is underneath.
 //
-// It is a plain widget rather than a widget.PopUp because a pop-up draws its own
-// themed card around the content and paints its backdrop from the theme's shadow
-// colour — a light seam tint, far too faint to read as a lightbox.
-//
-// An anchored overlay (NewPopover) is the same layer with the content placed
-// beside a widget instead of centred, and its backdrop left clear: a card that
-// belongs to the thing it points at should not dim what surrounds it, but it
-// still has to take the click that dismisses it.
+// A plain widget rather than a widget.PopUp, which draws its own themed card and
+// paints its backdrop from the theme's shadow colour — far too faint to read as a
+// lightbox. NewPopover is the same layer placed beside a widget with its backdrop
+// left clear: a card belonging to what it points at should not dim its
+// surroundings, but still has to take the click that dismisses it.
 type Overlay struct {
 	tapBase
 	backdrop *canvas.Rectangle
@@ -81,20 +76,18 @@ func (o *Overlay) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // Reposition re-places the content after it changed size — a profile card grows
-// when its About section arrives, and both placements size the card from its own
-// minimum. Neither re-runs on its own: Refresh repaints without laying out, and
-// Resize is a no-op while the layer still fills the same canvas. Call on the UI
-// thread.
+// when its About section arrives. Neither placement re-runs on its own: Refresh
+// repaints without laying out, and Resize is a no-op while the layer still fills
+// the same canvas. Call on the UI thread.
 func (o *Overlay) Reposition() { Relayout(o.placement) }
 
 // Cursor keeps the normal pointer over the backdrop: tapBase advertises the hand
 // for things that look clickable, and a dimmed background isn't one.
 func (o *Overlay) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
-// tapSink swallows taps on whatever it wraps. Fyne delivers a tap to the deepest
-// object that accepts one, so without a sink a click anywhere on non-interactive
-// content inside an Overlay would fall through to the backdrop and dismiss it.
-// Buttons nested deeper still win over the sink, and so keep working.
+// tapSink swallows taps on what it wraps: innermost wins, so without one a click
+// on non-interactive content inside an Overlay falls through to the backdrop and
+// dismisses it. Anything nested deeper still wins over the sink.
 type tapSink struct {
 	tapBase
 	content fyne.CanvasObject
@@ -120,18 +113,14 @@ func (s *tapSink) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
 /* Attachment viewer */
 
-// NewAttachmentViewer builds the card shown inside the attachment lightbox: a
-// slim header (name, metadata, open-in-browser, close) over the attachment
-// itself, sized to fit within bounds. Images render scaled to fit; text files get
-// their full contents in a selectable, scrollable monospace pane. Anything else
-// falls back to a card offering the browser.
-//
-// The card carries its own chrome — there is no native window here, so nothing
-// has to be recoloured to match the palette.
+// NewAttachmentViewer is the card inside the attachment lightbox: a slim header
+// over the attachment, sized to fit bounds. An image is scaled to fit, a text
+// file gets its whole contents in a selectable monospace pane, anything else a
+// card offering the browser. The chrome is the card's own — there is no native
+// window here to recolour.
 func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, onClose func()) fyne.CanvasObject {
-	// The body gets what is left of bounds once the card's own chrome is paid for:
-	// NewPadded insets all four sides, and the Border layout puts one more gap
-	// between the header and the body.
+	// What is left of bounds once the chrome is paid for: NewPadded insets all four
+	// sides, and the Border puts one more gap between the header and the body.
 	pad := fynetheme.Padding()
 	body := fyne.NewSize(
 		bounds.Width-2*pad,
@@ -166,12 +155,10 @@ func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, o
 // viewerHeader is the card's title strip: filename on the left, then the file
 // size (and, for images, their pixel dimensions), a browser button, and close.
 func viewerHeader(attachment *domain.File, detail string, onClose func()) fyne.CanvasObject {
-	name := canvas.NewText(attachment.Name, theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.ViewerTitleSize
-	name.TextStyle = fyne.TextStyle{Bold: true}
+	name := newBoldText(attachment.Name, theme.Colors.TextPrimary, theme.Sizes.ViewerTitleSize)
 
 	// An embed's picture is not an upload and carries no byte count, so the size is
-	// left out rather than reported as nothing at all.
+	// left out rather than reported as nothing.
 	meta := detail
 	if attachment.Size > 0 {
 		meta = util.FormatFileSize(attachment.Size)
@@ -179,8 +166,7 @@ func viewerHeader(attachment *domain.File, detail string, onClose func()) fyne.C
 			meta = detail + "  ·  " + meta
 		}
 	}
-	info := canvas.NewText(meta, theme.Colors.TimestampText)
-	info.TextSize = theme.Sizes.ViewerTitleSize
+	info := newText(meta, theme.Colors.TimestampText, theme.Sizes.ViewerTitleSize)
 
 	actions := container.NewHBox(info, HorizontalSpacer(theme.Sizes.ViewerPadding))
 	if link := attachment.URL; link != "" {
@@ -252,21 +238,17 @@ func viewerUnsupported(bounds fyne.Size) fyne.CanvasObject {
 
 /* Join-server dialog */
 
-// JoinServerDialog is the card shown inside the join-server modal: one field
-// taking an invite code or link, a Join button, and a way to create a server
-// instead. It validates the input itself (util.InviteCode), so a typo never
-// costs a round trip, and reports the outcome on its own status line rather than
-// in a second dialog stacked over the modal layer.
-//
-// The layout mirrors the login screen: a centred bold heading, separators between
-// sections, section labels, and full-width controls.
+// JoinServerDialog is the join-server card: a field taking an invite code or
+// link, a Join button, and a way to create a server instead. It validates the
+// input itself (util.InviteCode), so a typo never costs a round trip. The layout
+// mirrors the login screen — centred heading, separators, full-width controls.
 type JoinServerDialog struct {
 	// Content is the card to hand to the modal layer, and Entry the field to
 	// focus once it is up.
 	Content fyne.CanvasObject
 	Entry   fyne.Focusable
 
-	status *canvas.Text
+	status dialogStatus
 	join   *widget.Button
 }
 
@@ -276,14 +258,11 @@ type JoinServerDialog struct {
 func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *JoinServerDialog {
 	d := &JoinServerDialog{}
 
-	entry := newInviteEntry(onClose)
+	entry := newModalEntry(onClose)
 	entry.SetPlaceHolder("stt.gg/dcRHWEF1")
 	d.Entry = entry
 
-	// Built empty rather than added on demand: the line holds its height from the
-	// start, so the card doesn't jump when a message appears.
-	d.status = canvas.NewText("", theme.Colors.TimestampText)
-	d.status.TextSize = theme.Sizes.JoinDialogTextSize
+	d.status = newDialogStatus()
 
 	d.join = widget.NewButton("Join", func() {
 		code := util.InviteCode(entry.Text)
@@ -291,28 +270,25 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 			d.Fail("That doesn't look like an invite code or link.")
 			return
 		}
-		d.setStatus("Joining...", theme.Colors.TimestampText)
+		d.status.set("Joining...", theme.Colors.TimestampText)
 		d.join.Disable()
 		onJoin(code)
 	})
 
-	// Guarded, unlike a click: calling OnTapped directly bypasses the button's own
-	// disabled check, so Enter during an in-flight join would join twice.
+	// Guarded, unlike a click: OnTapped bypasses the button's own disabled check, so
+	// Enter during an in-flight request would send it twice.
 	entry.OnSubmitted = func(string) {
 		if !d.join.Disabled() {
 			d.join.OnTapped()
 		}
 	}
 
-	card := canvas.NewRectangle(theme.Colors.ViewerCardBg)
-	card.CornerRadius = theme.Sizes.JoinDialogCornerRadius
-
 	inner := container.NewVBox(
-		d.buildHeader(onClose),
+		dialogHeader("Join a server", onClose),
 		widget.NewSeparator(),
 		widget.NewLabel("Invite code"),
 		WithCaret(entry),
-		d.statusLine(),
+		d.status.row(),
 		d.join,
 		widget.NewSeparator(),
 		widget.NewLabel("Start your own"),
@@ -320,65 +296,189 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 	)
 	body := NewMinWidthContainer(theme.Sizes.JoinDialogWidth, container.NewPadded(inner))
 
-	d.Content = newTapSink(container.NewStack(card, body))
+	d.Content = newTapSink(container.NewStack(newDialogCard(), body))
+
 	return d
 }
 
-// Fail reports a failed join and re-enables the button so the user can correct
-// the code and try again. Call on the UI thread.
+// Fail reports a failed join and re-enables the button so the code can be
+// corrected and tried again. Call on the UI thread.
 func (d *JoinServerDialog) Fail(message string) {
-	d.setStatus(message, theme.Colors.ErrorText)
+	d.status.set(message, theme.Colors.ErrorText)
 	d.join.Enable()
 }
 
-// Notice reports a neutral message on the status line — nothing failed, there is
-// just something to say. Call on the UI thread.
-func (d *JoinServerDialog) Notice(message string) {
-	d.setStatus(message, theme.Colors.TimestampText)
-}
-
-func (d *JoinServerDialog) setStatus(message string, textColor color.Color) {
-	d.status.Text = message
-	d.status.Color = textColor
-	d.status.Refresh()
-}
-
-// buildHeader is the title row: the heading is centred across the whole card, as
-// on the login screen, with the close button laid over its right edge so the
-// button doesn't shift the title off centre.
-func (d *JoinServerDialog) buildHeader(onClose func()) fyne.CanvasObject {
-	title := widget.NewLabelWithStyle("Join a server", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-
-	// Centred so the button keeps its square min size instead of being stretched
-	// to the row height by the border layout.
+// dialogHeader is the title row every card on the modal layer wears: the heading
+// centred across the whole card, with the close button laid *over* its right edge
+// so it does not shift the title off centre. The button is centred to keep its
+// square minimum rather than be stretched to the row height.
+func dialogHeader(title string, onClose func()) fyne.CanvasObject {
+	heading := widget.NewLabelWithStyle(title, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	closeButton := container.NewBorder(nil, nil, nil, container.NewCenter(NewCloseButton(onClose)))
 
-	return container.NewStack(title, closeButton)
+	return container.NewStack(heading, closeButton)
 }
 
-// statusLine indents the status text to line up with the labels around it, which
-// carry the widget inner padding that raw canvas text does not.
-func (d *JoinServerDialog) statusLine() fyne.CanvasObject {
-	return container.NewBorder(nil, nil, HorizontalSpacer(fynetheme.InnerPadding()), nil, d.status)
+// newDialogCard is the surface those cards are drawn on.
+func newDialogCard() *canvas.Rectangle {
+	card := canvas.NewRectangle(theme.Colors.ViewerCardBg)
+	card.CornerRadius = theme.Sizes.JoinDialogCornerRadius
+
+	return card
 }
 
-// inviteEntry is the dialog's single-line field. It handles Escape itself
+// dialogStatus is the line a card reports its own outcome on, a second dialog
+// stacked over the modal layer being one that covers the field it is about. It is
+// mounted empty rather than added on demand, so the card does not jump when a
+// message appears.
+type dialogStatus struct{ text *canvas.Text }
+
+func newDialogStatus() dialogStatus {
+	return dialogStatus{text: newText("", theme.Colors.TimestampText, theme.Sizes.JoinDialogTextSize)}
+}
+
+// row indents the line to meet the labels around it, which carry the widget inner
+// padding a raw canvas.Text does not.
+func (s dialogStatus) row() fyne.CanvasObject {
+	return container.NewBorder(nil, nil, HorizontalSpacer(fynetheme.InnerPadding()), nil, s.text)
+}
+
+func (s dialogStatus) set(message string, fill color.Color) {
+	s.text.Text = message
+	s.text.Color = fill
+	s.text.Refresh()
+}
+
+/* Prompt dialog */
+
+// PromptField is one line of a prompt: what to call it, what stands in it while
+// it is empty, and whether what is typed should be hidden.
+type PromptField struct {
+	Label       string
+	Placeholder string
+
+	// Password masks the field. Nothing keeps what is typed into one: it is sent
+	// with the request that needed it and dropped with the card.
+	Password bool
+}
+
+// Prompt asks for what a request needs and nothing else: a field per answer, one
+// button, and what to do with what is typed. Creating a server is a name alone —
+// Revolt takes no icon at creation — and changing a username is why it takes more
+// than one, Revolt asking for the account password with it.
+type Prompt struct {
+	Title  string
+	Action string // the button, and what the status line says it is doing
+	Busy   string
+
+	Fields []PromptField
+
+	// OnSubmit takes what was typed, in the fields' own order, on the UI thread.
+	// Whoever supplies it owns the request, so the dialog says only that one is out
+	// — the caller closes it or reports through Fail. Not called until every field
+	// has something in it, so the values are as long as Fields and none is empty.
+	OnSubmit func(values []string)
+}
+
+// PromptDialog is that card: the join dialog's shape with one section instead of
+// three.
+type PromptDialog struct {
+	// Content is the card to hand to the modal layer, and Entry the field to focus
+	// once it is up — the first one, the rest reached with Tab.
+	Content fyne.CanvasObject
+	Entry   fyne.Focusable
+
+	status dialogStatus
+	action *widget.Button
+}
+
+// NewPromptDialog builds the card. onClose dismisses the modal layer.
+func NewPromptDialog(prompt Prompt, onClose func()) *PromptDialog {
+	d := &PromptDialog{}
+
+	rows := []fyne.CanvasObject{dialogHeader(prompt.Title, onClose), widget.NewSeparator()}
+	entries := make([]*modalEntry, 0, len(prompt.Fields))
+
+	for _, field := range prompt.Fields {
+		entry := newModalEntry(onClose)
+		entry.SetPlaceHolder(field.Placeholder)
+		entry.Password = field.Password
+
+		// Guarded, unlike a click: OnTapped bypasses the button's own disabled check,
+		// so Enter during an in-flight request would send it twice.
+		entry.OnSubmitted = func(string) {
+			if !d.action.Disabled() {
+				d.action.OnTapped()
+			}
+		}
+
+		entries = append(entries, entry)
+		rows = append(rows, widget.NewLabel(field.Label), WithCaret(entry))
+	}
+	if len(entries) > 0 {
+		d.Entry = entries[0]
+	}
+
+	d.status = newDialogStatus()
+
+	d.action = widget.NewButton(prompt.Action, func() {
+		values := promptValues(entries)
+		if values == nil {
+			return
+		}
+
+		d.status.set(prompt.Busy, theme.Colors.TimestampText)
+		d.action.Disable()
+		prompt.OnSubmit(values)
+	})
+
+	rows = append(rows, d.status.row(), d.action)
+	body := NewMinWidthContainer(theme.Sizes.JoinDialogWidth, container.NewPadded(container.NewVBox(rows...)))
+
+	d.Content = newTapSink(container.NewStack(newDialogCard(), body))
+
+	return d
+}
+
+// promptValues is what the fields hold, or nothing while any is empty: a card is
+// answered whole, a half-answered request being refused for a reason the reader
+// can see for themselves.
+func promptValues(entries []*modalEntry) []string {
+	values := make([]string, len(entries))
+
+	for i, entry := range entries {
+		if entry.Text == "" {
+			return nil
+		}
+		values[i] = entry.Text
+	}
+
+	return values
+}
+
+// Fail reports a failed request and re-enables the button, so the text can be
+// corrected and sent again. Call on the UI thread.
+func (d *PromptDialog) Fail(message string) {
+	d.status.set(message, theme.Colors.ErrorText)
+	d.action.Enable()
+}
+
+// modalEntry is a single-line field on the modal layer. It handles Escape itself
 // because a focused entry is the end of the line for key events: Fyne routes them
-// to the focused widget and never reaches the canvas handler the modal layer uses
-// to dismiss on Escape.
-type inviteEntry struct {
+// to the focused widget and never reaches the canvas handler the layer dismisses on.
+type modalEntry struct {
 	widget.Entry
 	onCancel func()
 }
 
-func newInviteEntry(onCancel func()) *inviteEntry {
-	e := &inviteEntry{onCancel: onCancel}
+func newModalEntry(onCancel func()) *modalEntry {
+	e := &modalEntry{onCancel: onCancel}
 	e.ExtendBaseWidget(e)
 
 	return e
 }
 
-func (e *inviteEntry) TypedKey(key *fyne.KeyEvent) {
+func (e *modalEntry) TypedKey(key *fyne.KeyEvent) {
 	if key.Name == fyne.KeyEscape {
 		if e.onCancel != nil {
 			e.onCancel()

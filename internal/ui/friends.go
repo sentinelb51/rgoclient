@@ -1,13 +1,11 @@
 package ui
 
-// The friends list: the row at the top of the home sidebar, and the dialog it
-// opens. Revolt has no collection of relationships to fetch — each one is filed
-// on the person it is with — so the controller resolves them and this draws what
-// it is handed.
-//
-// The dialog refills in place rather than being rebuilt. Accepting a request is
-// the one action here whose whole result is the list changing under it, and a
-// dialog that closed to show that would take the rest of the answers with it.
+// The friends list: the row at the top of the home sidebar and the dialog it
+// opens. Revolt has no collection of relationships to fetch — each is filed on
+// the person it is with — so the controller resolves them and this draws what it
+// is handed. The dialog refills in place: accepting a request is an action whose
+// whole result is the list moving, and closing to show that would take the rest
+// of the answers with it.
 
 import (
 	"image/color"
@@ -25,10 +23,9 @@ import (
 
 /* The sidebar row */
 
-// FriendsRow is the way into the friends list, drawn above the conversations in
-// the home sidebar. It marks itself the way an unread channel does when requests
-// are waiting, that being the only part of the list somebody is owed an answer
-// on.
+// FriendsRow is the way into the friends list, above the conversations in the
+// home sidebar. It marks itself as an unread channel does while requests are
+// waiting, that being the only part of the list owed an answer.
 type FriendsRow struct {
 	tapBase
 
@@ -46,8 +43,7 @@ var (
 
 // NewFriendsRow creates the sidebar row.
 func NewFriendsRow(onTap func()) *FriendsRow {
-	label := canvas.NewText("Friends", theme.Colors.CategoryText)
-	label.TextSize = theme.Sizes.ChannelLabelSize
+	label := newText("Friends", theme.Colors.CategoryText, theme.Sizes.ChannelLabelSize)
 
 	w := &FriendsRow{
 		background: canvas.NewRectangle(color.Transparent),
@@ -60,9 +56,8 @@ func NewFriendsRow(onTap func()) *FriendsRow {
 	return w
 }
 
-// SetPending marks the row while friend requests are waiting on an answer.
-// Unchanged state is a no-op, so a sidebar-wide sync costs nothing for a row that
-// did not move.
+// SetPending marks the row while friend requests are waiting on an answer. A
+// no-op when unchanged, so a sidebar-wide sync costs nothing for a row that held.
 func (w *FriendsRow) SetPending(pending bool) {
 	if w.pending == pending {
 		return
@@ -78,11 +73,10 @@ func (w *FriendsRow) CreateRenderer() fyne.WidgetRenderer {
 	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
 	w.refreshAppearance()
 
-	// The marker slot, the left padding and the glyph are the channel row's, so the
-	// two line up down the column despite being different widgets. The slot is as
-	// wide as a *selection* marker even though nothing here draws one: a channel row
-	// stacks the two markers and takes the wider, so a slot sized to the pending bar
-	// alone would stand every row above the conversations two pixels to the left.
+	// The marker slot, the padding and the glyph are the channel row's, so the two
+	// line up despite being different widgets. The slot is as wide as a *selection*
+	// marker though nothing here draws one: a channel row stacks both and takes the
+	// wider, so sizing to the pending bar alone would shift this row two pixels left.
 	leading := container.NewHBox(
 		container.NewStack(HorizontalSpacer(theme.Sizes.SelectionMarkerWidth), container.NewHBox(w.pendingBar)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
@@ -118,10 +112,9 @@ func (w *FriendsRow) MouseOut() { w.refreshAppearance() }
 
 /* The dialog */
 
-// FriendEntry is one person in the list. Buttons are the same ProfileButton a
-// card offers, built by the same controller policy — what applies to somebody is
-// a question about the relationship, and asking it twice is how two surfaces
-// come to disagree.
+// FriendEntry is one person in the list. Buttons are the ProfileButtons a card
+// offers, built by the same controller policy — what applies to somebody is a
+// question about the relationship, and asking it twice is how surfaces disagree.
 type FriendEntry struct {
 	UserID    string
 	Name      string
@@ -136,10 +129,9 @@ type FriendSection struct {
 	Title   string
 	Entries []FriendEntry
 
-	// Awaiting marks a section somebody is owed an answer on, which is the only
-	// place a row draws its first button emphasised. Everywhere else the heading
-	// has already said what the row is about, and a coloured slab per row would
-	// be the loudest thing in a list that is mostly read rather than acted on.
+	// Awaiting marks a section owed an answer, the only place a row emphasises its
+	// first button. Elsewhere the heading has already said what the row is about,
+	// and a coloured slab per row would be the loudest thing in a list mostly read.
 	Awaiting bool
 }
 
@@ -163,37 +155,32 @@ func NewFriendsDialog(deps Deps, onUser func(userID string, anchor fyne.CanvasOb
 	d := &FriendsDialog{
 		deps:   deps,
 		list:   VBoxNoSpacing(),
-		empty:  canvas.NewText("Nobody yet. Add somebody from their profile.", theme.Colors.TimestampText),
+		empty:  newText("Nobody yet. Add somebody from their profile.", theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize),
 		onUser: onUser,
 	}
-	d.empty.TextSize = theme.Sizes.FriendsHandleSize
 	d.empty.Hide()
 
-	card := canvas.NewRectangle(theme.Colors.ViewerCardBg)
-	card.CornerRadius = theme.Sizes.JoinDialogCornerRadius
-
-	// The scroller cannot be asked how tall it wants to be — container.Scroll
-	// reports its own current height as its minimum — so the list is measured and
-	// the ceiling applied here.
+	// The scroller cannot be asked how tall it wants to be — container.Scroll reports
+	// its own current height as its minimum — so the list is measured and the ceiling
+	// applied here.
 	viewport := container.New(
 		&cappedHeightLayout{content: d.list, max: theme.Sizes.FriendsListMaxHeight},
 		NewPlainVScroll(d.list))
 
 	body := VBoxNoSpacing(
-		d.header(onClose),
+		dialogHeader("Friends", onClose),
 		NewInset(VBoxNoSpacing(d.empty, viewport), 0, pad, pad, pad),
 	)
 
 	// Fixed rather than minimum width, as a profile card is: every row shortens to
-	// the width it is given, so no name can widen the dialog.
-	d.Content = newTapSink(NewFixedWidthContainer(width, container.NewStack(card, body)))
+	// what it is given, so no name can widen the dialog.
+	d.Content = newTapSink(NewFixedWidthContainer(width, container.NewStack(newDialogCard(), body)))
 
 	return d
 }
 
-// SetSections replaces the whole list. The dialog is on a centred layer sized
-// from its own minimum, so the caller repositions the overlay afterwards — a
-// section gained or lost changes the card's height. Call on the UI thread.
+// SetSections replaces the whole list. A section gained or lost changes the
+// card's height, so the caller repositions the overlay. Call on the UI thread.
 func (d *FriendsDialog) SetSections(sections []FriendSection) {
 	rows := make([]fyne.CanvasObject, 0, len(sections)*2)
 	for _, section := range sections {
@@ -213,29 +200,14 @@ func (d *FriendsDialog) SetSections(sections []FriendSection) {
 	d.list.Objects = rows
 	d.list.Refresh()
 
-	if len(rows) == 0 {
-		d.empty.Show()
-	} else {
-		d.empty.Hide()
-	}
+	showIf(d.empty, len(rows) == 0)
 }
 
-// header is the title row, laid out as the join dialog's is: the heading centred
-// across the whole card with the close button over its right edge, so the button
-// does not shift the title off centre.
-func (d *FriendsDialog) header(onClose func()) fyne.CanvasObject {
-	title := widget.NewLabelWithStyle("Friends", fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
-	closeButton := container.NewBorder(nil, nil, nil, container.NewCenter(NewCloseButton(onClose)))
-
-	return container.NewStack(title, closeButton)
-}
-
-// caption names a section and counts it. The count is what says whether the
-// heading is worth reading before the rows under it are.
+// caption names a section and counts it — the count says whether the heading is
+// worth reading before the rows under it are.
 func (d *FriendsDialog) caption(section FriendSection) fyne.CanvasObject {
-	text := canvas.NewText(section.Title+" — "+strconv.Itoa(len(section.Entries)), theme.Colors.TimestampText)
-	text.TextSize = theme.Sizes.FriendsSectionSize
-	text.TextStyle = fyne.TextStyle{Bold: true}
+	text := newBoldText(section.Title+" — "+strconv.Itoa(len(section.Entries)),
+		theme.Colors.TimestampText, theme.Sizes.FriendsSectionSize)
 
 	return NewInset(text, theme.Sizes.FriendsGap, theme.Sizes.FriendsGap, 0, 0)
 }
@@ -247,16 +219,11 @@ func (d *FriendsDialog) row(entry FriendEntry, awaiting bool) fyne.CanvasObject 
 	side := theme.Sizes.FriendsAvatarSize
 	avatar := circularAvatar(d.deps.Images, entry.AvatarURL, fyne.NewSize(side, side))
 
-	name := canvas.NewText(entry.Name, theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.FriendsNameSize
-	name.TextStyle = fyne.TextStyle{Bold: true}
+	name := newBoldText(entry.Name, theme.Colors.TextPrimary, theme.Sizes.FriendsNameSize)
+	handle := newText(entry.Handle, theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
 
-	handle := canvas.NewText(entry.Handle, theme.Colors.TimestampText)
-	handle.TextSize = theme.Sizes.FriendsHandleSize
-
-	// Spacers rather than a Center: an ellipsis box reports no width of its own —
-	// it shortens to whatever it is given — so centring it would hand it nothing
-	// and the name would be truncated away entirely.
+	// Spacers rather than a Center: an ellipsis box reports no width of its own, so
+	// centring would hand it nothing and truncate the name away entirely.
 	identity := container.NewVBox(
 		layout.NewSpacer(),
 		NewEllipsisText(name),
@@ -286,13 +253,10 @@ func (d *FriendsDialog) row(entry FriendEntry, awaiting bool) fyne.CanvasObject 
 }
 
 // cappedHeightLayout hands its children the room it is given and reports the
-// content's own minimum height up to a ceiling, past which the scroller wrapping
-// it takes over. The content is measured rather than the child, because the child
-// is that scroller and a scroller has no opinion about its height.
-//
-// The ceiling is a field rather than a theme lookup: the emoji picker mounts one
-// of these too, and a shared layout reading one surface's size would cap the
-// other at it.
+// content's minimum height up to a ceiling, past which the scroller takes over.
+// The *content* is measured rather than the child, the child being that scroller
+// and a scroller having no opinion about its height. The ceiling is a field
+// rather than a theme lookup: three surfaces mount one of these.
 type cappedHeightLayout struct {
 	content fyne.CanvasObject
 	max     float32

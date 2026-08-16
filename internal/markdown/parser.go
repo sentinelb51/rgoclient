@@ -23,9 +23,7 @@ func PlainText(nodes []Inline) string {
 }
 
 // DocumentText returns a whole document as one run of unformatted text, blocks
-// joined by a space. It is for a preview with room for a sentence rather than a
-// body — a profile card's bio — where the formatting would only get in the way
-// of the words.
+// joined by a space — for a preview with room for a sentence rather than a body.
 func DocumentText(doc *Document) string {
 	var b strings.Builder
 	writeBlocks(&b, doc.Blocks)
@@ -34,33 +32,34 @@ func DocumentText(doc *Document) string {
 }
 
 // Links reports every URL a document links to, in reading order and with
-// duplicates kept — a masked [label](url), a bracketed <url> and a bare one in
-// running text all parse to a Link, so all three are reported alike.
+// duplicates kept — masked, bracketed and bare URLs all parse to a Link.
 //
 // Walking the tree rather than scanning the source is the point: a URL inside a
 // code span or a fenced block is text somebody wrote about a link, not a link,
 // and nothing there is a Link node to find.
 func Links(doc *Document) []string {
 	var found []string
-	collectLinks(&found, doc.Blocks)
+	eachInline(doc.Blocks, func(nodes []Inline) { collectInlineLinks(&found, nodes) })
 
 	return found
 }
 
-func collectLinks(found *[]string, blocks []Block) {
+// eachInline visits every run of inline content in blocks, in reading order,
+// descending into quotes and list items.
+func eachInline(blocks []Block, visit func([]Inline)) {
 	for _, block := range blocks {
 		switch v := block.(type) {
 		case *Paragraph:
-			collectInlineLinks(found, v.Children)
+			visit(v.Children)
 		case *Heading:
-			collectInlineLinks(found, v.Children)
+			visit(v.Children)
 		case *Subtext:
-			collectInlineLinks(found, v.Children)
+			visit(v.Children)
 		case *Blockquote:
-			collectLinks(found, v.Blocks)
+			eachInline(v.Blocks, visit)
 		case *List:
 			for _, item := range v.Items {
-				collectInlineLinks(found, item.Children)
+				visit(item.Children)
 			}
 		}
 	}
@@ -80,9 +79,7 @@ func collectInlineLinks(found *[]string, nodes []Inline) {
 		case *Strike:
 			collectInlineLinks(found, v.Children)
 		case *Spoiler:
-			// A spoiler's whole purpose is that its contents are not read until
-			// somebody asks, so a link inside one is deliberately not reported: a
-			// card unfurled from it would say what the spoiler was hiding.
+			// Not reported: a card unfurled from a spoiler would say what it hides.
 		}
 	}
 }
@@ -140,19 +137,17 @@ func writePlain(b *strings.Builder, nodes []Inline) {
 		case *Link:
 			writePlain(b, v.Children)
 		case *UserMention:
-			// No session here to turn the ID into a name, and the raw token would be
-			// worse than nothing in a preview, so the marker alone stands in.
+			// No session here to name the ID, and the raw token would read worse than
+			// nothing, so the marker alone stands in.
 			b.WriteByte('@')
 		case *ChannelMention:
 			b.WriteByte('#')
 		case *Emoji:
-			// Nothing stands in for one. Its name lives on the server, this package
-			// has no session to ask, and the ID is 26 characters of noise in a line
-			// that was asked for because there was no room for the message.
+			// Nothing stands in: the name lives on the server and the ID is 26
+			// characters of noise in a line asked for because space was short.
 		case *Timestamp:
-			// The reader's clock format and their "2 hours ago" are the renderer's to
-			// decide (util.MessageTimestamp), so a preview takes the plainest reading
-			// of the same instant rather than the one the body will show.
+			// The reader's clock format is the renderer's to decide, so a preview
+			// takes the plainest reading of the instant.
 			b.WriteString(v.Time.Local().Format("2 Jan 2006 15:04"))
 		}
 	}
@@ -586,9 +581,8 @@ func matchInline(s string, prevWord bool) (Inline, int) {
 const mentionIDMaxLen = 64
 
 // matchAngle matches what opens with '<': a mention, a timestamp, or a bracketed
-// URL. A future kind of mention — a role, a server — is one more case here and one
-// more node in markdown.go; the ID rule and everything downstream is already
-// shared.
+// URL. A future kind of mention is one more case here and one more node in
+// markdown.go — the ID rule and everything downstream is already shared.
 func matchAngle(s string) (Inline, int) {
 	if len(s) < 2 {
 		return nil, 0
@@ -611,9 +605,8 @@ func matchAngle(s string) (Inline, int) {
 }
 
 // matchReference matches a <@id> or <#id> reference, handing the ID to build.
-// The two differ only in the marker and the node, and the ID must be a non-empty
-// run of alphanumerics either way — so "<@ someone>" and other prose that happens
-// to open with a delimiter stays literal.
+// The ID must be a non-empty run of alphanumerics, so "<@ someone>" and other
+// prose opening with a delimiter stays literal.
 func matchReference(s string, build func(id string) Inline) (Inline, int) {
 	for i := 2; i < len(s) && i-2 <= mentionIDMaxLen; i++ {
 		switch {
@@ -635,12 +628,10 @@ func matchReference(s string, build func(id string) Inline) (Inline, int) {
 // end of the body; anything this long is not an instant anybody meant.
 const timestampMaxDigits = 20
 
-// matchTimestamp matches a <t:1700000000> or <t:1700000000:F> instant.
-//
-// The style is validated against the letters Revolt defines rather than taken
-// verbatim, because an unknown one has no rendering to fall back to: drawing it
-// as the default would silently show the wrong face of the same instant, where
-// leaving the whole thing literal shows what the author actually typed.
+// matchTimestamp matches a <t:1700000000> or <t:1700000000:F> instant. The style
+// is validated rather than taken verbatim: an unknown one has no rendering to
+// fall back to, and the default would silently show the wrong face of the
+// instant where staying literal shows what the author typed.
 func matchTimestamp(s string) (Inline, int) {
 	if !strings.HasPrefix(s, "<t:") {
 		return nil, 0
@@ -680,8 +671,7 @@ func matchTimestamp(s string) (Inline, int) {
 }
 
 // isTimestampStyle reports whether b names one of the faces an instant can be
-// drawn as: short and long clock times, a numeric and a written date, both
-// together with and without the weekday, and the relative one.
+// drawn as.
 func isTimestampStyle(b byte) bool {
 	switch b {
 	case 't', 'T', 'd', 'D', 'f', 'F', 'R':

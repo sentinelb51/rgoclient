@@ -9,6 +9,7 @@ package client
 
 import (
 	"log"
+	"slices"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -158,13 +159,10 @@ type UserUpdated struct {
 	UserID string
 }
 
-// RelationshipChanged names somebody this account now stands differently with:
-// a friend request either way, an unfriending, a block or an unblock.
-//
-// Like TypingChanged it exists because no store answers for it on its own —
-// revoltgo registers no default handler for the event and State's caches are
-// unexported, so the client records the new value itself and this only names who
-// it was about. Ask Store.User afterwards.
+// RelationshipChanged names somebody this account now stands differently with.
+// revoltgo registers no default handler and State's caches are unexported, so
+// the client records the new value itself and this only names who it was about.
+// Ask Store.User afterwards.
 type RelationshipChanged struct {
 	UserID string
 }
@@ -253,27 +251,26 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.applyPinEvent(epoch, message)
 	})
 
+	// Only the fields whose absent state reads the same as their zero one are
+	// taken: EventMessageUpdate.Data is a whole Message, not a partial.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageUpdate) {
-		current := c.messages.Find(event.Channel, event.ID)
-		if current == nil {
-			return
-		}
+		changed := c.reviseMessage(event.Channel, event.ID, func(message *domain.Message) bool {
+			if event.Data.Content != "" {
+				message.Content = event.Data.Content
+			}
+			if event.Data.Edited != nil {
+				message.Edited = event.Data.Edited
+			}
+			if event.Data.Embeds != nil {
+				message.Embeds = toEmbeds(event.Data.Embeds)
+			}
 
-		// Cached messages are read without the cache lock, so they stay immutable:
-		// the edit goes onto a copy that replaces the original.
-		updated := *current
-		if event.Data.Content != "" {
-			updated.Content = event.Data.Content
-		}
-		if event.Data.Edited != nil {
-			updated.Edited = event.Data.Edited
-		}
-		if event.Data.Embeds != nil {
-			updated.Embeds = toEmbeds(event.Data.Embeds)
-		}
-		c.messages.Replace(event.Channel, &updated)
+			return true
+		})
 
-		c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
+		if changed {
+			c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
+		}
 	})
 
 	// A link is unfurled after the message carrying it has been delivered, and the
@@ -285,18 +282,16 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 			return
 		}
 
-		current := c.messages.Find(event.Channel, event.ID)
-		if current == nil {
-			return
+		changed := c.reviseMessage(event.Channel, event.ID, func(message *domain.Message) bool {
+			// A new slice, so a reader holding the earlier message sees what it had.
+			message.Embeds = slices.Concat(message.Embeds, embeds)
+
+			return true
+		})
+
+		if changed {
+			c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
 		}
-
-		// As above: the append goes onto a copy, and the slice is a new one, so a
-		// reader holding the earlier message keeps seeing what it already had.
-		updated := *current
-		updated.Embeds = append(append(make([]*domain.Embed, 0, len(current.Embeds)+len(embeds)), current.Embeds...), embeds...)
-		c.messages.Replace(event.Channel, &updated)
-
-		c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageDelete) {
@@ -313,13 +308,10 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, MessageDeleted{ChannelID: event.Channel, MessageIDs: event.IDs})
 	})
 
-	// Both halves are registered for the reason the typing pair is: EventMessageUnreact
-	// *embeds* EventMessageReact rather than aliasing it, so the fields are promoted
-	// but one handler does not answer for the other. ID is the message.
-	//
-	// Nothing is emitted for a reaction this account has already recorded — our own
-	// goes into the cache when the server accepts it, so the echo that follows is
-	// what applyReaction reports as nothing moved.
+	// Both halves are registered because EventMessageUnreact *embeds* the react
+	// event rather than aliasing it, so one handler does not answer for the other.
+	// ID is the message. Nothing is emitted for a reaction this account already
+	// recorded — the echo is what applyReaction reports as nothing moved.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageReact) {
 		if c.applyReaction(event.ChannelID, event.ID, event.EmojiID, event.UserID, true) {
 			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
@@ -332,10 +324,8 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		}
 	})
 
-	// One emoji taken off a message wholesale, whoever had chosen it. Taking off
-	// *every* reaction is not this event: Revolt sends that as a message update
-	// carrying an empty map, which cannot be told from an update that never
-	// mentioned reactions — see Client.ClearReactions.
+	// One emoji taken off wholesale, whoever chose it. Taking off *every* reaction
+	// is not this event — see Client.ClearReactions.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageRemoveReaction) {
 		if c.clearReaction(event.ChannelID, event.ID, event.EmojiID) {
 			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
@@ -438,21 +428,16 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	})
 
 	// An account removed from the platform outright. revoltgo's own handler has
-	// already dropped the user, every conversation and group they were in, and
-	// every membership — ignoring the tracking flags, since the account is gone
-	// rather than merely unwatched — so this only names who it was.
+	// already dropped the user, their conversations, groups and memberships, so
+	// this only names who it was.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserPlatformWipe) {
 		log.Printf("user %s removed from the platform", event.UserID)
 
 		c.emit(epoch, UserRemoved{UserID: event.UserID})
 	})
 
-	// Nothing subscribed to this before, so somebody's avatar or display name
-	// changing stayed invisible for the life of the session — and presence never
-	// moved anybody between the member list's sections at all, State's own copy
-	// being kept current with nothing to announce it. revoltgo's default handler
-	// has already applied the change by the time this runs; all that is decided
-	// here is which of the two kinds it was.
+	// revoltgo's default handler has already applied the change by the time this
+	// runs; all that is decided here is which of the two kinds it was.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserUpdate) {
 		presence, identity := userUpdateKinds(event.Data, event.Clear)
 		if presence {
@@ -463,14 +448,10 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		}
 	})
 
-	// A relationship this account is one half of, changed here or anywhere else.
-	// Nothing else keeps one current: Ready fills User.Relationship for everybody it
-	// names and revoltgo registers no default handler for this, so without the
-	// recording below a friend added on a phone stays a stranger here for the life
-	// of the session — and a block would leave the composer open on a conversation
-	// that can no longer be written to.
-	//
-	// The ID on the event is *this* account; the user it carries is the other half.
+	// Nothing else keeps a relationship current past Ready: without the recording
+	// below, a friend added on a phone stays a stranger for the life of the
+	// session and a block leaves the composer open on a dead conversation. The ID
+	// on the event is *this* account; the user it carries is the other half.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserRelationship) {
 		if event.User == nil {
 			return
@@ -480,15 +461,10 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, RelationshipChanged{UserID: event.User.ID})
 	})
 
-	// Both halves are registered because EventChannelStopTyping *embeds* the start
-	// event rather than aliasing it: the fields are promoted, but the handler is
-	// keyed on the concrete type and one does not answer for the other. The ID is
-	// the channel's.
-	//
-	// Neither is gated on the setting that draws them. revoltgo drops an event
-	// before decoding it when nothing is registered for its type, so registering
-	// nothing would be the cheaper answer — but there is no way to unregister
-	// afterwards, and the setting has to be able to change without a reconnect.
+	// Both halves again — EventChannelStopTyping embeds the start event — and the
+	// ID is the channel's. Neither is gated on the setting that draws them:
+	// registering nothing would be cheaper, but there is no way to unregister and
+	// the setting has to change without a reconnect.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStartTyping) {
 		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User, Typing: true})
 	})
@@ -499,16 +475,12 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 }
 
 // applyPinEvent records a pin or unpin announced by an incoming system message,
-// and names the message it moved so a mounted row can redraw. Anything else is a
-// no-op, as is a pin of a message no longer cached.
+// naming the message it moved so a mounted row can redraw.
 //
-// A pin is announced twice over — as this system message, and as a MessageUpdate
-// carrying the new flag — and only this one can be believed.
-// EventMessageUpdate.Data is a whole Message rather than a partial one, so Pinned
-// arrives as a plain bool with no way to tell "now false" from "not mentioned in
-// this update": read there, every ordinary content edit would land as an unpin.
-// The system event names the message and says which of the two happened, which is
-// the whole of what a reader needs.
+// A pin is announced twice over — here and as a MessageUpdate carrying the flag
+// — and only this one can be believed: Data is a whole Message, so Pinned false
+// cannot be told from "not mentioned", and every content edit would read as an
+// unpin.
 func (c *Client) applyPinEvent(epoch uint64, message *domain.Message) {
 	if message.System == nil {
 		return
@@ -529,15 +501,12 @@ func (c *Client) applyPinEvent(epoch uint64, message *domain.Message) {
 
 // userUpdateKinds classifies a partial user update. Both may be true, and two
 // events are emitted rather than one carrying a flag: a reader that has to
-// remember which bits of an event applied to it is a reader that will one day
-// read the wrong one.
+// remember which bits applied to it will one day read the wrong one.
 //
-// Telling the two apart at all is what PartialUser makes possible — every field
-// is nilable and Online is separate from Status, so a presence change is
-// recognisable without comparing the result against what was there before. Clear
-// names the fields the update *removes*, and a cleared avatar or display name is
-// as much a change as a set one; the rest of what Clear can carry is profile
-// text, which nothing mounted draws.
+// PartialUser is what makes telling them apart possible — every field nilable,
+// Online separate from Status — so a presence change is recognisable without
+// diffing against what was there. Clear names what the update *removes*, and a
+// cleared avatar or display name is as much a change as a set one.
 func userUpdateKinds(data revoltgo.PartialUser, clear []string) (presence, identity bool) {
 	// Status is taken as presence whatever moved inside it. It carries the
 	// presence and the status line together, and re-reading is cheap where

@@ -11,7 +11,6 @@ package client
 import (
 	"image/color"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/sentinelb51/revoltgo"
@@ -507,33 +506,43 @@ func colorStops(s string) []color.Color {
 	return stops
 }
 
-// parseHexTriple parses the digits of "RGB" or "RRGGBB", without their '#'.
+// parseHexTriple parses the digits of "RGB" or "RRGGBB", without their '#'. It
+// reads nibbles directly rather than going through strconv: every role colour in
+// a server passes through here on each Members walk.
 func parseHexTriple(hex string) (color.Color, bool) {
-	parse := func(h string) (uint8, bool) {
-		v, err := strconv.ParseUint(h, 16, 8)
-		return uint8(v), err == nil
-	}
+	var r, g, b int
 
 	switch len(hex) {
-	case 3: // #RGB -> #RRGGBB
-		r, okR := parse(hex[0:1] + hex[0:1])
-		g, okG := parse(hex[1:2] + hex[1:2])
-		b, okB := parse(hex[2:3] + hex[2:3])
-		if okR && okG && okB {
-			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
-		}
-	case 6: // #RRGGBB
-		r, okR := parse(hex[0:2])
-		g, okG := parse(hex[2:4])
-		b, okB := parse(hex[4:6])
-		if okR && okG && okB {
-			return color.NRGBA{R: r, G: g, B: b, A: 255}, true
-		}
+	case 3: // #RGB -> #RRGGBB, each nibble doubled
+		r, g, b = hexNibble(hex[0])*17, hexNibble(hex[1])*17, hexNibble(hex[2])*17
+	case 6:
+		r = hexNibble(hex[0])<<4 | hexNibble(hex[1])
+		g = hexNibble(hex[2])<<4 | hexNibble(hex[3])
+		b = hexNibble(hex[4])<<4 | hexNibble(hex[5])
+	default:
+		return nil, false
 	}
 
-	return nil, false
+	if r < 0 || g < 0 || b < 0 {
+		return nil, false
+	}
+
+	return color.NRGBA{R: uint8(r), G: uint8(g), B: uint8(b), A: 255}, true
 }
 
-func isHexDigit(b byte) bool {
-	return b >= '0' && b <= '9' || b >= 'a' && b <= 'f' || b >= 'A' && b <= 'F'
+// hexNibble is a hex digit's value, or -1. A negative propagates through the
+// shifts above, so one test covers all six digits.
+func hexNibble(b byte) int {
+	switch {
+	case b >= '0' && b <= '9':
+		return int(b - '0')
+	case b >= 'a' && b <= 'f':
+		return int(b-'a') + 10
+	case b >= 'A' && b <= 'F':
+		return int(b-'A') + 10
+	}
+
+	return -1
 }
+
+func isHexDigit(b byte) bool { return hexNibble(b) >= 0 }

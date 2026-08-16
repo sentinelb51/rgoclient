@@ -1,14 +1,12 @@
 package app
 
-// User profiles. Clicking a message avatar or a member row opens the compact
-// card beside it, and the card expands into the full dialog on the modal layer.
-// Both are drawn from one domain.Profile resolved out of the store here, so the
-// widgets never look anything up themselves.
+// User profiles. Clicking an avatar or a member row opens the compact card beside
+// it, and the card expands into the dialog on the modal layer. Both are drawn
+// from one domain.Profile resolved here, so the widgets look nothing up.
 //
-// The bio and the banner are the exception. Neither is part of the user record
-// the client already holds, so both are fetched after the card is up and filled
-// in when they land — which is why a card is a value plus one late arrival
-// rather than a snapshot.
+// The bio and the banner are the exception: neither is part of the user record,
+// so both are fetched after the card is up and filled in when they land — which
+// is why a card is a value plus a late arrival rather than a snapshot.
 
 import (
 	"log"
@@ -58,10 +56,9 @@ func (a *App) showProfileDialog(userID string) {
 
 /* Resolving one */
 
-// profileOf assembles a profile from what the client already knows. A user the
-// store has never heard of still gets a card — with what little is known, and
-// their resolution queued so a second look shows the real thing — because a click
-// that does nothing is worse than a card that is thin.
+// profileOf assembles a profile from what the client already knows. An unknown
+// user still gets a card — thin, with their resolution queued so a second look
+// shows the real thing — because a click that does nothing is worse.
 func (a *App) profileOf(userID string) domain.Profile {
 	profile := domain.Profile{UserID: userID, Name: "Unknown user"}
 	if created, err := util.Timestamp(userID); err == nil {
@@ -83,9 +80,9 @@ func (a *App) profileOf(userID string) domain.Profile {
 	profile.Relationship = user.Relationship
 	profile.Bot = user.Bot
 
-	// The server the profile was opened in is what makes them a member: the
-	// nickname, the per-server avatar, the role colour and the join date all
-	// belong to that membership, and none of them exists in a conversation.
+	// The server the profile was opened in is what makes them a member: nickname,
+	// per-server avatar, role colour and join date all belong to that membership,
+	// and none exists in a conversation.
 	server, ok := a.currentServer()
 	if !ok {
 		return profile
@@ -111,8 +108,8 @@ func (a *App) loadProfile(userID string, card *ui.ProfileCard) {
 	go func() {
 		profile, err := a.client.UserProfile(userID)
 		if err != nil {
-			// A profile reads perfectly well without either, and a notice over the card
-			// would be louder than the miss is worth — so this only reaches the log.
+			// A profile reads well without either, and a notice over the card would be
+			// louder than the miss is worth.
 			log.Printf("fetch profile %s: %v", userID, err)
 			return
 		}
@@ -131,12 +128,10 @@ func (a *App) loadProfile(userID string, card *ui.ProfileCard) {
 	}()
 }
 
-// loadMutual fetches the servers and friends the two accounts have in common and
-// fills them into the dialog. The dialog only — the compact card names somebody,
-// and a second request per avatar click is not what naming them costs.
-//
-// Nothing is asked about this account: everything is in common with yourself, and
-// Revolt refuses the route for it anyway.
+// loadMutual fetches what the two accounts have in common and fills it into the
+// dialog — the dialog only, the compact card naming somebody rather than costing
+// a second request per avatar click. Nothing is asked about this account:
+// everything is in common with yourself, and Revolt refuses the route anyway.
 func (a *App) loadMutual(userID string, card *ui.ProfileCard) {
 	if userID == a.store.SelfID() {
 		return
@@ -166,14 +161,11 @@ func (a *App) loadMutual(userID string, card *ui.ProfileCard) {
 }
 
 // mutualProfile resolves what the two accounts have in common into what the
-// dialog draws: a name and where it leads, plus the totals, since somebody the
-// store cannot name is still one of the people in common and the card's "+n" is
-// what has to account for them.
-//
-// Both destinations replace what is on the modal layer rather than stacking on
-// it. A server is behind the dialog, so the dialog goes; another profile is the
-// same surface with somebody else in it, which is what makes the mutual friends
-// worth walking rather than only counting.
+// dialog draws: a name and where it leads, plus the totals — somebody the store
+// cannot name is still one of the people in common, and the "+n" accounts for
+// them. Both destinations replace what is on the modal layer rather than stacking:
+// a server is behind the dialog, and another profile is this surface with somebody
+// else in it.
 func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
 	resolved := ui.MutualProfile{
 		ServerCount: len(mutual.ServerIDs),
@@ -211,20 +203,19 @@ func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
 
 /* What a profile offers to do */
 
-// profileButtons is what a card offers to do about somebody. It is decided here
-// rather than in the widget because the answer is entirely a question about the
-// relationship, and a card has no business knowing Revolt's states.
+// profileButtons is what a card offers to do about somebody — decided here rather
+// than in the widget, the answer being a question about the relationship and a
+// card having no business knowing Revolt's states.
 //
-// "Message" is deliberately not always offered. Revolt will not open a
-// conversation with a stranger, so a button that could only fail is worse than
-// the one that leads somewhere — asking to be friends first. A bot is the
-// exception it has to be: nobody befriends one, and writing to it is the whole
-// of what it is for.
+// "Message" is not always offered: Revolt will not open a conversation with a
+// stranger, so a button that could only fail is worse than the one leading
+// somewhere. A bot is the exception — nobody befriends one, and writing to it is
+// what it is for.
 //
-// Copying the ID is added here rather than in relationshipButtons because it is
-// the one thing a card offers about *anybody*, this account included, where the
-// relationship policy answers with nothing for yourself. The friends list is
-// spared it: a row already leads to the profile that carries it.
+// Copying the ID is added here rather than in relationshipButtons: it is the one
+// thing offered about *anybody*, this account included, where the relationship
+// policy answers with nothing for yourself. The friends list is spared it, a row
+// already leading to the profile that carries it.
 func (a *App) profileButtons(profile domain.Profile) []ui.ProfileButton {
 	buttons := a.relationshipButtons(profile, a.closeOverlay)
 
@@ -243,17 +234,16 @@ func (a *App) profileButtons(profile domain.Profile) []ui.ProfileButton {
 	})
 }
 
-// copied is the receipt for a clipboard write the user cannot see happen. what
-// names the thing rather than quoting it: a handle read back in a notice is the
-// same string twice, and an ID is 26 characters nobody reads.
+// copied is the receipt for a clipboard write nobody can see happen. what *names*
+// the thing rather than quoting it: a handle read back is the same string twice,
+// and an ID is 26 characters nobody reads.
 func (a *App) copied(what string) {
 	a.notify(ui.ToneInfo, "%s copied.", what)
 }
 
 // relationshipButtons is that policy with the way out left open. A card is taken
-// down before it acts, since a profile does not refresh while it is up; the
-// friends list stays and refills instead, one row changing being the whole result
-// of acting on it.
+// down before it acts, a profile not refreshing while it is up; the friends list
+// stays and refills instead, one row changing being the whole result.
 func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.ProfileButton {
 	userID, name := profile.UserID, profile.Name
 	if userID == "" || userID == a.store.SelfID() {
@@ -268,8 +258,8 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		return []ui.ProfileButton{message}
 	}
 
-	// Every action here settles the surface that raised it before it fires, so a
-	// button can never be clicked twice against a state the first click changed.
+	// Each settles the surface that raised it before firing, so a button cannot be
+	// clicked twice against a state the first click changed.
 	act := func(label string, danger bool, run func()) ui.ProfileButton {
 		return ui.ProfileButton{Label: label, Danger: danger, Do: func() {
 			done()
@@ -278,9 +268,8 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 	}
 
 	// The two that cannot be taken back by the person they are done to are also the
-	// two nobody opens a profile in order to do, so both are filed behind the card's
-	// hamburger. Everything else is the point of the card it appears on: a request
-	// is answered, a block is lifted, a conversation is opened.
+	// two nobody opens a profile to do, so both go behind the hamburger. Everything
+	// else is the point of the card: a request answered, a block lifted.
 	overflow := func(button ui.ProfileButton, icon fyne.Resource) ui.ProfileButton {
 		button.Overflow, button.Icon = true, icon
 
@@ -298,17 +287,16 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 			block}
 
 	case domain.RelationshipIncoming:
-		// Neither of these is drawn as destructive, for the same reason neither is
-		// confirmed: a request declined can be sent again, where a friend removed and
-		// a block cannot be taken back by the person they were done to.
+		// Neither is drawn as destructive, for the same reason neither is confirmed: a
+		// declined request can be sent again.
 		return []ui.ProfileButton{
 			act("Accept request", false, func() { a.acceptFriend(userID, name) }),
 			act("Ignore", false, func() { a.removeFriend(userID, name) }),
 		}
 
 	case domain.RelationshipOutgoing:
-		// Nothing to do but wait or withdraw, and a card that left the first out
-		// would read as one that had never been asked.
+		// Nothing to do but wait or withdraw, and a card leaving the first out would
+		// read as one that had never been asked.
 		return []ui.ProfileButton{
 			{Label: "Request sent"},
 			act("Cancel request", false, func() { a.removeFriend(userID, name) }),
@@ -352,12 +340,11 @@ func (a *App) openConversation(userID string) {
 }
 
 // showConversation opens a conversation in the home view, adding its row itself
-// when the DM list hasn't caught up: that list is a fetched snapshot with no
-// gateway event behind it, so one opened a moment ago is not in it yet. Call on
-// the UI thread.
+// when the list has not caught up — that list is a fetched snapshot with no
+// gateway event behind it. Call on the UI thread.
 func (a *App) showConversation(channelID string) {
 	if !slices.Contains(a.dmChannels, channelID) {
-		a.dmChannels = append([]string{channelID}, a.dmChannels...)
+		a.dmChannels = slices.Insert(a.dmChannels, 0, channelID)
 	}
 
 	a.selectHome() // a no-op when home is already open

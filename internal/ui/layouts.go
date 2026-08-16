@@ -3,6 +3,7 @@ package ui
 import (
 	"cmp"
 	"image/color"
+	"slices"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -14,26 +15,28 @@ import (
 
 /* Spacers and fitting */
 
-// HorizontalSpacer returns a fixed-width transparent gap.
+// HorizontalSpacer is a fixed-width transparent gap.
 func HorizontalSpacer(width float32) fyne.CanvasObject {
-	r := canvas.NewRectangle(color.Transparent)
-	r.SetMinSize(fyne.NewSize(width, 0))
-
-	return r
+	return sizedRect(color.Transparent, width, 0)
 }
 
-// VerticalSpacer returns a fixed-height transparent gap.
+// VerticalSpacer is a fixed-height transparent gap.
 func VerticalSpacer(height float32) fyne.CanvasObject {
-	r := canvas.NewRectangle(color.Transparent)
-	r.SetMinSize(fyne.NewSize(0, height))
+	return sizedRect(color.Transparent, 0, height)
+}
+
+// sizedRect is a rectangle with a floor on one axis and none on the other, which
+// is what every spacer and hairline in this package is.
+func sizedRect(fill color.Color, width, height float32) *canvas.Rectangle {
+	r := canvas.NewRectangle(fill)
+	r.SetMinSize(fyne.NewSize(width, height))
 
 	return r
 }
 
-// fitWithin scales width by height down to fit inside maxW by maxH, preserving
-// the aspect ratio; dimensions that already fit come back unchanged. A zero
-// input dimension (metadata the server didn't provide) yields a zero size,
-// leaving the fallback to the caller.
+// fitWithin scales width by height down into maxW by maxH, preserving the aspect
+// ratio; what already fits comes back unchanged. A zero input — metadata the
+// server did not provide — yields a zero size, leaving the fallback to the caller.
 func fitWithin(width, height int, maxW, maxH float32) fyne.Size {
 	w, h := float32(width), float32(height)
 	if w > maxW {
@@ -61,15 +64,13 @@ func HBoxNoSpacing(objects ...fyne.CanvasObject) *fyne.Container {
 }
 
 // NewFillRow lays objects left to right with no gaps, the child at fillIndex
-// absorbing the leftover width while the rest keep their minimum. Used for the
-// flat server | channel | messages | member columns, so the sections sit flush
-// against each other and only the message area stretches.
+// absorbing the leftover width while the rest keep their minimum. It backs the
+// flat server | channel | messages | member row.
 func NewFillRow(fillIndex int, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{horizontal: true, fill: fillIndex}, objects...)
 }
 
-// NewFillColumn stacks objects top to bottom with no gaps, the child at
-// fillIndex absorbing the leftover height. It backs the message area, where the
+// NewFillColumn is the same top to bottom. It backs the message area, where the
 // composer's margin has to be exactly what it asks for: a Border charges theme
 // padding between its centre and each edge slot, so the dock's gap to the
 // messages came out wider than its gap to the window.
@@ -77,10 +78,10 @@ func NewFillColumn(fillIndex int, objects ...fyne.CanvasObject) *fyne.Container 
 	return container.New(&noSpacingLayout{fill: fillIndex}, objects...)
 }
 
-// Relayout re-runs c's own layout and repaints it, without touching its
-// children. Hiding or showing a child does neither on its own, so the vacated
-// slot stays reserved until something else forces a layout; Container.Refresh
-// would reclaim it, but only by walking every descendant.
+// Relayout re-runs c's own layout and repaints it without touching its children.
+// Hiding or showing a child does neither, so the vacated slot stays reserved
+// until something forces a layout — Container.Refresh reclaims it, but only by
+// walking every descendant.
 func Relayout(c *fyne.Container) {
 	if c == nil || c.Layout == nil {
 		return
@@ -96,16 +97,26 @@ func Relayout(c *fyne.Container) {
 type noSpacingLayout struct {
 	horizontal bool
 	fill       int
+
+	// extents holds each child's measurement for the length of one pass, so a fill
+	// layout measures each child once rather than twice. Reused, UI-thread only.
+	extents []float32
 }
 
 func (l *noSpacingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	l.extents = slices.Grow(l.extents[:0], len(objects))
+
 	var fixed float32
-	if l.fill >= 0 {
-		for i, child := range objects {
-			if child.Visible() && i != l.fill {
-				fixed += l.extent(child.MinSize())
+	for i, child := range objects {
+		var extent float32
+		if child.Visible() {
+			extent = l.extent(child.MinSize())
+			if i != l.fill {
+				fixed += extent
 			}
 		}
+
+		l.extents = append(l.extents, extent)
 	}
 
 	var pos float32
@@ -114,7 +125,7 @@ func (l *noSpacingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 			continue
 		}
 
-		extent := l.extent(child.MinSize())
+		extent := l.extents[i]
 		if i == l.fill {
 			extent = max(l.extent(size)-fixed, 0)
 		}
@@ -161,14 +172,11 @@ func (l *noSpacingLayout) extent(size fyne.Size) float32 {
 
 /* Columns */
 
-// columnLayout stacks children in a fixed-width column, each centred
-// horizontally and the group pinned to the top. It backs the message avatar
-// gutter, so the avatar lines up with the author name rather than drifting to
-// the middle of a tall message.
-//
-// With collapse set it reports zero minimum height, so its child can never make
-// the row taller than the content beside it — that is what keeps a grouped
-// message's hover timestamp from stretching a one-line row.
+// columnLayout stacks children in a fixed-width column, centred and pinned to the
+// top. It backs the avatar gutter, so the avatar lines up with the author name
+// rather than drifting to the middle of a tall message. With collapse it reports
+// zero minimum height, so a grouped message's hover timestamp cannot stretch a
+// one-line row.
 type columnLayout struct {
 	width     float32
 	topOffset float32
@@ -207,11 +215,10 @@ func (l *columnLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 /* Overlays */
 
 // NewLayer wraps what is stacked over the main row — the tooltip, the notice
-// stack, the settings page — so that it fills the window and asks nothing of it.
-// A layer is furniture floating over the client, but Fyne grows a window to its
-// content's minimum the frame that minimum outgrows it and never gives the room
-// back, so a layer reporting what it holds resizes the window whenever a long
-// name is hovered or a notice is pushed.
+// stack, the settings page — so it fills the window and asks nothing of it. Fyne
+// grows a window to its content's minimum the frame it outgrows it and never
+// gives the room back, so a layer reporting what it holds would resize the window
+// whenever a long name was hovered or a notice pushed.
 func NewLayer(objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&layerLayout{}, objects...)
 }
@@ -232,9 +239,9 @@ func (l *layerLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 func (l *layerLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Size{} }
 
-// overlayLayout positions children relative to the top-right corner, allowing
-// them to bleed outside the parent (a negative Y). It reports a zero minimum
-// size, so it never affects the parent's layout.
+// overlayLayout positions children against the top-right corner, letting them
+// bleed outside the parent (a negative Y). Zero minimum, so it never affects the
+// parent's layout.
 type overlayLayout struct {
 	yOffset     float32
 	rightOffset float32
@@ -257,43 +264,34 @@ func (l *overlayLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Siz
 /* Docking */
 
 // NewFloatingDock hangs card over the bottom of body, inset by the composer's
-// margin on three sides. Body is laid out *past* the card's top edge rather than
-// stopping above it: a column that ends above a card ends at a hard cut through
-// whatever glyph the viewport landed on, and that cut — not the gap — is what
-// reads as the top of a separate bar. Sliding the content under the card instead
-// puts the cut behind the card, where the only thing left to see is the shadow
-// darkening the content on its way under.
+// margin on three sides. Body is laid out *past* the card's top edge: a column
+// ending above a card ends at a hard cut through whatever glyph the viewport
+// landed on, and that cut — not the gap — is what reads as the top of a separate
+// bar. Sliding the content under puts the cut behind the card.
 //
-// Body stops a corner radius short of the card's bottom edge, since the rounded
-// corners would otherwise leave the cut showing in the two notches beside them.
-// Pair this with NewDockReserve, or the newest content sits under the card with
-// no way to scroll it clear.
+// Body stops a corner radius short of the card's bottom edge, or the rounded
+// corners leave the cut showing in the two notches beside them. Pair with
+// NewDockReserve, or the newest content sits under the card unreachable.
 func NewFloatingDock(body, card fyne.CanvasObject) *fyne.Container {
 	return container.New(&dockLayout{}, body, card)
 }
 
 // DockReserve is the room a floating card takes out of the column it hangs over:
-// the part of the card standing above where the column already stops, plus the
-// gutter the last message comes to rest in.
-//
-// The column is laid out to a corner radius short of the card's *bottom* edge,
-// not to its top — so the card only obscures its own height less that radius.
-// Reserving the full height and a gutter at each end counted the overlap a second
-// time and left the newest message hanging a margin and a radius clear of the
-// card. Whatever rides on top of the card — the slowmode chip — is part of the
-// height measured here, so the message clears that too.
+// the part standing above where the column already stops, plus the gutter the
+// last message rests in. The column runs to a corner radius short of the card's
+// *bottom* edge, so the card obscures its own height less that radius — reserving
+// the full height and a gutter at each end counted the overlap twice. Whatever
+// rides on top of the card is part of the height measured here.
 func DockReserve(card fyne.CanvasObject) float32 {
 	margin, radius := theme.Sizes.ComposerDockMargin, theme.Sizes.ComposerRadius
 
 	return max(card.MinSize().Height+margin-radius, 0)
 }
 
-// NewDockReserve wraps a scroller's content so the bottom of it can still be
-// read: it reports its child's height plus DockReserve, so the last message
-// comes to rest above the card instead of under it. The card is measured on
-// demand rather than pushed in, so one that grows — a reply preview, an
-// attachment row, the mention picker — is accounted for without anything having
-// to notice that it grew.
+// NewDockReserve wraps a scroller's content so its bottom stays readable: it
+// reports the child's height plus DockReserve. The card is measured on demand, so
+// one that grows — a reply preview, an attachment row, the mention picker — is
+// accounted for without anything having to notice.
 func NewDockReserve(content, card fyne.CanvasObject) *fyne.Container {
 	return container.New(&dockReserveLayout{card: card}, content)
 }
@@ -322,10 +320,9 @@ func (l *dockLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return m.Max(fyne.NewSize(card.Width+margin*2, card.Height+margin*2))
 }
 
-// dockReserveLayout pads its single child by the height of the card hanging over
-// it. The padding is on the far side of the child from the card, in the sense
-// that it is the child that shrinks: the container itself is what the scroller
-// measures, so the reserve has to be part of the height it reports.
+// dockReserveLayout shrinks its child by the card's height while reporting the
+// full one: the container is what the scroller measures, so the reserve has to be
+// part of the height it reports.
 type dockReserveLayout struct{ card fyne.CanvasObject }
 
 func (l *dockReserveLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -359,31 +356,25 @@ func NewMinHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.C
 	return container.New(&minSizeLayout{min: fyne.NewSize(0, height)}, objects...)
 }
 
-// NewFixedWidthContainer pins a column to exactly width whatever its contents ask
-// for. The sidebars use it because a vertical scroller reports its content's
-// minimum *width* as its own: without this, one long channel or member name
-// widens the column and shoves the message area sideways. Contrast
-// NewMinWidthContainer, which treats width as a floor and still grows. Content
-// wider than the slot is clipped by the scroller, so pair it with NewEllipsisText
-// on anything holding user-supplied text.
+// NewFixedWidthContainer pins a column to exactly width. The sidebars use it
+// because a vertical scroller reports its content's minimum *width* as its own,
+// so one long name would shove the message area sideways. Contrast
+// NewMinWidthContainer, whose width is a floor. Content wider than the slot is
+// clipped, so pair it with NewEllipsisText on anything user-supplied.
 func NewFixedWidthContainer(width float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&minSizeLayout{min: fyne.NewSize(width, 0), pinWidth: true}, objects...)
 }
 
-// NewFixedHeightContainer pins a slot to exactly height whatever its contents ask
-// for. It is what stops a control that grows on interaction from moving the row
-// it sits in: the settings page swaps a slider's value for a text field when it
-// is clicked, and an entry is half again as tall as the number it replaces.
+// NewFixedHeightContainer pins a slot to exactly height, which is what stops a
+// control that grows on interaction from moving its row: the settings page swaps
+// a slider's value for an entry half again as tall.
 func NewFixedHeightContainer(height float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&minSizeLayout{min: fyne.NewSize(0, height), pinHeight: true}, objects...)
 }
 
-// NewFixedSizeContainer pins a slot to exactly size on both axes, still handing
-// its children whatever room it is given. It is what keeps the message column out
-// of the window's minimum: a Fyne window is grown to its content's minimum size
-// the frame that minimum outgrows it (and is never given the room back), so a
-// column reporting what it holds resizes the window from under the reader every
-// time a wide message is mounted or the composer grows.
+// NewFixedSizeContainer pins both axes while still handing its children whatever
+// room it is given. It keeps the message column out of the window's minimum — see
+// NewLayer for what that costs otherwise.
 func NewFixedSizeContainer(size fyne.Size, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&minSizeLayout{min: size, pinWidth: true, pinHeight: true}, objects...)
 }
@@ -423,14 +414,10 @@ func (l *minSizeLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 /* Flow */
 
-// NewFlow lays children left to right, wrapping onto a new row once the next one
-// would pass width, with spacing between them on both axes. It is what a run of
-// chips — a profile's roles and badges — is laid out with.
-//
-// The width is given rather than measured because MinSize is asked for before
-// the container is handed a width: a row that wrapped only once it was laid out
-// would draw outside the height its parent had already reserved. Callers pass
-// the width they are about to give it, which for a card of fixed width is known.
+// NewFlow lays children left to right, wrapping once the next would pass width —
+// what a run of chips is laid out with. The width is given rather than measured
+// because MinSize is asked before the container has one: a row that wrapped only
+// on layout would draw outside the height its parent had already reserved.
 func NewFlow(width, spacing float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&flowLayout{width: width, spacing: spacing}, objects...)
 }
@@ -457,9 +444,9 @@ func (l *flowLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(width, height)
 }
 
-// arrange walks the visible children in row order, reporting where each one goes
-// and how big it is. Laying out and measuring are the same walk, so the two can
-// never disagree about how many rows the children take.
+// arrange walks the visible children in row order, reporting where each goes.
+// Laying out and measuring are the same walk, so the two cannot disagree about
+// how many rows the children take.
 func (l *flowLayout) arrange(objects []fyne.CanvasObject, place func(fyne.CanvasObject, fyne.Position, fyne.Size)) {
 	var x, y, rowHeight float32
 
@@ -482,14 +469,10 @@ func (l *flowLayout) arrange(objects []fyne.CanvasObject, place func(fyne.Canvas
 
 /* Anchored placement */
 
-// popoverLayout places a single card beside an anchor widget — the profile card
-// a click on an avatar opens next to it. The card takes its minimum size and is
-// kept wholly on screen: it flips to the anchor's other side rather than run off
-// the right edge, and slides along the anchor rather than off the top or bottom.
-//
-// host is the layer the card is positioned within, which is what the anchor's
-// canvas-absolute position is measured against — the same conversion Tooltip
-// makes for the same reason.
+// popoverLayout places a card beside an anchor widget and keeps it wholly on
+// screen — see placeBeside. host is the layer the card is positioned within,
+// which the anchor's canvas-absolute position is measured against, the same
+// conversion Tooltip makes.
 type popoverLayout struct {
 	anchor fyne.CanvasObject
 	host   fyne.CanvasObject
@@ -516,11 +499,10 @@ func (l *popoverLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	return m
 }
 
-// placeBeside returns where a card of size card goes next to an anchor of size
-// anchorSize at anchor, inside a layer of size bounds. It prefers the anchor's
-// right, centred on it vertically, and gives way to the edges of the layer: a
-// card that cannot fit on the right goes on the left, and one that would hang
-// off the top or bottom is pulled back inside.
+// placeBeside is where a card goes next to an anchor inside a layer of size
+// bounds. It prefers the anchor's right, centred vertically, and gives way to the
+// layer's edges: no room on the right puts it on the left, and an overhang at top
+// or bottom is pulled back inside.
 func placeBeside(anchor fyne.Position, anchorSize, card, bounds fyne.Size) fyne.Position {
 	gap, margin := theme.Sizes.PopoverGap, theme.Sizes.PopoverMargin
 
@@ -537,41 +519,33 @@ func placeBeside(anchor fyne.Position, anchorSize, card, bounds fyne.Size) fyne.
 }
 
 // clamp holds v between low and high, preferring low when the two cross — a card
-// taller than the layer starts at the top rather than being pushed off it, and a
-// slider whose range is empty rests at its floor.
-//
-// Generic because the two things that need it are a layout in pixels and a
-// settings control in float64s, and a clamp that disagreed with itself between
-// them would be a bug nobody would look for.
+// taller than the layer starts at the top rather than being pushed off it.
+// Generic because a layout works in pixels and a settings control in float64s.
 func clamp[T cmp.Ordered](v, low, high T) T {
 	return max(low, min(v, high))
 }
 
 /* Padding */
 
-// NewInset wraps a single object in exactly the padding it is given. Neither of
-// Fyne's ready-made options does that: container.NewPadded applies the uniform
-// theme padding, and container.NewBorder inserts theme padding of its own between
-// the edge slots and the centre. The composer needs exact insets, because its
-// card padding has to compose predictably with the padding the entry already
-// draws inside itself.
+// NewInset wraps one object in exactly the padding it is given. Neither Fyne
+// option does: NewPadded applies the uniform theme padding, NewBorder inserts its
+// own between edge slots and centre. The composer needs exact insets, its card
+// padding having to compose with what the entry already draws inside itself.
 func NewInset(obj fyne.CanvasObject, top, bottom, left, right float32) *fyne.Container {
 	return container.New(&insetLayout{top: top, bottom: bottom, left: left, right: right}, obj)
 }
 
-// newFlushContainer wraps a single widget that carries Fyne's built-in inner
-// padding (notably widget.RichText) so its content sits flush against the
-// container's top-left origin instead of being inset. That lets the message body
-// line up with the author name, a plain canvas.Text with no padding of its own.
+// newFlushContainer cancels Fyne's built-in inner padding — widget.RichText's,
+// notably — so the content sits flush against the origin. That is what lines the
+// message body up with the author name, a canvas.Text with no padding at all.
 func newFlushContainer(obj fyne.CanvasObject) *fyne.Container {
 	inset := -fynetheme.InnerPadding()
 	return NewInset(obj, inset, inset, inset, inset)
 }
 
-// insetLayout pads its single child by a per-side amount. A negative inset
-// over-sizes the child and offsets it instead, so the child's content aligns with
-// the container origin; what it then draws outside the container bounds is its
-// own transparent padding, so nothing visible spills onto neighbours.
+// insetLayout pads its single child per side. A negative inset over-sizes and
+// offsets the child instead, so its content aligns with the container origin;
+// what spills outside is the child's own transparent padding.
 type insetLayout struct{ top, bottom, left, right float32 }
 
 func (l *insetLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {

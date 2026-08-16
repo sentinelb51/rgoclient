@@ -19,18 +19,15 @@ import (
 )
 
 // buildUI assembles the four-column layout: servers | channels | messages |
-// members. The fill row keeps the sections flush for the flat look; only the
-// message area (index 2) stretches, the rest stay at their fixed widths.
+// members. Only the message area (index 2) stretches; the rest keep their fixed
+// widths, which is what makes the sections sit flush.
 //
-// Three layers sit over the whole row: notices, which appear in its top-right
-// corner whatever column is there; the tooltip, since a server icon's name has
-// to be able to overhang the narrow column it is anchored in; and the settings
-// page. The first two carry nothing that matches a pointer event bar a notice
-// card itself, so the row underneath keeps receiving every click and hover.
-//
-// Settings is a layer here rather than an overlay because the modal layer holds
-// one thing at a time: a confirmation raised from the settings page has to be
-// able to draw over it. It is hidden until opened, and opaque when it is not.
+// Three layers sit over the row — notices, the tooltip (a server icon's name has
+// to overhang the narrow column it is anchored in) and the settings page. The
+// first two match no pointer event bar a notice card itself, so the row keeps
+// receiving every click and hover. Settings is a layer rather than an overlay
+// because the modal layer holds one thing at a time, and a confirmation raised
+// from the page has to draw over it.
 func (a *App) buildUI() fyne.CanvasObject {
 	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
@@ -44,9 +41,8 @@ func (a *App) buildUI() fyne.CanvasObject {
 
 /* Server sidebar */
 
-// buildServerList builds the server icon sidebar: fixed home and settings buttons
-// bookend the scrolling icons, each set off by a short separator. They sit
-// outside the scroll, so they stay put when the list grows tall enough to scroll.
+// buildServerList is the server rail: fixed home and settings buttons bookending
+// the scrolling icons, outside the scroll so they stay put as the list grows.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
 
@@ -69,19 +65,19 @@ func (a *App) buildServerList() fyne.CanvasObject {
 	a.refreshServerList()
 	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
 
-	// The seam is drawn by the column to its left, so each divider is the last
-	// child of the column it edges and the main row keeps its four children.
+	// Each divider is the last child of the column it edges, so the main row keeps
+	// its four children — see ui.NewColumnDivider.
 	return ui.NewFixedWidthContainer(theme.Sizes.ServerSidebarWidth, background,
 		ui.NewFillRow(0, content, ui.NewColumnDivider()))
 }
 
-// refreshServerList rebuilds the server icons from the current server list. Any
-// tooltip is taken down first: the icon that raised it is about to be replaced,
-// so it will never report the pointer leaving.
+// refreshServerList rebuilds the icons. Any tooltip is taken down first: the icon
+// that raised it is about to be replaced, and will never report the pointer
+// leaving.
 func (a *App) refreshServerList() {
-	a.serverList.Objects = nil
 	a.tooltip.Hide()
 
+	icons := make([]fyne.CanvasObject, 0, len(a.serverIDs)+1)
 	for _, serverID := range a.serverIDs {
 		server, ok := a.store.Server(serverID)
 		if !ok {
@@ -99,17 +95,17 @@ func (a *App) refreshServerList() {
 		}
 		w.Menu = func() []*fyne.MenuItem { return a.serverMenu(serverID) }
 
-		// Added bare, not wrapped in a Center: ServerWidget already centres its own
-		// icon, and keeping the widget at the top level lets syncServerSelection
-		// find it without unwrapping.
-		a.serverList.Add(w)
+		// Bare, not wrapped in a Center: ServerWidget centres its own icon, and
+		// keeping it at the top level lets syncServerSelection find it unwrapped.
+		icons = append(icons, w)
 	}
 
-	// The join button reads as one more server icon at the end of the list, so it
-	// lives inside the scroll rather than in the fixed bookends. Objects are
-	// rebuilt wholesale here, hence re-adding it every time; the selection sync
-	// skips it because it isn't a ServerWidget.
-	a.serverList.Add(ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
+	// The join button reads as one more server icon at the end, so it lives inside
+	// the scroll rather than in the fixed bookends. The selection sync skips it,
+	// not being a ServerWidget.
+	icons = append(icons, ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
+
+	a.serverList.Objects = icons
 	a.serverList.Refresh()
 }
 
@@ -132,9 +128,9 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
 		container.NewVScroll(a.channelList))
 
-	// The pinned group sits outside that padding and above the scroll: it is the
-	// full width of the column, which is what says it is not one of the rows
-	// below, and it does not scroll away from what it leads to.
+	// The pinned group sits outside that padding and above the scroll: full column
+	// width, which is what says it is not one of the rows below, and it does not
+	// scroll away from what it leads to.
 	header := ui.VBoxNoSpacing(container.NewPadded(a.serverHeader), a.channelTop)
 	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
 
@@ -142,27 +138,30 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 		ui.NewFillRow(0, a.channelColumn, ui.NewColumnDivider()))
 }
 
-// refreshChannelList rebuilds the channel rows for the current server, grouping
-// channels under their categories — or, in the home view, the flat list of
-// cached direct messages and groups, which has no categories to group under.
-//
-// The composer's #mention candidates come off this same walk, as the member
-// sidebar's @mentions come off its own: they are the same channels under the
-// same names, in the order the sidebar lists them. The home view contributes
-// none — a conversation is not something a message can link to.
+// refreshChannelList rebuilds the rows for the current server, grouped under
+// their categories — or, in the home view, the flat list of cached conversations,
+// which has none. The composer's #mention candidates come off this same walk, as
+// the member sidebar's @mentions come off its own. The home view contributes none:
+// a conversation is not something a message can link to.
 func (a *App) refreshChannelList() {
 	a.releaseChannelRows()
-	a.channelList.Objects = nil
+
+	// Written once at the end rather than through Container.Add, which refreshes
+	// the whole column per child.
+	var rows []fyne.CanvasObject
+	mount := func() {
+		a.channelList.Objects = rows
+		a.channelList.Refresh()
+	}
 
 	if a.homeSelected {
 		// Rebuilt with the list rather than kept aside: the sidebar's objects are
-		// replaced wholesale, so a row held across one would be a widget in no
-		// container. What it marks is re-derived below.
+		// replaced wholesale, so a row held across one is a widget in no container.
 		a.friendsRow = ui.NewFriendsRow(a.showFriends)
 
 		// Neither of these is a conversation with somebody, so they are pinned as
 		// their own group rather than sorted among the ones that are — Saved Notes
-		// by its last message, which would move it about, and the friends list by
+		// would move about with its last message, and the friends list sorts by
 		// nothing at all.
 		group := []fyne.CanvasObject{a.friendsRow}
 		saved := a.savedNotesID()
@@ -176,10 +175,11 @@ func (a *App) refreshChannelList() {
 				continue
 			}
 			if w := a.newChannelRow(channelID); w != nil {
-				a.channelList.Add(w)
+				rows = append(rows, w)
 			}
 		}
-		a.channelList.Refresh()
+
+		mount()
 		a.setMentionCandidates(ui.MentionChannel, nil)
 		a.refreshFriends()
 		return
@@ -190,7 +190,7 @@ func (a *App) refreshChannelList() {
 
 	server, ok := a.currentServer()
 	if !ok {
-		a.channelList.Refresh()
+		mount()
 		a.setMentionCandidates(ui.MentionChannel, nil)
 		return
 	}
@@ -211,7 +211,7 @@ func (a *App) refreshChannelList() {
 		}
 		if w := a.newChannelRow(channelID); w != nil {
 			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
-			a.channelList.Add(w)
+			rows = append(rows, w)
 		}
 	}
 
@@ -222,35 +222,31 @@ func (a *App) refreshChannelList() {
 		})
 		header.SetFirst(i == 0)
 
-		var rows []fyne.CanvasObject
+		var under []fyne.CanvasObject
 		for _, channelID := range category.Channels {
 			if w := a.newChannelRow(channelID); w != nil {
 				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
-				rows = append(rows, w)
+				under = append(under, w)
 			}
 		}
 
-		a.channelList.Add(header)
-		for _, row := range rows {
-			a.channelList.Add(row)
-		}
+		rows = append(rows, header)
+		rows = append(rows, under...)
 
-		header.SetChannels(rows, a.channelList)
+		header.SetChannels(under, a.channelList)
 		if a.collapsedCategories[key] {
 			header.SetCollapsed(true)
 		}
 	}
 
-	a.channelList.Refresh()
+	mount()
 	a.setMentionCandidates(ui.MentionChannel, candidates)
 }
 
-// newChannelRow builds a channel row reflecting its current state, or nil when
-// the store doesn't know the channel or the account cannot see it.
-//
-// A channel hidden this way is hidden everywhere at once: the sidebar walk that
-// builds these rows is also what feeds the composer its #mention candidates, so
-// one that never becomes a row is never a candidate either.
+// newChannelRow is a channel row in its current state, or nil when the store does
+// not know the channel or the account cannot see it. Hidden this way is hidden
+// everywhere at once: this walk also feeds the composer its #mention candidates,
+// so one that never becomes a row is never a candidate either.
 func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canViewChannel(channel) {
@@ -265,13 +261,10 @@ func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
 }
 
 // setChannelGroup fills the block pinned above the channel list, or empties it
-// for a server, which has nothing to pin. The divider is added with the rows
-// rather than kept in the column: it is what marks the group off from the list,
-// and an empty group has nothing to mark off.
-//
-// The block's height is what the column places the list from, so the sidebar is
-// laid out again rather than merely repainted — Fyne reclaims nothing for a slot
-// whose minimum has shrunk.
+// for a server, which has nothing to pin. The divider goes with the rows rather
+// than in the column: it marks the group off from the list, and an empty group
+// has nothing to mark. The block's height is what the column places the list
+// from, hence the relayout — Fyne reclaims nothing for a shrunken slot.
 func (a *App) setChannelGroup(rows []fyne.CanvasObject) {
 	if len(rows) > 0 {
 		rows = append(rows, ui.NewRowDivider())
@@ -295,14 +288,11 @@ func (a *App) savedNotesID() string {
 	return ""
 }
 
-// applyChannelState paints a channel row from what the app currently knows about
-// it. Three paths need this — building a row, syncing the whole sidebar, and
-// repainting one row — and they must agree, so the row's state is derived in one
-// place. Both setters no-op on unchanged state, so calling it costs nothing for a
-// row that did not move.
-//
-// animate is passed rather than read because syncChannelList reads the setting
-// once for the whole sidebar.
+// applyChannelState paints a channel row from what the app knows about it. Three
+// paths need it — building a row, syncing the sidebar, repainting one row — and
+// they must agree, so the state is derived in one place. Both setters no-op on an
+// unchanged value. animate is passed rather than read: syncChannelList reads the
+// setting once for the whole sidebar.
 func (a *App) applyChannelState(w *ui.ChannelWidget, animate bool) {
 	channelID := w.Channel.ID
 
@@ -322,7 +312,7 @@ func (a *App) serverMenu(serverID string) []*fyne.MenuItem {
 	}
 
 	// Anything irreversible goes below a separator and asks first, so no single
-	// misclick in a menu can act.
+	// misclick can act.
 	if a.canLeaveServer(serverID) {
 		items = append(items,
 			fyne.NewMenuItemSeparator(),
@@ -330,14 +320,21 @@ func (a *App) serverMenu(serverID string) []*fyne.MenuItem {
 		)
 	}
 
-	if a.serverUnread(serverID) {
-		items = append([]*fyne.MenuItem{
-			fyne.NewMenuItemWithIcon("Mark as read", fynetheme.ConfirmIcon(), func() { a.markServerRead(serverID) }),
-			fyne.NewMenuItemSeparator(),
-		}, items...)
+	return leadWithMarkRead(items, a.serverUnread(serverID), func() { a.markServerRead(serverID) })
+}
+
+// leadWithMarkRead puts "Mark as read" at the head of a menu, where the one thing
+// clicked without reading the menu should be. Nothing to clear leaves it out
+// rather than greying it: a disabled first item is a menu that looks broken.
+func leadWithMarkRead(items []*fyne.MenuItem, unread bool, mark func()) []*fyne.MenuItem {
+	if !unread {
+		return items
 	}
 
-	return items
+	return append([]*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Mark as read", fynetheme.ConfirmIcon(), mark),
+		fyne.NewMenuItemSeparator(),
+	}, items...)
 }
 
 // channelMenu builds the items a channel row offers on right-click. A DM row is
@@ -349,9 +346,8 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		}),
 	}
 
-	// An invite is to a *channel* of a server, which is why this is offered here
-	// rather than on the server icon: Revolt has no server-wide invite, only one
-	// per channel that lands the joiner in it.
+	// Offered here rather than on the server icon: Revolt has no server-wide invite,
+	// only one per *channel*, which is where it lands the joiner.
 	if a.canInviteTo(channelID) {
 		items = append(items,
 			fyne.NewMenuItemWithIcon("Create invite", fynetheme.MailSendIcon(),
@@ -359,8 +355,8 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		)
 	}
 
-	// Only a conversation can be closed; a server's channels are not the user's
-	// to remove from their own sidebar.
+	// Only a conversation can be closed: a server's channels are not the user's to
+	// remove from their own sidebar.
 	if a.isConversation(channelID) {
 		items = append(items,
 			fyne.NewMenuItemSeparator(),
@@ -369,14 +365,7 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		)
 	}
 
-	if a.unreadChannels[channelID] {
-		items = append([]*fyne.MenuItem{
-			fyne.NewMenuItemWithIcon("Mark as read", fynetheme.ConfirmIcon(), func() { a.markChannelRead(channelID) }),
-			fyne.NewMenuItemSeparator(),
-		}, items...)
-	}
-
-	return items
+	return leadWithMarkRead(items, a.unreadChannels[channelID], func() { a.markChannelRead(channelID) })
 }
 
 // closeChannelLabel names what closing a conversation means for its kind: a
@@ -389,9 +378,9 @@ func (a *App) closeChannelLabel(channelID string) string {
 	return "Close conversation"
 }
 
-// memberMenu builds the items a member row offers on right-click. Removing
-// someone is only offered to a user who can actually do it — see canKickMember —
-// so the menu never presents an action the server will refuse.
+// memberMenu builds the items a member row offers on right-click. Removal is
+// offered only where it can actually be done (canKickMember), so the menu never
+// presents an action the server will refuse.
 func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItemWithIcon("Copy user ID", fynetheme.ContentCopyIcon(), func() {
@@ -458,8 +447,8 @@ func (a *App) markServerRead(serverID string) {
 /* Selection */
 
 // selectServer switches to a server and selects its first channel. Re-clicking
-// the current server is a no-op, which would otherwise rebuild both sidebars and
-// yank the view to the first channel.
+// the open one is a no-op: it would rebuild both sidebars and yank the view back
+// to the first channel.
 func (a *App) selectServer(serverID string) {
 	if a.currentServerID == serverID && !a.homeSelected {
 		return
@@ -479,9 +468,9 @@ func (a *App) selectServer(serverID string) {
 	a.showStatus("No channels you can see in this server")
 }
 
-// firstVisibleChannel is the channel a server opens on: the first one in its own
-// order the account can actually see. Landing on a hidden one would show the
-// no-access line for a server whose channels are perfectly readable.
+// firstVisibleChannel is the channel a server opens on: the first in its own
+// order the account can see. Landing on a hidden one would show the no-access
+// line for a server whose channels are perfectly readable.
 func (a *App) firstVisibleChannel(server domain.Server) (string, bool) {
 	for _, channelID := range server.Channels {
 		if channel, ok := a.store.Channel(channelID); ok && a.canViewChannel(channel) {
@@ -492,22 +481,17 @@ func (a *App) firstVisibleChannel(server domain.Server) (string, bool) {
 	return "", false
 }
 
-// canViewChannel reports whether the account may see a channel at all. It is the
-// one permission the client answers by hiding rather than by refusing: a channel
-// you cannot look into has nothing to offer a sidebar row.
-//
-// Only a server ever decides this. A conversation is in the user's own list
-// because they are in it — a group's permission field says what they may do
-// there, not whether the row should exist, and a closed DM leaves the list by
-// its own Active flag rather than by a permission.
+// canViewChannel is the one permission the client answers by hiding rather than
+// refusing: a channel you cannot look into has nothing to offer a sidebar row.
+// Only a server decides it — a conversation is in the user's own list because
+// they are in it, and a closed DM leaves by its Active flag, not a permission.
 func (a *App) canViewChannel(channel domain.Channel) bool {
 	return channel.ServerID == "" || a.store.Permissions(channel.ID).Has(domain.PermissionViewChannel)
 }
 
-// enterServer switches both sidebars to a server without choosing a channel in
-// it. Selecting one lands on the first; following a #mention lands on the one it
-// names, and going through selectServer to get there would load the first
-// channel's history on the way past.
+// enterServer switches both sidebars to a server without choosing a channel.
+// Following a #mention lands on the one it names, and going through selectServer
+// to get there would load the first channel's history on the way past.
 func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	server, ok := a.store.Server(serverID)
 	if !ok {
@@ -521,9 +505,8 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	a.setHeader(a.serverHeader, server.Name)
 	a.refreshChannelList()
 
-	// Paint what is known, then go and get the rest: this is the single funnel
-	// both selectServer and #mention navigation pass through, so it is the one
-	// place a server's membership is worth asking for.
+	// Paint what is known, then fetch the rest. Both selectServer and #mention
+	// navigation funnel through here, so it is the one place to ask for membership.
 	a.refreshMemberList()
 	a.loadMembers(serverID)
 
@@ -531,9 +514,9 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 }
 
 // OnChannelTapped follows a rendered #mention. What it names need not be in the
-// open server — or in a server at all — so the sidebars are moved to wherever it
-// lives first, and only then is it selected. A channel the account cannot see
-// never resolves, and saying so is better than a click that does nothing.
+// open server, or in a server at all, so the sidebars move to wherever it lives
+// before it is selected. Saying a channel is unavailable beats a click that does
+// nothing.
 func (a *App) OnChannelTapped(channelID string) {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canViewChannel(channel) {
@@ -541,8 +524,8 @@ func (a *App) OnChannelTapped(channelID string) {
 		return
 	}
 
-	// A conversation lives in the home view, which already knows how to open one
-	// that its list hasn't caught up with.
+	// A conversation lives in the home view, which knows how to open one its list
+	// has not caught up with.
 	if channel.ServerID == "" {
 		a.showConversation(channelID)
 		return
@@ -558,12 +541,10 @@ func (a *App) OnChannelTapped(channelID string) {
 }
 
 // OnServerTapped goes to a server the account is already in, as an invite card's
-// "Go to server" does. Unlike a channel there is nothing named to open inside it,
-// so selectServer picks the first one visible.
-//
-// A server the store has never heard of is one the account has since left — the
-// card was drawn from an invite resolved earlier in the session — so it says so
-// rather than opening an empty shell.
+// "Go to server" does; nothing inside is named, so selectServer picks the first
+// visible channel. A server the store has never heard of is one since left — the
+// card was drawn from an invite resolved earlier — so it says so rather than
+// opening an empty shell.
 func (a *App) OnServerTapped(serverID string) {
 	if _, ok := a.store.Server(serverID); !ok {
 		a.notify(ui.ToneWarning, "That server isn't available.")
@@ -573,19 +554,17 @@ func (a *App) OnServerTapped(serverID string) {
 	a.selectServer(serverID)
 }
 
-// selectChannel switches to a channel, acknowledging unreads and showing its
-// messages from cache when available.
-//
-// What the account may do here decides how far the switch goes: a channel it
-// cannot see is a dead end, and firing the slowmode request and the first page of
-// history at one would be two requests the server can only refuse.
+// selectChannel switches to a channel, acknowledging unreads and painting from
+// cache where it can. What the account may do decides how far the switch goes: a
+// channel it cannot see is a dead end, and the slowmode request and first page of
+// history would be two requests the server can only refuse.
 func (a *App) selectChannel(channelID string) {
 	if a.currentChannelID == channelID {
 		return
 	}
 
-	// Whatever was half-composed here stays in the entry, but nobody in the channel
-	// being left should go on being told it is still being written in.
+	// What was half-composed stays in the entry, but the channel being left should
+	// stop being told it is still being written in.
 	a.stopTyping(a.currentChannelID)
 
 	unread := a.unreadChannels[channelID]
@@ -617,9 +596,8 @@ func (a *App) selectChannel(channelID string) {
 	a.loadSlowmode(channelID)
 	a.focusInput() // so the user can type straight away
 
-	// Seeing a channel and being allowed to read what was said in it are separate
-	// permissions: an announcement channel a bot posts into can be one without the
-	// other, and asking for the page anyway would only be refused.
+	// Seeing a channel and reading what was said in it are separate permissions: an
+	// announcement channel can be one without the other, and asking anyway is refused.
 	if !permissions.Has(domain.PermissionReadMessageHistory) {
 		a.showStatus("You can't read this channel's history")
 		return
@@ -649,8 +627,8 @@ func (a *App) clearChannelSelection() {
 }
 
 // syncServerSelection updates the highlighted server icon. The home button is
-// part of the same one-of-N selection, so it is cleared or lit here too rather
-// than by whichever handler happens to run.
+// part of the same one-of-N selection, so it is lit or cleared here rather than
+// by whichever handler happens to run.
 func (a *App) syncServerSelection(selectedID string) {
 	if a.homeButton != nil {
 		a.homeButton.SetSelected(a.homeSelected)
@@ -662,10 +640,10 @@ func (a *App) syncServerSelection(selectedID string) {
 	}
 }
 
-// channelRows walks every mounted channel row: the group pinned above the list
-// and the list itself. Saved Notes is in the first and answers to selection,
-// unread and typing exactly as the conversations under it do, so a walk that
-// knew only the list would leave one row that never repaints.
+// channelRows walks every mounted channel row: the pinned group and the list.
+// Saved Notes is in the first and answers to selection, unread and typing exactly
+// as the conversations do, so a walk of the list alone would leave one row that
+// never repaints.
 func (a *App) channelRows() iter.Seq[*ui.ChannelWidget] {
 	return func(yield func(*ui.ChannelWidget) bool) {
 		for _, host := range [...]*fyne.Container{a.channelTop, a.channelList} {
@@ -689,22 +667,19 @@ func (a *App) syncChannelList() {
 }
 
 // releaseChannelRows stops what the rows about to be dropped are still running.
-//
 // A row is discarded by having the list forget it, which tells the row nothing:
-// Fyne destroys a renderer — and with it the animation its Destroy stops — only
-// when its own cache expires the widget, a minute after the last paint that used
-// it. A mark left sweeping in the meantime asks the canvas to repaint sixty times
-// a second on behalf of a row nothing can see, and every rebuild of a sidebar
-// somebody is typing in adds another.
+// Fyne destroys a renderer — and the animation its Destroy stops — only when its
+// cache expires the widget, a minute after the last paint. A mark left sweeping
+// repaints sixty times a second for a row nothing can see, and every rebuild of a
+// sidebar somebody is typing in adds another.
 func (a *App) releaseChannelRows() {
 	for w := range a.channelRows() {
 		w.SetTyping(false, false)
 	}
 }
 
-// refreshChannelRow updates a single channel row, repainting only that widget.
-// Used on the per-message hot path, so an incoming message in a background
-// channel doesn't refresh the entire sidebar.
+// refreshChannelRow repaints one row. On the per-message hot path, so a message
+// in a background channel does not refresh the whole sidebar.
 func (a *App) refreshChannelRow(channelID string) {
 	for w := range a.channelRows() {
 		if w.Channel.ID == channelID {
@@ -736,11 +711,10 @@ func (a *App) channelName() string {
 // in for the server name.
 const homeHeader = "Direct Messages"
 
-// selectHome opens the home view. The cached DM list paints immediately and a
-// refresh is fired regardless: the list is a fetched snapshot with no gateway
-// event behind it, so re-opening home is the natural moment to re-ask for it.
-// Re-clicking home is a no-op — it would otherwise yank the view back to the
-// first conversation.
+// selectHome opens the home view. The cached list paints at once and a refresh
+// fires regardless: it is a fetched snapshot with no gateway event behind it, so
+// re-opening home is the moment to re-ask. Re-clicking is a no-op — it would yank
+// the view back to the first conversation.
 func (a *App) selectHome() {
 	if a.homeSelected {
 		return
@@ -763,11 +737,10 @@ func (a *App) selectHome() {
 	a.loadDirectMessages()
 }
 
-// loadDirectMessages refreshes the cached DM/group list from the API. It is
-// stale-while-revalidate: whatever is already cached stays on screen until the
-// response lands, so re-opening home never blanks the sidebar. Recipients
-// missing from State are resolved in the same pass, because a DM has no name of
-// its own — the row is titled after the other participant.
+// loadDirectMessages refreshes the cached conversation list. Stale-while-
+// revalidate: what is cached stays on screen until the response lands, so
+// re-opening home never blanks the sidebar. Recipients missing from State are
+// resolved in the same pass — a DM is titled after the other participant.
 func (a *App) loadDirectMessages() {
 	if a.loadingDMs || !a.client.Connected() {
 		return
@@ -777,9 +750,9 @@ func (a *App) loadDirectMessages() {
 	epoch := a.epoch
 
 	go func() {
-		// Every hop back to the UI thread re-checks that this is still the same
-		// session: a logout and re-login can land mid-request, and the previous
-		// account's conversations must not be painted into the new one's sidebar.
+		// Every hop back re-checks the session: a logout and re-login can land
+		// mid-request, and the old account's conversations must not paint into the new
+		// one's sidebar.
 		defer a.doOnUI(func() {
 			if !a.stale(epoch) {
 				a.loadingDMs = false
@@ -827,12 +800,11 @@ func (a *App) setDirectMessages(channels []domain.Channel) {
 	}
 }
 
-// sortConversations drops closed DMs, orders the rest by most recent activity,
-// and returns only their IDs: DirectMessages() feeds the channels themselves into
-// State, so keeping a second copy would be a cache of a cache. LastMessageID is
-// compared directly, ULIDs sorting chronologically as strings. The order is a
-// snapshot — a new message marks its row unread but doesn't re-sort the sidebar
-// under the user mid-read; the next refresh picks the new order up.
+// sortConversations drops closed DMs, orders the rest by most recent activity and
+// answers with IDs alone: the channels themselves are already in State, so a
+// second copy is a cache of a cache. LastMessageID compares directly, ULIDs
+// sorting chronologically as strings. The order is a snapshot — a new message
+// marks its row unread but does not re-sort the sidebar under the reader.
 func sortConversations(channels []domain.Channel) []string {
 	channels = slices.DeleteFunc(channels, func(channel domain.Channel) bool {
 		return channel.Kind == domain.ChannelDM && !channel.Active

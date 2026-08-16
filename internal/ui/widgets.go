@@ -28,18 +28,17 @@ const (
 	// glyphButtonSize is the side length of a GlyphButton.
 	glyphButtonSize = 24
 
-	// iconRestTranslucency dims an icon button while the pointer is elsewhere.
-	// Hovering clears it, so what lights up is the icon itself rather than a plate
-	// drawn behind it.
+	// iconRestTranslucency dims an icon button at rest, so hovering lights the icon
+	// itself rather than a plate behind it.
 	iconRestTranslucency = 0.45
 )
 
 /* Shared plumbing */
 
-// tapBase provides the tap, right-click, and (no-op) mouse-move plumbing shared
-// by the interactive widgets here. Embedders implement CreateRenderer and, where
-// they react to hover, MouseIn/MouseOut. Setting onSecondaryTap opts the widget
-// into a context menu; leaving it nil makes right-clicks a no-op.
+// tapBase is the tap, right-click and mouse-move plumbing every interactive
+// widget here embeds. Embedders supply CreateRenderer and, where they want it,
+// MouseIn/MouseOut — deliberately not declared here, since a no-op pair would
+// take hover from every parent row.
 type tapBase struct {
 	widget.BaseWidget
 	onTap          func()
@@ -60,12 +59,18 @@ func (b *tapBase) TappedSecondary(e *fyne.PointEvent) {
 
 func (b *tapBase) MouseMoved(*desktop.MouseEvent) {}
 
-// Cursor shows the pointer over every tappable widget, so clickable elements
-// read as clickable.
+// reportHover passes a hover on to an optional listener — the shape every widget
+// here that both draws its own hover and hands it upward repeats.
+func reportHover(onHover func(bool), on bool) {
+	if onHover != nil {
+		onHover(on)
+	}
+}
+
 func (b *tapBase) Cursor() desktop.Cursor { return desktop.PointerCursor }
 
-// roundedPanel is the small rounded surface the floating message controls — the
-// hover quick-actions and the edit save/cancel pair — sit on.
+// roundedPanel is the surface the floating message controls sit on — the hover
+// quick-actions and the edit save/cancel pair.
 func roundedPanel() *canvas.Rectangle {
 	panel := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 	panel.CornerRadius = 4
@@ -73,32 +78,60 @@ func roundedPanel() *canvas.Rectangle {
 	return panel
 }
 
+/* Text objects */
+
+// newText is how every canvas.Text here is built. The fill goes through
+// solidColor, so a role's gradient reaching a text object — which panics the
+// painter — is structurally impossible rather than a rule each caller remembers.
+// A zero size is the theme's own, as canvas.NewText takes it.
+func newText(text string, fill color.Color, size float32) *canvas.Text {
+	obj := canvas.NewText(text, solidColor(fill))
+	if size > 0 {
+		obj.TextSize = size
+	}
+
+	return obj
+}
+
+// newInitial is the letter a server icon falls back to before its picture lands
+// — the same in the rail and on an invite card, so a server reads the same in
+// both. Empty where there is nothing to stand for.
+func newInitial(name string) *canvas.Text {
+	letter := ""
+	if name != "" {
+		letter = strings.ToUpper(string([]rune(name)[0]))
+	}
+
+	initial := newBoldText(letter, theme.Colors.TextPrimary, 0)
+	initial.Alignment = fyne.TextAlignCenter
+
+	return initial
+}
+
+// newBoldText is the same in the one style anything here asks for.
+func newBoldText(text string, fill color.Color, size float32) *canvas.Text {
+	obj := newText(text, fill, size)
+	obj.TextStyle = fyne.TextStyle{Bold: true}
+
+	return obj
+}
+
 /* Edges */
 
-// Outline edges rect with the client's hairline. Every card is drawn with the
-// same one — an embed, an attachment, the composer dock — and it is darker than
-// anything it is ever laid over, so no fill behind it can close on it.
-//
-// Which rectangle carries it matters. A card whose content sits inside padding
-// can wear it on its own background; one whose content reaches its edge — a
-// picture — needs it on a rectangle stacked over the content instead, or it is
-// simply painted over.
+// Outline edges rect with the client's one hairline, darker than anything it is
+// laid over. Which rectangle carries it matters: a card sized by its own padding
+// wears it on its background, but one whose content reaches its edge — a picture
+// — needs it on a rectangle stacked over the content or it is painted over.
 func Outline(rect *canvas.Rectangle) {
 	rect.StrokeColor = theme.Colors.Outline
 	rect.StrokeWidth = theme.Sizes.OutlineWidth
 }
 
-// Elevate casts rect's shadow onto whatever it is laid over. The composer dock
-// is the only thing in the client that carries one: an outline and a margin make
-// a card, but only a cast shadow makes a card that is *above* something. Without
-// it the gutter reads as a strip the card was dropped into, which is the
-// difference between an island and a bar.
-//
-// DropShadow follows the corner radius and paints nothing beneath the fill, so a
-// translucent shadow cannot darken the card itself. The blur deliberately
-// overruns the margin — it is the surface behind that has to darken — and Fyne
-// grows the object's own quad to fit the shadow, so it draws outside rect's
-// bounds rather than being clipped to them.
+// Elevate casts rect's shadow onto what it is laid over — only the composer dock
+// carries one, an outline and a margin making a card but only a shadow making one
+// that is *above* something. DropShadow follows the corner radius and paints
+// nothing under the fill, so a translucent shadow cannot dirty the card, and the
+// blur overruns the margin on purpose: the surface behind is what has to darken.
 func Elevate(rect *canvas.Rectangle) {
 	rect.Shadow = canvas.Shadow{
 		Color:      theme.Colors.CardShadow,
@@ -107,28 +140,44 @@ func Elevate(rect *canvas.Rectangle) {
 	}
 }
 
-// NewColumnDivider is the seam between two columns of the main row: the same
-// hairline, one pixel wide, stretched to the column's height by the row it is
-// placed in.
-//
-// It belongs to a column rather than sitting between two. The main row
-// addresses its children by position to find the one that stretches, and a
-// divider of its own would both shift that index and stay behind when the
-// member sidebar is hidden.
-func NewColumnDivider() fyne.CanvasObject {
-	divider := canvas.NewRectangle(theme.Colors.Outline)
-	divider.SetMinSize(fyne.NewSize(theme.Sizes.OutlineWidth, 0))
+// NewColumnDivider is the seam between two columns of the main row. It belongs
+// *inside* a column: the row addresses children by position to find the one that
+// stretches, so a divider of its own would shift that index and would stay behind
+// when the member sidebar is hidden.
+func NewColumnDivider() fyne.CanvasObject { return hairline(theme.Sizes.OutlineWidth, 0) }
 
-	return divider
+// NewRowDivider is the same hairline lying across a column.
+func NewRowDivider() fyne.CanvasObject { return hairline(0, theme.Sizes.OutlineWidth) }
+
+// hairline is a bar of the outline colour, thick on one axis and stretched by its
+// parent on the other.
+func hairline(width, height float32) fyne.CanvasObject {
+	return sizedRect(theme.Colors.Outline, width, height)
 }
 
-// NewRowDivider is the same hairline lying across a column, which is what marks
-// off a group of rows from the rows under it.
-func NewRowDivider() fyne.CanvasObject {
-	divider := canvas.NewRectangle(theme.Colors.Outline)
-	divider.SetMinSize(fyne.NewSize(0, theme.Sizes.OutlineWidth))
+/* Drawn glyphs */
 
-	return divider
+// The client's own marks are laid out on a 20-unit grid and scaled to whatever
+// square they are drawn in, so a hashtag, a stopwatch and a tinted SVG all line
+// up as one set.
+
+// glyphBox centres content in the square every one of those marks shares.
+func glyphBox(content fyne.CanvasObject) fyne.CanvasObject {
+	side := theme.Sizes.HashtagIconSize
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), content))
+}
+
+// glyphLine is a stroke plotter on that grid, given the square's own scale.
+func glyphLine(fill color.Color, scale float32) func(x1, y1, x2, y2 float32) *canvas.Line {
+	return func(x1, y1, x2, y2 float32) *canvas.Line {
+		line := canvas.NewLine(fill)
+		line.Position1 = fyne.NewPos(x1*scale, y1*scale)
+		line.Position2 = fyne.NewPos(x2*scale, y2*scale)
+		line.StrokeWidth = 2 * scale
+
+		return line
+	}
 }
 
 /* Chips */
@@ -138,10 +187,9 @@ func NewChip(text string, tint color.Color) fyne.CanvasObject {
 	return newChip(nil, text, tint)
 }
 
-// NewTappableChip is a chip that leads somewhere. It lights under the pointer and
-// carries the pointer cursor, which is the whole of what tells it apart from the
-// plain one beside it — a mutual profile draws both, the names it resolved and a
-// "+n" for the ones it could not.
+// NewTappableChip is a chip that leads somewhere. Lighting under the pointer is
+// the whole of what tells it from a plain one beside it — a mutual profile draws
+// both, the names it resolved and a "+n" for the ones it could not.
 func NewTappableChip(text string, tint color.Color, onTap func()) fyne.CanvasObject {
 	c := &tappableChip{}
 	c.content, c.background = chipParts(nil, text, tint)
@@ -151,10 +199,9 @@ func NewTappableChip(text string, tint color.Color, onTap func()) fyne.CanvasObj
 	return c
 }
 
-// tappableChip is NewChip's surface with a click on it. It is a widget rather
-// than a TappableContainer around a chip because that one hovers a square behind
-// whatever it wraps, and a square lighting up behind a rounded label is a second
-// shape appearing rather than the chip responding.
+// tappableChip is NewChip's surface with a click on it — a widget of its own
+// rather than a TappableContainer, whose square hover fill behind a rounded label
+// reads as a second shape appearing rather than the chip responding.
 type tappableChip struct {
 	tapBase
 
@@ -184,18 +231,15 @@ func (c *tappableChip) MouseOut() {
 /* Status lines */
 
 // StatusLine is the one place a screen with no notice layer can report an
-// outcome. The login screen and the second-factor screen are both up before the
-// client — and therefore before NoticeStack — is built, so a failure there had
-// nowhere to go but a Fyne error dialog, which is the one surface in the app
-// that AppTheme does not reach.
+// outcome: login and the second factor are both up before NoticeStack is built,
+// and a Fyne error dialog is the one surface AppTheme does not reach.
 //
-// It is a widget.Label rather than a canvas.Text for two reasons a login screen
-// runs into immediately: a transport error is a long sentence and has to wrap,
-// and Importance is the one way to colour text without holding a colour that a
-// restyle would leave stale.
+// A widget.Label rather than a canvas.Text: a transport error is a long sentence
+// and has to wrap, and Importance colours text without holding a colour a restyle
+// would leave stale.
 type StatusLine struct {
-	// Content is the object to mount. The label is kept apart from it so a caller
-	// can put the line where it wants without knowing what it is made of.
+	// Content is the object to mount, kept apart from the label so a caller need
+	// not know what the line is made of.
 	Content fyne.CanvasObject
 
 	label *widget.Label
@@ -226,22 +270,16 @@ func (s *StatusLine) set(message string, importance widget.Importance) {
 
 /* Bot mark */
 
-// NewBotMark is the glyph that says an account is a bot, drawn after its name.
-//
-// A glyph rather than a lettered chip: the word is the same on every row that
-// carries one, so a column of them reads as a column of identical labels rather
-// than as a property of the names beside them — and the mark is legible at a
-// size a three-letter chip is not.
-//
-// The side is the caller's, as a TypingMark's width is, because the two names it
-// follows are set differently: a member row's and a profile's heading.
+// NewBotMark is the glyph that says an account is a bot, drawn after its name. A
+// glyph rather than a lettered chip: a column of identical words reads as labels
+// rather than as a property of the names beside them. The side is the caller's —
+// a member row's name and a profile heading are set differently.
 func NewBotMark(side float32) fyne.CanvasObject {
 	return container.NewCenter(newScaledIcon(tintedIcon(assets.BotIcon, theme.Colors.BotMark), side))
 }
 
-// RoleChip is a role drawn as a chip: a dot in the role's own colour beside its
-// name. The chip is what answers the right-click rather than the dot alone —
-// the dot is a few pixels across, and a menu nothing can reliably hit is not one.
+// RoleChip is a role drawn as a chip: a dot in its colour beside its name. The
+// whole chip answers the right-click — the dot is a few pixels across.
 type RoleChip struct {
 	tapBase
 
@@ -250,9 +288,9 @@ type RoleChip struct {
 
 var _ fyne.SecondaryTappable = (*RoleChip)(nil)
 
-// NewRoleChip draws role as a chip, right-clickable for its name and ID. Roles
-// without a colour fall back to the primary text colour, dot included, so the
-// shape stays the same wherever the chip is used.
+// NewRoleChip draws role as a chip, right-clickable for its name and ID. An
+// uncoloured role falls back to the primary text colour, dot included, so the
+// shape is the same wherever the chip is used.
 func NewRoleChip(role domain.Role) *RoleChip {
 	tint := theme.Colors.TextPrimary
 	if role.Color != nil {
@@ -270,9 +308,8 @@ func (w *RoleChip) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(w.content)
 }
 
-// roleMenu is what right-clicking a role offers. A role resolved from a server
-// always carries an ID; one built from a name alone leaves that item out rather
-// than offering an empty copy.
+// roleMenu is what right-clicking a role offers. One built from a name alone
+// carries no ID, and leaves that item out rather than offering an empty copy.
 func roleMenu(role domain.Role) []*fyne.MenuItem {
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItem("Copy role name", func() { CopyToClipboard(role.Name) }),
@@ -285,23 +322,20 @@ func roleMenu(role domain.Role) []*fyne.MenuItem {
 }
 
 // newChip assembles the chip: an optional leading mark, then the text, on a
-// rounded surface. The mark is centred rather than stretched — a row layout
-// would otherwise hand a circle the full height of the text beside it.
+// rounded surface.
 func newChip(mark fyne.CanvasObject, text string, tint color.Color) fyne.CanvasObject {
 	chip, _ := chipParts(mark, text, tint)
 
 	return chip
 }
 
-// chipParts builds the surface and hands its background back alongside it, which
-// is what a tappable one needs to recolour on hover.
+// chipParts builds the surface and hands the background back beside it, which a
+// tappable chip needs to recolour on hover.
 func chipParts(mark fyne.CanvasObject, text string, tint color.Color) (fyne.CanvasObject, *canvas.Rectangle) {
 	background := canvas.NewRectangle(theme.Colors.ChipBg)
 	background.CornerRadius = theme.Sizes.ChipRadius
 
-	label := canvas.NewText(text, solidColor(tint))
-	label.TextStyle = fyne.TextStyle{Bold: true}
-	label.TextSize = theme.Sizes.ChipTextSize
+	label := newBoldText(text, tint, theme.Sizes.ChipTextSize)
 
 	var content fyne.CanvasObject = container.NewCenter(label)
 	if mark != nil {
@@ -313,10 +347,10 @@ func chipParts(mark fyne.CanvasObject, text string, tint color.Color) (fyne.Canv
 	return container.NewStack(background, NewInset(content, padV, padV, padH, padH)), background
 }
 
-// newChipDot is the leading dot: the one thing in a chip carrying the shared
-// hairline, which is what lifts a saturated colour off the surface behind it.
-// The circle is pinned to its own square and centred twice over — a row layout
-// stretches what it is given, and a stretched circle is an ellipse.
+// newChipDot is the leading dot, the one thing in a chip carrying the hairline —
+// which is what lifts a saturated colour off the surface behind it. Pinned to its
+// own square and centred twice: a row layout stretches, and a stretched circle is
+// an ellipse.
 func newChipDot(fill color.Color) fyne.CanvasObject {
 	size := theme.Sizes.ChipDotSize
 
@@ -334,9 +368,8 @@ func newChipDot(fill color.Color) fyne.CanvasObject {
 type TappableContainer struct {
 	tapBase
 
-	// Menu supplies the items right-clicking the row offers, as on the sidebar's
-	// server and channel rows. It is the option for rows that are a plain
-	// container rather than a widget of their own — the member list's.
+	// Menu supplies the items right-clicking offers. The option for rows that are a
+	// plain container rather than a widget of their own.
 	Menu func() []*fyne.MenuItem
 
 	background *canvas.Rectangle
@@ -365,9 +398,8 @@ func (t *TappableContainer) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(t.background, t.content))
 }
 
-// TappedSecondary raises Menu's items when one is set, falling back to the
-// handler tapBase carries — the reply preview inside a message hands its
-// right-click to the message rather than opening a menu of its own.
+// TappedSecondary raises Menu's items when set, else falls back to tapBase's
+// handler — a reply preview hands its right-click to the message around it.
 func (t *TappableContainer) TappedSecondary(event *fyne.PointEvent) {
 	if t.Menu != nil {
 		showMenuHook(t, t.Menu, event)
@@ -402,12 +434,9 @@ var (
 )
 
 // NewHoverableStack makes content tappable with an outline and an optional hover
-// callback.
-//
-// Its rectangle is stacked *over* the content, which is what lets an attachment
-// be framed at all: the picture is drawn to the card's own edge, so a border
-// behind it would simply be painted over. The stroke is the shared hairline at
-// rest and lifts to a lighter slate under the pointer.
+// callback. The rectangle is stacked *over* the content, which is what lets an
+// attachment be framed: the picture reaches the card's edge, so a border behind
+// it is painted over. Drawn at rest, so hover must lift the stroke, not replace it.
 func NewHoverableStack(content fyne.CanvasObject, onTap func(), onHover func(bool)) *HoverableStack {
 	h := &HoverableStack{
 		background: canvas.NewRectangle(color.Transparent),
@@ -425,22 +454,17 @@ func (h *HoverableStack) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(h.content, h.background))
 }
 
-func (h *HoverableStack) MouseIn(*desktop.MouseEvent) {
-	h.background.StrokeColor = theme.Colors.AttachmentHoverBorder
-	h.background.Refresh()
+func (h *HoverableStack) MouseIn(*desktop.MouseEvent) { h.setHovered(true) }
+func (h *HoverableStack) MouseOut()                   { h.setHovered(false) }
 
-	if h.onHover != nil {
-		h.onHover(true)
-	}
-}
-
-func (h *HoverableStack) MouseOut() {
+func (h *HoverableStack) setHovered(on bool) {
 	h.background.StrokeColor = theme.Colors.Outline
+	if on {
+		h.background.StrokeColor = theme.Colors.AttachmentHoverBorder
+	}
 	h.background.Refresh()
 
-	if h.onHover != nil {
-		h.onHover(false)
-	}
+	reportHover(h.onHover, on)
 }
 
 /* Buttons */
@@ -480,37 +504,21 @@ func (b *IconButton) MinSize() fyne.Size {
 	return fyne.NewSize(size, size*0.8)
 }
 
-func (b *IconButton) MouseIn(*desktop.MouseEvent) {
-	b.setLit(true)
+func (b *IconButton) MouseIn(*desktop.MouseEvent) { b.setHovered(true) }
+func (b *IconButton) MouseOut()                   { b.setHovered(false) }
 
-	if b.onHover != nil {
-		b.onHover(true)
+func (b *IconButton) setHovered(on bool) {
+	b.icon.Translucency = iconRestTranslucency
+	if on {
+		b.icon.Translucency = 0
 	}
-}
-
-func (b *IconButton) MouseOut() {
-	b.setLit(false)
-
-	if b.onHover != nil {
-		b.onHover(false)
-	}
-}
-
-// setLit brightens or dims the icon.
-func (b *IconButton) setLit(lit bool) {
-	translucency := float64(iconRestTranslucency)
-	if lit {
-		translucency = 0
-	}
-
-	b.icon.Translucency = translucency
 	b.icon.Refresh()
+
+	reportHover(b.onHover, on)
 }
 
-// SidebarButton is a circular, icon-only button matching the server-icon look.
-// It bookends the server list as the fixed home and settings entries, so it
-// reuses the server background, hover, and selected colours — the last of which
-// the home button carries while the direct-message view is open.
+// SidebarButton is the circular icon button bookending the server list as the
+// fixed home and settings entries, in the server rows' own colours.
 type SidebarButton struct {
 	tapBase
 	background *canvas.Circle
@@ -545,8 +553,8 @@ func (b *SidebarButton) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewCenter(wrap))
 }
 
-// SetSelected marks the button as the active view. Unchanged state is a no-op,
-// so a sidebar-wide sync only repaints what actually changed.
+// SetSelected marks the button as the active view. A no-op when unchanged, so a
+// sidebar-wide sync only repaints what moved.
 func (b *SidebarButton) SetSelected(selected bool) {
 	if b.selected == selected {
 		return
@@ -556,8 +564,8 @@ func (b *SidebarButton) SetSelected(selected bool) {
 	b.refreshAppearance()
 }
 
-// refreshAppearance repaints the circle for the current selected/hovered state.
-// Selection outranks hover, so hovering the active view doesn't dim it.
+// refreshAppearance repaints the circle. Selection outranks hover, so hovering
+// the active view does not dim it.
 func (b *SidebarButton) refreshAppearance() {
 	switch {
 	case b.selected:
@@ -609,8 +617,8 @@ func NewCloseButton(onTap func()) *GlyphButton {
 	return NewGlyphButton(fynetheme.CancelIcon(), onTap)
 }
 
-// NewGlyphButton creates the same button wearing res — the way into a card's own
-// menu, drawn on its banner beside the way out of it.
+// NewGlyphButton is the same button wearing res — the way into a card's menu,
+// drawn on its banner beside the way out.
 func NewGlyphButton(res fyne.Resource, onTap func()) *GlyphButton {
 	background := canvas.NewRectangle(color.Transparent)
 	background.CornerRadius = 4
@@ -642,14 +650,10 @@ func (b *GlyphButton) MouseOut() {
 
 /* Tooltips */
 
-// Tooltip is the floating label an icon-only control shows on hover, naming
-// what the icon stands for.
-//
-// Layer is mounted over the whole window rather than inside the column that
-// triggers it, because the label has to be able to overhang that column. A Fyne
-// pop-up would do the same job but cannot be used: pushing an overlay routes the
-// entire hit test into it, so the widget being hovered would never receive
-// MouseOut and the tooltip would never come back down.
+// Tooltip is the floating label an icon-only control shows on hover. Layer goes
+// over the whole window so the label can overhang the column that triggered it.
+// Not a Fyne pop-up: pushing an overlay routes the whole hit test into it, so the
+// hovered widget never sees MouseOut and the tooltip never comes down.
 type Tooltip struct {
 	Layer *fyne.Container // stack this over the main layout
 
@@ -659,9 +663,7 @@ type Tooltip struct {
 
 // NewTooltip builds an empty, hidden tooltip.
 func NewTooltip() *Tooltip {
-	label := canvas.NewText("", theme.Colors.TextPrimary)
-	label.TextSize = theme.Sizes.TooltipTextSize
-	label.TextStyle = fyne.TextStyle{Bold: true}
+	label := newBoldText("", theme.Colors.TextPrimary, theme.Sizes.TooltipTextSize)
 
 	background := canvas.NewRectangle(theme.Colors.TooltipBg)
 	background.CornerRadius = theme.Sizes.TooltipRadius
@@ -670,10 +672,9 @@ func NewTooltip() *Tooltip {
 	card := container.NewStack(background, NewInset(label, padV, padV, padH, padH))
 	card.Hide()
 
-	// Nothing in the layer is tappable or hoverable, so it never takes an event
-	// from the widgets underneath it, and NewLayer keeps the name it is holding out
-	// of the window's minimum size — the card places itself, so it goes in a
-	// container of its own that the layer can fill without resizing it.
+	// Nothing in the layer accepts an event, so it takes none from underneath, and
+	// NewLayer keeps the name it holds out of the window's minimum size. The card
+	// places itself, hence the unlaid-out container the layer can fill freely.
 	return &Tooltip{Layer: NewLayer(container.NewWithoutLayout(card)), card: card, label: label}
 }
 
@@ -691,10 +692,9 @@ func (t *Tooltip) Show(text string, obj fyne.CanvasObject) {
 	))
 }
 
-// ShowAbove names obj with the label centred over it rather than beside it, kept
-// inside the layer's own width and dropped below obj where there is no room over
-// it. That is what a cell in a grid needs: it has neighbours either side, so a
-// label past its right edge names the wrong one.
+// ShowAbove centres the label over obj, clamped to the layer's width and dropped
+// below where there is no room above. What a cell in a grid needs: it has
+// neighbours either side, so a label past its right edge names the wrong one.
 func (t *Tooltip) ShowAbove(text string, obj fyne.CanvasObject) {
 	anchor, size, ok := t.prepare(text, obj)
 	if !ok {
@@ -712,8 +712,8 @@ func (t *Tooltip) ShowAbove(text string, obj fyne.CanvasObject) {
 }
 
 // prepare labels the card and measures it, reporting where obj sits inside the
-// layer. Both positions it reads are canvas-absolute; the difference is the
-// offset inside the layer, wherever the layer itself happens to sit.
+// layer — the difference of two canvas-absolute positions, so it holds wherever
+// the layer itself sits.
 func (t *Tooltip) prepare(text string, obj fyne.CanvasObject) (fyne.Position, fyne.Size, bool) {
 	if text == "" {
 		t.Hide()
@@ -752,14 +752,13 @@ func circularAvatar(images *cache.ImageCache, avatarURL string, size fyne.Size) 
 	return avatar
 }
 
-// newAvatarSlot is the same circle with nothing loaded into it. It exists apart
-// from circularAvatar for the member list, whose rows are recycled: a picture
-// asked for at construction has no generation to check itself against when it
-// arrives, and would be painted into whoever the row has since moved on to.
+// newAvatarSlot is the same circle with nothing loaded into it, for the member
+// list's recycled rows: a picture asked for at construction has no generation to
+// check itself against and lands on whoever the row has moved on to.
 //
-// The placeholder is handed back alongside the slot so a row swapping a picture
-// back out can restore *that* object. A fresh circle is one the canvas has never
-// seen, and a row that quietly put one back drew nothing at all.
+// The placeholder comes back beside the slot so a row swapping a picture out can
+// restore *that* object — Fyne only learns of an object when the container
+// holding it is refreshed, so a fresh circle draws nothing at all.
 func newAvatarSlot(size fyne.Size) (*fyne.Container, *canvas.Circle) {
 	placeholder := canvas.NewCircle(theme.Colors.AvatarPlaceholder)
 
@@ -776,13 +775,9 @@ func loadAvatar(images *cache.ImageCache, target *fyne.Container, avatarURL stri
 	images.LoadIntoContainer(imageCacheID(avatarURL), avatarURL, size, target, true, nil)
 }
 
-// imageCacheID is the key a picture is cached under: its Autumn file ID where
-// the URL is one of Revolt's, and a hash of the URL where it isn't.
-//
-// The hash is not decoration. The ID doubles as the picture's filename in the
-// disk cache, and an embed's preview or a site's mark comes from wherever the
-// page it was unfurled from serves it — a URL with a scheme and slashes in it,
-// which no file can be called. Hashing is what lets those be cached at all.
+// imageCacheID is the key a picture is cached under: its Autumn file ID for one
+// of Revolt's URLs, a hash otherwise. The ID doubles as the disk cache's
+// filename, and an embed preview's URL — scheme and slashes — is no filename.
 func imageCacheID(imageURL string) string {
 	if imageURL == "" {
 		return ""
@@ -797,12 +792,9 @@ func imageCacheID(imageURL string) string {
 	return strconv.FormatUint(sum.Sum64(), 16)
 }
 
-// Avatar is the circular, tappable avatar shown beside a message.
-//
-// It deliberately does not implement desktop.Hoverable: Fyne delivers hover to
-// the innermost hoverable object, so an avatar that accepted hover would pull it
-// away from the message row and make the row's quick-actions vanish whenever the
-// pointer crossed the avatar.
+// Avatar is the circular, tappable avatar beside a message. Deliberately not
+// hoverable — innermost wins, so it would take hover from the message row and the
+// quick-actions would vanish whenever the pointer crossed it.
 type Avatar struct {
 	tapBase
 	content *fyne.Container
@@ -838,16 +830,14 @@ func avatarSize() fyne.Size {
 /* Scrolling */
 
 // scrollAmplify multiplies wheel deltas so scrolling feels message-by-message.
-// Read per event rather than at construction: it is one map lookup against a
-// wheel notch, and it means the setting takes effect without a rebuild.
+// Read per event so the setting takes effect without a rebuild.
 func scrollAmplify() float32 {
 	return float32(config.Current().Behaviour.ScrollSpeed)
 }
 
 const (
-	// scrollIndicatorLinger is how long the position indicator stays up after the
-	// last movement, and scrollIndicatorFade how long it takes to leave. Long
-	// enough to say where the view landed; gone before anything is read against it.
+	// scrollIndicatorLinger is how long the indicator stays up after the last
+	// movement, scrollIndicatorFade how long it takes to leave.
 	scrollIndicatorLinger = 700 * time.Millisecond
 	scrollIndicatorFade   = 350 * time.Millisecond
 )
@@ -879,10 +869,9 @@ func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
 	return s.init(content)
 }
 
-// NewPlainVScroll is the same scroll without the position indicator, for a column
-// whose own content reaches the right edge the strip would be drawn over. The
-// settings pane centres its cards, so an indicator lands on top of one whenever
-// the window is narrow enough for the two to meet.
+// NewPlainVScroll is the same scroll without the indicator, for a column whose
+// content reaches the right edge the strip would be drawn over — the settings
+// pane centres its cards, so a narrow window puts the indicator on one.
 func NewPlainVScroll(content fyne.CanvasObject) *ObservableScroll {
 	return new(ObservableScroll).init(content)
 }
@@ -895,12 +884,10 @@ func (s *ObservableScroll) init(content fyne.CanvasObject) *ObservableScroll {
 	return s
 }
 
-// CreateRenderer adds the indicator to Fyne's own scroll renderer. It is a
-// canvas.Rectangle rather than Fyne's scroll bar because that bar comes wrapped
-// in a hover-accepting area over the right edge of the content, which — being
-// innermost — takes the hover the message row under it needs, and swells under
-// the pointer over the text it is meant to sit beside. AppTheme zeroes both of
-// its sizes; this draws what they used to.
+// CreateRenderer adds the indicator to Fyne's own scroll renderer. A plain
+// rectangle rather than Fyne's bar, which comes wrapped in a hover-accepting area
+// over the content's right edge and — innermost — takes the message row's hover.
+// AppTheme zeroes both of its sizes; this draws what they used to.
 func (s *ObservableScroll) CreateRenderer() fyne.WidgetRenderer {
 	base := s.Scroll.CreateRenderer()
 
@@ -929,11 +916,9 @@ func (r *scrollRenderer) Layout(size fyne.Size) {
 	r.scroll.placeIndicator()
 }
 
-// Refresh is where the indicator is revealed rather than in Scrolled: every
-// offset change ends here whoever asked for it, so a middle-button pan and the
-// jump to the newest message are covered by the same line. The offset is compared
-// rather than trusted, because a refresh for any other reason — a mounted widget
-// repainting, a theme change — must not flash the bar.
+// Refresh reveals the indicator rather than Scrolled doing it: every offset
+// change ends here whoever asked for it. The offset is compared rather than
+// trusted, so a repaint for any other reason does not flash the bar.
 func (r *scrollRenderer) Refresh() {
 	r.WidgetRenderer.Refresh()
 
@@ -945,8 +930,8 @@ func (r *scrollRenderer) Refresh() {
 	}
 }
 
-// Destroy stops the fade with the widget. A rebuild of the tree — restyling does
-// one — drops the scroll while an animation could still be running against it.
+// Destroy stops the fade with the widget: a restyle rebuilds the tree, dropping
+// the scroll while an animation could still be running against it.
 func (r *scrollRenderer) Destroy() {
 	r.scroll.stopFade()
 	if r.scroll.linger != nil {
@@ -956,15 +941,12 @@ func (r *scrollRenderer) Destroy() {
 	r.WidgetRenderer.Destroy()
 }
 
-// SyncContent resizes the content to what it now measures. Fyne's scroller does
-// this from its renderer's Layout, which runs on a Refresh — and refreshing a
-// mounted message column re-wraps every body in it, which is the whole reason
-// nothing here calls Scroll.Refresh after a mount.
-//
-// Without it ScrollToOffset clamps against the size the content was laid out at
-// *before* the mount: a column that has just grown from a screenful to a page of
-// history is scrolled as though it still fitted the viewport, which zeroes the
-// offset. Only a caller that mounts and then scrolls in the same pass needs it.
+// SyncContent resizes the content to what it now measures. Fyne does this from
+// its renderer's Layout, which runs on a Refresh — and refreshing a mounted
+// message column re-wraps every body, which is why nothing here refreshes after a
+// mount. Without it ScrollToOffset clamps against the pre-mount size, so a column
+// grown to a page of history scrolls as though it still fitted the viewport. Only
+// a caller that mounts and scrolls in one pass needs it.
 func (s *ObservableScroll) SyncContent() {
 	if s.Content == nil {
 		return
@@ -973,10 +955,9 @@ func (s *ObservableScroll) SyncContent() {
 	s.Content.Resize(s.Content.MinSize().Max(s.Size()))
 }
 
-// placeIndicator sizes the bar to the fraction of the content in view and moves
-// it to where that fraction sits, reporting whether there is anything to
-// indicate. The extent comes from Content.Size(), which the scroll's own layout
-// has already resized to it — MinSize on the message list is a walk of every
+// placeIndicator sizes the bar to the fraction of content in view and moves it to
+// where that fraction sits, reporting whether there is anything to indicate. The
+// extent comes from Content.Size(), never MinSize — that is a walk of every
 // mounted row, and this runs on the scroll path.
 func (s *ObservableScroll) placeIndicator() bool {
 	if s.indicator == nil || s.Content == nil {
@@ -994,8 +975,10 @@ func (s *ObservableScroll) placeIndicator() bool {
 	inset := theme.Sizes.ScrollIndicatorInset
 	track := view.Height - inset*2
 
-	height := fyne.Min(fyne.Max(track*view.Height/content, theme.Sizes.ScrollIndicatorMinHeight), track)
-	progress := fyne.Min(fyne.Max(s.Offset.Y/(content-view.Height), 0), 1)
+	// The floor is applied first, so a viewport shorter than the minimum still gets
+	// a bar no taller than its track.
+	height := min(max(track*view.Height/content, theme.Sizes.ScrollIndicatorMinHeight), track)
+	progress := clamp(s.Offset.Y/(content-view.Height), 0, 1)
 
 	s.indicator.CornerRadius = width / 2
 	s.indicator.Resize(fyne.NewSize(width, height))
@@ -1019,8 +1002,8 @@ func (s *ObservableScroll) revealIndicator() {
 	s.linger.Reset(scrollIndicatorLinger)
 }
 
-// fadeIndicator takes the bar out over scrollIndicatorFade. Only the linger timer
-// calls it, so a movement arriving mid-fade stops it through revealIndicator.
+// fadeIndicator takes the bar out. Only the linger timer calls it, so a movement
+// arriving mid-fade stops it through revealIndicator.
 func (s *ObservableScroll) fadeIndicator() {
 	s.stopFade()
 
@@ -1072,14 +1055,13 @@ func (s *ObservableScroll) Dragged(ev *fyne.DragEvent) {
 	}
 
 	// ScrollToOffset rather than writing Offset and refreshing: Scroll.Refresh
-	// walks and repaints every descendant, which for a long pane is the whole
-	// column once per frame of the pan.
+	// repaints every descendant, which for a pan is the whole column per frame.
 	s.ScrollToOffset(fyne.NewPos(s.Offset.X-ev.Dragged.DX, s.Offset.Y-ev.Dragged.DY))
 	s.notify()
 }
 
 // DragEnd completes fyne.Draggable. Without it the driver never recognises the
-// scroll as draggable, so Dragged is never called and panning silently dies.
+// scroll as draggable and Dragged is never called at all.
 func (s *ObservableScroll) DragEnd() { s.panning = false }
 
 func (s *ObservableScroll) notify() {
@@ -1090,29 +1072,25 @@ func (s *ObservableScroll) notify() {
 
 /* Text metrics */
 
-// textAscentRatio is how much of a line of text sits above its baseline. Fyne
-// measures a line but exposes none of the metrics behind it, so the split is
-// taken as fixed — the client draws one font throughout, and only the difference
-// between two line heights is ever scaled by it.
+// textAscentRatio is how much of a line sits above its baseline. Fyne exposes no
+// font metrics, so it is taken as fixed — one font throughout, and only the
+// difference between two line heights is ever scaled by it.
 const textAscentRatio = 0.8
 
 // baselineOffset is how far down text at size small must start to share a
-// baseline with text at size large beside it. Two sizes handed the same height
-// centre against each other instead, which leaves the smaller one riding high.
+// baseline with text at large beside it. Two sizes handed the same height centre
+// against each other instead, leaving the smaller one riding high.
 func baselineOffset(large, small float32) float32 {
 	return textAscentRatio * (lineHeight(large) - lineHeight(small))
 }
 
 /* Accented text */
 
-// AccentText is a name drawn in a role's colour. Fyne fills a text object with
-// one colour, so a gradient across a word can only be a gradient across its
-// letters: a flat colour mounts a single canvas.Text, a gradient one per rune,
-// each filled where that rune sits along the run.
-//
-// The split is the whole reason it is a widget rather than a bare canvas.Text.
-// A name whose role carries no gradient — nearly every one — still mounts exactly
-// one text object, so the message list pays nothing for the ones that do.
+// AccentText is a name drawn in a role's colour. A text object takes one colour,
+// so a gradient across a word is a gradient across its letters: a flat fill
+// mounts one canvas.Text, a gradient one per rune. That split is why it is a
+// widget — a name with no gradient, nearly every one, still mounts a single
+// object, so the message list pays nothing for the ones that do.
 type AccentText struct {
 	widget.BaseWidget
 
@@ -1173,16 +1151,14 @@ func (t *AccentText) Fit(width float32) {
 	t.build()
 }
 
-// build lays out the text objects the current name and fill need: one, or one
-// per rune, each filled where its own glyph falls along the run.
+// build mounts the text objects the current name and fill need: one, or one per
+// rune, each filled where its glyph falls along the run.
 //
-// Every offset is measured off the *whole* name up to that rune rather than
-// accumulated from the runes themselves, so the split run is laid out exactly
-// where the unsplit one would be — summing single glyphs drifts by a fraction of
-// a pixel each, which is enough to move the timestamp beside a name. The centres
-// are then stretched over the whole gradient: a text object takes one colour, so
-// the outermost letters would otherwise stop short of the stops they exist to
-// show.
+// Offsets are measured off the *whole* name up to each rune rather than summed
+// from the runes, so the split run lands exactly where the unsplit one would —
+// summing single glyphs drifts enough to move the timestamp beside a name. The
+// centres are then stretched over the whole gradient, or the outermost letters
+// stop short of the stops they exist to show.
 func (t *AccentText) build() {
 	t.layout.size = fyne.MeasureText(t.text, t.size, t.style)
 
@@ -1222,9 +1198,8 @@ func (t *AccentText) build() {
 	t.content.Objects = objects
 }
 
-// accentLayout places each of AccentText's glyphs at the offset the name
-// measures up to it, and reports the name's own measurement whatever it was split
-// into.
+// accentLayout places each glyph at the offset the name measures up to it, and
+// reports the name's own measurement whatever it was split into.
 type accentLayout struct {
 	offsets []float32
 	size    fyne.Size
@@ -1253,37 +1228,32 @@ func (t *AccentText) newText(text string, fill color.Color) *canvas.Text {
 		fill = theme.Colors.TextPrimary
 	}
 
-	obj := canvas.NewText(text, solidColor(fill))
-	obj.TextSize = t.size
+	obj := newText(text, fill, t.size)
 	obj.TextStyle = t.style
 
 	return obj
 }
 
-// solidColor flattens fill to something a canvas.Text can be drawn in. Fyne
-// caches a rendered glyph run in a map keyed by the text object's own fields,
-// colour included, so a fill that cannot be a map key — a domain.Gradient is a
-// slice — panics the painter mid-frame rather than drawing. A shape is safe: its
-// texture is keyed by the object, not by what fills it.
+// solidColor flattens fill to something a canvas.Text can be drawn in. Fyne keys
+// its glyph cache on the text object's fields, colour included, so a fill that
+// cannot be a map key — domain.Gradient is a slice — panics the painter mid-frame.
+// Shapes are safe: their texture is keyed by the object, not by the fill.
 //
-// The flattening is the gradient's own mean, which is what it answers as
-// anywhere it is used as a plain colour. Only ui.AccentText spreads one across
-// text, and it does that by giving each rune a stop of its own — so every fill
-// reaching a text object here is already meant to be flat.
+// What comes back is the gradient's own mean, as anywhere it is used flat. Only
+// AccentText spreads one across text, and it gives each rune a stop of its own.
 func solidColor(fill color.Color) color.Color {
 	if _, gradient := fill.(domain.Gradient); !gradient {
 		return fill
 	}
 
-	// Premultiplied, as RGBA reports: RGBA64 holds it exactly, where NRGBA would
-	// have to divide the alpha back out.
+	// RGBA64 holds RGBA's premultiplied result exactly; NRGBA would have to divide
+	// the alpha back out.
 	r, g, b, a := fill.RGBA()
 
 	return color.RGBA64{R: uint16(r), G: uint16(g), B: uint16(b), A: uint16(a)}
 }
 
-// sameColor compares two fills without assuming either can be compared with ==,
-// which a domain.Gradient — a slice — panics on.
+// sameColor compares two fills without ==, which panics on a domain.Gradient.
 func sameColor(first, second color.Color) bool {
 	firstStops, firstGradient := first.(domain.Gradient)
 	secondStops, secondGradient := second.(domain.Gradient)
@@ -1306,21 +1276,18 @@ func sameColor(first, second color.Color) bool {
 // text it replaces stays as long as possible.
 const ellipsis = "…"
 
-// NewEllipsisText wraps a single-line canvas.Text in a container that shortens
-// the text to whatever width it is given, ending it in an ellipsis. Its minimum
-// width is zero, which is the whole point: a sidebar row must not be able to
-// widen its column just because someone has a long name.
-//
-// It only works in a slot that hands its child real width — a Border's centre,
-// not an HBox, which would give a zero-minimum child zero width.
+// NewEllipsisText shortens a single-line canvas.Text to whatever width it is
+// given. Its minimum width is zero, which is the point: a sidebar row must not
+// widen its column because someone has a long name. Only works in a slot that
+// hands its child real width — a Border's centre, not an HBox.
 func NewEllipsisText(text *canvas.Text) *fyne.Container {
 	return container.New(&ellipsisLayout{text: text, full: text.Text}, text)
 }
 
-// SetEllipsisText re-labels a box built by NewEllipsisText. The full text is
-// fixed at construction there, which is right for a row built per person and
-// wrong for one the member list recycles — and reading the name back off the
-// text object instead would take it to be whatever last fitted the column.
+// SetEllipsisText re-labels a box built by NewEllipsisText, whose full text is
+// otherwise fixed at construction — right for a row built per person, wrong for a
+// recycled one. Reading the name back off the text object would take whatever
+// last fitted the column for the real one.
 func SetEllipsisText(box *fyne.Container, text string) {
 	layout, ok := box.Layout.(*ellipsisLayout)
 	if !ok {
@@ -1332,15 +1299,11 @@ func SetEllipsisText(box *fyne.Container, text string) {
 	Relayout(box)
 }
 
-// ellipsisLayout re-fits its text to the width it is handed and centres it
-// vertically. Rewriting the text during Layout is safe because the reported
-// minimum size doesn't depend on the content — the width is fixed at zero and
-// the height is the font's — so a shortened string can't trigger another layout.
-//
-// Both derived values are held onto because Layout and MinSize run on every
-// pass, over every row of both sidebars, while the answers change only when the
-// column is resized: full is fixed at construction, and so are the text's size
-// and style.
+// ellipsisLayout re-fits its text to the width it is handed and centres it.
+// Rewriting text during Layout is safe because the reported minimum does not
+// depend on the content — zero wide, one line tall — so it cannot trigger another
+// pass. Both derived values are cached: Layout and MinSize run per pass over every
+// row of both sidebars, while the answers change only on a resize.
 type ellipsisLayout struct {
 	text *canvas.Text
 	full string
@@ -1380,12 +1343,10 @@ func (l *ellipsisLayout) lineHeight() float32 {
 	return l.height
 }
 
-// TruncateToWidth shortens text until it fits inside width when rendered at the
-// given size and style, appending an ellipsis when anything was dropped. Unlike
-// util.Truncate, which counts runes, this measures the rendered result — in a
-// proportional font the same rune count is a different width. The binary search
-// keeps it to a handful of measurements, which matters because it runs on every
-// layout pass.
+// TruncateToWidth shortens text to fit width when rendered, appending an ellipsis
+// when anything was dropped. Unlike util.Truncate it measures rather than counts
+// runes — in a proportional font the same count is a different width. Binary
+// search because this runs on every layout pass.
 func TruncateToWidth(text string, width, size float32, style fyne.TextStyle) string {
 	if width <= 0 {
 		return ""
@@ -1412,11 +1373,9 @@ func TruncateToWidth(text string, width, size float32, style fyne.TextStyle) str
 	return string(runes[:low]) + ellipsis
 }
 
-// WrapToWidth breaks text into lines that each measure no wider than width.
-// A word too long for a line of its own is broken mid-word: the alternative is
-// one line overhanging whatever sits beside it, which is the thing wrapping is
-// for. A width of zero or less is no room to decide anything in, so the text
-// comes back whole.
+// WrapToWidth breaks text into lines no wider than width, breaking mid-word where
+// a word does not fit a line of its own — the alternative is a line overhanging
+// what sits beside it. A width of zero or less returns the text whole.
 func WrapToWidth(text string, width, size float32, style fyne.TextStyle) []string {
 	words := strings.Fields(text)
 	if width <= 0 || len(words) == 0 {
@@ -1440,8 +1399,8 @@ func WrapToWidth(text string, width, size float32, style fyne.TextStyle) []strin
 			line, extent = word, measured
 		}
 
-		// A word wider than the column itself is cut where it stops fitting and
-		// carries on filling the next line, however many that takes.
+		// A word wider than the column is cut where it stops fitting and carries on
+		// over as many lines as it takes.
 		for extent > width {
 			head, tail := splitToWidth(line, width, size, style)
 			if tail == "" {
@@ -1468,21 +1427,16 @@ func splitToWidth(text string, width, size float32, style fyne.TextStyle) (head,
 	return text, ""
 }
 
-// NewWrappedText is a block of prose that wraps at width. It is canvas.Text per
-// line rather than a wrapping widget.Label because a wrapping widget cannot be
-// asked how tall it wants to be until after it has been given a width — it
-// answers with whatever it was last laid out at — so a row holding one reports
-// the wrong height for the frame it is already in. Every caller here knows its
-// width beforehand, so the break points are decided at construction and the
-// block's minimum is true from the first pass.
+// NewWrappedText is a block of prose wrapped at width — a canvas.Text per line
+// rather than a wrapping widget.Label, which cannot be asked how tall it wants to
+// be before it has a width and answers with whatever it was last laid out at.
+// Every caller knows its width, so the block's minimum is true from the first pass.
 func NewWrappedText(text string, width, size float32, colour color.Color) fyne.CanvasObject {
 	lines := WrapToWidth(text, width, size, fyne.TextStyle{})
 
 	objects := make([]fyne.CanvasObject, 0, len(lines))
 	for _, line := range lines {
-		object := canvas.NewText(line, colour)
-		object.TextSize = size
-		objects = append(objects, object)
+		objects = append(objects, newText(line, colour, size))
 	}
 
 	return VBoxNoSpacing(objects...)
@@ -1494,11 +1448,10 @@ const (
 	// typingSweepPeriod is one full there-and-back of the line.
 	typingSweepPeriod = time.Second
 
-	// typingSweepSegments is the head and everything trailing it, and
-	// typingSweepLag how far behind the head — in fractions of a cycle — each
-	// following segment runs. Lagging in *time* rather than in space is what makes
-	// the trail take the same path: it bunches up behind the head at each turn and
-	// draws out again across the middle, with nothing to clamp at either end.
+	// typingSweepSegments is the head and its trail, typingSweepLag how far behind
+	// — in fractions of a cycle — each following segment runs. Lagging in *time*
+	// rather than in space is what puts the trail on the head's own path: it bunches
+	// at each turn and draws out across the middle, with nothing to clamp.
 	typingSweepSegments = 4
 	typingSweepLag      = 0.075
 
@@ -1506,19 +1459,14 @@ const (
 	typingSweepFade = 0.55
 )
 
-// TypingMark is the sweeping line that says somebody is composing. Both places
-// that need one mount it: the line above the composer card, and a channel row in
-// the sidebar.
+// TypingMark is the sweeping line that says somebody is composing, mounted above
+// the composer card and on a sidebar channel row.
 //
-// It is a widget of its own rather than a container of rectangles because the
-// sweep has to be stopped when the tree holding it goes away, and only a renderer
-// is told about that. Every channel row is rebuilt from scratch by
-// refreshChannelList, so an animation left running against a discarded row would
-// tick for the life of the process.
-//
-// It accepts no pointer event, so hover and right-click reach whatever it is
-// drawn over: the message passing under the composer, or the channel row it
-// marks.
+// A widget rather than a container of rectangles because the sweep must stop when
+// the tree holding it goes away, and only a renderer hears that — refreshChannelList
+// rebuilds every row, so an animation left running would tick for the life of the
+// process. It accepts no pointer event, so hover and right-click reach what it is
+// drawn over.
 type TypingMark struct {
 	widget.BaseWidget
 
@@ -1536,15 +1484,10 @@ type TypingMark struct {
 func NewTypingMark(width float32, tint color.Color) *TypingMark {
 	m := &TypingMark{}
 
-	// Laid out by hand on the 20-unit grid the client's other glyphs use, so the
-	// line keeps its proportions at any width and the sweep can move a rectangle
-	// with no layout pass behind it. Nine units by three: long enough to read as a
-	// line rather than a dash, shallow enough not to read as a bar — and leaving
-	// eleven for it to travel, which is what has to be legible at a glance.
-	//
-	// The box is exactly as tall as the line, unlike the square the client's glyphs
-	// are drawn in: there is nothing above or below it, and both callers centre it
-	// in a row of their own.
+	// Hand-laid on the 20-unit grid the client's glyphs use, so proportions hold at
+	// any width and the sweep moves a rectangle with no layout pass behind it. Nine
+	// units by three leaves eleven to travel, which is what has to read at a glance.
+	// The box is only as tall as the line — both callers centre it in their own row.
 	scale := width / 20
 	barWidth, barHeight := 9*scale, 3*scale
 
@@ -1562,14 +1505,15 @@ func NewTypingMark(width float32, tint color.Color) *TypingMark {
 		alpha *= typingSweepFade
 	}
 
-	// Farthest behind first: the head is opaque and has to be drawn over its own
-	// trail, and a container paints its objects in the order it holds them.
-	glyph := container.NewWithoutLayout()
-	for i := len(m.segments) - 1; i >= 0; i-- {
-		glyph.Add(m.segments[i])
+	// Farthest behind first: a container paints in order, and the opaque head has to
+	// land over its own trail.
+	stacked := make([]fyne.CanvasObject, len(m.segments))
+	for i, bar := range m.segments {
+		stacked[len(m.segments)-1-i] = bar
 	}
 
-	m.content = container.NewGridWrap(fyne.NewSize(width, barHeight), glyph)
+	m.content = container.NewGridWrap(fyne.NewSize(width, barHeight),
+		container.NewWithoutLayout(stacked...))
 
 	m.Hide()
 	m.ExtendBaseWidget(m)
@@ -1581,13 +1525,12 @@ func (m *TypingMark) CreateRenderer() fyne.WidgetRenderer {
 	return &typingMarkRenderer{WidgetRenderer: widget.NewSimpleRenderer(m.content), mark: m}
 }
 
-// SetActive shows the mark and starts the sweep, or hides it and stops it.
-// Unchanged state is a no-op, so a repaint of a whole sidebar costs nothing per
-// row that did not move.
+// SetActive shows the mark and starts the sweep, or hides and stops it. A no-op
+// when unchanged, so a sidebar repaint costs nothing per row that did not move.
 //
-// A hidden widget must never keep an animation: it would repaint nothing sixty
-// times a second. Neither may a still one, which is what animate off asks for —
-// the line rests in the middle of its travel and no animation is started at all.
+// A hidden widget must never keep an animation — it would repaint nothing sixty
+// times a second — and neither may a still one: animate off rests the line in the
+// middle of its travel and starts nothing.
 func (m *TypingMark) SetActive(active, animate bool) {
 	if !active {
 		if m.Visible() || m.sweep != nil {
@@ -1597,9 +1540,8 @@ func (m *TypingMark) SetActive(active, animate bool) {
 		return
 	}
 
-	// animate is only part of the state while the mark is up, which is why it is
-	// not compared on the way out: a still mark and a stopped one are the same
-	// thing hidden.
+	// animate only counts while the mark is up: hidden, still and stopped are one
+	// state, which is why it is not compared on the way out.
 	if m.Visible() && animate == (m.sweep != nil) {
 		return
 	}
@@ -1612,13 +1554,10 @@ func (m *TypingMark) SetActive(active, animate bool) {
 	}
 }
 
-// start runs the sweep. Nothing here refreshes anything: a written fill marks
-// nothing dirty, but canvas.Rectangle.Move repaints for itself — and moving is
-// all this does, the trail's colours being fixed at construction.
-//
-// The curve is linear because the shaping is in typingSweepAt. An eased one would
-// also stutter at every repeat, easing out of a cycle and back into the next at
-// the point the line is travelling fastest.
+// start runs the sweep. Nothing refreshes: canvas.Rectangle.Move repaints for
+// itself, and moving is all this does — the trail's colours are fixed at
+// construction. Linear because the shaping is in typingSweepAt; an eased curve
+// would also stutter at every repeat, where the line is travelling fastest.
 func (m *TypingMark) start() {
 	m.sweep = fyne.NewAnimation(typingSweepPeriod, func(done float32) {
 		for i, bar := range m.segments {
@@ -1632,9 +1571,8 @@ func (m *TypingMark) start() {
 	m.sweep.Start()
 }
 
-// stop halts the sweep and rests the line in the middle of its travel, which is
-// where a still mark is drawn — the trail collapsed under the head, where an
-// opaque head hides it. Nil-safe and idempotent: every start goes through it.
+// stop halts the sweep and rests the line mid-travel, the trail collapsed under
+// the opaque head. Nil-safe and idempotent: every start goes through it.
 func (m *TypingMark) stop() {
 	if m.sweep == nil {
 		return
@@ -1648,13 +1586,10 @@ func (m *TypingMark) stop() {
 	}
 }
 
-// typingTrailTint dims the mark's colour for a segment behind the head.
-//
-// It is not theme.Fade, which scales the alpha of a color.RGBA and leaves the
-// channels alone — and Go defines those channels as *already multiplied by* that
-// alpha. Faded that way, a colour composites brighter than the one it came from,
-// which for a trail meant a tail lighter than the line casting it. Everything has
-// to come down together.
+// typingTrailTint dims the mark's colour for a segment behind the head. Not
+// theme.Fade, which scales a color.RGBA's alpha and leaves channels Go defines as
+// *already multiplied by* it — faded that way a colour composites brighter, so
+// the tail came out lighter than the line casting it.
 func typingTrailTint(c color.Color, alpha float32) color.Color {
 	r, g, b, a := c.RGBA()
 	scale := func(channel uint32) uint8 { return uint8(float32(channel>>8) * alpha) }
@@ -1662,22 +1597,19 @@ func typingTrailTint(c color.Color, alpha float32) color.Color {
 	return color.RGBA{R: scale(r), G: scale(g), B: scale(b), A: scale(a)}
 }
 
-// typingSweepAt is where a segment sits at a point in the cycle, from 0 at the
-// left of the travel to 1 at the right and back. A cosine rather than a triangle:
-// the line eases into each turn instead of striking the end and reversing, and it
-// is that slowing which gathers the trail up behind the head there.
-//
-// The phase arrives negative for every segment but the head, so it is wrapped by
-// flooring rather than by truncating towards zero.
+// typingSweepAt is where a segment sits in the cycle, 0 at the left of the travel
+// to 1 at the right and back. A cosine rather than a triangle: the line eases into
+// each turn instead of striking the end, and that slowing is what gathers the
+// trail behind the head. The phase arrives negative for every segment but the
+// head, so it wraps by flooring rather than truncating towards zero.
 func typingSweepAt(phase float32) float32 {
 	phase -= float32(math.Floor(float64(phase)))
 
 	return float32(1-math.Cos(2*math.Pi*float64(phase))) / 2
 }
 
-// typingMarkRenderer exists for Destroy alone: the tree holding the mark is
-// rebuilt by a restyle and by every refresh of the channel list, and the
-// animation has to go with it.
+// typingMarkRenderer exists for Destroy alone: a restyle and every channel-list
+// refresh rebuild the tree, and the animation has to go with it.
 type typingMarkRenderer struct {
 	fyne.WidgetRenderer
 	mark *TypingMark

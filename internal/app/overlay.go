@@ -1,18 +1,18 @@
 package app
 
-// The modal layer: one overlay at a time over the main window, holding the
-// attachment lightbox, the join-server dialog, a confirmation, or a profile.
-// They are overlays rather than windows because there is no native chrome to
-// recolour, they cannot be left behind, and they cannot drift off-centre.
-//
-// A profile card is the one that is anchored rather than centred (showPopover),
-// which is the only difference between the two ways in.
+// The modal layer: one overlay at a time over the main window — the attachment
+// lightbox, the join dialog, a confirmation, a profile. Overlays rather than
+// windows: no native chrome to recolour, nothing to leave behind, nothing that
+// can drift off-centre. A profile card is the one anchored rather than centred
+// (showPopover), which is the only difference between the two ways in.
 
 import (
+	"errors"
 	"log"
 
 	"fyne.io/fyne/v2"
 
+	"RGOClient/internal/client"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -20,12 +20,10 @@ import (
 
 /* The layer itself */
 
-// showOverlay puts content on the modal layer, replacing whatever was there.
-// While it is up, Esc closes it: Fyne gives each overlay its own focus manager,
-// so with nothing in the overlay focused, key events reach the canvas handler
-// instead of the composer underneath. Content that does take focus (the invite
-// dialog's entry) has to handle Esc itself, since Fyne routes keys to the focused
-// widget and never calls this handler. Call on the UI thread.
+// showOverlay puts content on the modal layer, replacing what was there. While it
+// is up Esc closes it: Fyne gives each overlay its own focus manager, so with
+// nothing focused inside, keys reach the canvas handler rather than the composer.
+// Content that *does* take focus handles Esc itself. Call on the UI thread.
 func (a *App) showOverlay(content fyne.CanvasObject) {
 	a.mountOverlay(ui.NewOverlay(content, a.closeOverlay))
 }
@@ -37,10 +35,9 @@ func (a *App) showPopover(content, anchor fyne.CanvasObject) {
 	a.mountOverlay(ui.NewPopover(content, anchor, a.closeOverlay))
 }
 
-// mountOverlay replaces the modal layer with overlay and takes the keyboard.
-// Escape is claimed by whichever surface is topmost, which is what bindKeys
-// decides — the settings page is underneath this layer and gets it back when the
-// overlay goes.
+// mountOverlay replaces the modal layer and takes the keyboard. Escape belongs to
+// whichever surface is topmost, which bindKeys decides — the settings page is
+// under this layer and gets it back when the overlay goes.
 func (a *App) mountOverlay(overlay *ui.Overlay) {
 	a.closeOverlay()
 
@@ -68,8 +65,10 @@ func (a *App) closeOverlay() {
 
 	a.overlay = nil
 	a.joinDialog = nil
+	a.prompt = nil
 	a.closeFriends()
 	a.closePins()
+	a.closeSearch()
 	a.bindKeys()
 
 	// The settings page has its own focus to keep; only the client underneath
@@ -112,14 +111,11 @@ func (a *App) showJoinServer() {
 	a.window.Canvas().Focus(dialog.Entry)
 }
 
-// joinInvite redeems an invite code and reports the outcome to done, on the UI
-// thread. It is shared by the two places a join starts from — the dialog and an
-// invite card in a message — which differ only in where a failure is said.
-//
-// The joined server reaches the sidebar through the ServerJoined event rather
-// than this response — see Client.JoinInvite for why the response cannot name it
-// — so pendingJoin marks the request, telling onServerJoined this is the server
-// to switch to.
+// joinInvite redeems a code and reports to done on the UI thread. Shared by the
+// two places a join starts from — the dialog and an invite card — which differ
+// only in where a failure is said. The joined server reaches the sidebar through
+// the ServerJoined event rather than this response (see Client.JoinInvite), so
+// pendingJoin marks the request as the one to switch to.
 func (a *App) joinInvite(code string, done func(err error)) {
 	a.pendingJoin = true
 
@@ -128,8 +124,8 @@ func (a *App) joinInvite(code string, done func(err error)) {
 
 		a.doOnUI(func() {
 			if err != nil {
-				// The API's message ("bad status code 404: ...") is no use to the
-				// user, so it goes to the log and the caller says what to do.
+				// The API's message ("bad status code 404: …") is no use to the user, so
+				// it goes to the log and the caller says what to do.
 				log.Printf("join invite %s: %v", code, err)
 				a.pendingJoin = false
 			}
@@ -153,9 +149,9 @@ func (a *App) joinServer(code string) {
 	})
 }
 
-// OnJoinInvite redeems a code from an invite card in a message. There is no
-// dialog to answer in, and no overlay to close on success — the sidebar simply
-// gains the server — so only the failure is worth saying, on the notice layer.
+// OnJoinInvite redeems a code from an invite card. No dialog to answer in and no
+// overlay to close — the sidebar simply gains the server — so only the failure is
+// worth saying, on the notice layer.
 func (a *App) OnJoinInvite(code string) {
 	a.joinInvite(code, func(err error) {
 		if err != nil {
@@ -164,9 +160,9 @@ func (a *App) OnJoinInvite(code string) {
 	})
 }
 
-// inviteResult is what a code resolved to. A failure is remembered alongside a
-// success because an invite that has expired stays expired, and a card that
-// re-asked on every scroll past its message would be a request per frame.
+// inviteResult is what a code resolved to. Failures are remembered too: an
+// expired invite stays expired, and a card re-asking on every scroll past its
+// message would be a request per frame.
 type inviteResult struct {
 	invite domain.Invite
 	err    error
@@ -204,8 +200,8 @@ func (a *App) ResolveInvite(code string, done func(domain.Invite, error)) {
 			waiting := a.pendingInvites[code]
 			delete(a.pendingInvites, code)
 
-			// A card from the previous account's view is gone along with the tree
-			// it was in, and its answer must not be cached against this one.
+			// A card from the previous account's view is gone with the tree it was in,
+			// and its answer must not be cached against this one.
 			if a.stale(epoch) {
 				return
 			}
@@ -218,12 +214,68 @@ func (a *App) ResolveInvite(code string, done func(domain.Invite, error)) {
 	}()
 }
 
-// createServer is the dialog's "Create a server" action.
-func (a *App) createServer() {
-	// todo: server creation (ServerCreate + name/icon form)
-	log.Print("create server requested")
+/* Creating a server */
 
-	if a.joinDialog != nil {
-		a.joinDialog.Notice("Creating a server isn't available yet.")
+// createServer replaces the join dialog with the one asking for a name — replaces
+// rather than stacks, the modal layer holding one card and the two being the same
+// question asked of a server that exists and one that does not. A name is all
+// Revolt takes at creation, so the card is one field.
+func (a *App) createServer() {
+	if !a.client.Connected() {
+		return
 	}
+
+	dialog := ui.NewPromptDialog(ui.Prompt{
+		Title:  "Create a server",
+		Action: "Create",
+		Busy:   "Creating...",
+		Fields: []ui.PromptField{{Label: "Server name", Placeholder: "My server"}},
+		OnSubmit: func(values []string) {
+			a.submitServer(values[0])
+		},
+	}, a.closeOverlay)
+
+	a.showOverlay(dialog.Content)
+	a.prompt = dialog // after showOverlay, which clears the field
+	a.window.Canvas().Focus(dialog.Entry)
+}
+
+// submitServer creates the server and leaves the dialog up until it exists. The
+// server arrives on the gateway rather than in the response (see
+// Client.CreateServer), so pendingJoin selects it — the same mark a join leaves.
+func (a *App) submitServer(name string) {
+	a.pendingJoin = true
+	epoch := a.epoch
+
+	go func() {
+		err := a.client.CreateServer(name)
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+			if err == nil {
+				a.closeOverlay()
+				return
+			}
+
+			log.Printf("create server: %v", err)
+			a.pendingJoin = false
+
+			if a.prompt != nil {
+				a.prompt.Fail(createServerFailure(err))
+			}
+		}, false)
+	}()
+}
+
+// createServerFailure is what the card says about a refusal. Only one is worth
+// naming: an empty name is the reader's to fix, and the rest are status codes
+// they can do nothing with.
+func createServerFailure(err error) string {
+	if errors.Is(err, client.ErrServerNameEmpty) {
+		return "Give the server a name."
+	}
+
+	return "Could not create that server."
 }

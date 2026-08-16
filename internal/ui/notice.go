@@ -1,10 +1,9 @@
 package ui
 
-// The notification system. One vocabulary — Tone — behind two presentations:
-// NoticeStack, a transient message the user need not answer, and ConfirmDialog,
-// a modal question they must. Anything that reports an outcome or asks before
-// doing something irreversible goes through one of the two, so the client has a
-// single look for "this went wrong" and "are you sure".
+// The notification system: one vocabulary (Tone) behind two presentations —
+// NoticeStack, a transient message needing no answer, and ConfirmDialog, a modal
+// question that does. Everything reporting an outcome or asking before something
+// irreversible goes through one, so the client has one look for each.
 
 import (
 	"image/color"
@@ -22,9 +21,9 @@ import (
 
 /* Tones */
 
-// Tone is what a notice or a confirmation is about. It is the only thing that
-// decides colour, icon, and button weight, so a caller says what it means and
-// never how it should look.
+// Tone is what a notice or confirmation is about — the only thing deciding
+// colour, icon and button weight, so a caller says what it means and never how it
+// should look.
 type Tone int
 
 const (
@@ -59,9 +58,8 @@ func (t Tone) icon() fyne.Resource {
 	return fynetheme.NewColoredResource(fynetheme.InfoIcon(), fynetheme.ColorNamePrimary)
 }
 
-// title is the heading a notice carries when its caller gave none. It says what
-// kind of thing happened, which a card of body text alone never does at a
-// glance.
+// title is the heading a notice takes when its caller gave none: what kind of
+// thing happened, which body text alone never says at a glance.
 func (t Tone) title() string {
 	switch t {
 	case ToneWarning:
@@ -90,12 +88,9 @@ func (t Tone) importance() widget.Importance {
 /* Transient notices */
 
 // NoticeStack is the layer transient messages appear on: a corner of cards, each
-// on its own timer, dismissed early by clicking it.
-//
-// Layer is stacked over the main layout like a Tooltip's, and for the same
-// reason — a canvas overlay would take the whole hit test, and a message nobody
-// has to answer must not block the client. Nothing in the layer matches a
-// pointer event except a card itself, so clicks elsewhere reach the UI beneath.
+// on its own timer, dismissed early by a click. Layer is stacked over the main
+// layout like a Tooltip's and for the same reason — a canvas overlay takes the
+// whole hit test, and a message nobody has to answer must not block the client.
 type NoticeStack struct {
 	Layer *fyne.Container // stack this over the main layout
 
@@ -115,10 +110,9 @@ func NewNoticeStack() *NoticeStack {
 	list := container.NewVBox()
 	margin := theme.Sizes.NoticeStackMargin
 
-	// Pinned to the top right: the bottom of the message area belongs to the
-	// composer, and a notice must never land on what the user is typing. The stack
-	// of cards is the layer's own business, so NewLayer keeps it out of the window's
-	// minimum size — without it a fourth notice made the window taller.
+	// Top right: the bottom of the message area belongs to the composer, and a
+	// notice must never land on what is being typed. NewLayer keeps the stack out of
+	// the window's minimum — without it a fourth notice made the window taller.
 	layer := NewLayer(container.NewBorder(nil, nil, nil, NewInset(list, margin, margin, 0, margin)))
 
 	return &NoticeStack{Layer: layer, list: list}
@@ -131,9 +125,9 @@ func (n *NoticeStack) Push(tone Tone, text string) {
 }
 
 // PushNotice puts a message on the layer for its configured lifetime, dropping
-// the oldest when the stack is full. A tone the user has switched off is dropped
-// here rather than at the call sites, so nothing has to ask before it reports.
-// Call on the UI thread.
+// the oldest when the stack is full. A tone switched off is dropped here rather
+// than at the call sites, so nothing has to ask before it reports. Call on the UI
+// thread.
 func (n *NoticeStack) PushNotice(notice Notice) {
 	settings := config.Current().Notifications
 	if notice.Body == "" || !notice.Tone.enabled(settings) {
@@ -145,8 +139,8 @@ func (n *NoticeStack) PushNotice(notice Notice) {
 
 	lifetime := settings.Lifetime()
 
-	// The card has to exist before the dismissal that removes it, and the
-	// dismissal before the card that carries it — hence the declaration first.
+	// The card must exist before the dismissal that removes it, and the dismissal
+	// before the card carrying it — hence the declaration first.
 	var card *noticeCard
 	dismiss := func() {
 		card.stop()
@@ -212,12 +206,9 @@ func (n *NoticeStack) remove(card fyne.CanvasObject) {
 }
 
 // noticeCard is one message on the layer: a tone-coloured edge and glyph, a
-// heading, the sentence under it, a close button, and a bar along the bottom
-// that drains over the notice's lifetime.
-//
-// The bar is the part that earns its keep. A card that simply vanishes gives no
-// warning that it is about to, so anything read slowly is read twice; a bar
-// running out says how long is left without saying anything.
+// heading, the sentence, a close button, and a bar draining over its lifetime.
+// The bar earns its keep — a card that simply vanishes gives no warning it is
+// about to, so anything read slowly is read twice.
 type noticeCard struct {
 	tapBase
 
@@ -243,9 +234,7 @@ func newNoticeCard(notice Notice, lifetime time.Duration, onDismiss func()) *not
 	edge.CornerRadius = theme.Sizes.NoticeRadius
 	edge.SetMinSize(fyne.NewSize(theme.Sizes.NoticeEdgeWidth, 0))
 
-	title := canvas.NewText(notice.Title, tint)
-	title.TextSize = theme.Sizes.NoticeTitleSize
-	title.TextStyle = fyne.TextStyle{Bold: true}
+	title := newBoldText(notice.Title, tint, theme.Sizes.NoticeTitleSize)
 
 	body := widget.NewLabel(notice.Body)
 	body.Wrapping = fyne.TextWrapWord
@@ -256,9 +245,8 @@ func newNoticeCard(notice Notice, lifetime time.Duration, onDismiss func()) *not
 
 	bar, countdown := newCountdownBar(tint, inner, lifetime)
 
-	// Both the glyph and the close button hang from the top of the card rather
-	// than centring on it: a two-line body would otherwise push the mark that
-	// says what kind of message this is into the middle of the sentence.
+	// Glyph and close button hang from the top rather than centring: a two-line body
+	// would otherwise push the mark into the middle of the sentence.
 	head := NewFillRow(2,
 		topAligned(theme.Sizes.NoticeIconSize, theme.Sizes.NoticeTitleSize,
 			newScaledIcon(notice.Tone.icon(), theme.Sizes.NoticeIconSize)),
@@ -295,9 +283,9 @@ func (c *noticeCard) stop() {
 	}
 }
 
-// newCountdownBar is the draining bar and the animation that drains it. The
-// width is passed in rather than measured: the card is a fixed width, and an
-// animation cannot wait for a layout pass to learn how far it has to travel.
+// newCountdownBar is the draining bar and the animation draining it. The width is
+// passed in rather than measured: the card is fixed, and an animation cannot wait
+// for a layout pass to learn how far it travels.
 func newCountdownBar(tint color.Color, width float32, lifetime time.Duration) (fyne.CanvasObject, *fyne.Animation) {
 	height := theme.Sizes.NoticeCountdown
 
@@ -305,8 +293,8 @@ func newCountdownBar(tint color.Color, width float32, lifetime time.Duration) (f
 	bar.CornerRadius = height / 2
 	bar.Resize(fyne.NewSize(width, height))
 
-	// Positioned rather than laid out: a layout would put the width back every
-	// time the card was refreshed, which is once per frame of the animation.
+	// Positioned rather than laid out: a layout would put the width back on every
+	// refresh, which is once per frame of the animation.
 	strip := NewMinHeightContainer(height, container.NewWithoutLayout(bar))
 
 	animation := canvas.NewSizeAnimation(
@@ -348,7 +336,7 @@ type Confirm struct {
 // action, cancelling, and the close button — so the caller never has to.
 func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 	card := canvas.NewRectangle(theme.Colors.ViewerCardBg)
-	card.CornerRadius = theme.Sizes.ConfirmRadius
+	card.CornerRadius = theme.Sizes.ConfirmRadius // its own, tighter than a dialog's
 
 	body := widget.NewLabel(confirm.Body)
 	body.Wrapping = fyne.TextWrapWord
@@ -361,13 +349,9 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 	})
 	action.Importance = confirm.Tone.importance()
 
-	// Two halves of the card's width, cancel first and plain.
-	//
-	// Full width rather than a pair in the corner: the two answers to one question
-	// should be the same size and in the same place every time, so the dialog is
-	// answered by position rather than by reading a small label — and the weighted
-	// one is still the only thing carrying colour, so which is destructive is read
-	// off that rather than off which is easier to hit.
+	// Two halves of the card, cancel first and plain — full width rather than a pair
+	// in the corner, so the dialog is answered by position rather than by reading a
+	// small label. The weighted one is still the only thing carrying colour.
 	buttons := container.NewGridWithColumns(2, widget.NewButton("Cancel", onClose), action)
 
 	inner := container.NewVBox(
@@ -385,17 +369,15 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 		NewFixedWidthContainer(theme.Sizes.ConfirmWidth, container.NewPadded(inner))))
 }
 
-// confirmHint says how to skip the question next time — a shortcut nothing else
-// announces, and one nobody would find by trying. It is drawn only where the key
-// can be read (see ShiftHeld) and only on a question that does something, an
-// acknowledgement having nothing to skip.
+// confirmHint says how to skip the question next time — a shortcut nobody would
+// find by trying. Drawn only where the key can be read (see ShiftHeld) and only
+// on a question that does something, an acknowledgement having nothing to skip.
 func confirmHint(confirm Confirm) fyne.CanvasObject {
 	if !shiftSkippable || confirm.OnConfirm == nil {
 		return nil
 	}
 
-	hint := canvas.NewText("Hold Shift to skip this confirmation.", theme.Colors.ConfirmHint)
-	hint.TextSize = theme.Sizes.ConfirmHintSize
+	hint := newText("Hold Shift to skip this confirmation.", theme.Colors.ConfirmHint, theme.Sizes.ConfirmHintSize)
 	hint.Alignment = fyne.TextAlignCenter
 
 	return hint

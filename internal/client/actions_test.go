@@ -9,6 +9,40 @@ import (
 // because it is invisible in a source file.
 const zeroWidth = "​"
 
+// validUsername is the client's copy of a pattern the server owns, and the only
+// thing standing between a typed name and a refusal with nothing to say why. A
+// rule too strict silently refuses a name Revolt would have taken; one too loose
+// spends a round trip to learn the same thing.
+func TestValidUsername(t *testing.T) {
+	tests := []struct {
+		name  string
+		in    string
+		wants bool
+	}{
+		{"plain", "sentinel", true},
+		{"digits", "user2024", true},
+		{"the three marks", "a_b.c-d", true},
+		{"letters outside ASCII", "セン", true},
+		{"at the minimum", "ab", true},
+		{"under the minimum", "a", false},
+		{"at the maximum", strings.Repeat("a", MaxUsername), true},
+		{"over the maximum", strings.Repeat("a", MaxUsername+1), false},
+		{"counted by rune, not by byte", strings.Repeat("é", MaxUsername), true},
+		{"empty", "", false},
+		{"a space", "sen tinel", false},
+		{"the handle's separator", "sentinel#0001", false},
+		{"a mention", "@sentinel", false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validUsername(test.in); got != test.wants {
+				t.Errorf("validUsername(%q) = %v; want %v", test.in, got, test.wants)
+			}
+		})
+	}
+}
+
 // cleanDisplayName decides three things at once — what is dropped, what is cut
 // and what cannot be sent — and only the last of them reaches the user as a
 // notice. A silent slip in either of the first two is a name they did not choose.

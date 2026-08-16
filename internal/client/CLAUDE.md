@@ -76,7 +76,19 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   and members — `BulkMessageResponse` is an `anyOf` — and the method decodes into
   `[]*Message` only, so setting it fails on shape. `ChannelMessages` handles both
   and this does not. `Client.PinnedMessages` therefore comes back with author IDs
-  and nothing behind them, and the caller resolves what it cannot name.
+  and nothing behind them, and the caller resolves what it cannot name. The route
+  takes `pinned` and `query` as **alternatives** — Revolt refuses them together —
+  so the two callers share `Client.search` and differ in which one they fill; a
+  query is 1–64 characters, past which the request is refused rather than cut,
+  hence `maxSearchQuery`.
+- **Known bug: `Session.ServerCreate` can decode nothing.** `/servers/create`
+  answers with an object carrying the server *and* its default channels, while the
+  method decodes into a bare `Server` — no field matches, so it succeeds and hands
+  back a zero value with an empty ID. `Client.CreateServer` therefore reports only
+  the error: the created server arrives as `EventServerCreate`, which revoltgo does
+  file into `State`. `Session.InviteJoin` has the same shape of problem for the
+  same reason (`Invite.ServerID` is never populated), so both go through the
+  gateway rather than through their own response.
 - **A system message's `id` is not always a user.** `MessageSystem` models one
   `ID` for every kind, and for `message_pinned`/`message_unpinned` it is the
   *message* that moved — so resolving it as an author is a fetch the server can
@@ -96,6 +108,21 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   here. `Session.ServerEmojis` is the one route to leave alone — it decodes into
   a slice it hands straight back and writes nothing to `State`, so calling it
   buys an overlay to maintain, not an answer.
+- **An upload's bucket is not a detail.** `Session.AttachmentUpload` posts to Autumn's
+  *attachments* bucket and takes no say in it, while Revolt looks a file up by ID **and**
+  bucket at the moment it is used — so an attachment's ID handed to `UserEdit` as an
+  avatar is refused as a file that does not exist. `client.uploadFile` is the same request
+  with the bucket as an argument (`attachments`, `avatars`, `backgrounds`), and is now the
+  only upload path; `AttachmentUpload` is not called.
+- **Missing field:** `UserEditParams.Profile` is a `*UserProfile` whose `Background` is a
+  `*File` — the shape a profile is *read* in — where `DataUserProfile` takes an attachment
+  **ID**. A banner cannot be expressed through the typed API at all, hence
+  `Client.editProfile` sending its own body for both halves of the profile. Note too that
+  `PartialUser` carries a `Profile` which revoltgo's own `User.update` **ignores**, and
+  `EventUserUpdate` for a profile edit therefore writes nothing to `State`: a bio or a
+  banner is a request (`Session.UserProfile`) and stays one, which is why the settings page
+  re-reads it after every edit rather than recording what it sent. Revolt's `pronouns` is
+  modelled by neither `User` nor `UserEditParams`, so it is out of reach entirely.
 - **Known bug:** `Session.UserMutual` cannot succeed. `/users/{id}/mutual` answers
   with one object and the method decodes into a **slice** of them, so the request
   fails on shape whatever the account; the struct also drops `channels`, the groups

@@ -41,7 +41,7 @@ built in a test. `domain.Store` can — `ui/store_test.go` has a map-backed
 
 No globals. The `*app.App` controller owns the client, caches and widgets and
 passes what widgets need through `ui.Deps` (`Store`, `Images`, `Texts`,
-`Actions`). `App.deps()` is the only producer, so **every field is always set** —
+`Actions`, `Tooltip`). `App.deps()` is the only producer, so **every field is always set** —
 widgets do not nil-check them. The only package-level mutable state is pure
 measurement memoisation (`ui.lineHeights`, `ui.spaceWidths`), UI-thread only.
 
@@ -125,11 +125,11 @@ internal/
   cache/                 cache.go (LRU + TextCache), message.go, image.go
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
-                         pins.go, emoji.go, notify.go, settings.go
+                         pins.go, search.go, emoji.go, notify.go, settings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, reactions.go, emoji.go, embed.go, invite.go,
                          markdown.go, attachment.go, input.go, modal.go,
-                         profile.go, friends.go, pins.go, notice.go, settings*.go,
+                         profile.go, friends.go, panels.go, notice.go, settings*.go,
                          theme/, titlebar_*.go
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
@@ -152,6 +152,9 @@ Where things live that the filename doesn't tell you:
   `selectServer` would load the first channel on the way past.
 - `app/members.go` holds lazy author resolution as well as the member sidebar and
   the mention candidates, since one `Store.Members` walk feeds all three.
+- `app/pins.go` and `app/search.go` are the two message panels, and the summary a
+  row is drawn from (`messageEntry`, `messagePreview`, `messageWhen`) lives in the
+  first: a pin list and a search result are the same row reached two ways.
 - `app/typing.go` holds both halves of the typing indicator — the expiry map and
   its timer, and the throttle that announces this account — one feature with one
   setting group, neither legible without the other.
@@ -161,12 +164,16 @@ Where things live that the filename doesn't tell you:
   / `MemberSectionRow`. The model is pure and theme-free so `App` can build it
   off the UI thread. `memberStatus` — the strip above the list — is here too,
   being what speaks for the rows when there are none.
-- `ui/widgets.go` is the shared vocabulary: tapBase widgets, `Outline` +
-  `NewColumnDivider`, `Elevate`, Tooltip, chips, `NewBotMark`, `StatusLine`, the
-  avatar loader, `ObservableScroll` + its indicator, `AccentText`,
-  `NewEllipsisText`, `TypingMark` — that last one here rather than beside a
-  caller because the composer's line, a channel row and the member sidebar's
-  status all mount one.
+- `ui/widgets.go` is the shared vocabulary: `newText` / `newBoldText` (how every
+  `canvas.Text` in the package is built — they flatten the fill, so a gradient
+  cannot reach one; a zero size is the theme's own) and `newInitial`, the letter a
+  server icon falls back to in both the rail and an invite card; `glyphBox` +
+  `glyphLine`, the 20-unit grid every drawn mark shares; tapBase widgets and
+  `reportHover`; `Outline`, `hairline` + the two dividers, `Elevate`; Tooltip,
+  chips, `NewBotMark`, `StatusLine`, the avatar loader, `ObservableScroll` + its
+  indicator, `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here
+  rather than beside a caller because the composer's line, a channel row and the
+  member sidebar's status all mount one.
 - `ui/input.go` holds the composer, the mention picker, the slowmode chip and the
   typing line. The last two are one row under one set of rules: a pill of their
   own (`newDockBadgeSurface`) sized by what it holds rather than by the row,
@@ -189,6 +196,13 @@ Where things live that the filename doesn't tell you:
   walk of every server the account is in and no widget knows them.
 - `ui/invite.go` holds the invite card *and* `inviteCodesIn`, the scan that
   decides a message has one — the card is mounted from what that scan finds.
+- `ui/panels.go` holds both message panels — the pins list and channel search —
+  because they are one card with one row (`MessageEntry`, `messageRow`) and differ
+  only in what fills it. `ui/modal.go` holds the cards that are not lists: the
+  attachment viewer, the join dialog, `PromptDialog` (a field per answer and one
+  button — a name is all Revolt takes to create a server, where changing a
+  username is that name *and* the account password) and the `dialogHeader` all of
+  them wear.
 - `ui/settings_controls.go` holds the controls, none of them a Fyne form widget.
 - `ui/theme/overrides.go` holds `Apply` — reflection over the two tables, against
   a defaults snapshot taken at init.

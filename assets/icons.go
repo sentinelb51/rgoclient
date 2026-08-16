@@ -28,6 +28,9 @@ var emptyChannelSVG []byte
 //go:embed voice.svg
 var voiceSVG []byte
 
+//go:embed search.svg
+var searchSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
@@ -84,6 +87,9 @@ var (
 	// VoiceIcon prefixes a server's voice channels and leads the note saying the
 	// client can only type in one.
 	VoiceIcon fyne.Resource = fyne.NewStaticResource("voice.svg", voiceSVG)
+
+	// SearchIcon opens the channel-search panel from the message header.
+	SearchIcon fyne.Resource = fyne.NewStaticResource("search.svg", searchSVG)
 
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)

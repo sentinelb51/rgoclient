@@ -152,7 +152,9 @@ naming and the test policy.
   `BaseWidget.MinSize` is not memoised. A virtualised list's own layout must
   therefore report its height from a **field**, never from a walk
   (`memberListLayout.MinSize`): `container.Scroll` asks its content for a minimum
-  on every offset write.
+  on every offset write. `Container.Add` is the same trap one child at a time — it
+  refreshes the whole container per call — so a list is built into a slice and
+  written to `Objects` once. Nothing in this repo fills a container in a loop.
 - **A recycled widget must own nothing it captured.** `ui.MemberRow` is reused for
   a different person as the list scrolls, so every callback on it reads the field
   it needs at the moment it fires rather than closing over a value — a menu that

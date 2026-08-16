@@ -1,25 +1,23 @@
 package ui
 
 // The member sidebar's list. A server can hold thousands of members whose
-// presence changes continuously, and everything in this file follows from those
-// two numbers:
+// presence changes continuously, and everything here follows from that:
 //
 //   - The model is flat and each of its two kinds of entry is one fixed height,
-//     so an entry's position is a prefix sum and the visible range is two binary
-//     searches. Nothing here is ever measured.
-//   - Only what the viewport shows is mounted, and those widgets are recycled —
-//     the same MemberRow draws a different person as it scrolls past. SetMember
-//     no-ops on unchanged state, which is what makes an overlapping scroll
-//     window and a whole-model repaint alike cost nothing per row that did not
-//     move.
-//   - A picture arriving for a row that has since been recycled is dropped by a
-//     generation counter, which is the one thing recycling cannot do without.
+//     so a position is a prefix sum and the visible range two binary searches.
+//     Nothing here is ever measured.
+//   - Only what the viewport shows is mounted, and those widgets are recycled.
+//     SetMember no-ops on unchanged state, which is what makes an overlapping
+//     scroll window and a whole-model repaint alike cost nothing per row that did
+//     not move.
+//   - A picture arriving for a row since recycled is dropped by a generation
+//     counter, the one thing recycling cannot do without.
 
 import (
-	"fmt"
 	"image"
 	"image/color"
 	"sort"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -64,28 +62,18 @@ type MemberListOptions struct {
 }
 
 // NewMemberModel flattens members into the order the list draws them: each
-// hoisted role a section of its own in rank order, then Online, then Offline.
+// hoisted role a section in rank order, then Online, then Offline.
 //
-// It takes members in the order Store.Members handed them back and never
-// re-orders within a bucket — that walk has already resolved and sorted every
-// name, and doing it again here would be the expensive half of a rebuild done
-// twice. Bucketing is stable, so each section comes out in the store's order,
-// which is also what makes turning the sort off actually save anything.
-//
-// An **offline member never appears in their role's section**, which is Revolt's
-// own rule and the one most easily got wrong: a hoisted section is a list of who
-// is *here*.
-//
-// It reads no theme sizes, so it is safe to call off the UI thread — heights are
-// applied when the model is installed.
+// It never re-orders within a bucket — Store.Members has already resolved and
+// sorted every name, and bucketing is stable — which is also what makes turning
+// the sort off save anything. An **offline member never appears in their role's
+// section**: Revolt's own rule, and a hoisted section is a list of who is *here*.
+// Reads no theme sizes, so it is safe off the UI thread.
 //
 // A server whose members are all hidden by the settings comes back empty, and an
-// empty sidebar reads exactly like one whose fetch failed — the settings that
-// caused it are two pages away and were set for some other server. FallbackToAll
-// answers that by drawing everybody rather than nobody. The second pass is only
-// ever reached when the first produced no rows, which is the case where the walk
-// cost nothing to begin with, and only when a setting was hiding somebody: a
-// server that really is empty must stay empty.
+// empty sidebar reads exactly like a failed fetch. FallbackToAll draws everybody
+// instead — reached only when the first pass produced nothing *and* a setting was
+// hiding somebody, so a server that really is empty stays empty.
 func NewMemberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
 	if len(members) == 0 {
 		return nil
@@ -103,8 +91,7 @@ func NewMemberModel(members []domain.Member, hoisted []domain.Role, opts MemberL
 
 // memberModel is the flattening itself, with the hiding settings taken as given.
 func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
-	// Ungrouped is one run with no headers and no hoisting, which is what turning
-	// the presence split off has always meant.
+	// Ungrouped is one run with no headers and no hoisting.
 	if !opts.GroupByPresence {
 		entries := make([]MemberEntry, 0, len(members))
 		for i := range members {
@@ -139,15 +126,15 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 
 	entries := make([]MemberEntry, 0, len(members)+len(titles))
 	for i, rows := range buckets {
-		// An empty bucket emits nothing at all, header included: a server with no
-		// moderator online has no Moderators section, not an empty one.
+		// An empty bucket emits nothing, header included: a server with no moderator
+		// online has no Moderators section, not an empty one.
 		if len(rows) == 0 {
 			continue
 		}
 
 		entries = append(entries, MemberEntry{
 			Kind:  MemberEntrySection,
-			Title: fmt.Sprintf("%s — %d", titles[i], len(rows)),
+			Title: titles[i] + " — " + strconv.Itoa(len(rows)),
 		})
 		for j := range rows {
 			entries = append(entries, MemberEntry{Kind: MemberEntryRow, Member: rows[j]})
@@ -157,9 +144,9 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 	return entries
 }
 
-// hides is whether a member is left out of the list altogether, asked before
-// anything decides where they would have gone. Both branches of the model ask
-// it, so the two settings cannot drift apart between them.
+// hides is whether a member is left out altogether, asked before anything decides
+// where they would have gone. Both branches of the model ask it, so the two
+// settings cannot drift apart.
 func (o MemberListOptions) hides(member domain.Member) bool {
 	if o.HideOffline && !member.Presence.IsOnline() {
 		return true
@@ -212,12 +199,9 @@ func memberOffsets(entries []MemberEntry) []float32 {
 	return offsets
 }
 
-// visibleRange is the half-open range of entries touching a viewport of height
-// at y, widened by overscan at each end and clamped to the model. offsets is
-// memberOffsets' output, so its length is one more than the entry count.
-//
-// Two heights rule out a closed form, and the search is what makes headers and
-// rows interchangeable at no cost.
+// visibleRange is the half-open range of entries touching a viewport of height at
+// y, widened by overscan and clamped to the model. Two heights rule out a closed
+// form; the search is what makes headers and rows interchangeable at no cost.
 func visibleRange(offsets []float32, y, height float32, overscan int) (first, last int) {
 	n := len(offsets) - 1
 	if n <= 0 || height <= 0 {
@@ -234,15 +218,13 @@ func visibleRange(offsets []float32, y, height float32, overscan int) (first, la
 // Objects, which is why the two are always rebuilt together.
 type memberSlot struct{ top, height float32 }
 
-// memberListLayout places the mounted entries at the absolute position their
-// index has in the whole model, and reports the whole model's height.
+// memberListLayout places mounted entries at the absolute position their index
+// has in the whole model, and reports that model's height.
 //
 // MinSize is O(1) and **must stay so**: container.Scroll asks its content for a
-// minimum on every offset write, so a walk of the children here would put the
-// cost of the list straight back onto the scroll path — the same rule
-// app/messages.go's contentHeight exists to honour. The reported width is zero
-// for the sidebar reason: a vertical scroll takes its content's minimum width as
-// its own, so one long name would otherwise widen the column.
+// minimum on every offset write, so a walk here would put the cost of the list
+// back on the scroll path. The width is zero for the sidebar reason — a vertical
+// scroll takes its content's minimum width as its own.
 type memberListLayout struct {
 	slots []memberSlot
 	total float32
@@ -271,10 +253,9 @@ func (l *memberListLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 type MemberList struct {
 	widget.BaseWidget
 
-	// RowMenu supplies the items right-clicking a row offers. It is set once on
-	// the list rather than per row, and is passed the user the row is *currently*
-	// drawing: a closure capturing a member ID would kick the wrong person the
-	// first time its row was recycled.
+	// RowMenu supplies the items right-clicking a row offers. Set once on the list
+	// and passed the user the row is *currently* drawing: a closure capturing a
+	// member ID would kick the wrong person the first time its row was recycled.
 	RowMenu func(userID string) []*fyne.MenuItem
 
 	deps    Deps
@@ -315,10 +296,8 @@ func NewMemberList(deps Deps) *MemberList {
 	w.scroll = NewObservableVScroll(w.content)
 	w.scroll.OnScroll = func(fyne.Position) { w.mount(false) }
 
-	// The strip takes its own height off the top and the scroller absorbs the
-	// rest. Laid *over* the list it read as a glitch rather than as a message: the
-	// first row is drawn from the column's own origin, so a strip on top of it cut
-	// the avatar and the name in half.
+	// The strip takes its height off the top and the scroller absorbs the rest. Laid
+	// *over* the list it cut the first row's avatar and name in half.
 	w.column = NewFillColumn(1, w.status.root, w.scroll)
 	w.ExtendBaseWidget(w)
 
@@ -330,25 +309,23 @@ func (w *MemberList) CreateRenderer() fyne.WidgetRenderer {
 }
 
 // Resize re-mounts for the new viewport. Fyne fires no scroll event on a resize
-// and the content's height does not change with it, so this is the only hook
-// that catches the window being resized or the sidebar being shown again.
+// and the content's height does not move with it, so this is the only hook that
+// catches the window resizing or the sidebar being shown again.
 func (w *MemberList) Resize(size fyne.Size) {
 	w.BaseWidget.Resize(size)
 	w.mount(false)
 }
 
-// SetModel replaces what the list draws.
-//
-// The scroll offset is clamped and *kept* rather than reset: this runs every
-// time somebody's presence changes, and a list that jumped to the top each time
-// would be unusable on the servers it exists for.
+// SetModel replaces what the list draws. The offset is clamped and *kept* rather
+// than reset: this runs on every presence change, and a list that jumped to the
+// top each time would be unusable on the servers it exists for.
 func (w *MemberList) SetModel(entries []MemberEntry) {
 	w.entries = entries
 	w.offsets = memberOffsets(entries)
 	w.layout.total = w.offsets[len(w.offsets)-1]
 
-	// The scroll re-reads the content's minimum and resizes it; it does not walk
-	// the children, and our minimum is a field read.
+	// The scroll re-reads the content's minimum and resizes it. It walks no
+	// children, and this minimum is a field read.
 	w.clampOffset()
 	w.scroll.Refresh()
 
@@ -363,8 +340,8 @@ func (w *MemberList) Reset() {
 }
 
 // RefreshMember redraws one member in place, for a change that does not move
-// them. Somebody not currently mounted is a silent no-op: their row is built
-// from the store's own value when it scrolls into view.
+// them. Somebody unmounted is a no-op: their row is built from the store's value
+// when it scrolls into view.
 func (w *MemberList) RefreshMember(member domain.Member) {
 	if row, ok := w.rows[member.UserID]; ok {
 		row.SetMember(member)
@@ -375,10 +352,9 @@ func (w *MemberList) RefreshMember(member domain.Member) {
 // its status is about a first load or a refresh.
 func (w *MemberList) Empty() bool { return len(w.entries) == 0 }
 
-// SetStatus says what the rows cannot. The strip appearing or disappearing
-// changes the viewport, so the window is re-mounted after the column is laid out
-// again — Fyne reclaims nothing for a child that has merely been hidden. Call on
-// the UI thread.
+// SetStatus says what the rows cannot. The strip coming or going changes the
+// viewport, so the window is re-mounted after the column is laid out again. Call
+// on the UI thread.
 func (w *MemberList) SetStatus(status MemberListStatus) {
 	if !w.status.set(status) {
 		return
@@ -389,21 +365,18 @@ func (w *MemberList) SetStatus(status MemberListStatus) {
 }
 
 // SetSweeping stops or restarts the status mark for a list whose column has been
-// hidden, or which is about to be dropped by a rebuild.
-//
-// It is the caller's to say because neither event reaches the widget: Fyne's
-// Visible() answers for one object rather than for a tree, so the mark cannot
-// ask whether an ancestor took it off screen, and a discarded widget is told
-// nothing at all. An animation nobody can see is a repaint request a frame for
-// the life of the process. Call on the UI thread.
+// hidden or is about to be dropped. The caller's to say because neither event
+// reaches the widget: Visible() answers for one object rather than a tree, and a
+// discarded widget is told nothing. An unseen animation is a repaint request a
+// frame for the life of the process. Call on the UI thread.
 func (w *MemberList) SetSweeping(on bool) {
 	sweeping := on && w.status.shown.Busy
 	w.status.mark.SetActive(sweeping, sweeping)
 }
 
-// mount brings the window in line with the viewport. Unless force is set it
-// returns as soon as it finds the range unchanged, which an ordinary wheel tick
-// usually leaves it — that early return is what makes scrolling free.
+// mount brings the window in line with the viewport, returning early on an
+// unchanged range unless forced — which an ordinary wheel tick usually leaves it,
+// and is what makes scrolling free.
 func (w *MemberList) mount(force bool) {
 	first, last := visibleRange(w.offsets, w.scroll.Offset.Y, w.scroll.Size().Height, memberOverscan())
 	if !force && first == w.first && last == w.last {
@@ -431,10 +404,10 @@ func (w *MemberList) mount(force bool) {
 	Relayout(w.content)
 }
 
-// acquire returns the object drawing entry i, reusing what is already in that
-// slot where it can. Keying the mounted map by *index* is what lets it: an
-// overlapping window leaves the same object on the same entry, so the common
-// case reaches SetMember's no-op rather than building anything.
+// acquire is the object drawing entry i, reusing what is already in that slot.
+// Keying the mounted map by *index* is what lets it: an overlapping window leaves
+// the same object on the same entry, so the common case reaches SetMember's
+// no-op rather than building anything.
 func (w *MemberList) acquire(i int) fyne.CanvasObject {
 	entry := &w.entries[i]
 
@@ -452,8 +425,7 @@ func (w *MemberList) acquire(i int) fyne.CanvasObject {
 			}
 		}
 
-		// The entry under this index changed kind, so what is here is the wrong
-		// shape whatever it says.
+		// The entry changed kind, so what is here is the wrong shape whatever it says.
 		w.release(i, obj)
 	}
 
@@ -501,33 +473,34 @@ func (w *MemberList) release(i int, obj fyne.CanvasObject) {
 }
 
 func (w *MemberList) takeRow() *MemberRow {
-	if n := len(w.rowPool); n > 0 {
-		row := w.rowPool[n-1]
-		w.rowPool = w.rowPool[:n-1]
+	return takePooled(&w.rowPool, func() *MemberRow {
+		// The hook reads RowMenu through the list rather than closing over it, so a
+		// menu set after the first rows were built still reaches them.
+		return newMemberRow(w.deps, func(userID string) []*fyne.MenuItem {
+			if w.RowMenu == nil {
+				return nil
+			}
 
-		return row
-	}
-
-	// The hook reads RowMenu through the list rather than closing over it, so a
-	// menu set after the first rows were built still reaches them.
-	return newMemberRow(w.deps, func(userID string) []*fyne.MenuItem {
-		if w.RowMenu == nil {
-			return nil
-		}
-
-		return w.RowMenu(userID)
+			return w.RowMenu(userID)
+		})
 	})
 }
 
 func (w *MemberList) takeSection() *MemberSectionRow {
-	if n := len(w.sectionPool); n > 0 {
-		section := w.sectionPool[n-1]
-		w.sectionPool = w.sectionPool[:n-1]
+	return takePooled(&w.sectionPool, newMemberSectionRow)
+}
 
-		return section
+// takePooled pops a recycled widget, building one only when the pool is empty.
+func takePooled[T any](pool *[]T, build func() T) T {
+	n := len(*pool)
+	if n == 0 {
+		return build()
 	}
 
-	return newMemberSectionRow()
+	item := (*pool)[n-1]
+	*pool = (*pool)[:n-1]
+
+	return item
 }
 
 // clampOffset pulls the view back inside a model that has shrunk under it, which
@@ -546,20 +519,16 @@ func memberOverscan() int { return config.Current().Behaviour.MemberOverscan }
 /* Status */
 
 // MemberListStatus is what the sidebar says when its rows cannot: the membership
-// is on its way, or the request for it never arrived.
+// is on its way, or the request never arrived.
 //
-// It is a strip *above* the list rather than a message in place of it. The list
-// is paint-then-fill — re-entering a server draws what is already known while the
-// fetch runs — so saying "refreshing" must not take the members already there
-// away. It costs its own height rather than being laid over the top row, which is
-// the one placement that reads the same whether there is anything under it or
-// not: over the rows it cut the first avatar and name in half.
+// A strip *above* the list rather than a message in place of it. The list is
+// paint-then-fill — re-entering a server draws what is known while the fetch runs
+// — so saying "refreshing" must not take the members already there away.
 type MemberListStatus struct {
 	Text string // "" draws nothing at all
 
-	// Busy runs the sweeping mark above the text. It is the glyph the typing
-	// indicator uses, which is what keeps "something is happening" one shape in
-	// this client rather than two.
+	// Busy runs the sweeping mark above the text — the typing indicator's glyph, so
+	// "something is happening" is one shape in this client rather than two.
 	Busy bool
 
 	// Action labels the button under the text and Retry is what it does. Both or
@@ -569,19 +538,17 @@ type MemberListStatus struct {
 }
 
 // drawnAs reports whether two statuses draw the same thing. The callback is
-// compared only for presence — it is rebuilt per call, closing over the server it
-// would retry, and Go does not compare functions.
+// compared only for presence: Go does not compare functions, and it is rebuilt
+// per call anyway, closing over the server it would retry.
 func (s MemberListStatus) drawnAs(other MemberListStatus) bool {
 	return s.Text == other.Text && s.Busy == other.Busy && s.Action == other.Action &&
 		(s.Retry == nil) == (other.Retry == nil)
 }
 
-// memberStatus is the strip itself.
-//
-// It is built once and shown or hidden rather than rebuilt per status, because
-// it holds a TypingMark: Fyne tells a discarded widget nothing, so a strip
-// replaced on every change would leave a sweep running against a rectangle
-// nothing draws — one repaint request a frame, for the life of the process.
+// memberStatus is the strip itself, built once and shown or hidden rather than
+// rebuilt per status: it holds a TypingMark, and a discarded widget is told
+// nothing, so a replaced strip leaves a sweep running against a rectangle nothing
+// draws.
 type memberStatus struct {
 	root  *fyne.Container // the strip and its backing, hidden when there is nothing to say
 	strip *fyne.Container
@@ -601,8 +568,7 @@ type memberStatus struct {
 func newMemberStatus() *memberStatus {
 	pad, gap := theme.Sizes.MemberStatusPadding, theme.Sizes.MemberStatusGap
 
-	label := canvas.NewText("", theme.Colors.MemberStatusText)
-	label.TextSize = theme.Sizes.MemberStatusTextSize
+	label := newText("", theme.Colors.MemberStatusText, theme.Sizes.MemberStatusTextSize)
 	label.Alignment = fyne.TextAlignCenter
 
 	s := &memberStatus{
@@ -615,8 +581,8 @@ func newMemberStatus() *memberStatus {
 	s.retryBox = VBoxNoSpacing(VerticalSpacer(gap), container.NewCenter(s.retry))
 	s.strip = VBoxNoSpacing(s.markBox, label, s.retryBox)
 
-	// The list's own background rather than none at all: the strip is the top of
-	// the column, and a transparent one would show the window through it.
+	// The list's own background: the strip is the top of the column, and a
+	// transparent one shows the window through it.
 	s.root = container.NewStack(canvas.NewRectangle(theme.Colors.MemberListBackground),
 		NewInset(s.strip, pad, pad, pad, pad))
 	s.root.Hide()
@@ -624,13 +590,10 @@ func newMemberStatus() *memberStatus {
 	return s
 }
 
-// set draws status, or nothing at all when it has no text, reporting whether
-// anything moved — the caller re-lays the column out only when it did.
-//
-// Refresh rather than Relayout: the strip's own height changes with it — a
-// button appearing is a taller strip — and re-running one layout at the size it
-// already has cannot express that. It is a five-object tree changed only when
-// the fetch is.
+// set draws status, or nothing when it has no text, reporting whether anything
+// moved. Refresh rather than Relayout: the strip's own height changes with it —
+// a button appearing is a taller strip — which re-running one layout at the size
+// it already has cannot express.
 func (s *memberStatus) set(status MemberListStatus) bool {
 	if s.shown.drawnAs(status) {
 		s.retry.OnTapped = status.Retry // the label is the same; the server may not be
@@ -659,8 +622,7 @@ func (s *memberStatus) set(status MemberListStatus) bool {
 	return true
 }
 
-// showIf shows or hides an object from a condition, which is what every one of
-// these is really saying.
+// showIf shows or hides an object from a condition.
 func showIf(obj fyne.CanvasObject, visible bool) {
 	if visible {
 		obj.Show()
@@ -672,12 +634,10 @@ func showIf(obj fyne.CanvasObject, visible bool) {
 
 /* Rows */
 
-// MemberRow is one person in the member sidebar: their avatar with a presence
-// dot, their name in their role's colour, and a bot mark.
-//
-// It is a widget with an in-place updater rather than something built per member
-// because the list recycles it — see the file comment. Every field below records
-// what is currently *drawn*, so SetMember can touch only what moved.
+// MemberRow is one person: avatar with a presence dot, name in their role's
+// colour, bot mark. A widget with an in-place updater because the list recycles
+// it — see the file comment. Every field below records what is currently *drawn*,
+// so SetMember touches only what moved.
 type MemberRow struct {
 	tapBase
 
@@ -692,11 +652,10 @@ type MemberRow struct {
 	nameBox     *fyne.Container
 	botMark     fyne.CanvasObject
 
-	// row is the assembled tree, built once here rather than in CreateRenderer,
-	// which Fyne may run again after a renderer is dropped — by then the name box
-	// holds a shortened name, and rebuilding around it would take that for the
-	// name. It is held because the bot mark appearing moves the layout rather than
-	// repainting in place.
+	// row is the assembled tree, built here rather than in CreateRenderer, which
+	// Fyne may run again after a renderer is dropped — by then the name box holds a
+	// shortened name, and rebuilding around it would take that for the name. Held
+	// because the bot mark appearing moves the layout rather than repainting.
 	row *fyne.Container
 
 	userID    string
@@ -706,11 +665,10 @@ type MemberRow struct {
 	fill      color.Color
 	bot       bool
 
-	// generation is the recycling guard. Every SetMember and every release bumps
-	// it, and an image load captures it: a picture arriving after the row has
-	// moved on to somebody else has no other way to know it is not wanted. It is
-	// UI-thread only — LoadAsync delivers there — so a plain counter, not an
-	// atomic.
+	// generation is the recycling guard: every SetMember and release bumps it, and
+	// an image load captures it, a picture arriving after the row moved on having no
+	// other way to know it is unwanted. UI-thread only — LoadAsync delivers there —
+	// hence a plain counter.
 	generation uint64
 }
 
@@ -720,12 +678,10 @@ var (
 	_ desktop.Hoverable      = (*MemberRow)(nil)
 )
 
-// newMemberRow builds an empty row. It draws nobody until SetMember is called.
-// A nil onMenu is a row that offers no menu, which is what a settings preview
-// wants and what the list itself never passes.
+// newMemberRow builds an empty row, drawing nobody until SetMember. A nil onMenu
+// offers no menu, which is what a settings preview wants.
 func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *MemberRow {
-	name := canvas.NewText("", theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.MemberNameSize
+	name := newText("", theme.Colors.TextPrimary, theme.Sizes.MemberNameSize)
 
 	side := theme.Sizes.MemberAvatarSize
 	avatar, placeholder := newAvatarSlot(fyne.NewSize(side, side))
@@ -741,8 +697,8 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		nameBox:     NewEllipsisText(name),
 		botMark:     NewBotMark(theme.Sizes.MemberBotMarkSize),
 
-		// The recorded state has to match what was just built, or the first
-		// SetMember will no-op over a difference that is really there.
+		// The recorded state must match what was just built, or the first SetMember
+		// no-ops over a difference that is really there.
 		fill:     theme.Colors.TextPrimary,
 		presence: domain.PresenceOffline,
 	}
@@ -754,17 +710,16 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
-	// The name takes the leftover width in a Border's centre rather than its
-	// natural width: an HBox hands a zero-minimum child zero width, and the
-	// ellipsis box reports zero on purpose so no name can widen the column.
+	// The name takes the leftover width in a Border's centre: an HBox hands a
+	// zero-minimum child zero width, and the ellipsis box reports zero on purpose.
 	w.row = container.NewStack(w.background, container.NewBorder(nil, nil, leading,
 		HBoxNoSpacing(w.botMark, HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
 		w.nameBox,
 	))
 
-	// The row is its own anchor, so the profile card opens beside the name that
-	// was clicked. Both hooks read userID at the moment of the click rather than
-	// capturing it, which is the whole discipline of a recycled widget.
+	// The row is its own anchor, so the profile card opens beside the name clicked.
+	// Both hooks read userID at the moment of the click rather than capturing it,
+	// which is the whole discipline of a recycled widget.
 	w.onTap = func() { w.deps.Actions.OnUserTapped(w.userID, w) }
 	w.onSecondaryTap = func(e *fyne.PointEvent) {
 		if w.onMenu == nil {
@@ -782,9 +737,9 @@ func (w *MemberRow) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(w.row)
 }
 
-// SetMember draws member, touching only what moved. Unchanged state costing
-// nothing is not polish here: a repaint of the whole model calls this once per
-// mounted row, and a scroll calls it for every row the window still holds.
+// SetMember draws member, touching only what moved. Not polish: a whole-model
+// repaint calls this once per mounted row, and a scroll once per row the window
+// still holds.
 func (w *MemberRow) SetMember(member domain.Member) {
 	w.userID = member.UserID
 
@@ -816,11 +771,9 @@ func (w *MemberRow) setName(text string, fill color.Color) {
 		SetEllipsisText(w.nameBox, text)
 	}
 
-	// A role colour can be a domain.Gradient, and a gradient must never reach a
-	// canvas.Text: Fyne keys its glyph-run cache on the text object's fields,
-	// colour included, and a fill that cannot be a map key panics the painter on
-	// the frame it is drawn. AccentText is the wrong answer here — one text object
-	// per rune, on a row recycled thousands of times.
+	// A role colour can be a domain.Gradient, which must never reach a canvas.Text —
+	// see solidColor. AccentText is the wrong answer here: one text object per rune,
+	// on a row recycled thousands of times.
 	w.fill = fill
 	w.name.Color = solidColor(fill)
 	w.name.Refresh()
@@ -842,21 +795,16 @@ func (w *MemberRow) setBot(bot bool) {
 	}
 
 	w.bot = bot
-	if bot {
-		w.botMark.Show()
-	} else {
-		w.botMark.Hide()
-	}
+	showIf(w.botMark, bot)
 
-	// Showing or hiding neither lays a container out nor repaints it, and the
-	// slot the mark vacates stays reserved until something does.
+	// Showing or hiding neither lays a container out nor repaints it, and the slot
+	// the mark vacates stays reserved until something does.
 	Relayout(w.row)
 }
 
 // setAvatar loads url into the row's slot. An unchanged URL is left alone, so a
-// row scrolled back into view keeps its picture instead of flashing the
-// placeholder; anything else resets to the placeholder and bumps the generation,
-// which is what the callback checks itself against.
+// row scrolled back into view keeps its picture rather than flashing the
+// placeholder; anything else resets and bumps the generation.
 func (w *MemberRow) setAvatar(url string) {
 	if w.avatarURL == url {
 		return
@@ -879,11 +827,10 @@ func (w *MemberRow) setAvatar(url string) {
 	})
 }
 
-// showPlaceholder empties the avatar slot back to the circle it was built with.
-// It restores that same object rather than a new one, and only refreshes when
-// the slot actually held something else: a canvas.Circle nobody has drawn is
-// invisible until the container it is in is refreshed, so putting a fresh one in
-// on every release left every recycled row with no avatar at all.
+// showPlaceholder empties the slot back to *the same* circle it was built with,
+// refreshing only when it held something else. A canvas.Circle nobody has drawn is
+// invisible until its container is refreshed, so putting a fresh one in on every
+// release left every recycled row with no avatar at all.
 func (w *MemberRow) showPlaceholder() {
 	if len(w.avatar.Objects) == 1 && w.avatar.Objects[0] == w.placeholder {
 		return
@@ -893,10 +840,9 @@ func (w *MemberRow) showPlaceholder() {
 	w.avatar.Refresh()
 }
 
-// paintAvatar puts a loaded picture in the slot, unless the row has been
-// recycled since it was asked for. That check is the whole of what makes an
-// off-thread load safe on a widget the list reuses, so it is named rather than
-// left inside the callback. Call on the UI thread.
+// paintAvatar puts a loaded picture in the slot unless the row was recycled since
+// it was asked for. That check is what makes an off-thread load safe on a reused
+// widget, so it is named rather than left inside the callback. Call on the UI thread.
 func (w *MemberRow) paintAvatar(generation uint64, img image.Image, size fyne.Size) {
 	if w.generation != generation || img == nil {
 		return
@@ -920,9 +866,8 @@ func (w *MemberRow) MouseOut() {
 	w.background.Refresh()
 }
 
-// memberNameColor is what a member's name is drawn in: their most-senior
-// coloured role, dimmed to a single grey while they are offline. The dimming is
-// what lets one list hold both halves without reading as two columns.
+// memberNameColor is a member's most-senior coloured role, dimmed to one grey
+// while offline — which is what lets a single list hold both halves.
 func memberNameColor(member domain.Member) color.Color {
 	if !member.Presence.IsOnline() {
 		return theme.Colors.MemberNameOffline
@@ -934,9 +879,9 @@ func memberNameColor(member domain.Member) color.Color {
 	return theme.Colors.TextPrimary
 }
 
-// newPresenceDot is the small filled circle over the avatar's corner. It wears a
-// ring in the list's own background rather than the shared hairline, so it reads
-// as punched out of the avatar rather than laid on top of it.
+// newPresenceDot is the filled circle over the avatar's corner, ringed in the
+// list's own background rather than the shared hairline so it reads as punched
+// out of the avatar rather than laid on it.
 func newPresenceDot() *canvas.Circle {
 	dot := canvas.NewCircle(presenceColor(domain.PresenceOffline))
 	dot.StrokeColor = theme.Colors.MemberListBackground
@@ -945,9 +890,8 @@ func newPresenceDot() *canvas.Circle {
 	return dot
 }
 
-// memberPresenceLayout stacks the presence dot on the avatar's bottom-right
-// corner. The dot is placed rather than centred because a row layout stretches
-// what it is given, and a stretched circle is an ellipse.
+// memberPresenceLayout stacks the dot on the avatar's bottom-right corner. Placed
+// rather than centred: a row layout stretches, and a stretched circle is an ellipse.
 type memberPresenceLayout struct{}
 
 func (l *memberPresenceLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -967,9 +911,8 @@ func (l *memberPresenceLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 /* Section headers */
 
-// MemberSectionRow is the small bold header grouping members, e.g. "Online — 5".
-// A widget with a setter for the same reason MemberRow is one: the list recycles
-// it, and one that rebuilt itself per scroll would undo the point of the pool.
+// MemberSectionRow is the bold header grouping members, e.g. "Online — 5". A
+// widget with a setter for the same reason MemberRow is one: the list recycles it.
 type MemberSectionRow struct {
 	widget.BaseWidget
 
@@ -978,9 +921,7 @@ type MemberSectionRow struct {
 }
 
 func newMemberSectionRow() *MemberSectionRow {
-	label := canvas.NewText("", theme.Colors.MemberSectionText)
-	label.TextStyle = fyne.TextStyle{Bold: true}
-	label.TextSize = theme.Sizes.MemberSectionTextSize
+	label := newBoldText("", theme.Colors.MemberSectionText, theme.Sizes.MemberSectionTextSize)
 
 	w := &MemberSectionRow{label: label}
 	w.ExtendBaseWidget(w)
@@ -999,8 +940,8 @@ func (w *MemberSectionRow) SetTitle(title string) {
 }
 
 func (w *MemberSectionRow) CreateRenderer() fyne.WidgetRenderer {
-	// The top padding is inside the section's own height rather than a spacer
-	// beside it, so the list still has exactly two heights to add up.
+	// The top padding is inside the section's own height rather than a spacer beside
+	// it, so the list still has exactly two heights to add up.
 	return widget.NewSimpleRenderer(
 		NewInset(w.label, theme.Sizes.MemberSectionTopPad, 0, theme.Sizes.ChannelLeftPadding, 0))
 }

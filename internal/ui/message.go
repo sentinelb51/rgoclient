@@ -23,9 +23,8 @@ const (
 	// floating action buttons so they don't flicker.
 	hoverHideDelay = 50 * time.Millisecond
 
-	// flashDuration is how long the wash marking a jumped-to message takes to
-	// fade. Long enough to find the row after the column moved under the reader,
-	// short enough not to read as a state the message is in.
+	// flashDuration is how long the wash marking a jumped-to message takes to fade:
+	// long enough to find the row, short enough not to read as a state it is in.
 	flashDuration = 1200 * time.Millisecond
 
 	maxReplyUsernameLength = 16
@@ -44,41 +43,35 @@ type MessageWidget struct {
 	content    fyne.CanvasObject
 	background *canvas.Rectangle
 
-	// authorText and avatar are retained so a message whose author resolves after
-	// the widget is mounted can be updated in place by RefreshAuthor rather than
-	// re-rendering the channel. Both are nil for a grouped continuation, which
-	// draws neither a name nor an avatar.
+	// Kept so an author resolving after the mount is written in place by
+	// RefreshAuthor rather than re-rendering the channel. Nil for a grouped
+	// continuation, which draws neither name nor avatar.
 	authorText *AccentText
 	avatar     *Avatar
 
-	// gutterTimestamp is the small left-gutter time a grouped continuation shows
-	// in place of the avatar, revealed on hover. nil for a full message.
+	// gutterTimestamp stands in the avatar's place on a grouped continuation,
+	// revealed on hover. Nil for a full message.
 	gutterTimestamp *canvas.Text
 
-	// systemName is the person a system message is about, drawn as a mention, and
-	// systemText the rest of the sentence; systemLine is the row they share with
-	// the time beside them. All three are kept so a target resolving after the
-	// widget is mounted can be written in place, which moves what follows it.
-	// systemName is nil for an event about the channel rather than about somebody,
-	// and all three are nil for a message somebody wrote.
+	// A system message's target, the rest of its sentence, and the row they share
+	// with the time — kept so a target resolving later can be written in place,
+	// which moves what follows it. systemName is nil for an event about the channel
+	// rather than a person, all three for a message somebody wrote.
 	systemName *mentionText
 	systemText *canvas.Text
 	systemLine *fyne.Container
 
-	// replies are the quoted lines above the message, kept because the message a
-	// reply quotes can be older than anything cached — resolving one is a request,
-	// and the line fills itself in when the answer lands. Empty for a grouped
-	// continuation, which draws no quotes.
+	// replies are the quoted lines above the message, kept because what a reply
+	// quotes can be older than anything cached: resolving one is a request, and the
+	// line fills itself in when the answer lands.
 	replies []*replyPreview
 
-	// bottomSpacer is the bottom margin, kept so SetFollowedByGroup can tighten it
-	// when a continuation is appended directly beneath.
+	// bottomSpacer is the bottom margin, kept for SetFollowedByGroup.
 	bottomSpacer *canvas.Rectangle
 
-	// daySeparator is the dated divider above the first message of a calendar day,
-	// nil for every other message. It lives on the widget rather than as its own
-	// list entry, so the mounted window stays one object per message and every
-	// path that re-evaluates a message against a new predecessor re-derives it.
+	// daySeparator is the dated divider above the first message of a day. It lives
+	// on the widget rather than as its own list entry, so the mounted window stays
+	// one object per message and re-evaluating a predecessor re-derives it.
 	daySeparator fyne.CanvasObject
 
 	// bodySlot holds the rendered body; StartEdit swaps it for an editor and
@@ -86,32 +79,28 @@ type MessageWidget struct {
 	bodySlot *fyne.Container
 	body     fyne.CanvasObject
 
-	// The hover quick-actions are built lazily on first reveal (ensureActions), so
-	// the buttons and their icons are never constructed for messages the pointer
-	// does not touch. actionsOverlay is empty until then.
+	// The quick-actions are built on first reveal (ensureActions), so a message the
+	// pointer never touches builds no buttons. actionsOverlay is empty until then.
 	actionsOverlay *fyne.Container
 	actions        *fyne.Container
 
-	// mentioned marks a message that names the logged-in account, which is what
-	// warms the row's background. Decided once at construction: it is a fact about
-	// the message, and every path that re-evaluates one rebuilds the widget.
+	// mentioned warms the row's background. Decided once: it is a fact about the
+	// message, and every path that re-evaluates one rebuilds the widget.
 	mentioned bool
 
 	editing   bool
-	emptyBody bool // the message says nothing, so the slot stays hidden outside an edit
+	emptyBody bool // says nothing, so the slot stays hidden outside an edit
 
-	// overChild is the pointer being over something inside the row that takes
-	// hover for itself — the quick-action group, a reaction chip. Fyne gives hover
-	// to the innermost object that accepts it and nothing above hears of it, so
-	// each of those reports back here or the row would darken and drop its buttons
-	// the moment the pointer crossed one on the way to them.
+	// overChild is the pointer being over something in the row that takes hover for
+	// itself — the action group, a reaction chip. Innermost wins and nothing above
+	// hears of it, so each reports back here or the row drops its buttons the moment
+	// the pointer crosses one on the way to them.
 	overMessage bool
 	overChild   bool
 	hideTimer   *time.Timer
 
-	// flash is the wash a jump leaves on the row it landed on, fading back to the
-	// rest fill. Kept so a second jump — or the pointer arriving, which is the
-	// reader having found the row — takes it off rather than fighting it.
+	// flash is the wash a jump leaves, kept so a second jump — or the pointer
+	// arriving, the reader having found the row — takes it off rather than fights it.
 	flash *fyne.Animation
 }
 
@@ -121,16 +110,12 @@ var (
 	_ fyne.SecondaryTappable = (*MessageWidget)(nil)
 )
 
-// NewMessageWidget builds a message widget. When grouped is set the message is a
-// continuation of the previous one from the same author: it omits the avatar and
-// name header and shows a small hover-revealed timestamp in the avatar gutter
-// instead. Spacing is asymmetric — a head or standalone message carries the full
-// gap above it while a continuation carries a tight one, and followedByGroup
-// tightens the bottom margin so a head sits flush against the continuations
-// beneath without changing the gap between separate groups.
-//
-// A non-empty dayLabel means this message opens a new calendar day, and the
-// named day separator is drawn above it.
+// NewMessageWidget builds a message widget. grouped marks a continuation of the
+// previous message from the same author: no avatar or name header, a
+// hover-revealed timestamp in the gutter instead. Spacing is asymmetric — a head
+// carries the full gap above, a continuation a tight one, and followedByGroup
+// tightens the bottom so a head sits flush against what follows without changing
+// the gap between groups. A non-empty dayLabel draws the day separator above.
 func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, grouped, followedByGroup bool) *MessageWidget {
 	w := &MessageWidget{
 		deps:       deps,
@@ -145,9 +130,9 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 		shortTime, fullTime = util.ShortTime(t), util.NiceTime(t)
 	}
 
-	// A system message is not a message anybody wrote: no avatar, no name, nothing
-	// to edit and nothing hanging beneath it. It takes a line of its own and shares
-	// only the margins, the hover and the day separator with what people say.
+	// A system message is not a message anybody wrote: no avatar, name, edit or
+	// anything hanging beneath. It shares only the margins, the hover and the day
+	// separator with what people say.
 	var content fyne.CanvasObject
 	if message.System != nil {
 		content = w.buildSystemLine(shortTime)
@@ -181,21 +166,18 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 		return widget.NewSimpleRenderer(row)
 	}
 
-	// The separator sits above the hover-highlight stack, not inside it, so
-	// hovering the message doesn't light up the divider as part of the row.
+	// Above the hover-highlight stack, not inside it, so hovering the message does
+	// not light the divider as part of the row.
 	return widget.NewSimpleRenderer(VBoxNoSpacing(w.daySeparator, row))
 }
 
 // Message returns the message this widget renders.
 func (w *MessageWidget) Message() *domain.Message { return w.message }
 
-// Author returns the user this row names: the message's author, or — for a system
-// event — whoever it is about, since that is the name the line has to resolve and
-// the one a lazy fetch has to bring back.
-//
-// A system event about a *message* rather than a person names nobody, so it
-// answers with "": its target is a message ID, and both IDs being ULIDs there is
-// nothing about the value itself that would stop one matching a user.
+// Author is the user this row names — the message's author, or for a system event
+// whoever it is about, that being what a lazy fetch has to bring back. An event
+// about a *message* names nobody and answers "": its target is a message ID, and
+// both being ULIDs, nothing about the value would stop one matching a user.
 func (w *MessageWidget) Author() string {
 	if system := w.message.System; system != nil {
 		if !system.TargetsUser() {
@@ -216,14 +198,10 @@ func (w *MessageWidget) SetFollowedByGroup(followed bool) {
 	w.Refresh()
 }
 
-// RefreshAuthor re-resolves the author's name, role colour, and avatar and
-// applies them in place, for when a previously-unknown author is fetched or a
-// member updates after the widget was mounted. A grouped continuation shows
-// neither name nor avatar, so there is nothing to update.
-//
-// A system line names its target in the middle of a sentence, so re-resolving it
-// changes the sentence's width — hence the relayout, which the row beside a name
-// of fixed extent doesn't need.
+// RefreshAuthor re-resolves the name, role colour and avatar in place, for an
+// author fetched after the mount. Nothing to do on a grouped continuation. A
+// system line names its target mid-sentence, so re-resolving moves everything
+// after it — hence the relayout a name of fixed extent does not need.
 func (w *MessageWidget) RefreshAuthor() {
 	if w.systemText != nil {
 		name, rest := w.deps.Store.SystemTextParts(w.message.System)
@@ -246,10 +224,9 @@ func (w *MessageWidget) RefreshAuthor() {
 	w.avatar.SetSource(w.deps.Images, avatarURL)
 }
 
-// RefreshReplies re-reads the quoted lines whose target is one of resolved, for
-// a reply whose message arrived after the widget was mounted. It is given the set
-// rather than refreshing unconditionally because re-laying a line out is not free
-// and every mounted row is offered the batch.
+// RefreshReplies re-reads the quoted lines whose target is in resolved. It takes
+// the set rather than refreshing unconditionally because every mounted row is
+// offered the batch and re-laying a line out is not free.
 func (w *MessageWidget) RefreshReplies(resolved map[string]bool) {
 	for _, preview := range w.replies {
 		if resolved[preview.messageID] {
@@ -267,70 +244,57 @@ func (w *MessageWidget) isOwnMessage() bool {
 	return self != "" && self == w.message.AuthorID
 }
 
-// canEdit reports whether the edit action should be offered: only your own
-// regular messages, since system messages have no editable content.
+// canEdit: your own non-system message. A system one has no editable content.
 func (w *MessageWidget) canEdit() bool {
 	return w.message.System == nil && w.isOwnMessage()
 }
 
-// canReply reports whether the reply action should be offered. A system event is
-// the channel narrating itself and nobody is waiting to be answered, so quoting
-// one back at the channel is offered nowhere — and neither is a reply the channel
-// would not let you send.
+// canReply: a system event is the channel narrating itself, and nobody is waiting
+// to be answered.
 func (w *MessageWidget) canReply(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionSendMessage)
 }
 
-// canDelete reports whether the delete action should be offered: your own
-// message, or any message in a channel where you hold ManageMessages.
+// canDelete: your own message, or any where you hold ManageMessages.
 func (w *MessageWidget) canDelete(permissions domain.Permission) bool {
 	return w.isOwnMessage() || permissions.Has(domain.PermissionManageMessages)
 }
 
-// canPin reports whether pinning should be offered. Unlike deleting, authorship
-// buys nothing here: a pin is a change to the channel rather than to the
-// message, so Revolt asks for ManageMessages even over your own words.
+// canPin: authorship buys nothing, unlike deleting — a pin is a change to the
+// channel, so Revolt asks for ManageMessages even over your own words.
 func (w *MessageWidget) canPin(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionManageMessages)
 }
 
-// canClearReactions reports whether taking every reaction off should be offered.
-// A message carrying none is not asked about — there is nothing to clear, and the
-// item would be the only one in the menu that never does anything — which also
-// covers a system message, Revolt refusing a reaction to one.
+// canClearReactions: a message carrying none is not asked about, which also
+// covers a system message — Revolt refuses a reaction to one.
 func (w *MessageWidget) canClearReactions(permissions domain.Permission) bool {
 	return len(w.message.Reactions) > 0 && permissions.Has(domain.PermissionManageMessages)
 }
 
-// canReact reports whether the chips under a message answer a click. A system
-// event is the channel narrating itself and Revolt refuses a reaction to one, so
-// the row is not offered there at all — which is also why nothing draws it: a
-// system message carries no reactions to show either.
+// canReact gates whether the chips answer a click.
 func (w *MessageWidget) canReact(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionReact)
 }
 
-// permissions is what the account may do in this message's channel. It is asked
-// lazily, on the first hover or right-click, so a mounted page costs no
-// permission checks at all — and asked once per menu, since one bitfield answers
-// every question the menu has.
+// permissions is asked lazily on the first hover or right-click, so a mounted
+// page costs no permission checks — and once per menu, one bitfield answering
+// every question it has.
 func (w *MessageWidget) permissions() domain.Permission {
 	return w.deps.Store.Permissions(w.message.ChannelID)
 }
 
 /* Quick actions and context menu */
 
-// actionMark tints one of the client's action marks in the neutral colour, which
-// is what an action that only takes you somewhere wears. The two that commit
-// something — saving an edit, deleting a message — name their own colour at the
-// call site, since that colour is the warning.
+// actionMark tints an action mark neutral, what an action that only takes you
+// somewhere wears. The two that commit something name their own colour at the
+// call site, that colour being the warning.
 func actionMark(res fyne.Resource) fyne.Resource {
 	return tintedIcon(res, theme.Colors.SwiftActionIcon)
 }
 
-// buildActions creates the hidden, rounded group of quick-action buttons. The
-// set is dynamic: reply is always offered, edit only on your own non-system
-// message, delete on your own or where you can manage messages.
+// buildActions creates the hidden, rounded group of quick-action buttons, each
+// gated the same way the matching menu item is.
 func (w *MessageWidget) buildActions() *fyne.Container {
 	onHover := func(hovering bool) {
 		w.overChild = hovering
@@ -355,8 +319,7 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 		buttons = append(buttons, NewIconButton(tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }, onHover))
 	}
 
-	// The overflow button is always last and opens the full context menu — the
-	// same one right-clicking the message shows — beneath itself.
+	// The overflow button is always last and opens the right-click menu beneath itself.
 	more := NewIconButton(actionMark(assets.ActionMoreIcon), nil, onHover)
 	more.onTap = func() { ShowContextMenu(more, w.menuItems(), AnchorBelow(more)) }
 	buttons = append(buttons, more)
@@ -387,9 +350,8 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 		items = append(items, fyne.NewMenuItemWithIcon("Edit", actionMark(assets.ActionEditIcon), func() { act.OnEdit(w.message) }))
 	}
 
-	// Pinning is offered in the menu alone, never as a hover button: the quick
-	// actions are the three things done often enough to be worth a click without
-	// opening anything, and pinning is not one of them.
+	// Menu only, never a hover button: the quick actions are the things done often
+	// enough to be worth a click without opening anything.
 	if w.canPin(permissions) {
 		label, mark := "Pin message", assets.SystemPinnedIcon
 		if w.message.Pinned {
@@ -416,9 +378,8 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 		}),
 	)
 
-	// The two that take something away from everybody sit together under the last
-	// separator, furthest from the copy helpers a misaimed click would otherwise
-	// land on.
+	// The two that take something away from everybody sit under the last separator,
+	// furthest from the copy helpers a misaimed click would land on.
 	clearable, deletable := w.canClearReactions(permissions), w.canDelete(permissions)
 	if clearable || deletable {
 		items = append(items, fyne.NewMenuItemSeparator())
@@ -436,8 +397,8 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 }
 
 // react adds the picked emoji, for the two entry points that offer one to a
-// message carrying none. A chip already showing it toggles instead — picking one
-// that is already there is a request to have reacted, which is already true.
+// message carrying none. Picking one already there is a request to have reacted,
+// which is already true.
 func (w *MessageWidget) react(anchor fyne.CanvasObject) {
 	w.deps.Actions.OnPickEmoji(anchor, func(choice EmojiChoice) {
 		w.deps.Actions.OnReact(w.message, choice.Value(), true)
@@ -451,11 +412,9 @@ func (w *MessageWidget) TappedSecondary(e *fyne.PointEvent) {
 
 /* In-place editing */
 
-// StartEdit swaps the message body for an in-place editor, with save/cancel
-// buttons floating where the hover quick-actions normally appear. Enter without
-// shift, or the save button, submits through onSave; Escape or cancel calls
-// onCancel. Saving unchanged or emptied content counts as a cancel. Returns the
-// entry for the caller to focus, or nil when the message isn't editable or is
+// StartEdit swaps the body for an in-place editor, save/cancel floating where the
+// quick-actions do. Saving unchanged or emptied content counts as a cancel.
+// Answers with the entry to focus, or nil when the message is not editable or is
 // already being edited.
 func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func()) *EditEntry {
 	if w.editing || !w.canEdit() {
@@ -484,8 +443,7 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 	}
 	entry.OnSave, entry.OnCancel = save, cancel
 
-	hint := canvas.NewText("esc to cancel  •  enter to save", theme.Colors.TimestampText)
-	hint.TextSize = theme.Sizes.MessageTimestampSize
+	hint := newText("esc to cancel  •  enter to save", theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
 	w.bodySlot.Objects = []fyne.CanvasObject{container.NewVBox(WithCaret(entry), hint)}
 	w.bodySlot.Show()
 	w.bodySlot.Refresh()
@@ -542,8 +500,8 @@ func (w *MessageWidget) MouseOut() {
 }
 
 // updateHover shows the action buttons while the pointer is over the message or
-// the buttons, hiding them after a grace period otherwise. Suspended while
-// editing, which paints its own highlight and overlay buttons.
+// over them, hiding them after a grace period otherwise. Suspended while editing,
+// which paints its own highlight and overlay.
 func (w *MessageWidget) updateHover() {
 	if w.editing {
 		return
@@ -563,9 +521,9 @@ func (w *MessageWidget) updateHover() {
 	}
 	w.hideTimer = time.AfterFunc(hoverHideDelay, func() {
 		DoOnUI(func() {
-			// Cleared first: a timer that fires while the row is being edited used
-			// to return with the field still set, and the guard above then refused
-			// to arm another one — leaving that message's actions up for good.
+			// Cleared first: a timer firing mid-edit used to return with the field
+			// still set, so the guard above refused to arm another and the actions
+			// stayed up for good.
 			w.hideTimer = nil
 			if w.overMessage || w.overChild || w.editing {
 				return
@@ -608,16 +566,14 @@ func (w *MessageWidget) setHighlighted(on bool) {
 
 /* The jump mark */
 
-// Flash washes the row and fades it back out, marking the message a jump landed
-// on. It is not a state the widget holds: fill() is untouched, so the row goes
-// on answering the pointer, and the last tick hands the background back to
-// whatever fill() says.
+// Flash washes the row a jump landed on and fades it back out. Not a state the
+// widget holds: fill() is untouched, so the row goes on answering the pointer and
+// the last tick hands the background back to it.
 //
-// The fade runs between two opaque colours rather than down the wash's alpha.
-// The palette writes straight alpha into color.RGBA, which Go's compositor reads
-// as premultiplied — see theme.Fade — so a wash faded that way darkens the row
-// on its way out instead of leaving it. What it fades *to* is therefore the
-// colour behind a row at rest rather than the transparency it will end on.
+// The fade runs between two opaque colours rather than down the wash's alpha. The
+// palette writes straight alpha into color.RGBA, which Go composites as
+// premultiplied (see theme.Fade), so fading that way darkens the row on the way
+// out — hence fading *to* what is behind a row at rest.
 func (w *MessageWidget) Flash() {
 	w.stopFlash()
 
@@ -631,8 +587,8 @@ func (w *MessageWidget) Flash() {
 		canvas.Refresh(w.background)
 	})
 
-	// Held, then let go: an ease-out curve would spend most of the second on a
-	// colour too faint to have found anything by.
+	// Held, then let go: ease-out would spend most of the second on a colour too
+	// faint to have found anything by.
 	w.flash.Curve = fyne.AnimationEaseIn
 	w.flash.Start()
 }
@@ -647,8 +603,7 @@ func (w *MessageWidget) stopFlash() {
 }
 
 // restBackdrop is what a row at rest is seen against: its own wash where it has
-// one, and otherwise the message area behind it, a row's rest fill being
-// transparent.
+// one, else the message area behind it — a row's rest fill being transparent.
 func (w *MessageWidget) restBackdrop() color.Color {
 	if w.mentioned {
 		return theme.Colors.MessageMentionBackground
@@ -670,10 +625,9 @@ func mixColor(from, to color.Color, at float32) color.Color {
 	return color.RGBA{R: lerp(fr, tr), G: lerp(fg, tg), B: lerp(fb, tb), A: 0xFF}
 }
 
-// fill is the row's background at rest and under the pointer. A message that
-// names the account keeps its warm wash either way — it is what tells the reader
-// they were addressed, and it has to survive being read past — so hovering one
-// lifts that colour rather than replacing it with the ordinary hover.
+// fill is the row's background at rest and under the pointer. A message naming
+// the account keeps its warm wash either way — that is what says they were
+// addressed — so hovering lifts the colour rather than replacing it.
 func (w *MessageWidget) fill(hovered bool) color.Color {
 	switch {
 	case w.mentioned && hovered:
@@ -687,9 +641,8 @@ func (w *MessageWidget) fill(hovered bool) color.Color {
 	return color.Transparent
 }
 
-// setGutterShown reveals or hides a grouped continuation's gutter timestamp by
-// toggling its colour, keeping the width fixed so the body never shifts. A no-op
-// for full messages, which have no gutter timestamp.
+// setGutterShown reveals a grouped continuation's gutter timestamp by toggling
+// its colour, so the width stays fixed and the body never shifts.
 func (w *MessageWidget) setGutterShown(shown bool) {
 	if w.gutterTimestamp == nil {
 		return
@@ -705,22 +658,20 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 
 /* Content assembly */
 
-// buildAuthoredContent assembles a message somebody wrote: the avatar gutter — or,
-// for a grouped continuation, the hover timestamp standing in it — the header, the
-// body slot, and any reply previews above them.
+// buildAuthoredContent assembles a message somebody wrote: the avatar gutter (or
+// the hover timestamp standing in it), the header, the body slot, and any reply
+// previews above them.
 func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime string) fyne.CanvasObject {
 	deps, message := w.deps, w.message
 
-	// Every interactive piece of the row takes the same context menu, so the
-	// pointer never lands somewhere that swallows a right-click silently.
+	// Every interactive piece of the row takes the same menu, so the pointer never
+	// lands somewhere that swallows a right-click.
 	w.body = newFlushContainer(renderMessageBody(deps, message.Content, w.TappedSecondary))
 	w.bodySlot = container.NewStack(w.body)
 
-	// A message that says nothing — a bot's embed, an attachment on its own —
-	// still renders an empty body one text line tall, which draws as a gap above
-	// whatever it does carry. Hiding the slot is what removes it: the layouts
-	// around it skip hidden children entirely, so no spacing is charged for it
-	// either. StartEdit shows it again, since an editor needs somewhere to sit.
+	// An empty body still renders one line tall, drawing as a gap above whatever the
+	// message does carry. Hiding the slot removes it — the layouts around skip
+	// hidden children, so no spacing is charged either. StartEdit shows it again.
 	w.emptyBody = message.Content == ""
 	if w.emptyBody {
 		w.bodySlot.Hide()
@@ -728,10 +679,8 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 
 	var leftColumn, body fyne.CanvasObject
 	if grouped {
-		// Transparent until hover: toggling colour rather than visibility keeps the
-		// gutter's width fixed, so the body never shifts when the time appears.
-		w.gutterTimestamp = canvas.NewText(shortTime, color.Transparent)
-		w.gutterTimestamp.TextSize = theme.Sizes.MessageTimestampSize
+		// Transparent until hover — see setGutterShown.
+		w.gutterTimestamp = newText(shortTime, color.Transparent, theme.Sizes.MessageTimestampSize)
 
 		gutter := &columnLayout{
 			width:     theme.Sizes.MessageAvatarColumnWidth,
@@ -739,7 +688,7 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 			collapse:  true,
 		}
 		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = buildGroupedContent(w.bodySlot, w.buildExtras())
+		body = stackExtras(w.bodySlot, w.buildExtras())
 	} else {
 		name, nameColor, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
@@ -752,17 +701,17 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 		}, w.avatar)
 
 		w.authorText = NewAccentText(name, nameColor, 0, fyne.TextStyle{Bold: true})
-		body = buildMessageContent(w.authorText, fullTime, message.Pinned, w.bodySlot, w.buildExtras())
+		header := buildMessageHeader(w.authorText, fullTime, message.Pinned, w.bodySlot)
+		body = stackExtras(header, w.buildExtras())
 	}
 
-	// One row rather than a Border inside a Border: each of those inserts theme
-	// padding between its edges and its centre, so the gap after the avatar gutter
-	// was three times MessageContentPadding with nothing saying so.
+	// One row rather than nested Borders: each inserts theme padding between its
+	// edges and its centre, which made the gap after the gutter three times
+	// MessageContentPadding with nothing saying so.
 	row := NewFillRow(2, leftColumn, HorizontalSpacer(theme.Sizes.MessageContentPadding), body)
 
-	// Replies belong inside the row's margins, above the message they answer, so
-	// carrying one leaves the avatar and the name exactly where a message without
-	// one puts them.
+	// Replies go inside the row's margins, so carrying one leaves the avatar and the
+	// name where a message without one puts them.
 	if grouped || len(message.Replies) == 0 {
 		return row
 	}
@@ -773,9 +722,8 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 	return VBoxNoSpacing(block, row)
 }
 
-// resolveAuthor resolves the display name, role colour, and avatar URL for a
-// message's author. Shared by construction and RefreshAuthor, so a lazily
-// fetched author renders identically either way.
+// resolveAuthor is shared by construction and RefreshAuthor, so a lazily fetched
+// author renders identically either way.
 func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor color.Color, avatarURL string) {
 	author := deps.Store.MessageAuthor(message)
 
@@ -789,27 +737,19 @@ func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor c
 
 /* System events */
 
-// buildSystemLine renders a server-generated event as the one line it is: the
-// mark for what happened, standing in the gutter an avatar would occupy, then the
-// sentence and the time it happened at.
+// buildSystemLine renders an event as the one line it is: its mark standing in
+// the avatar's gutter, then the sentence and the time.
 //
-// The time is drawn rather than revealed on hover, as a full message's is: there
-// is no name for it to follow here, and a line that reads "Someone left" with
-// nothing to say when is the one case where the timestamp is most of the content.
-//
-// The name it announces is the one thing here that accepts a pointer: it opens
-// that person's profile, as their name does anywhere else in the client. It
-// carries the row's context menu for the reason mentionText documents, and it is
-// deliberately not hoverable, so the row keeps the hover the whole line lights up
-// with. Nothing else in here answers anything.
+// The time is drawn rather than revealed on hover — there is no name for it to
+// follow, and "Someone left" with no *when* is half a sentence. The name is the
+// one thing here accepting a pointer, opening that profile; it carries the row's
+// menu and is deliberately not hoverable, so the row keeps the hover the whole
+// line lights up with.
 func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
 	name, rest := w.deps.Store.SystemTextParts(w.message.System)
 
-	w.systemText = canvas.NewText(rest, theme.Colors.SystemMessageText)
-	w.systemText.TextSize = theme.Sizes.SystemMessageTextSize
-
-	time := canvas.NewText(timestamp, theme.Colors.TimestampText)
-	time.TextSize = theme.Sizes.MessageTimestampSize
+	w.systemText = newText(rest, theme.Colors.SystemMessageText, theme.Sizes.SystemMessageTextSize)
+	time := newText(timestamp, theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
 
 	mark, tone := systemMark(w.message.System.Kind)
 	icon := newScaledIcon(tintedIcon(mark, tone), theme.Sizes.SystemMessageIconSize)
@@ -818,8 +758,7 @@ func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
 		topOffset: systemIconTopOffset(),
 	}, icon)
 
-	// Every text here is a sibling in the one row, so the smaller time centres
-	// itself against the line rather than needing an offset of its own.
+	// Siblings in one row, so the smaller time centres itself against the line.
 	line := make([]fyne.CanvasObject, 0, 4)
 	if name != "" {
 		target := w.message.System.Target
@@ -833,15 +772,11 @@ func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
 	return NewFillRow(2, gutter, HorizontalSpacer(theme.Sizes.MessageContentPadding), w.systemLine)
 }
 
-// systemMark is the mark an event is announced by and the colour it is drawn in.
-// The two are decided together because they say different halves of one thing:
-// the tone is the class of event — an arrival, a departure, a removal, a change
-// to the channel — which is what a column of these is skimmed by, and the glyph
-// is which event of that class it was.
-//
-// SystemKind is Revolt's own vocabulary, carried verbatim, so an event the
-// platform adds later falls through to the generic mark in the neutral grey
-// rather than drawing nothing.
+// systemMark answers with the glyph *and* the colour, being two halves of one
+// thing: the tone is the class of event — arrival, departure, removal, a channel
+// change — which is what a column of these is skimmed by, and the glyph is which
+// event of that class it was. SystemKind is Revolt's vocabulary carried verbatim,
+// so one added later falls through to the generic mark in neutral grey.
 func systemMark(kind domain.SystemKind) (fyne.Resource, color.Color) {
 	switch kind {
 	case domain.SystemUserJoined:
@@ -881,33 +816,30 @@ func systemMark(kind domain.SystemKind) (fyne.Resource, color.Color) {
 // and a single-line body share it, both being drawn at the theme's text size.
 func messageLineHeight() float32 { return lineHeight(fynetheme.TextSize()) }
 
-// avatarTopOffset places the avatar centred on the block a single-line message
-// occupies: the author line plus one line of body. It is an offset from the top
-// of the row rather than a centring of the whole row, so a longer body, an
-// attachment or a reply grows away from it and every message's avatar sits at
-// the same height whatever it says.
+// avatarTopOffset centres the avatar on the block a single-line message occupies:
+// the author line plus one line of body. An offset from the top rather than a
+// centring of the row, so a longer body grows away from it and every avatar sits
+// at the same height whatever the message says.
 func avatarTopOffset() float32 {
 	return (messageLineHeight()*2 - theme.Sizes.MessageAvatarSize) / 2
 }
 
 // gutterTimestampTopOffset centres a grouped continuation's hover timestamp on
-// the one body line it stands beside. It is smaller text than the body, so
-// sharing that line's centre takes an offset of its own.
+// the body line beside it — smaller text, so the shared centre takes an offset.
 func gutterTimestampTopOffset() float32 {
 	return (messageLineHeight() - lineHeight(theme.Sizes.MessageTimestampSize)) / 2
 }
 
-// systemIconTopOffset centres an event's mark on the one line of text beside it.
-// The mark is a different height from a line of type, so sharing that line's
-// centre takes an offset of its own — as the grouped timestamp above does.
+// systemIconTopOffset does the same for an event's mark, a different height again
+// from the line of type beside it.
 func systemIconTopOffset() float32 {
 	return (lineHeight(theme.Sizes.SystemMessageTextSize) - theme.Sizes.SystemMessageIconSize) / 2
 }
 
-// verticalPad returns this message's top or bottom margin: tight when it abuts a
+// verticalPad is this message's top or bottom margin: tight when it abuts a
 // same-author continuation, the full gap otherwise. A system line keeps its own
-// margin whatever surrounds it — it can neither open nor continue a group, so the
-// question the flag answers doesn't arise, and a run of joins reads as one block.
+// whatever surrounds it — it can neither open nor continue a group, and a run of
+// joins reads as one block.
 func (w *MessageWidget) verticalPad(tight bool) float32 {
 	switch {
 	case w.message.System != nil:
@@ -919,40 +851,26 @@ func (w *MessageWidget) verticalPad(tight bool) float32 {
 	return theme.Sizes.MessageVerticalPadding
 }
 
-// buildMessageContent assembles the author header plus whatever the message
-// carries beneath its text.
-func buildMessageContent(author *AccentText, timestamp string, pinned bool, body fyne.CanvasObject, extras []fyne.CanvasObject) fyne.CanvasObject {
-	header := buildMessageHeader(author, timestamp, pinned, body)
+// stackExtras hangs extras under head, or answers with head alone when there are
+// none — the great majority of messages, which is why the box is not built
+// regardless.
+func stackExtras(head fyne.CanvasObject, extras []fyne.CanvasObject) fyne.CanvasObject {
 	if len(extras) == 0 {
-		return header
+		return head
 	}
 
-	return container.NewVBox(append([]fyne.CanvasObject{header}, extras...)...)
+	return container.NewVBox(append([]fyne.CanvasObject{head}, extras...)...)
 }
 
-// buildGroupedContent renders a grouped continuation: the body and its extras,
-// with no author/timestamp header.
-func buildGroupedContent(body fyne.CanvasObject, extras []fyne.CanvasObject) fyne.CanvasObject {
-	if len(extras) == 0 {
-		return body
-	}
-
-	return container.NewVBox(append([]fyne.CanvasObject{body}, extras...)...)
-}
-
-// buildExtras is what hangs below a message's text: its attachments, then the
-// embeds, then any invite it links to, then its reactions — what was uploaded
-// before what was unfurled, since only the first was deliberate; the invite after
-// both, being the only one the client composed rather than the server; and the
-// reactions last, they being what everybody else added to all of it. Empty for
-// the great majority of messages, which is why both callers check before wrapping
-// the body in a box at all.
+// buildExtras is what hangs below a message's text, in order: attachments, then
+// embeds — what was uploaded before what was unfurled, only the first being
+// deliberate — then any invite, the one thing the client composed rather than the
+// server, then reactions, what everybody else added to all of it.
 //
 // The reaction row is drawn only when there is one, so a mounted page still costs
 // no permission checks: the chips need to know whether they answer a click, and
-// asking that per message would be a lookup per row for a feature few of them
-// carry. Adding the first reaction is offered from the hover actions instead,
-// which are built lazily and already read permissions once.
+// asking per message would be a lookup per row for a feature few carry. Adding
+// the first is offered from the hover actions, which read permissions once anyway.
 func (w *MessageWidget) buildExtras() []fyne.CanvasObject {
 	deps, message, onMenu := w.deps, w.message, w.TappedSecondary
 
@@ -981,23 +899,16 @@ func (w *MessageWidget) setOverChild(hovering bool) {
 	w.updateHover()
 }
 
-// buildMessageHeader renders the author line — the bold name in its role colour
-// followed by the timestamp — above the message text. Keeping the timestamp
-// inline on the name line aligns it with the username and stops long body text
-// running under it.
+// buildMessageHeader is the author line — bold name in its role colour, then the
+// timestamp — above the message text. Keeping the time on the name line stops long
+// body text running under it, and both being siblings in the HBox, the smaller one
+// centres itself against the name.
 //
-// Both texts go straight into the HBox, which stretches each to the line's full
-// height; canvas.Text centres its glyphs in whatever height it is given, so the
-// smaller timestamp lands centred against the name with no offset of our own.
-//
-// A pinned message trails the same line with the mark the pin event is announced
-// by, in the timestamp's own colour: it is a note about the message rather than
-// part of what was said. It is a bare image and not a widget, so the row's hover
-// and context menu pass straight through it — the same rule an embed's card
-// follows.
+// A pinned message trails the same line with the pin event's own mark, in the
+// timestamp's colour: a note about the message rather than part of what was said.
+// A bare image, not a widget, so the row's hover and menu pass through it.
 func buildMessageHeader(author *AccentText, timestamp string, pinned bool, body fyne.CanvasObject) fyne.CanvasObject {
-	ts := canvas.NewText(timestamp, theme.Colors.TimestampText)
-	ts.TextSize = theme.Sizes.MessageTimestampSize
+	ts := newText(timestamp, theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
 
 	line := []fyne.CanvasObject{author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts}
 	if pinned {
@@ -1011,13 +922,10 @@ func buildMessageHeader(author *AccentText, timestamp string, pinned bool, body 
 
 /* Day separator */
 
-// newDaySeparator builds the divider announcing a new day of messages: the day's
-// name at the left, a hairline running out to the right edge, inset to the same
-// horizontal padding as a message row.
+// newDaySeparator is the divider announcing a new day: the day's name, a hairline
+// out to the right edge, inset to a message row's horizontal padding.
 func newDaySeparator(label string) fyne.CanvasObject {
-	text := canvas.NewText(label, theme.Colors.DaySeparatorText)
-	text.TextSize = theme.Sizes.DaySeparatorTextSize
-	text.TextStyle = fyne.TextStyle{Bold: true}
+	text := newBoldText(label, theme.Colors.DaySeparatorText, theme.Sizes.DaySeparatorTextSize)
 
 	rule := canvas.NewRectangle(theme.Colors.DaySeparatorLine)
 	rule.SetMinSize(fyne.NewSize(0, theme.Sizes.DaySeparatorThickness))
@@ -1033,10 +941,8 @@ func newDaySeparator(label string) fyne.CanvasObject {
 	)
 }
 
-// daySeparatorLayout lays out the label and the rule trailing it: the label keeps
-// its minimum size, the rule takes the leftover width, and both are vertically
-// centred so the hairline meets the middle of the text. It expects exactly two
-// children, label first.
+// daySeparatorLayout gives the label its minimum and the rule the rest, both
+// centred so the hairline meets the middle of the text. Two children, label first.
 type daySeparatorLayout struct{ gap float32 }
 
 func (l *daySeparatorLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -1070,7 +976,7 @@ func (l *daySeparatorLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 
 // NewMessageStatus is the line the column draws in place of messages. A nil mark
 // draws the sentence alone: what earns one is a state the reader is looking at
-// rather than waiting on, an empty channel being the whole of what is there.
+// rather than waiting on.
 func NewMessageStatus(mark fyne.Resource, text string) fyne.CanvasObject {
 	label := widget.NewLabelWithStyle(text, fyne.TextAlignCenter, fyne.TextStyle{Bold: true})
 	if mark == nil {
@@ -1080,9 +986,8 @@ func NewMessageStatus(mark fyne.Resource, text string) fyne.CanvasObject {
 	side := theme.Sizes.MessageStatusMarkSize
 	icon := newScaledIcon(tintedIcon(mark, theme.Colors.MessageStatusMark), side)
 
-	// The mark is boxed at its own size before it goes in the row: a row hands
-	// every child the full height, and an unboxed image would be drawn at the
-	// height of the label's padding rather than at the size asked for.
+	// Boxed at its own size first: a row hands every child the full height, so an
+	// unboxed image draws at the label's padding rather than the size asked for.
 	box := container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), icon))
 	row := HBoxNoSpacing(box, HorizontalSpacer(theme.Sizes.MessageStatusGap), label)
 
@@ -1091,19 +996,14 @@ func NewMessageStatus(mark fyne.Resource, text string) fyne.CanvasObject {
 
 /* Channel note */
 
-// NewChannelNote is the strip under the message header, saying what the client
-// cannot do in the channel below it. It is a standing caption rather than a
-// notice: what it says is true for as long as the channel is open, so it cannot
-// be something that fades, and it is not the message column's own status line
-// either — that one stands *in place of* messages, and a voice channel's
-// messages are still there to be read.
-//
-// The sentence is shortened rather than wrapped: it lives in a fixed-height
-// strip that must not grow the column, and NewFillRow hands it the leftover
-// width an ellipsis box needs to fit itself into.
+// NewChannelNote is the strip under the message header saying what the client
+// cannot do in the channel below. A standing caption rather than a notice — what
+// it says holds as long as the channel is open, so it cannot fade — and not the
+// column's status line, which stands *in place of* messages a voice channel still
+// has. Shortened rather than wrapped: the strip is fixed height and must not grow
+// the column, and NewFillRow hands the ellipsis box the leftover width.
 func NewChannelNote(mark fyne.Resource, text string) fyne.CanvasObject {
-	label := canvas.NewText(text, theme.Colors.ChannelNoteText)
-	label.TextSize = theme.Sizes.ChannelNoteTextSize
+	label := newText(text, theme.Colors.ChannelNoteText, theme.Sizes.ChannelNoteTextSize)
 
 	side := theme.Sizes.ChannelNoteMarkSize
 	icon := newScaledIcon(tintedIcon(mark, theme.Colors.ChannelNoteText), side)
@@ -1118,9 +1018,8 @@ func NewChannelNote(mark fyne.Resource, text string) fyne.CanvasObject {
 /* Reply previews */
 
 // buildReplyBlock stacks the quoted lines above the message answering them,
-// ending in the gap that separates the two. The lines are handed back as well as
-// mounted: the message one quotes may not be cached, and resolving it is a
-// request, so the line has to be able to fill itself in when the answer lands.
+// ending in the gap between the two. The lines come back as well as being mounted:
+// what one quotes may not be cached, and resolving it is a request.
 func buildReplyBlock(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent)) (fyne.CanvasObject, []*replyPreview) {
 	previews := make([]*replyPreview, 0, len(message.Replies))
 	quotes := make([]fyne.CanvasObject, 0, len(message.Replies)+1)
@@ -1134,11 +1033,9 @@ func buildReplyBlock(deps Deps, message *domain.Message, onMenu func(*fyne.Point
 	return VBoxNoSpacing(append(quotes, VerticalSpacer(theme.Sizes.MessageReplyBlockGap))...), previews
 }
 
-// newReplyLine draws the elbow that ties a quoted line to the message answering
-// it: a leg standing in the avatar gutter and an arm running right to the quote.
-// Both are plain rectangles meeting at a square corner — nothing rounds the turn.
-// Every quoted line carries its own, so a stack of them reads as several separate
-// answers rather than one bracket around the group.
+// newReplyLine is the elbow tying a quoted line to the message answering it: a
+// leg in the avatar gutter, an arm running right to the quote. Every quoted line
+// carries its own, so a stack reads as separate answers rather than one bracket.
 func newReplyLine() fyne.CanvasObject {
 	leg := canvas.NewRectangle(theme.Colors.ReplyLine)
 	arm := canvas.NewRectangle(theme.Colors.ReplyLine)
@@ -1146,11 +1043,9 @@ func newReplyLine() fyne.CanvasObject {
 	return container.New(&replyLineLayout{}, leg, arm)
 }
 
-// replyLineLayout draws the elbow across the width the avatar gutter and the gap
-// after it occupy, so the quote it leads starts exactly where the message body
-// below does. It reports no height of its own — the quoted line decides the row,
-// and the elbow is measured against whatever that comes to. Exactly two children,
-// leg first.
+// replyLineLayout spans the avatar gutter and the gap after it, so the quote
+// starts where the body below does. It reports no height — the quoted line decides
+// the row. Two children, leg first.
 type replyLineLayout struct{}
 
 func (l *replyLineLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
@@ -1161,8 +1056,9 @@ func (l *replyLineLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 	thickness := theme.Sizes.MessageReplyLineThickness
 	x := theme.Sizes.MessageReplyLineInset
-	// The arm sits on the quoted line's centre and the leg hangs from the corner to
-	// the foot of the row, pointing at the message the quote belongs to.
+
+	// The arm sits on the quoted line's centre; the leg hangs from the corner to the
+	// foot of the row, pointing at the message the quote belongs to.
 	y := (size.Height - thickness) / 2
 
 	leg.Resize(fyne.NewSize(thickness, max(size.Height-y, 0)))
@@ -1178,13 +1074,13 @@ func (l *replyLineLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(width, 0)
 }
 
-// replyPreview is the small quoted line shown above a message that replies to
-// another. It is a struct rather than a built subtree because what it quotes may
-// arrive later: the reply reaches as far back as somebody cared to answer, and
-// the message cache is only the tail of a channel.
+// replyPreview is the quoted line above a message that answers another. A struct
+// rather than a built subtree because what it quotes may arrive later: a reply
+// reaches as far back as somebody cared to answer, and the cache is only the tail
+// of a channel.
 type replyPreview struct {
 	// row is the whole line, kept so filling one in can re-lay it out — the name
-	// sits inside the line and everything after it moves.
+	// sits inside it and everything after moves.
 	row *fyne.Container
 
 	channelID string
@@ -1201,16 +1097,11 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 	size := fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize)
 	p.avatar, _ = newAvatarSlot(size)
 
-	p.author = canvas.NewText("", theme.Colors.TextPrimary)
-	p.author.TextStyle.Bold = true
-	p.author.TextSize = replyPreviewTextSize
+	p.author = newBoldText("", theme.Colors.TextPrimary, replyPreviewTextSize)
+	p.content = newText("", theme.Colors.TimestampText, replyPreviewTextSize)
 
-	p.content = canvas.NewText("", theme.Colors.TimestampText)
-	p.content.TextSize = replyPreviewTextSize
-
-	// A line that found nothing to quote leads nowhere: everything a mounted reply
-	// names has been asked for by the time it is drawn, so one still unresolved is
-	// a message that was deleted, and a jump could only report that again.
+	// A line that found nothing leads nowhere: everything a mounted reply names has
+	// been asked for by the time it is drawn, so one still unresolved was deleted.
 	quote := NewTappableContainer(HBoxNoSpacing(
 		container.NewCenter(p.avatar),
 		HorizontalSpacer(8),
@@ -1224,9 +1115,8 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 	})
 	quote.onSecondaryTap = onMenu
 
-	// The elbow both indents the quote to the message content column and draws the
-	// line down to the message. The row's own horizontal margin is already applied
-	// around the block, so it only has the gutter and the gap after it to span.
+	// The elbow indents the quote to the content column and draws the line down. The
+	// row's horizontal margin is already applied around the block.
 	p.row = HBoxNoSpacing(newReplyLine(), quote)
 	p.set(deps)
 
@@ -1234,7 +1124,7 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 }
 
 // Resolved reports whether the line is quoting a message rather than saying it
-// could not find one. The controller asks so it knows which targets to fetch.
+// found none. The controller asks so it knows which targets to fetch.
 func (p *replyPreview) Resolved(deps Deps) bool {
 	return deps.Actions.ResolveMessage(p.channelID, p.messageID) != nil
 }
@@ -1256,9 +1146,8 @@ func (p *replyPreview) set(deps Deps) {
 	loadAvatar(deps.Images, p.avatar, avatarURL, fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize))
 }
 
-// resolveReply looks up a referenced message and returns its author, truncated
-// content, avatar URL, and role colour (nil when none). A missing reference
-// yields a placeholder.
+// resolveReply looks up a referenced message: its author, truncated content,
+// avatar URL and role colour. A missing reference yields a placeholder.
 func resolveReply(deps Deps, channelID, messageID string) (author, content, avatarURL string, accent color.Color) {
 	message := deps.Actions.ResolveMessage(channelID, messageID)
 	if message == nil {
@@ -1299,15 +1188,12 @@ func NewEditEntry(content string) *EditEntry {
 	return e
 }
 
-// MinSize grows the entry up to maxInputLines as the user types, matching the
-// main composer.
+// MinSize grows the entry as the composer's does.
 func (e *EditEntry) MinSize() fyne.Size { return composerMinSize(&e.Entry) }
 
-// Resize places the caret at the end of the text the first time the entry gets a
-// real size. Setting it in the constructor positions it against zero-width
-// word-wrapped row bounds (one rune per visual row), which clamps it a character
-// in from the start; deferring to the first real layout makes the entry recompute
-// against correct bounds.
+// Resize places the caret at the end on the first real size. Set in the
+// constructor it lands against zero-width word-wrapped row bounds — one rune per
+// visual row — which clamps it a character in from the start.
 func (e *EditEntry) Resize(size fyne.Size) {
 	e.Entry.Resize(size)
 	if e.cursorPlaced || size.Width <= 0 || size.Height <= 0 {

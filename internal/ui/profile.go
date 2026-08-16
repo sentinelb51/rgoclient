@@ -1,18 +1,17 @@
 package ui
 
-// User profiles. One resolved Profile behind two presentations: the compact card
-// a click on an avatar opens beside it, and the full dialog that card expands
-// into on the modal layer. Both are assembled from the same header, section and
-// chip helpers, so the only thing separating them is how much they say — the
-// card names someone, the dialog tells you about them.
+// User profiles: one resolved Profile behind two presentations, the compact card
+// a click on an avatar opens beside it and the dialog that card expands into.
+// Both are built from the same helpers, so what separates them is how much they
+// say — the card names someone, the dialog tells you about them.
 //
-// Neither reaches for State. The controller resolves a Profile (app/profile.go)
-// and hands it over, so a card can be built and measured from a value alone.
+// Neither reaches for State: the controller resolves a Profile (app/profile.go),
+// so a card can be built and measured from a value alone.
 
 import (
-	"fmt"
 	"image"
 	"image/color"
+	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -38,9 +37,9 @@ const (
 	// counting the rest into a final "+n"; the dialog lists them all.
 	profileRoleLimit = 4
 
-	// profileMutualLimit is the same for what two accounts have in common, and
-	// applies to the dialog too: roles are a fact about somebody that stops, where
-	// mutual friends on a busy account run to hundreds and would be the whole card.
+	// profileMutualLimit is the same for what two accounts have in common, and binds
+	// the dialog too: roles are a fact that stops, where mutual friends on a busy
+	// account run to hundreds and would be the whole card.
 	profileMutualLimit = 6
 
 	// profileHandleShare is how much of the identity line the handle may take
@@ -51,9 +50,8 @@ const (
 
 /* Presence */
 
-// presenceColor fills the presence ring. The vocabulary itself is
-// domain.Presence — what each state is *called* belongs to the domain, what
-// colour it is drawn in belongs here.
+// presenceColor fills the presence ring. What a state is *called* belongs to
+// domain.Presence; what colour it is drawn in belongs here.
 func presenceColor(presence domain.Presence) color.Color {
 	switch presence {
 	case domain.PresenceOnline:
@@ -79,16 +77,12 @@ type ProfileButton struct {
 	Danger bool // drawn in the destructive weight
 	Do     func()
 
-	// Overflow files the action behind the card's hamburger instead of drawing it
-	// under the card. Blocking somebody, dropping them and copying their ID are
-	// not what a profile is opened for, and a row of buttons that leads with them
-	// says the wrong thing about the person on screen.
-	//
-	// Icon marks it there, already in the colour it is to be drawn: a menu in this
-	// client always carries marks, and which one names an action — and whether it
-	// is the destructive weight — is decided beside the action itself. Only the
-	// menu reads either field, so a surface that draws its own rows (the friends
-	// dialog) ignores both and draws the lot.
+	// Overflow files the action behind the card's hamburger rather than drawing it
+	// under the card: blocking somebody or copying their ID is not what a profile is
+	// opened for, and a row of buttons leading with them says the wrong thing about
+	// the person on screen. Icon marks it there, already in the colour it is drawn
+	// in. Only the menu reads either field — a surface drawing its own rows ignores
+	// both and draws the lot.
 	Overflow bool
 	Icon     fyne.Resource
 }
@@ -96,18 +90,15 @@ type ProfileButton struct {
 // ProfileActions are the buttons a presentation offers. A nil field leaves its
 // button out, which is how the dialog — already expanded — drops "Full profile".
 type ProfileActions struct {
-	// Buttons is what to do about this person, most useful first. Which of them
-	// apply is entirely a question about the relationship, so it is answered by
-	// the controller and this file draws whatever it is handed.
-	//
-	// The compact card draws only the first. It names somebody; a row of ways to
-	// act on them is what expanding it is for.
+	// Buttons is what to do about this person, most useful first. Which apply is a
+	// question about the relationship, answered by the controller. The compact card
+	// draws only the first: it names somebody, and a row of ways to act on them is
+	// what expanding it is for.
 	Buttons []ProfileButton
 
-	// OnCopied names what a click on the card has just put on the clipboard, so
-	// the controller can say so. A clipboard write is invisible, and the handle is
-	// the one thing here copied by clicking the thing itself rather than by
-	// picking it out of a menu — with no receipt, nothing distinguishes it from a
+	// OnCopied names what a click just put on the clipboard, so the controller can
+	// say so. A clipboard write is invisible, and the handle is the one thing here
+	// copied by clicking the thing itself — with no receipt, nothing tells it from a
 	// click that missed.
 	OnCopied func(what string)
 
@@ -115,20 +106,19 @@ type ProfileActions struct {
 	OnClose  func() // dismiss the layer; drawn on the dialog's banner
 }
 
-// MutualEntry is one thing two accounts have in common: a server both are in, or
-// a friend both have. Open is what tapping its chip does, supplied by the
-// controller the way a ProfileButton's Do is — where a name leads is a question
-// about what is behind the dialog, which the card has no view of. A nil Open
-// draws the plain chip, which is what a name with nowhere to go should look like.
+// MutualEntry is one thing two accounts have in common: a shared server or a
+// shared friend. Open is what tapping its chip does, supplied by the controller —
+// where a name leads is a question about what is behind the dialog. A nil Open
+// draws the plain chip, which is what a name with nowhere to go looks like.
 type MutualEntry struct {
 	Name string
 	Open func()
 }
 
-// MutualProfile is what this account has in common with the person on screen,
-// resolved. The counts are apart from the entries deliberately: somebody the
-// store cannot name is still one of the people in common, so the "+n" counts them
-// rather than the total quietly shrinking to what happens to be cached.
+// MutualProfile is what this account has in common with the person on screen.
+// The counts are kept apart from the entries: somebody the store cannot name is
+// still one of the people in common, so the "+n" counts them rather than the
+// total quietly shrinking to what happens to be cached.
 type MutualProfile struct {
 	Servers     []MutualEntry
 	ServerCount int
@@ -193,27 +183,24 @@ func newProfileCard(deps Deps, profile domain.Profile, actions ProfileActions, f
 		NewInset(c.details(profile, actions, c.inner), 0, pad, pad, pad),
 	)
 
-	// Fixed rather than minimum width: every row inside shortens to the width it
-	// is given, so a long name or role can never widen the card.
+	// Fixed rather than minimum: every row inside shortens to what it is given, so a
+	// long name or role cannot widen the card.
 	c.Content = newTapSink(NewFixedWidthContainer(width, container.NewStack(background, body)))
 
 	return c
 }
 
-// SetProfile fills in the half of a profile that only the profile request
-// carries: the bio, and the background that replaces the accent banner. An empty
-// bio leaves the About section out altogether rather than showing an empty well.
-// The dialog grows by filling one in, so the caller re-places it
-// (Overlay.Reposition). Call on the UI thread.
+// SetProfile fills in what only the profile request carries: the bio, and the
+// background replacing the accent banner. The dialog grows by filling one in, so
+// the caller re-places it (Overlay.Reposition). Call on the UI thread.
 func (c *ProfileCard) SetProfile(profile domain.UserProfile) {
 	c.setBackground(profile.BackgroundURL)
 	c.setBio(profile.Bio)
 }
 
-// SetMutual fills in what the two accounts have in common, which like the bio is
-// a request of its own and only the dialog carries — the compact card names
-// somebody, and how you already know them is what expanding it is for. The dialog
-// grows by filling one in, so the caller re-places it. Call on the UI thread.
+// SetMutual fills in what the two accounts have in common — like the bio, a
+// request of its own that only the dialog carries. The caller re-places the
+// dialog afterwards. Call on the UI thread.
 func (c *ProfileCard) SetMutual(mutual MutualProfile) {
 	if !c.full || !mutual.any() {
 		return
@@ -229,33 +216,33 @@ func (c *ProfileCard) SetMutual(mutual MutualProfile) {
 			mutualChips(mutual.Friends, mutual.FriendCount, c.inner)))
 	}
 
-	c.mutual.Objects = []fyne.CanvasObject{VBoxNoSpacing(sections...)}
-	c.mutual.Show()
-	c.mutual.Refresh()
+	fillSlot(c.mutual, VBoxNoSpacing(sections...))
 }
 
-// setBio fills the About section, which only the dialog carries — the compact
-// card names someone rather than telling you about them, so it never mounts the
-// slot at all.
+// fillSlot puts content in a slot the card mounted empty and hidden, for the half
+// of a profile that arrives after it is up.
+func fillSlot(slot *fyne.Container, content fyne.CanvasObject) {
+	slot.Objects = []fyne.CanvasObject{content}
+	slot.Show()
+	slot.Refresh()
+}
+
+// setBio fills the About section, which only the dialog carries. An empty bio
+// leaves it out rather than showing an empty well.
 func (c *ProfileCard) setBio(bio string) {
 	bio = strings.TrimSpace(bio)
 	if !c.full || bio == "" {
 		return
 	}
 
-	c.about.Objects = []fyne.CanvasObject{profileSection("About me", c.bio(bio))}
-	c.about.Show()
-	c.about.Refresh()
+	fillSlot(c.about, profileSection("About me", c.bio(bio)))
 }
 
 // setBackground draws the user's own banner over the accent strip, cropped to
-// cover it. It replaces the strip rather than sitting on it, because what has to
-// show through the picture's rounded corners differs top and bottom: the card's
-// own corners at the top, and the card body at the bottom.
-//
-// A canvas.Image takes one radius for all four corners, so the bottom band is
-// laid over itself again squared off — the strip meets the body flush, as it does
-// without a background, rather than notching the card's colour into it.
+// cover it. It replaces the strip rather than sitting on it: what shows through
+// the rounded corners differs top and bottom — the card's corners above, its body
+// below. A canvas.Image takes one radius for all four, so the bottom band is laid
+// over itself squared off and the strip meets the body flush.
 func (c *ProfileCard) setBackground(backgroundURL string) {
 	if backgroundURL == "" {
 		return
@@ -290,34 +277,37 @@ func newStretchedImage(img image.Image) *canvas.Image {
 	return picture
 }
 
-// bottomBand is the bottom fraction of an image.
-func bottomBand(img image.Image, fraction float32) image.Image {
+// subImage is a view onto part of img where the decoder hands one back — no
+// pixels copied — and the whole picture where it does not.
+func subImage(img image.Image, rect image.Rectangle) image.Image {
 	sub, ok := img.(interface {
 		SubImage(image.Rectangle) image.Image
 	})
+	if !ok {
+		return img
+	}
 
+	return sub.SubImage(rect)
+}
+
+// bottomBand is the bottom fraction of an image.
+func bottomBand(img image.Image, fraction float32) image.Image {
 	bounds := img.Bounds()
-	if !ok || fraction <= 0 || fraction >= 1 {
+	if fraction <= 0 || fraction >= 1 {
 		return img
 	}
 
 	band := bounds
 	band.Min.Y = bounds.Max.Y - max(int(float32(bounds.Dy())*fraction), 1)
 
-	return sub.SubImage(band)
+	return subImage(img, band)
 }
 
 // coverCrop is the middle of img in the proportions of size, so a background
-// fills the banner without being stretched out of shape. It is a sub-image where
-// the decoder hands one back — no pixels are copied — and the whole picture
-// where it does not.
+// fills the banner without being stretched out of shape.
 func coverCrop(img image.Image, size fyne.Size) image.Image {
-	sub, ok := img.(interface {
-		SubImage(image.Rectangle) image.Image
-	})
-
 	bounds := img.Bounds()
-	if !ok || size.Width <= 0 || size.Height <= 0 || bounds.Dx() == 0 || bounds.Dy() == 0 {
+	if size.Width <= 0 || size.Height <= 0 || bounds.Dx() == 0 || bounds.Dy() == 0 {
 		return img
 	}
 
@@ -334,13 +324,12 @@ func coverCrop(img image.Image, size fyne.Size) image.Image {
 		crop.Max.Y = crop.Min.Y + height
 	}
 
-	return sub.SubImage(crop)
+	return subImage(img, crop)
 }
 
-// bio renders the profile text inside a well of its own, markdown and mentions
-// and all. It is the one block of the dialog written by the person rather than
-// about them, and at any length it runs into the sections under it — the hairline
-// is what says where it stops.
+// bio renders the profile text in a well of its own, markdown and mentions and
+// all. It is the one block written by the person rather than about them, and at
+// any length runs into the sections under it — the hairline says where it stops.
 func (c *ProfileCard) bio(bio string) fyne.CanvasObject {
 	pad := theme.Sizes.ProfileBioPadding
 	inner := c.inner - 2*pad
@@ -349,11 +338,9 @@ func (c *ProfileCard) bio(bio string) fyne.CanvasObject {
 	// offer beyond the selection the flattened body already supports.
 	body := renderMessageBody(c.deps, util.Truncate(bio, profileDialogBioRunes), func(*fyne.PointEvent) {})
 
-	// Laid out at the width it will be given before it is measured: a wrapping
-	// widget answers MinSize with whatever it was last sized to, so asking first
-	// would get back the height of one unwrapped line. The flush container
-	// over-sizes it by the padding it cancels, which is the width it wraps inside —
-	// the well's own padding comes off it first.
+	// Sized before it is measured: a wrapping widget answers MinSize with whatever
+	// it was last laid out at, so asking first returns one unwrapped line. The flush
+	// container over-sizes it by the padding it cancels.
 	padding := 2 * fynetheme.InnerPadding()
 	body.Resize(fyne.NewSize(inner+padding, body.MinSize().Height))
 
@@ -362,20 +349,18 @@ func (c *ProfileCard) bio(bio string) fyne.CanvasObject {
 		return profileWell(content, pad)
 	}
 
-	// Past that, the section scrolls rather than growing: the dialog is centred on
-	// the modal layer with its buttons below, so a long bio would otherwise push
-	// them off the screen. The flush container's negative inset survives the move
-	// inside — the scroll clips to its own viewport, so the padding it cancels is
-	// cut off rather than drawn.
+	// Past that the section scrolls rather than growing: the dialog is centred with
+	// its buttons below, and a long bio would push them off the screen. The flush
+	// container's negative inset survives — the scroll clips to its own viewport.
 	scroll := container.NewVScroll(content)
 	scroll.SetMinSize(fyne.NewSize(0, theme.Sizes.ProfileBioMaxHeight))
 
 	return profileWell(scroll, pad)
 }
 
-// profileWell frames content in the client's hairline with pad inside it. The
-// rectangle is unfilled: the card is already a surface, and a second fill on it
-// would read as a panel rather than as the edge of one block.
+// profileWell frames content in the hairline with pad inside it. Unfilled: the
+// card is already a surface, and a second fill reads as a panel rather than as
+// the edge of one block.
 func profileWell(content fyne.CanvasObject, pad float32) fyne.CanvasObject {
 	frame := canvas.NewRectangle(color.Transparent)
 	frame.CornerRadius = theme.Sizes.ProfileBioRadius
@@ -396,9 +381,8 @@ func (c *ProfileCard) header(profile domain.Profile, actions ProfileActions) fyn
 	c.banner = profileBanner(profile.Accent, height)
 	c.strip = fyne.NewSize(c.inner+2*theme.Sizes.ProfilePadding, height)
 
-	// Laid over the banner rather than beside it, so the card's own chrome costs it
-	// no height. The menu comes before the close button in the row, so the way out
-	// stays in the corner it is in on every other card here.
+	// Over the banner rather than beside it, so the chrome costs no height. The menu
+	// comes first, so the way out stays in the corner every other card puts it in.
 	var chrome []fyne.CanvasObject
 	if items := profileMenuItems(actions); len(items) > 0 {
 		menu := NewGlyphButton(tintedIcon(assets.ActionMoreIcon, theme.Colors.TextPrimary), nil)
@@ -416,21 +400,18 @@ func (c *ProfileCard) header(profile domain.Profile, actions ProfileActions) fyn
 			container.New(&overlayLayout{yOffset: inset, rightOffset: inset}, HBoxNoSpacing(chrome...)))
 	}
 
-	// Raised by half its own height — ring included, so the picture itself is
-	// centred on the banner's bottom edge — by a negative inset, which shortens
-	// the row it sits in by the same amount so the name starts directly under it.
+	// Raised half its own height, ring included, by a negative inset — which also
+	// shortens the row, so the name starts directly under it.
 	avatar := c.avatar(profile, side)
 
 	return VBoxNoSpacing(banner,
 		NewInset(avatar, -avatar.MinSize().Height/2, 0, theme.Sizes.ProfilePadding, 0))
 }
 
-// profileBanner is the strip of colour the avatar overhangs, in the user's
-// most-senior role colour — what shows until a background lands over it
-// (setBackground), and what a user without one keeps. Two rectangles: the
-// rounded one gives the card its top corners, and the square one covers the
-// strip's lower half so it meets the card body flush instead of pinching in at
-// the bottom corners.
+// profileBanner is the strip the avatar overhangs, in the user's most-senior role
+// colour until a background lands over it. Two rectangles: the rounded one gives
+// the card its top corners, the square one covers the lower half so the strip
+// meets the body flush instead of pinching in.
 func profileBanner(accent color.Color, height float32) *fyne.Container {
 	if accent == nil {
 		accent = theme.Colors.ProfileBannerBg
@@ -443,18 +424,16 @@ func profileBanner(accent color.Color, height float32) *fyne.Container {
 	return NewMinHeightContainer(height, rounded, NewInset(square, height/2, 0, 0, 0))
 }
 
-// avatar is the picture inside its presence ring, sized to the card. The whole
-// block is the same size whatever the presence is — an offline user simply has
-// the ring's width in card colour, so nothing around the avatar moves when
-// someone goes online.
+// avatar is the picture inside its presence ring, sized to the card. The block is
+// the same size whatever the presence, so nothing around it moves when someone
+// comes online — an offline user simply has the ring's width in card colour.
 func (c *ProfileCard) avatar(profile domain.Profile, side float32) fyne.CanvasObject {
 	cut, ring := theme.Sizes.ProfileAvatarRing, theme.Sizes.ProfilePresenceRing
 	inner := side + 2*ring
 	outer := inner + 2*cut
 
-	// Filled in the card's own colour, so the outermost band reads as the avatar
-	// being cut out of the banner rather than outlined on top of it — and as the
-	// gap that keeps the presence ring off the banner's own colour.
+	// The card's own colour, so the outermost band reads as the avatar cut out of the
+	// banner rather than outlined on it — and keeps the presence ring off that colour.
 	backdrop := canvas.NewCircle(theme.Colors.ViewerCardBg)
 	avatar := circularAvatar(c.deps.Images, profile.AvatarURL, fyne.NewSize(side, side))
 
@@ -467,9 +446,9 @@ func (c *ProfileCard) avatar(profile domain.Profile, side float32) fyne.CanvasOb
 	return container.NewGridWrap(fyne.NewSize(outer, outer), container.NewStack(layers...))
 }
 
-// presenceRing is the coloured band the avatar sits in, at diameter side. Offline
-// gets nothing at all rather than a grey ring: absence is what "offline" looks
-// like, and it is the one presence invisible has to be indistinguishable from.
+// presenceRing is the band the avatar sits in. Offline gets nothing rather than a
+// grey ring: absence is what offline looks like, and it is the one presence
+// invisible has to be indistinguishable from.
 func presenceRing(presence domain.Presence, side float32) fyne.CanvasObject {
 	if presence == domain.PresenceOffline {
 		return nil
@@ -491,9 +470,8 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 		rows = append(rows, VerticalSpacer(theme.Sizes.ProfileTightGap), profileStatus(profile.Status))
 	}
 
-	// Empty and hidden: the bio is a separate request and lands after the dialog is
-	// already up (SetProfile). The compact card never carries one — it names
-	// someone, and what they wrote about themselves is what expanding it is for.
+	// Empty and hidden: the bio is a request of its own, landing after the dialog is
+	// up (SetProfile). The compact card never carries one.
 	if c.full {
 		rows = append(rows, c.about)
 	}
@@ -506,9 +484,8 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 			rows = append(rows, profileSection("Badges", profileBadges(profile.Badges, width)))
 		}
 
-		// Empty and hidden, like the bio: mutuals are a request of their own and land
-		// after the dialog is up. Above the dates because how you already know
-		// somebody is worth more than when they turned up.
+		// Empty and hidden like the bio. Above the dates: how you already know somebody
+		// is worth more than when they turned up.
 		rows = append(rows, c.mutual)
 
 		if history := profileHistory(profile); history != nil {
@@ -523,11 +500,10 @@ func (c *ProfileCard) details(profile domain.Profile, actions ProfileActions, wi
 	return VBoxNoSpacing(rows...)
 }
 
-// identity is the display name with the account's real handle beside it: the
-// name is what someone chose to be called, the handle is who they are, and on one
-// line the second reads as qualifying the first. The name carries the role
-// colour, as it does on a message, and gives up its width first, so neither can
-// widen the card.
+// identity is the display name with the real handle beside it: the name is what
+// someone chose to be called, the handle is who they are, and on one line the
+// second qualifies the first. The name carries the role colour and gives up its
+// width first, so neither can widen the card.
 func (c *ProfileCard) identity(profile domain.Profile, actions ProfileActions, width float32) fyne.CanvasObject {
 	size := theme.Sizes.ProfileNameSize
 	if c.full {
@@ -541,8 +517,8 @@ func (c *ProfileCard) identity(profile domain.Profile, actions ProfileActions, w
 
 	name := NewAccentText(profile.Name, nameColor, size, fyne.TextStyle{Bold: true})
 
-	// What follows the name, and the room it costs. Each gets its own spacer: one
-	// object laid out twice would keep only the last position it was moved to.
+	// Each trailing item gets its own spacer: one object laid out twice keeps only
+	// the last position it was moved to.
 	gap := theme.Sizes.ProfileGap
 	room := width
 
@@ -558,26 +534,21 @@ func (c *ProfileCard) identity(profile domain.Profile, actions ProfileActions, w
 		trailing = append(trailing, HorizontalSpacer(gap), mark)
 	}
 
-	// The name takes the width it needs and no more, so the handle reads as
-	// following it rather than sitting at the far edge of the card — and gives up
-	// its own text before the line can grow, so it is still the one that shortens.
+	// The name takes what it needs and no more, so the handle follows it rather than
+	// sitting at the card's far edge — and shortens before the line can grow.
 	name.Fit(max(room, 0))
 
 	return HBoxNoSpacing(append([]fyne.CanvasObject{name}, trailing...)...)
 }
 
-// profileHandle is the "@username#0001" beside the display name: the name is
-// chosen and the handle is issued, and the second reads as qualifying the first
-// by following it, so it is set bare and muted rather than framed — a second
-// outlined thing on the identity line competed with the name for the eye. It is
-// kept at its own text size rather than the name's, and given a width of its own
-// capped at a share of the row — a zero-minimum ellipsis in a fill row would be
-// handed no width at all, and an unbounded one would leave the name none.
+// profileHandle is the "@username#0001" beside the display name — set bare and
+// muted rather than framed, a second outlined thing on the line competing with
+// the name for the eye. Its width is capped at a share of the row: a zero-minimum
+// ellipsis in a fill row is handed nothing, an unbounded one leaves the name none.
 //
 // nameSize is what it sits beside. The row stretches every child to its own
-// height, which would centre the handle against the name rather than seat it on
-// the same line, so the tag takes exactly its own height and is pushed down onto
-// the name's baseline instead — less the padding above the text inside it.
+// height, which would centre the handle rather than seat it on the same line, so
+// the tag takes its own height and is pushed down onto the name's baseline.
 func profileHandle(handle string, limit, nameSize float32, onCopied func(string)) fyne.CanvasObject {
 	tag := newHandleTag(handle, limit, onCopied)
 
@@ -587,10 +558,9 @@ func profileHandle(handle string, limit, nameSize float32, onCopied func(string)
 	)
 }
 
-// handleTag is that handle, and a click on it copies it. A widget rather than a
-// text object because only a widget is offered hover and taps, and the pill it
-// fills under the pointer is the whole affordance: with no border at rest,
-// nothing else says the handle answers a click.
+// handleTag is that handle, and a click on it copies it. A widget because only a
+// widget is offered hover and taps, and the pill it fills under the pointer is
+// the whole affordance — with no border at rest, nothing else says it answers one.
 type handleTag struct {
 	tapBase
 
@@ -605,8 +575,7 @@ var (
 )
 
 func newHandleTag(handle string, limit float32, onCopied func(string)) *handleTag {
-	text := canvas.NewText(handle, theme.Colors.TimestampText)
-	text.TextSize = theme.Sizes.ProfileHandleSize
+	text := newText(handle, theme.Colors.TimestampText, theme.Sizes.ProfileHandleSize)
 
 	padV, padH := theme.Sizes.ProfileHandlePaddingV, theme.Sizes.ProfileHandlePaddingH
 	width := min(fyne.MeasureText(handle, text.TextSize, text.TextStyle).Width, max(limit-2*padH, 0))
@@ -639,8 +608,8 @@ func (t *handleTag) MouseIn(*desktop.MouseEvent) { t.hover(true) }
 func (t *handleTag) MouseOut() { t.hover(false) }
 
 // hover lifts the text as well as filling behind it: the fill alone is faint
-// against the card, and the handle is muted enough at rest that brightening it
-// is what reads as the thing under the pointer.
+// against the card, and the handle is muted enough at rest that brightening it is
+// what reads as the thing under the pointer.
 func (t *handleTag) hover(over bool) {
 	t.background.FillColor = color.Transparent
 	t.text.Color = theme.Colors.TimestampText
@@ -656,8 +625,7 @@ func (t *handleTag) hover(over bool) {
 
 // profileStatus is the user's own status line.
 func profileStatus(status string) fyne.CanvasObject {
-	text := canvas.NewText(status, theme.Colors.TextPrimary)
-	text.TextSize = theme.Sizes.ProfileStatusSize
+	text := newText(status, theme.Colors.TextPrimary, theme.Sizes.ProfileStatusSize)
 	text.TextStyle = fyne.TextStyle{Italic: true}
 
 	return NewEllipsisText(text)
@@ -666,9 +634,7 @@ func profileStatus(status string) fyne.CanvasObject {
 // profileSection titles a block of the card, in the small caps the channel
 // sidebar's category headers are set in.
 func profileSection(title string, content fyne.CanvasObject) fyne.CanvasObject {
-	label := canvas.NewText(strings.ToUpper(title), theme.Colors.CategoryText)
-	label.TextStyle = fyne.TextStyle{Bold: true}
-	label.TextSize = theme.Sizes.ProfileSectionSize
+	label := newBoldText(strings.ToUpper(title), theme.Colors.CategoryText, theme.Sizes.ProfileSectionSize)
 
 	return VBoxNoSpacing(
 		VerticalSpacer(theme.Sizes.ProfileGap),
@@ -678,23 +644,18 @@ func profileSection(title string, content fyne.CanvasObject) fyne.CanvasObject {
 	)
 }
 
-// profileDetail is one muted line of fact behind its own mark, as the dates are
-// set. The mark is what tells two dates apart: under a caption they would differ
-// only in the word opening each, which is not what a line of small grey text is
-// read for.
+// profileDetail is one muted line of fact behind its own mark. The mark is what
+// tells two dates apart — under a caption they differ only in the word opening
+// each, which is not what a line of small grey text is read for.
 func profileDetail(mark fyne.Resource, text string) fyne.CanvasObject {
-	line := canvas.NewText(text, theme.Colors.TimestampText)
-	line.TextSize = theme.Sizes.ProfileDetailSize
+	line := newText(text, theme.Colors.TimestampText, theme.Sizes.ProfileDetailSize)
 
 	side := theme.Sizes.ProfileDetailIconSize
 	icon := container.NewGridWrap(fyne.NewSize(side, side),
 		newScaledIcon(tintedIcon(mark, theme.Colors.TimestampText), side))
 
-	// A fill row rather than an HBox: an ellipsis box reports no width of its own —
-	// it shortens to whatever it is given — so a layout handing every child its
-	// minimum would hand the text nothing and draw the mark alone. The mark is
-	// centred rather than sharing the text's box, the row stretching every child to
-	// its own height.
+	// A fill row rather than an HBox: an ellipsis box reports no width of its own, so
+	// a layout handing every child its minimum draws the mark alone.
 	return NewFillRow(2,
 		container.NewCenter(icon),
 		HorizontalSpacer(theme.Sizes.ProfileTightGap),
@@ -702,12 +663,10 @@ func profileDetail(mark fyne.Resource, text string) fyne.CanvasObject {
 	)
 }
 
-// profileHistory is the dates block: when the account was made, and when they
-// joined the open server. Nil when neither is known — a conversation has no
-// server to have been joined, and an ID that isn't a ULID carries no date.
-//
-// It carries no caption. "Member since" named only the second of the two, and
-// nothing covers both that is shorter than reading them.
+// profileHistory is the dates block: when the account was made, when they joined
+// the open server. Nil when neither is known — a conversation has no server to
+// have been joined, and an ID that is not a ULID carries no date. No caption:
+// "Member since" named only one of the two.
 func profileHistory(profile domain.Profile) fyne.CanvasObject {
 	var lines []fyne.CanvasObject
 
@@ -727,9 +686,9 @@ func profileHistory(profile domain.Profile) fyne.CanvasObject {
 
 /* Chips */
 
-// profileRoles draws the role chips, most senior first. The card shows the first
-// few and counts the rest into a final chip: something that only names a person
-// should not turn into a list of their roles.
+// profileRoles draws the role chips, most senior first. The card shows a few and
+// counts the rest into a final chip: something that only names a person should
+// not turn into a list of their roles.
 func profileRoles(roles []domain.Role, full bool, width float32) fyne.CanvasObject {
 	shown, overflow := roles, 0
 	if !full && len(roles) > profileRoleLimit {
@@ -741,17 +700,16 @@ func profileRoles(roles []domain.Role, full bool, width float32) fyne.CanvasObje
 		chips = append(chips, NewRoleChip(role))
 	}
 	if overflow > 0 {
-		chips = append(chips, NewChip(fmt.Sprintf("+%d", overflow), theme.Colors.TimestampText))
+		chips = append(chips, NewChip("+"+strconv.Itoa(overflow), theme.Colors.TimestampText))
 	}
 
 	return NewFlow(width, theme.Sizes.ChipSpacing, chips...)
 }
 
-// mutualChips draws what two accounts have in common, counting whatever is not
-// drawn into a final chip. total is the whole set rather than len(entries): the
-// overflow covers what the store could not name as well as what did not fit, so
-// the number is right either way — and it is never tappable, having nothing named
-// to lead to.
+// mutualChips draws what two accounts have in common, the rest counted into a
+// final chip. total is the whole set rather than len(entries): the overflow
+// covers what the store could not name as well as what did not fit. It is never
+// tappable, having nothing named to lead to.
 func mutualChips(entries []MutualEntry, total int, width float32) fyne.CanvasObject {
 	shown := entries
 	if len(shown) > profileMutualLimit {
@@ -768,7 +726,7 @@ func mutualChips(entries []MutualEntry, total int, width float32) fyne.CanvasObj
 		chips = append(chips, NewTappableChip(entry.Name, theme.Colors.TextPrimary, entry.Open))
 	}
 	if overflow := total - len(shown); overflow > 0 {
-		chips = append(chips, NewChip(fmt.Sprintf("+%d", overflow), theme.Colors.MentionText))
+		chips = append(chips, NewChip("+"+strconv.Itoa(overflow), theme.Colors.MentionText))
 	}
 
 	return NewFlow(width, theme.Sizes.ChipSpacing, chips...)
@@ -787,9 +745,8 @@ func profileBadges(names []string, width float32) fyne.CanvasObject {
 /* Buttons */
 
 // profileMenuItems is what the hamburger offers: every action filed off the
-// button row, in the order the controller gave them. One drawn disabled is left
-// out rather than greyed — a menu item that says "Request sent" is a line of
-// state in a list of verbs, and the button row is already showing it.
+// button row, in the controller's order. A disabled one is left out — "Request
+// sent" is a line of state in a list of verbs, and the button row shows it already.
 func profileMenuItems(actions ProfileActions) []*fyne.MenuItem {
 	var items []*fyne.MenuItem
 
@@ -835,10 +792,9 @@ func (c *ProfileCard) buttons(actions ProfileActions) fyne.CanvasObject {
 	return profileButtonRows(buttons)
 }
 
-// newProfileButton weights one action. Only the first carries the filled weight:
-// a card whose every button is coloured says nothing about which one it is for,
-// and the destructive ones are the exception that has to keep reading as
-// destructive wherever they land.
+// newProfileButton weights one action. Only the first is filled — a card whose
+// every button is coloured says nothing about which one it is for — with the
+// destructive ones the exception, reading as destructive wherever they land.
 func newProfileButton(action ProfileButton, first bool) *widget.Button {
 	button := widget.NewButton(action.Label, action.Do)
 
@@ -854,10 +810,9 @@ func newProfileButton(action ProfileButton, first bool) *widget.Button {
 	return button
 }
 
-// profileButtonRows lays the buttons out two to a row, an odd last one taking
-// the whole width. Sharing one row between all of them would shrink every button
-// as another was offered, so the same action would be a different size depending
-// on how somebody else stood with you.
+// profileButtonRows lays the buttons two to a row, an odd last one taking the
+// whole width. One shared row would shrink every button as another was offered,
+// so the same action would be a different size per relationship.
 func profileButtonRows(buttons []fyne.CanvasObject) fyne.CanvasObject {
 	var rows []fyne.CanvasObject
 

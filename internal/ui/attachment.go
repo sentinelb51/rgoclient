@@ -24,35 +24,35 @@ const (
 	attachmentTextHeight  = 150    // height of a text attachment's preview box
 	attachmentFileHeight  = 64     // height of a generic file card
 	attachmentBarHeight   = 28     // height of the name/size strip beneath one
+	attachmentTextSize    = 12     // the name and size drawn on that strip
 	attachmentFileIcon    = 32     // side length of the generic file glyph
 	attachmentPreviewRead = 512    // bytes pulled from a text attachment to preview
 	attachmentPreviewRune = 256    // runes of that read actually shown
 	attachmentViewerRead  = 262144 // bytes pulled when opened in the viewer
 )
 
-// buildAttachments stacks each attachment with a small gap between them.
-// onMenu is the owning message's right-click handler, which each attachment
-// takes over: an attachment fills most of the row it belongs to, and being the
-// innermost object under the pointer it would otherwise swallow the click.
+// buildAttachments stacks each attachment with a small gap between them. onMenu
+// is the message's right-click handler, which each one takes over: an attachment
+// fills most of its row and, being innermost, would otherwise swallow the click.
+//
+// No left spacer — attachments share the body's content padding with the header
+// above, so a preview lines up flush with the message text.
 func buildAttachments(deps Deps, attachments []*domain.File, onMenu func(*fyne.PointEvent)) *fyne.Container {
-	box := container.NewVBox()
+	rows := make([]fyne.CanvasObject, 0, max(len(attachments)*2-1, 0))
 
 	for i, attachment := range attachments {
 		if i > 0 {
-			box.Add(VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
+			rows = append(rows, VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
 		}
-		// No left spacer: attachments share the body's content padding with the
-		// header text above, so the preview lines up flush with the message text.
-		box.Add(container.NewHBox(buildAttachment(deps, attachment, onMenu)))
+		rows = append(rows, container.NewHBox(buildAttachment(deps, attachment, onMenu)))
 	}
 
-	return box
+	return container.NewVBox(rows...)
 }
 
-// buildAttachment renders one attachment as an image, a text preview, or a
-// generic file card, with a name/size bar beneath it. Images and text files open
-// in the viewer when tapped — the inline render of both is deliberately small,
-// so the full thing has to be reachable from somewhere.
+// buildAttachment renders one attachment as an image, a text preview or a generic
+// file card, with a name/size bar beneath. Images and text open in the viewer when
+// tapped: the inline render of both is deliberately small.
 func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	isImage := attachment.Kind == domain.FileImage
 	isText := attachment.Kind == domain.FileText
@@ -73,8 +73,8 @@ func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.Point
 		onTap = func() { deps.Actions.OnAttachmentTapped(attachment) }
 	}
 
-	// The stack is what frames the card: it draws the shared outline over the
-	// content, square like the picture it edges.
+	// The stack frames the card, drawing the outline *over* the content — square,
+	// like the picture it edges.
 	stack := NewHoverableStack(content, onTap, nil)
 	stack.onSecondaryTap = onMenu
 
@@ -85,8 +85,8 @@ func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar
 	width, height := attachment.Width, attachment.Height
 	size := fitWithin(width, height, theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
 	if size.Width == 0 || size.Height == 0 {
-		// No usable metadata: reserve a wide, half-height box so the row doesn't
-		// jump much once the real image arrives.
+		// No usable metadata: reserve a wide half-height box so the row barely moves
+		// once the real picture arrives.
 		size = fyne.NewSize(theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight/2)
 	}
 
@@ -129,12 +129,9 @@ func attachmentBar(name string, size int, onRemove func()) fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 	background.SetMinSize(fyne.NewSize(0, attachmentBarHeight))
 
-	nameLabel := canvas.NewText(name, theme.Colors.TextPrimary)
-	nameLabel.TextSize = 12
-	nameLabel.TextStyle = fyne.TextStyle{Bold: true}
+	nameLabel := newBoldText(name, theme.Colors.TextPrimary, attachmentTextSize)
 
-	sizeLabel := canvas.NewText(util.FormatFileSize(size), theme.Colors.TimestampText)
-	sizeLabel.TextSize = 12
+	sizeLabel := newText(util.FormatFileSize(size), theme.Colors.TimestampText, attachmentTextSize)
 	sizeLabel.Alignment = fyne.TextAlignTrailing
 
 	left := container.NewHBox(HorizontalSpacer(8), nameLabel)
@@ -148,9 +145,9 @@ func attachmentBar(name string, size int, onRemove func()) fyne.CanvasObject {
 
 /* Text fetching */
 
-// fetchTextPreview loads the first few hundred characters of a text attachment
-// into preview, formatted as a code block. Fetched once per URL; failures are
-// not memoised, so they retry on the next rebuild. Call off the UI thread.
+// fetchTextPreview loads the first few hundred characters into preview as a code
+// block. Fetched once per URL; failures are not memoised, so they retry on the
+// next rebuild. Call off the UI thread.
 func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichText) {
 	text, ok := texts.Get(url)
 	if !ok {
@@ -173,9 +170,8 @@ func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichTe
 	})
 }
 
-// fetchText downloads at most limit bytes of a text file. The cap is what keeps
-// a "text" attachment of arbitrary size out of memory; the caller decides how
-// much it can show. Call off the UI thread.
+// fetchText downloads at most limit bytes of a text file — the cap is what keeps
+// a "text" attachment of arbitrary size out of memory. Call off the UI thread.
 func fetchText(url string, limit int) (string, error) {
 	if url == "" {
 		return "", errors.New("no attachment URL")
@@ -192,8 +188,8 @@ func fetchText(url string, limit int) (string, error) {
 		return "", fmt.Errorf("fetch %s: %s", url, resp.Status)
 	}
 
-	// ReadFull reports ErrUnexpectedEOF for a file shorter than the cap, which is
-	// the normal case rather than a failure; only n matters.
+	// ReadFull reports ErrUnexpectedEOF for a file shorter than the cap, the normal
+	// case rather than a failure; only n matters.
 	buf := make([]byte, limit)
 	n, err := io.ReadFull(resp.Body, buf)
 	if n == 0 && err != nil {

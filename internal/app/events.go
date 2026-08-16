@@ -1,12 +1,10 @@
 package app
 
 // The event pump: one goroutine ranging the client's event stream, hopping onto
-// the UI thread once per event and repainting. Everything the server pushes
-// arrives here in the order it was produced, which is what keeps a burst of
-// messages grouping correctly and a logout from racing a login.
-//
-// Nothing in this file talks to Revolt. What each handler does is decide what
-// the view should now look like.
+// the UI thread once per event. Everything arrives in the order it was produced,
+// which is what keeps a burst of messages grouping correctly and a logout from
+// racing a login. Nothing here talks to Revolt — a handler decides what the view
+// should now look like.
 
 import (
 	"log"
@@ -26,14 +24,12 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 /* The refresh queue */
 
 // refreshTarget names a whole surface a gateway event can invalidate. Each is a
-// rebuild that walks something — every server icon, every channel of the open
-// server against its permissions, every member of it — so none is worth making
-// once per event.
+// rebuild that walks something — every server icon, every channel against its
+// permissions, every member — so none is worth making once per event.
 //
-// The set is deliberately only these three. What a single event changes about
-// the *open* thing — a header's text, the channel glyph, whether the composer
-// takes a message — is a setter and a permission lookup, and deferring those
-// would make the client feel slow to save nothing.
+// Deliberately only these three. What an event changes about the *open* thing — a
+// header, the channel glyph, whether the composer takes a message — is a setter
+// and a lookup, and deferring those would feel slow to save nothing.
 type refreshTarget uint8
 
 const (
@@ -46,14 +42,13 @@ const (
 func refreshDelay() time.Duration { return config.Current().Behaviour.RefreshDelay() }
 
 // queueRefresh marks targets as needing a rebuild and arms the settling window,
-// which is not restarted by what arrives inside it: the point is that a burst
-// costs one rebuild, so the *first* event decides when the burst is drawn and
-// everything behind it joins that one. Call on the UI thread.
+// which is *not* restarted by what arrives inside it: a burst costs one rebuild,
+// so the first event decides when it is drawn and everything behind joins it.
+// Call on the UI thread.
 //
-// This is what makes the client's realtime handling affordable. Revolt sends a
-// rank reorder as one event per role, a channel added to a server as a create
-// *and* a server update, and presence on a large server continuously — all of
-// which land here as bits set on a byte.
+// This is what makes realtime handling affordable. Revolt sends a rank reorder as
+// one event per role, a new channel as a create *and* a server update, and
+// presence on a large server continuously — all landing here as bits on a byte.
 func (a *App) queueRefresh(targets refreshTarget) {
 	a.dirty |= targets
 	if a.refreshTimer != nil {
@@ -65,10 +60,10 @@ func (a *App) queueRefresh(targets refreshTarget) {
 	})
 }
 
-// flushRefresh runs the rebuilds the window gathered, outermost column first so
-// the state each reads is the state the one before it settled on. Every one of
-// them re-reads the store rather than anything the events carried, so a flush is
-// correct whenever it happens to run. Call on the UI thread.
+// flushRefresh runs what the window gathered, outermost column first so each
+// reads the state the one before it settled on. All of them re-read the store
+// rather than anything the events carried, so a flush is correct whenever it
+// happens to run. Call on the UI thread.
 func (a *App) flushRefresh() {
 	a.refreshTimer = nil
 
@@ -159,6 +154,10 @@ func (a *App) onReady(event client.Ready) {
 
 	a.showMainUI()
 
+	// Seed what a later user update is compared against, so the first one to name
+	// this account is not read as a picture or a handle that has just changed.
+	a.refreshSettingsAccount()
+
 	a.serverIDs = slices.Clone(event.ServerIDs)
 	a.refreshServerList()
 
@@ -197,8 +196,7 @@ func (a *App) savePendingToken() {
 }
 
 // onDisconnected tears down a dead session and returns to the login screen. Only
-// a fatal drop reaches here — a flaky connection is the gateway's problem, not
-// the user's.
+// a fatal drop reaches here — a flaky connection is the gateway's problem.
 func (a *App) onDisconnected(event client.Disconnected) {
 	if !event.Fatal {
 		return
@@ -213,9 +211,8 @@ func (a *App) onDisconnected(event client.Disconnected) {
 	a.client.Close()
 	a.showLogin()
 
-	// The saved login has just been removed, so the card that would have taken one
-	// click is gone as well — saying why is the difference between that and the
-	// client having forgotten who was signed in.
+	// The saved login has just been removed, so the one-click card is gone too —
+	// saying why is what tells that from the client forgetting who was signed in.
 	a.reportLogin("The server ended this session. Sign in again.")
 }
 
@@ -226,16 +223,14 @@ func (a *App) onDisconnected(event client.Disconnected) {
 func (a *App) onMessageCreated(event client.MessageCreated) {
 	channelID := event.Message.ChannelID
 
-	// One of our own starts the channel's cooldown. The send path has already
-	// started it for a message composed here, so this is what covers one the same
-	// account sent from another client.
+	// One of our own starts the cooldown. The send path already did for a message
+	// composed here, so this covers one sent from another client.
 	if event.Message.AuthorID == a.store.SelfID() {
 		a.startSlowmode(channelID)
 	}
 
-	// Sending is the end of typing, and Revolt does not reliably say so before the
-	// message lands — left to lapse, the line would name somebody under the message
-	// they just posted.
+	// Sending is the end of typing and Revolt does not reliably say so, so left to
+	// lapse the line would name somebody under the message they just posted.
 	a.forgetTyping(channelID, event.Message.AuthorID)
 
 	if channelID == a.currentChannelID {
@@ -250,11 +245,10 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 
 /* Read acknowledgement */
 
-// scheduleAck records messageID as the newest seen message of channelID and
-// acknowledges it after ackDelay, coalescing bursts into one request. An ack
-// still pending for a different channel — the user switched inside the window —
-// is flushed immediately, so it isn't lost to the overwrite. Call on the UI
-// thread.
+// scheduleAck records messageID as channelID's newest seen and acknowledges it
+// after ackDelay, coalescing bursts into one request. An ack pending for a
+// *different* channel — the user switched inside the window — is flushed at once
+// rather than lost to the overwrite. Call on the UI thread.
 func (a *App) scheduleAck(channelID, messageID string) {
 	if a.ackTimer != nil && a.ackChannelID != channelID {
 		a.ackTimer.Stop()
@@ -285,12 +279,10 @@ func (a *App) sendAck(channelID, messageID string) {
 
 /* Servers and members */
 
-// onServerJoined adds a newly joined server to the sidebar, keeping the app's own
-// ordered server list in step with the store.
-//
-// Selecting it is deliberately conditional on pendingJoin: the invite dialog is
-// the one path where the user asked to go there, and a server appearing for any
-// other reason must not yank the view out of the channel they are reading.
+// onServerJoined adds a newly joined server, keeping the app's ordered list in
+// step with the store. Selecting it is conditional on pendingJoin: the invite
+// dialog is the one path where the user asked to go there, and a server appearing
+// for any other reason must not yank the view out of what they are reading.
 func (a *App) onServerJoined(event client.ServerJoined) {
 	selecting := a.pendingJoin
 	a.pendingJoin = false
@@ -330,13 +322,11 @@ func (a *App) onServerLeft(event client.ServerLeft) {
 	a.selectHome()
 }
 
-// onServerUpdated repaints what a server's own details are drawn into: its icon
-// in the sidebar, the header above the channel list, and the channel list itself
-// — the same event carries a re-ordered category or a channel moved between two.
-//
-// Revolt sends this alongside the channel create or delete that caused it, so
-// both rebuilds are queued: acting on each as it lands would rebuild the sidebar
-// twice for one change.
+// onServerUpdated repaints what a server's details are drawn into: its icon, the
+// header, and the channel list — the same event carries a re-ordered category or
+// a channel moved between two. Revolt sends it alongside the create or delete
+// that caused it, so both rebuilds are queued: acting on each as it lands would
+// rebuild the sidebar twice for one change.
 func (a *App) onServerUpdated(event client.ServerUpdated) {
 	a.queueRefresh(refreshServers)
 
@@ -351,14 +341,10 @@ func (a *App) onServerUpdated(event client.ServerUpdated) {
 }
 
 // onRolesChanged re-reads a server whose roles moved. A role carries a colour, a
-// rank and a set of permissions, so this is the one event that can repaint every
-// name in the member list, re-sort it, and change which channels are listed at
-// all — hence the same three calls onMemberUpdated makes for our own member.
-//
-// Both rebuilds are queued rather than made: a rank reorder arrives as one event
-// per role, and creating a role arrives as an update for one State has never
-// heard of — revoltgo files it on the way past, so there is no separate create
-// to handle.
+// rank and permissions, so this is the one event that can repaint every name in
+// the member list, re-sort it, *and* change which channels are listed. Queued
+// rather than made: a rank reorder arrives as one event per role, and creating a
+// role arrives as an update for one State has never heard of.
 func (a *App) onRolesChanged(event client.RolesChanged) {
 	if a.currentServerID != event.ServerID {
 		return
@@ -369,11 +355,8 @@ func (a *App) onRolesChanged(event client.RolesChanged) {
 }
 
 // onChannelCreated adds a channel that now exists: one added to the open server,
-// or a conversation opened from another client — the case the home view could
-// previously only learn about by being re-entered.
-//
-// A conversation is prepended rather than sorted in. It has no messages yet, so
-// it has no LastMessageID to sort by, and the list is ordered by that.
+// or a conversation opened from another client. A conversation is prepended
+// rather than sorted in — it has no messages yet, so no LastMessageID to sort by.
 func (a *App) onChannelCreated(event client.ChannelCreated) {
 	if event.ServerID != "" {
 		if a.currentServerID == event.ServerID {
@@ -385,7 +368,7 @@ func (a *App) onChannelCreated(event client.ChannelCreated) {
 	if slices.Contains(a.dmChannels, event.ChannelID) {
 		return
 	}
-	a.dmChannels = append([]string{event.ChannelID}, a.dmChannels...)
+	a.dmChannels = slices.Insert(a.dmChannels, 0, event.ChannelID)
 
 	if a.homeSelected {
 		a.queueRefresh(refreshChannels)
@@ -393,11 +376,9 @@ func (a *App) onChannelCreated(event client.ChannelCreated) {
 }
 
 // onChannelUpdated repaints a channel whose name, icon or permissions changed.
-//
-// The whole sidebar is rebuilt rather than the one row: a permission overwrite is
-// among the things this announces, and whether the channel is a row at all is
-// decided by ViewChannel — so a row can have to appear or disappear, which
-// repainting it in place cannot do.
+// The whole sidebar rather than the one row: a permission overwrite is among what
+// this announces, and ViewChannel decides whether the channel is a row at all —
+// so one can have to appear or disappear, which repainting in place cannot do.
 func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 	a.queueRefresh(refreshChannels)
 
@@ -414,8 +395,8 @@ func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 	a.syncChannelKind()
 	a.syncComposer()
 
-	// The overwrites may have taken the channel away entirely, in which case the
-	// page under it is no longer ours to show.
+	// The overwrites may have taken the channel away, in which case the page under
+	// it is no longer ours to show.
 	if !a.canViewChannel(channel) {
 		a.showStatus("You don't have access to this channel")
 	}
@@ -434,8 +415,7 @@ func (a *App) onChannelRead(event client.ChannelRead) {
 }
 
 // onChannelClosed drops a closed conversation or a deleted server channel. Both
-// arrive the same way, so the sidebar is rebuilt either way and only the home
-// view's own ordering needs maintaining.
+// arrive the same way, so only the home view's own ordering needs maintaining.
 func (a *App) onChannelClosed(event client.ChannelClosed) {
 	delete(a.unreadChannels, event.ChannelID)
 	if i := slices.Index(a.dmChannels, event.ChannelID); i >= 0 {
@@ -447,9 +427,9 @@ func (a *App) onChannelClosed(event client.ChannelClosed) {
 		return
 	}
 
-	// The channel in view is about to stop existing, so its row goes now rather
-	// than at the end of a settling window: what follows selects another one, and
-	// selection is painted onto the rows the sidebar is holding.
+	// The channel in view is about to stop existing, so its row goes now rather than
+	// at the end of a window: what follows selects another, and selection is painted
+	// onto the rows the sidebar is holding.
 	a.refreshChannelList()
 
 	a.clearChannelSelection()
@@ -459,18 +439,14 @@ func (a *App) onChannelClosed(event client.ChannelClosed) {
 }
 
 // onMembersChanged repaints the member sidebar when the open server's membership
-// changes.
+// changes. A join arrives as a membership and nothing else — revoltgo fabricates
+// one with no account attached — so the row would read "Unknown user" until
+// ensureAuthor asked who it was; its own batch refreshes the sidebar when it lands.
 //
-// A join arrives as a membership and nothing else — revoltgo fabricates one with
-// no account attached — so the row would read "Unknown user" until something
-// asked who it was. ensureAuthor is that something, and its own batch refreshes
-// the sidebar when it lands.
-//
-// When the member is *us*, this is the only announcement that we have left the
-// server: Revolt reports a leave to the server rather than reporting a deletion
-// to the leaver, and revoltgo's own handler quietly evicts the server from State
-// on the strength of it. So it is handed to the leave path, which is a no-op for
-// a server already gone from the list — a leave made here has been through it.
+// When the member is *us*, this is the only announcement that we have left:
+// Revolt reports a leave to the server rather than a deletion to the leaver, and
+// revoltgo evicts the server from State on the strength of it. Hence the hand-off
+// to the leave path, a no-op for a server already gone from the list.
 func (a *App) onMembersChanged(event client.MembersChanged) {
 	if event.UserID == a.store.SelfID() {
 		a.onServerLeft(client.ServerLeft{ServerID: event.ServerID})
@@ -484,14 +460,12 @@ func (a *App) onMembersChanged(event client.MembersChanged) {
 	a.queueRefresh(refreshMembers)
 }
 
-// onRecipientsChanged follows a group conversation's own membership. A group is
-// the one channel whose participants are a list the client reads — they are the
-// pool the composer's @mention picker offers there — so a join or a leave has to
-// reach the picker as a server's would reach the member sidebar.
-//
-// Us leaving is the group leaving the sidebar. Revolt announces it as a
-// participant change like anybody else's, so the close path is reached from here
-// rather than from a deletion nobody is sent.
+// onRecipientsChanged follows a group's own membership. A group is the one
+// channel whose participants are a list the client reads — they are the pool the
+// @mention picker offers there — so a join or leave has to reach the picker as a
+// server's would reach the member sidebar. Us leaving is the group leaving the
+// sidebar, announced as any other participant change, so the close path is
+// reached from here rather than from a deletion nobody is sent.
 func (a *App) onRecipientsChanged(event client.RecipientsChanged) {
 	if event.UserID == a.store.SelfID() && !event.Joined {
 		a.onChannelClosed(client.ChannelClosed{ChannelID: event.ChannelID})
@@ -510,11 +484,9 @@ func (a *App) onRecipientsChanged(event client.RecipientsChanged) {
 }
 
 // onUserRemoved drops what an account taken off the platform leaves behind.
-//
-// Everything of theirs has already gone from the store, conversations included,
-// so the pruning here is of the app's own order — a channel ID the store no
-// longer answers for would otherwise sit in the home view forever, drawing no
-// row and never leaving the list.
+// Everything of theirs has already gone from the store, so the pruning here is of
+// the app's *own* order — a channel ID the store no longer answers for would sit
+// in the home view forever, drawing no row and never leaving the list.
 func (a *App) onUserRemoved(event client.UserRemoved) {
 	a.refreshAuthorMessages(event.UserID)
 
@@ -525,7 +497,7 @@ func (a *App) onUserRemoved(event client.UserRemoved) {
 	a.queueRefresh(refreshMembers)
 
 	// The conversation in view can be one of the ones that went, and a selection
-	// pointing at nothing is not something to leave until a window settles.
+	// pointing at nothing must not wait for a window to settle.
 	if _, open := a.currentChannel(); a.currentChannelID != "" && !open {
 		a.refreshChannelList()
 		a.clearChannelSelection()
@@ -536,33 +508,33 @@ func (a *App) onUserRemoved(event client.UserRemoved) {
 	a.queueRefresh(refreshChannels)
 }
 
-// onUserUpdated redraws what a change to somebody's account moves: their mounted
-// messages, and their row in the member sidebar.
-//
-// Neither reorders anything. A rename does move a sorted list, but a rename is
-// rare and a row briefly out of order is far cheaper than rebuilding the whole
-// model for one — the next rebuild puts it back.
+// onUserUpdated redraws what a change to an account moves: their mounted
+// messages and their member row. Neither reorders: a rename does move a sorted
+// list, but it is rare, and a row briefly out of order is far cheaper than
+// rebuilding the model for one — the next rebuild puts it back.
 func (a *App) onUserUpdated(event client.UserUpdated) {
 	a.refreshAuthorMessages(event.UserID)
 	a.refreshMemberRow(event.UserID)
 
-	// The line may be naming them, or waiting to — but only if they are composing
-	// here. Asking that is one map lookup, where redrawing the line unasked walks
-	// the channel's typists and resolves each of them, per account update, on a
-	// server where these arrive continuously.
+	// The settings page names this account and can be open while the change is made
+	// from it.
+	if event.UserID == a.store.SelfID() {
+		a.refreshSettingsAccount()
+	}
+
+	// Only if they are composing here. Asking is one map lookup, where redrawing the
+	// line unasked walks the channel's typists and resolves each — per account
+	// update, on a server where these arrive continuously.
 	if _, typing := a.typing[a.currentChannelID][event.UserID]; typing {
 		a.refreshTyping()
 	}
 }
 
-// onRelationshipChanged reaches two surfaces. The friends list is the one that
-// draws relationships as a set, and a request arriving is the only thing about
-// it nobody asked for. The other is the open conversation: a direct message with
-// somebody blocked is readable and nothing else, so the composer has to be
-// re-asked whether it still takes a message.
-//
-// Nothing else is repainted — a profile does not refresh while it is up, and a
-// member row says nothing about a relationship.
+// onRelationshipChanged reaches two surfaces: the friends list, which draws
+// relationships as a set, and the open conversation — a DM with somebody blocked
+// is readable and nothing else, so the composer is re-asked whether it still
+// takes a message. Nothing else repaints: a profile does not refresh while it is
+// up, and a member row says nothing about a relationship.
 func (a *App) onRelationshipChanged(event client.RelationshipChanged) {
 	a.friendsChanged(event.UserID)
 
@@ -577,16 +549,12 @@ func (a *App) onRelationshipChanged(event client.RelationshipChanged) {
 	a.syncComposer()
 }
 
-// onPresenceChanged moves somebody between the member list's sections.
-//
-// This is the one event a busy server produces continuously, and it is the one
-// that reorders, so it is queued rather than acted on: the rebuild is a walk of
-// the whole membership, and a thousand-member server can raise dozens of these a
-// second. Following presence at all is a setting, since on the largest servers
-// the cheapest answer is not to.
-//
-// HasMember decides whether it is even our business, and exists so that asking
-// allocates nothing.
+// onPresenceChanged moves somebody between the member list's sections. The one
+// event a busy server produces continuously *and* the one that reorders, so it is
+// queued: the rebuild walks the whole membership, and a thousand-member server
+// raises dozens a second. Following presence at all is a setting, the cheapest
+// answer on the largest servers being not to. HasMember decides whether it is our
+// business, and exists so that asking allocates nothing.
 func (a *App) onPresenceChanged(event client.PresenceChanged) {
 	if !config.Current().Behaviour.LiveMemberPresence || a.currentServerID == "" {
 		return
@@ -598,14 +566,11 @@ func (a *App) onPresenceChanged(event client.PresenceChanged) {
 	a.queueRefresh(refreshMembers)
 }
 
-// onMemberUpdated repaints the member sidebar when a member of the open server
-// changes, and updates that author's mounted messages in place so their name,
-// role colour and avatar stay current.
-//
-// When the member is the account itself, its roles are what every permission in
-// the server is resolved from: a role gained or lost changes which channels are
-// listed at all and whether the composer will take a message, neither of which
-// any other event announces.
+// onMemberUpdated repaints the member sidebar and that author's mounted messages,
+// so their name, role colour and avatar stay current. When the member is the
+// account itself, its roles are what every permission is resolved from: one
+// gained or lost changes which channels are listed and whether the composer takes
+// a message, neither of which any other event announces.
 func (a *App) onMemberUpdated(event client.MemberUpdated) {
 	if a.currentServerID == event.ServerID {
 		// A nickname or a role can move them between sections and re-colour the

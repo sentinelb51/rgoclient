@@ -1,18 +1,14 @@
 package ui
 
-// The settings page's controls.
+// The settings page's controls. None is a Fyne form widget: AppTheme zeroes
+// SizeNameInputBorder and answers SizeNameInputBackground with the very colour a
+// group is a card of, so Check, Select and Slider arrive flat, invisible, or — the
+// slider — as a bare thumb swelling into a grey disc under the pointer. Rather
+// than a theme override per widget, each control here is canvas objects and a
+// layout drawn from the client's own palette.
 //
-// None of them is a Fyne form widget. AppTheme zeroes SizeNameInputBorder and
-// answers SizeNameInputBackground with the very colour a settings group is a
-// card of, so widget.Check, widget.Select and widget.Slider all arrive flat,
-// invisible, or — in the slider's case — as a bare thumb that swells into a grey
-// disc the moment the pointer touches it. Rather than override the theme once
-// per widget, each control here is a few canvas objects and a layout, drawn from
-// the client's own palette.
-//
-// Every one of them is the same shape: a fixed-height box the row hands to its
-// control slot, so a row holding a switch, a dropdown and a slider is the same
-// height in all three cases.
+// All of them are one shape: a fixed-height box the row hands to its control
+// slot, so a switch, a dropdown and a slider all leave the row the same height.
 
 import (
 	"image/color"
@@ -36,10 +32,9 @@ const paletteColumns = 8
 
 /* Shared surfaces */
 
-// newFieldBackground is the surface every control that holds a *value* is drawn
-// on: the composer's own input fill, the shared hairline, and the corner radius
-// the rest of the page uses. It is what makes a dropdown read as something to
-// open rather than as a label that happens to sit on the right.
+// newFieldBackground is the surface every control holding a *value* is drawn on:
+// the composer's input fill, the hairline, the page's radius. It is what makes a
+// dropdown read as something to open rather than a label sitting on the right.
 func newFieldBackground() *canvas.Rectangle {
 	field := canvas.NewRectangle(theme.Colors.ComposerBg)
 	field.CornerRadius = theme.Sizes.SettingsInputRadius
@@ -55,14 +50,21 @@ func fixedControl(width float32, content fyne.CanvasObject) fyne.CanvasObject {
 		NewFixedHeightContainer(theme.Sizes.SettingsInputHeight, content))
 }
 
+// newSettingsCard is the outlined surface a group of rows — and the colour picker
+// floating over them — is drawn on.
+func newSettingsCard() *canvas.Rectangle {
+	card := canvas.NewRectangle(theme.Colors.SessionCardBg)
+	card.CornerRadius = theme.Sizes.SettingsGroupRadius
+	Outline(card)
+
+	return card
+}
+
 /* Toggle */
 
-// Toggle is the on/off switch every boolean setting uses: a pill that fills with
-// the accent and slides its knob across.
-//
-// It is a widget of its own rather than a widget.Check because the client has
-// never mounted one, and because a checkbox reads as part of a form while these
-// rows are a list of states.
+// Toggle is the on/off switch every boolean setting uses: a pill filling with the
+// accent as its knob slides across. Not a widget.Check — a checkbox reads as part
+// of a form, where these rows are a list of states.
 type Toggle struct {
 	tapBase
 
@@ -111,8 +113,8 @@ func (t *Toggle) Set(on bool) {
 	Relayout(t.content)
 }
 
-// flip is the tap: the state changes, the knob moves, and only then is anyone
-// told — so a handler that rebuilds the section sees the switch already moved.
+// flip is the tap: state, then knob, then the callback — so a handler that
+// rebuilds the section sees the switch already moved.
 func (t *Toggle) flip() {
 	t.on = !t.on
 	t.paint()
@@ -164,14 +166,11 @@ func (l *toggleLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 /* Slider */
 
-// Slider is a value dragged along a track.
-//
-// Fyne's own was tried first and abandoned. Its track thickness is two
-// SizeNameInputBorders, which AppTheme zeroes so the client's inputs draw flat,
-// and its track fill is SizeNameInputBackground, which AppTheme answers with the
-// colour of the card the slider sits on — so it needed a scoped theme override
-// simply to be visible, and still grew a grey hover disc under the pointer that
-// swallowed the thumb. This is a track, a fill and a knob.
+// Slider is a value dragged along a track. Fyne's own was tried and abandoned:
+// its thickness is two SizeNameInputBorders, which AppTheme zeroes, and its fill
+// is SizeNameInputBackground, which AppTheme answers with the card's own colour —
+// so it needed a scoped override to be visible at all, and still grew a grey
+// hover disc that swallowed the thumb. This is a track, a fill and a knob.
 type Slider struct {
 	tapBase
 
@@ -325,12 +324,10 @@ func (l *sliderLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 	return fyne.NewSize(theme.Sizes.SettingsSliderKnob, theme.Sizes.SettingsSliderHeight)
 }
 
-// newNumberBody is a slider and the exact value beside it, each moving the
-// other, without the slot around them. The value is a field once it is clicked:
-// a slider is how a size is *found*, and typing is how one already known is set.
-//
-// The slider takes the fill index, so widening the body lengthens the slider and
-// leaves the value where it is.
+// newNumberBody is a slider and the exact value beside it, each moving the other,
+// without the slot around them. The value becomes a field when clicked: a slider
+// is how a size is *found*, typing how one already known is set. The slider takes
+// the fill index, so widening the body lengthens it and leaves the value put.
 func newNumberBody(value, low, high, step float64, unit string, onChanged func(float64)) fyne.CanvasObject {
 	var slider *Slider
 
@@ -366,14 +363,10 @@ func newWideNumberControl(value, low, high, step float64, unit string, onChanged
 
 /* The number beside a slider */
 
-// numberBox shows a slider's exact value and, when it is clicked, becomes the
-// field that value can be typed into. A slider alone cannot be aimed at a
-// particular number, and a slider whose range is thousands of pixels wide cannot
-// be aimed at all.
-//
-// The entry is built on demand rather than kept hidden: the Advanced section
-// mounts a hundred of these at once, and an unused widget.Entry each is a cost
-// nothing has asked for.
+// numberBox shows a slider's exact value and becomes the field it can be typed
+// into. A slider alone cannot be aimed at a particular number, and one whose
+// range is thousands of pixels cannot be aimed at all. The entry is built on
+// demand rather than kept hidden: the Advanced section mounts a hundred of these.
 type numberBox struct {
 	tapBase
 
@@ -407,8 +400,7 @@ func newNumberBox(value, low, high float64, unit string, onCommit func(float64))
 	}
 	b.background.CornerRadius = theme.Sizes.SettingsInputRadius
 
-	b.text = canvas.NewText(b.valueText(), theme.Colors.TextPrimary)
-	b.text.TextSize = theme.Sizes.SettingsLabelSize
+	b.text = newText(b.valueText(), theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)
 
 	b.content = container.NewStack(b.background, container.NewCenter(b.text))
 	b.onTap = b.beginEdit
@@ -485,13 +477,11 @@ func (b *numberBox) cancel() {
 	b.unfocus()
 }
 
-// commit reads the field, clamps what it says to the slider's range, and returns
-// the box to showing a number. Anything that will not parse is discarded — an
-// empty field is what half-finished typing looks like, not a request for zero.
-//
-// Only the field currently open is read. Focusing a second box makes the first
-// report its loss *after* the second has installed its own field, so an
-// unguarded commit would close the one the user had only just opened.
+// commit reads the field, clamps it to the slider's range, and returns the box to
+// showing a number. Anything unparseable is discarded — an empty field is
+// half-finished typing, not a request for zero. Only the field currently open is
+// read: focusing a second box makes the first report its loss *after* the second
+// has installed its own, so an unguarded commit would close the new one.
 func (b *numberBox) commit(entry *numberEntry) {
 	if entry == nil || b.entry != entry {
 		return
@@ -531,10 +521,9 @@ func (b *numberBox) valueText() string {
 	return strconv.Itoa(int(b.value)) + " " + b.unit
 }
 
-// numberEntry is the field a numberBox becomes. It exists for two things
-// widget.Entry offers no hook for: Escape, which it otherwise hands to the
-// canvas — where the settings page would read it as "close" — and losing the
-// focus, which is the one place the typed value is read.
+// numberEntry is the field a numberBox becomes, for two things widget.Entry
+// offers no hook for: Escape, which it hands to the canvas where the page reads
+// it as "close", and losing focus, the one place the typed value is read.
 type numberEntry struct {
 	widget.Entry
 
@@ -570,12 +559,10 @@ func (e *numberEntry) TypedKey(key *fyne.KeyEvent) {
 
 var _ fyne.Focusable = (*commitEntry)(nil)
 
-// commitEntry is a field that reports its value once it has settled — on Enter,
-// and on losing the focus — rather than per keystroke, because every report is a
-// request and a sentence is typed a word at a time.
-//
-// Escape puts back what was there and is swallowed. widget.Entry hands the key
-// to the canvas otherwise, where the settings page reads it as "close the page".
+// commitEntry reports its value once it has settled — on Enter and on losing
+// focus — rather than per keystroke, every report being a request. Escape puts
+// back what was there and is swallowed, widget.Entry otherwise handing the key to
+// the canvas where the page reads it as "close".
 type commitEntry struct {
 	widget.Entry
 
@@ -592,6 +579,34 @@ func newCommitEntry(text string, onCommit func(string)) *commitEntry {
 	e.SetText(text)
 
 	return e
+}
+
+// bioRows is how much of a description is on screen at once. Enough to read a
+// sentence back without the row taking over the section.
+const bioRows = 4
+
+// newCommitArea is a commitEntry for prose. Enter puts in a newline rather than
+// submitting once an entry is multi-line, so what it reports on is losing the
+// focus alone.
+func newCommitArea(text string, onCommit func(string)) *commitEntry {
+	e := newCommitEntry(text, onCommit)
+	e.MultiLine = true
+	e.Wrapping = fyne.TextWrapWord
+	e.SetMinRowsVisible(bioRows)
+
+	return e
+}
+
+// Fill puts in a value that arrived after the field was built — a bio is fetched,
+// not held. It reports nothing, and is a no-op once there is anything in the
+// field: an answer landing late must not take back what is being written.
+func (e *commitEntry) Fill(text string) {
+	if e.Text != "" || e.committed != "" {
+		return
+	}
+
+	e.committed = text
+	e.SetText(text)
 }
 
 func (e *commitEntry) FocusLost() {
@@ -629,12 +644,9 @@ type settingsOption struct {
 }
 
 // optionControl is the page's dropdown: the chosen value in a field of its own,
-// opening the rest as a menu beneath itself.
-//
-// A field rather than bare text on the right of the row. Fyne's Select would
-// draw one, but AppTheme flattens its border away — and the value on its own,
-// which is what this was, reads as part of the row's description rather than as
-// the control.
+// opening the rest as a menu beneath. A field rather than bare text — Fyne's
+// Select draws one but AppTheme flattens its border away, and the value alone
+// reads as part of the row's description rather than as the control.
 type optionControl struct {
 	tapBase
 
@@ -651,8 +663,7 @@ var (
 )
 
 func newOptionControl(value string, options []settingsOption, onPick func(string)) *optionControl {
-	label := canvas.NewText(optionLabel(options, value), theme.Colors.TextPrimary)
-	label.TextSize = theme.Sizes.SettingsLabelSize
+	label := newText(optionLabel(options, value), theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)
 
 	chevron := newScaledIcon(fynetheme.MenuDropDownIcon(), theme.Sizes.SettingsIconSize)
 
@@ -742,8 +753,7 @@ func newSwatchRect(fill color.Color, side, radius float32) *canvas.Rectangle {
 	return swatch
 }
 
-// swatchButton is the round sample beside a hex field, opening the palette when
-// it is clicked. Typing a hex is exact but nobody knows a hex by heart; the
+// swatchButton is the round sample beside a hex field, opening the palette. The
 // palette is what makes a colour something to choose rather than to know.
 type swatchButton struct {
 	tapBase
@@ -799,14 +809,9 @@ func newPaletteCard(onPick func(hex string)) fyne.CanvasObject {
 	}
 
 	grid := NewFlow(float32(paletteColumns)*(side+gap), gap, cells...)
-
-	card := canvas.NewRectangle(theme.Colors.SessionCardBg)
-	card.CornerRadius = theme.Sizes.SettingsGroupRadius
-	Outline(card)
-
 	padding := theme.Sizes.SettingsPreviewGap
 
-	return container.NewStack(card, NewInset(grid, padding, padding, padding, padding))
+	return container.NewStack(newSettingsCard(), NewInset(grid, padding, padding, padding, padding))
 }
 
 // newPaletteCell is one preset. TappableContainer would give the hover for free,
@@ -826,8 +831,8 @@ func newPaletteCell(fill color.Color, hex string, onPick func(string)) fyne.Canv
 /* Usage meters */
 
 // newUsageBar is the how-full-is-it bar the cache section draws, and the setter
-// that fills it. A figure beside a budget is two numbers to divide; the bar is
-// the answer, and it turns as it runs out.
+// filling it. A figure beside a budget is two numbers to divide; the bar is the
+// answer, and it turns as it runs out.
 func newUsageBar() (*fyne.Container, func(ratio float32)) {
 	height := theme.Sizes.SettingsUsageHeight
 
@@ -848,9 +853,9 @@ func newUsageBar() (*fyne.Container, func(ratio float32)) {
 	}
 }
 
-// usageTint warns as a budget fills. The thresholds are what the cache's own
-// trim does not tell the user: it evicts silently, so a bar sitting at the line
-// is the only sign that images are being thrown away as fast as they arrive.
+// usageTint warns as a budget fills — the cache trims silently, so a bar sitting
+// at the line is the only sign that images are being thrown away as fast as they
+// arrive.
 func usageTint(ratio float32) color.Color {
 	switch {
 	case ratio >= 1:
@@ -890,14 +895,12 @@ func (l *usageBarLayout) MinSize([]fyne.CanvasObject) fyne.Size {
 
 /* The rail */
 
-// newSettingsMarker is the bar that says a rail entry is open or a setting is on:
-// transparent until something fills it, flush with the left edge of whatever it
-// is stacked over. It returns the rectangle to fill and the wrapper that pins it
-// left, since the caller keeps the first and mounts the second.
-//
-// It is inset vertically rather than drawn the full height because everything it
-// is laid over has rounded corners — the group card behind a row, the rail
-// button's own fill — and a bar reaching into one squares it off.
+// newSettingsMarker is the bar saying a rail entry is open or a setting is on:
+// transparent until something fills it, flush with the left edge of what it is
+// stacked over. It hands back the rectangle to fill *and* the wrapper pinning it
+// left — the caller keeps the first and mounts the second. Inset vertically
+// rather than full height: everything it is laid over has rounded corners, and a
+// bar reaching into one squares it off.
 func newSettingsMarker() (*canvas.Rectangle, fyne.CanvasObject) {
 	marker := canvas.NewRectangle(color.Transparent)
 	marker.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, 0))
@@ -909,9 +912,9 @@ func newSettingsMarker() (*canvas.Rectangle, fyne.CanvasObject) {
 }
 
 // settingsRailButton is one entry in the rail — a section, or one group of the
-// open section — as its mark, its name, a fill and the bar that says it is the
-// one open. TappableContainer would give the hover for free but not the
-// selection, which has to survive the pointer leaving.
+// open one — as its mark, its name, a fill and the bar saying it is open.
+// TappableContainer gives the hover for free but not the selection, which has to
+// survive the pointer leaving.
 type settingsRailButton struct {
 	tapBase
 
@@ -932,10 +935,8 @@ func newSettingsRailButton(entry railEntry, selected bool, onTap func()) *settin
 	return newRailButton(entry.title, entry.icon, selected, onTap)
 }
 
-// newSettingsSubButton is one group of the open section, listed under it. It
-// carries no icon — a group has no mark of its own, and newScaledIcon would
-// reserve the width for a nil resource rather than skip it — so the space an icon
-// would take is what indents it.
+// newSettingsSubButton is one group of the open section, listed under it. No icon
+// — a group has no mark of its own — so the space one would take is the indent.
 func newSettingsSubButton(title string, selected bool, onTap func()) *settingsRailButton {
 	return newRailButton(title, nil, selected, onTap)
 }
@@ -945,8 +946,7 @@ func newRailButton(title string, icon fyne.Resource, selected bool, onTap func()
 	b.onTap = onTap
 	b.background.CornerRadius = theme.Sizes.SettingsGroupRadius
 
-	b.label = canvas.NewText(title, theme.Colors.CategoryText)
-	b.label.TextSize = theme.Sizes.SettingsRailTextSize
+	b.label = newText(title, theme.Colors.CategoryText, theme.Sizes.SettingsRailTextSize)
 
 	// A sub-entry keeps the width an icon would take and is indented past it, so
 	// its name starts clear of the section names rather than in the same column.
@@ -977,8 +977,8 @@ func newRailButton(title string, icon fyne.Resource, selected bool, onTap func()
 }
 
 // setSelected repaints in place. The rail is not rebuilt to move the selection:
-// following the pane's scroll would otherwise replace every button several times
-// a second, including the one under the pointer — which then never hears MouseOut.
+// following the pane's scroll would replace every button several times a second,
+// including the one under the pointer — which then never hears MouseOut.
 func (b *settingsRailButton) setSelected(selected bool) {
 	b.selected = selected
 
@@ -1021,10 +1021,9 @@ func (b *settingsRailButton) MouseOut() {
 
 /* Dismissal */
 
-// dismissSink is the full-bleed surface behind a popover: it takes the next
-// click anywhere else and closes what is open. It draws nothing — a picker is
-// not modal enough to earn a dimmed window — and keeps the ordinary cursor, so
-// the page underneath still reads as reachable.
+// dismissSink is the full-bleed surface behind a popover, taking the next click
+// anywhere else. It draws nothing — a picker is not modal enough to earn a dimmed
+// window — and keeps the ordinary cursor, so the page still reads as reachable.
 type dismissSink struct {
 	tapBase
 

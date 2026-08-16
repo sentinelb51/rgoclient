@@ -9,8 +9,8 @@ package ui
 // declared rather than the day somebody remembers to list it.
 
 import (
-	"fmt"
 	"image/color"
+	"strconv"
 	"strings"
 
 	"fyne.io/fyne/v2"
@@ -41,8 +41,8 @@ var presenceOptions = []settingsOption{
 }
 
 // presenceValues maps an option back to what it sets. Offline is the domain's
-// name for the state and Invisible is the user's name for choosing it, which is
-// the one place the two vocabularies have to be bridged.
+// name for the state, Invisible the user's name for choosing it — the one place
+// the two vocabularies have to be bridged.
 var presenceValues = map[string]domain.Presence{
 	"online":    domain.PresenceOnline,
 	"idle":      domain.PresenceIdle,
@@ -62,17 +62,28 @@ func presenceValue(presence domain.Presence) string {
 	return "online"
 }
 
+// accountRows are the Account section's late arrivals: the description a profile
+// fetch fills in, and the button with nothing to take off until that fetch says
+// there is a banner. Cleared on every section change, so an answer landing after
+// the reader has moved on has nothing left to fill.
+type accountRows struct {
+	bio          *commitEntry
+	removeBanner *widget.Button
+}
+
 func (p *SettingsPage) accountSection() []settingsGroup {
-	groups := []settingsGroup{p.group("Signed in as", "",
-		p.identityRow(), p.displayNameRow(), p.presenceRow(), p.statusRow())}
+	groups := []settingsGroup{
+		p.group("Signed in as", "",
+			p.identityRow(), p.usernameRow(), p.displayNameRow(), p.presenceRow(), p.statusRow()),
+		p.profileGroup(),
+	}
 
 	var cards []fyne.CanvasObject
 	for _, session := range p.hooks.Sessions() {
-		forget := widget.NewButton("Forget", func() {
+		forget := newRowButton("Forget", ToneWarning, func() {
 			p.hooks.ForgetSession(session.UserID)
 			p.reload()
 		})
-		forget.Importance = ToneWarning.importance()
 
 		control := HBoxNoSpacing(
 			container.NewCenter(newSwatchlessAvatar(p.hooks.Deps, session.AvatarURL)),
@@ -125,13 +136,11 @@ func (p *SettingsPage) identityRow() fyne.CanvasObject {
 	return p.row(self.Name, self.Handle, newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL))
 }
 
-// displayNameRow is the name shown wherever the account is named. The field
-// holds domain.User.DisplayName rather than Name: Name has already fallen back
-// to the username, and a field pre-filled with that would send the username back
-// as a chosen name on the first blur that followed a keystroke.
-//
-// It is written back no more than the two rows under it are, and for the same
-// reason — the change returns through the gateway.
+// displayNameRow is the name shown wherever the account is named. The field holds
+// DisplayName rather than Name: Name has already fallen back to the username, and
+// a field pre-filled with that would send the username back as a chosen name on
+// the first blur after a keystroke. Nothing is written back — the change returns
+// through the gateway.
 func (p *SettingsPage) displayNameRow() fyne.CanvasObject {
 	self, ok := p.hooks.Deps.Store.Self()
 	if !ok {
@@ -144,11 +153,82 @@ func (p *SettingsPage) displayNameRow() fyne.CanvasObject {
 	return p.row("Display name", "Shown instead of your username. Clear it to remove it.", textField(entry))
 }
 
+// usernameRow leads to the card that changes the handle. A row rather than a
+// field: Revolt takes the account password with the new name, and two answers at
+// once is what the prompt on the modal layer is for.
+func (p *SettingsPage) usernameRow() fyne.CanvasObject {
+	if _, ok := p.hooks.Deps.Store.Self(); !ok {
+		return nil
+	}
+
+	return p.actionRow("Username", "What tells two identical display names apart. "+
+		"Changing it asks for your password.", "Change", ToneInfo, p.hooks.ChangeUsername)
+}
+
+// profileGroup is what a profile shows that the account record does not carry.
+// A profile is a request of its own, so the rows are built empty and filled
+// through SetProfile when the fetch lands.
+func (p *SettingsPage) profileGroup() settingsGroup {
+	self, ok := p.hooks.Deps.Store.Self()
+	if !ok {
+		return settingsGroup{}
+	}
+
+	group := p.group("Profile", "", p.pictureRow(self), p.bannerRow(), p.bioRow())
+	p.hooks.LoadProfile(p.SetProfile)
+
+	return group
+}
+
+// pictureRow is the account's own picture and the two things that can be done to
+// it. Remove is drawn disabled rather than left out, so the row keeps one shape
+// and no button appears under the pointer the moment a picture lands.
+func (p *SettingsPage) pictureRow(self domain.User) fyne.CanvasObject {
+	remove := newRowButton("Remove", ToneWarning, p.hooks.RemoveAvatar)
+	enableIf(remove, self.AvatarURL != "")
+
+	control := HBoxNoSpacing(
+		container.NewCenter(newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL)),
+		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
+		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeAvatar)),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		container.NewCenter(remove),
+	)
+
+	return p.row("Picture", "Shown wherever you are named.", control)
+}
+
+// bannerRow is the picture behind the profile. No preview: a banner is a wide
+// strip, and one shrunk into a settings row says nothing a caption does not.
+func (p *SettingsPage) bannerRow() fyne.CanvasObject {
+	remove := newRowButton("Remove", ToneWarning, p.hooks.RemoveBanner)
+	remove.Disable() // until the profile lands and says there is one
+	p.account.removeBanner = remove
+
+	control := HBoxNoSpacing(
+		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeBanner)),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		container.NewCenter(remove),
+	)
+
+	return p.row("Banner", "The picture behind your profile.", control)
+}
+
+// bioRow is the description under the name on a profile, stacked under its
+// explanation rather than in the control slot: prose typed into 190 pixels is
+// read one word at a time.
+func (p *SettingsPage) bioRow() fyne.CanvasObject {
+	entry := newCommitArea("", p.hooks.SetBio)
+	entry.PlaceHolder = "Say something about yourself"
+	p.account.bio = entry
+
+	return p.stackedRow("About", "Shown on your profile. Clear it to remove it.", wideField(entry))
+}
+
 // presenceRow sets how the account appears to everybody else. Nothing is written
-// back to the control: the change returns through the gateway like anybody
-// else's, so the page shows what the store last said and the next open shows
-// what actually took — a presence the server refused must not be left on screen
-// as though it held.
+// back: the change returns through the gateway like anybody else's, so the page
+// shows what the store last said — a presence the server refused must not be left
+// on screen as though it held.
 func (p *SettingsPage) presenceRow() fyne.CanvasObject {
 	self, ok := p.hooks.Deps.Store.Self()
 	if !ok {
@@ -164,9 +244,8 @@ func (p *SettingsPage) presenceRow() fyne.CanvasObject {
 	return p.row("Presence", "How you appear to everyone else.", control)
 }
 
-// statusRow is the line beside the account's name. It is written back no more
-// than presenceRow is, and for the same reason — the change returns through the
-// gateway — so what the field holds is what the store last said.
+// statusRow is the line beside the account's name, written back no more than
+// presenceRow is and for the same reason.
 func (p *SettingsPage) statusRow() fyne.CanvasObject {
 	self, ok := p.hooks.Deps.Store.Self()
 	if !ok {
@@ -506,13 +585,11 @@ func (p *SettingsPage) cacheSection() []settingsGroup {
 	}
 }
 
-// locationRow is the root the picture caches live under, and the two things that
-// can be done about it. The path is the row's explanation rather than its value: it is
-// long enough to need the whole width, and shortening it from the front would
-// hide the part that says which drive it is on.
+// locationRow is the root the picture caches live under and what can be done
+// about it. The path is the row's *explanation* rather than its value: it needs
+// the whole width, and shortening from the front hides the drive it is on.
 func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
-	path := canvas.NewText(p.hooks.CacheDir(), theme.Colors.TimestampText)
-	path.TextSize = theme.Sizes.SettingsDetailSize
+	path := newText(p.hooks.CacheDir(), theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
 
 	choose := widget.NewButton("Change…", func() {
 		p.hooks.ChooseCacheDir(func(picked string) {
@@ -537,8 +614,8 @@ func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
 	return p.rowWith("Location", NewEllipsisText(path), HBoxNoSpacing(controls...))
 }
 
-// usageMeter is one budget drawn as a bar, and the setter that fills it once the
-// measurement — which walks the cache directory — comes back.
+// usageMeter is one budget drawn as a bar, and the setter filling it once the
+// measurement — a walk of the cache directory — comes back.
 type usageMeter struct {
 	block fyne.CanvasObject
 	set   func(used, total int64, detail string)
@@ -547,14 +624,9 @@ type usageMeter struct {
 // newUsageMeter builds the meter empty. Its figures arrive from a goroutine, so
 // what it draws until then has to be something rather than nothing.
 func (p *SettingsPage) newUsageMeter(label, placeholder string) *usageMeter {
-	name := canvas.NewText(label, theme.Colors.TextPrimary)
-	name.TextSize = theme.Sizes.SettingsLabelSize
-
-	amount := canvas.NewText("", theme.Colors.TextPrimary)
-	amount.TextSize = theme.Sizes.SettingsDetailSize
-
-	detail := canvas.NewText(placeholder, theme.Colors.TimestampText)
-	detail.TextSize = theme.Sizes.SettingsDetailSize
+	name := newText(label, theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)
+	amount := newText("", theme.Colors.TextPrimary, theme.Sizes.SettingsDetailSize)
+	detail := newText(placeholder, theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
 
 	bar, fill := newUsageBar()
 	gap := theme.Sizes.ChipSpacing
@@ -570,8 +642,7 @@ func (p *SettingsPage) newUsageMeter(label, placeholder string) *usageMeter {
 	return &usageMeter{
 		block: p.block(body),
 		set: func(used, total int64, note string) {
-			amount.Text = fmt.Sprintf("%s of %s",
-				util.FormatFileSize(int(used)), util.FormatFileSize(int(total)))
+			amount.Text = util.FormatFileSize(int(used)) + " of " + util.FormatFileSize(int(total))
 			amount.Refresh()
 
 			detail.Text = note
@@ -586,37 +657,49 @@ func (p *SettingsPage) newUsageMeter(label, placeholder string) *usageMeter {
 	}
 }
 
-// fileCount reads as a sentence rather than a number on its own, since it sits
-// under a bar that is already showing a size.
+// fileCount reads as a sentence rather than a bare number, sitting under a bar
+// that is already showing a size.
 func fileCount(files int) string {
 	if files == 1 {
 		return "1 file"
 	}
 
-	return fmt.Sprintf("%d files", files)
+	return strconv.Itoa(files) + " files"
 }
 
 /* Advanced */
 
-// advancedSection lists what the curated groups did not claim. It is long by
+// advancedSection lists what the curated groups did not claim. Long by
 // construction — the point is that nothing is unreachable — so it opens with a
 // filter, which is what keeps the friendly sections short without hiding
-// anything.
-//
-// The two lists are refilled in place rather than rebuilt through reload: a
-// rebuild would replace the field being typed into on the first keystroke.
+// anything. The lists are refilled in place rather than through reload: a rebuild
+// would replace the field being typed into on the first keystroke.
 func (p *SettingsPage) advancedSection() []settingsGroup {
 	sizes, colors := VBoxNoSpacing(), VBoxNoSpacing()
 
+	// Both lists are fixed for the life of the section; only the filter moves.
+	sizeFields, colorFields := uncuratedSizeFields(), theme.ColorFields()
+
 	fill := func(query string) {
+		query = strings.ToLower(strings.TrimSpace(query))
+
+		// Matched before it is built. A row here is a slider, a field and a swatch,
+		// and there are hundreds — building every one per keystroke only to throw
+		// most away is the work the filter exists to avoid.
 		var sizeRows, colorRows []fyne.CanvasObject
-		for _, field := range uncuratedSizeFields() {
-			if row := p.sizeRow(field, field); row != nil && matchesField(field, query) {
+		for _, field := range sizeFields {
+			if !matchesField(field, query) {
+				continue
+			}
+			if row := p.sizeRow(field, field); row != nil {
 				sizeRows = append(sizeRows, row)
 			}
 		}
-		for _, field := range theme.ColorFields() {
-			if row := p.colorRow(field, field); row != nil && matchesField(field, query) {
+		for _, field := range colorFields {
+			if !matchesField(field, query) {
+				continue
+			}
+			if row := p.colorRow(field, field); row != nil {
 				colorRows = append(colorRows, row)
 			}
 		}
@@ -641,14 +724,10 @@ func (p *SettingsPage) advancedSection() []settingsGroup {
 	}
 }
 
-// matchesField is the filter: a case-insensitive substring of the field's own
-// name, which is what the rows are labelled with here.
+// matchesField is the filter: a substring of the field's own name, which is what
+// the rows are labelled with here. query arrives already folded.
 func matchesField(field, query string) bool {
-	if query == "" {
-		return true
-	}
-
-	return strings.Contains(strings.ToLower(field), strings.ToLower(query))
+	return query == "" || strings.Contains(strings.ToLower(field), query)
 }
 
 /* About */
@@ -823,9 +902,9 @@ var styleGroups = []styleGroup{
 	},
 }
 
-// uncuratedSizeFields is every entry of the size table that no curated group
-// claims, in declaration order. It is what the Advanced section lists, and what
-// keeps the two halves of the settings page adding up to the whole table.
+// uncuratedSizeFields is every size-table entry no curated group claims, in
+// declaration order — what the Advanced section lists, and what keeps the two
+// halves of the page adding up to the whole table.
 func uncuratedSizeFields() []string {
 	claimed := make(map[string]bool)
 	for _, group := range styleGroups {
@@ -848,11 +927,9 @@ func uncuratedSizeFields() []string {
 /* Previews */
 
 // messagePreview draws two real message rows, so what a size does is answered by
-// the widget that will draw it rather than by an approximation of one. The
-// client behind the page is covered, so this is the only thing that can answer.
-//
-// The messages are authored by the logged-in account, which is what lets the
-// store resolve a name and a face for them.
+// the widget that will draw it rather than an approximation. The messages are
+// authored by the logged-in account, which is what lets the store resolve a name
+// and a face for them.
 func (p *SettingsPage) messagePreview() fyne.CanvasObject {
 	deps := p.hooks.Deps
 
@@ -907,8 +984,7 @@ func previewFrame(content fyne.CanvasObject) fyne.CanvasObject {
 }
 
 func previewPlaceholder(text string) fyne.CanvasObject {
-	label := canvas.NewText(text, theme.Colors.TimestampText)
-	label.TextSize = theme.Sizes.SettingsDetailSize
+	label := newText(text, theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
 
 	return previewFrame(container.NewCenter(label))
 }

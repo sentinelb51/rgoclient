@@ -20,31 +20,23 @@ import (
 	"RGOClient/internal/util"
 )
 
-// renderMessageBody renders a message's body. A body whose whole content shares
-// one uniform style flattens to a selectable Label, so its text can be selected
-// with the mouse; only genuinely mixed-style bodies fall back to a RichText,
-// which Fyne cannot make selectable (its selection machinery is unexported and
-// assumes a single uniform style).
+// renderMessageBody renders a message's body. A body of one uniform style
+// flattens to a selectable Label; a mixed one falls back to RichText, which Fyne
+// cannot make selectable. A mention or a custom emoji is never flattenable — the
+// first has its own colour, the second is not text at all.
 //
 // Two RichText constraints shape the rest of this file. It only wraps and flows
-// native segments when every content segment is marked Inline, so content is
-// emitted inline and each line is terminated by an empty non-inline segment
-// acting as a break (see mdBuilder.lineBreak). And strike, underline and spoilers
-// have no native equivalent, so decoratedSegment draws them — split per word,
-// since RichText only breaks rows at text spaces, never between two custom
-// segments.
+// native segments when every content segment is Inline, so each line is
+// terminated by an empty non-inline break (mdBuilder.lineBreak). And strike,
+// underline and spoilers have no native equivalent, so decoratedSegment draws
+// them — split per word, RichText breaking rows only at text spaces.
 //
-// A body carrying a mention — of a person or of a channel — is never flattened:
-// the mention has its own colour, exactly the mixed-style case a Label cannot
-// express. Neither is one carrying a custom emoji, which is not text at all.
-//
-// onMenu is the owning message's right-click handler, which a selectable body
-// has to be given explicitly — see bodyText.
+// onMenu is the owning message's right-click handler — see bodyText.
 func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	doc := markdown.Parse(text)
 
-	// An empty body (attachment-only message) keeps the zero-height RichText; a
-	// Label would reserve a blank text line above the attachment.
+	// An empty body keeps the zero-height RichText: a Label would reserve a blank
+	// line above whatever the message does carry.
 	if flat, ok := flattenDocument(doc); ok && flat.text != "" {
 		label := newBodyText(flat.text, onMenu)
 		label.Wrapping = fyne.TextWrapWord
@@ -68,32 +60,24 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 		return rt
 	}
 
-	// RichText never breaks a row *before* a segment it cannot measure as text: a
-	// mention or an emoji is appended to the row in hand however little of it is
-	// left, so one landing at a line end draws past the right edge and is cut off by
-	// the message column. Narrowing the text by the widest of them the body carries
-	// is what gives that overhang somewhere to land — the words wrap earlier, and
-	// what follows them spills into the strip kept clear for it.
+	// RichText never breaks a row *before* a segment it cannot measure as text, so a
+	// mention or emoji landing at a line end draws past the right edge and is cut
+	// off. Narrowing the text by the widest one the body carries gives that overhang
+	// somewhere to land: the words wrap earlier and spill into the strip kept clear.
 	return NewFillRow(0, rt, HorizontalSpacer(b.reserve))
 }
 
 /* Selectable body */
 
-// bodyText is the flattened, selectable message body.
+// bodyText is the flattened, selectable message body. It exists to get a
+// right-click back: a selectable Label mounts an unexported selection overlay
+// above its text, and innermost wins, so that overlay takes the click and answers
+// with Fyne's own one-item "Copy" menu — having first pulled focus off the
+// composer.
 //
-// It exists to get a right-click back. A selectable Label mounts an invisible
-// selection overlay above its text, and the driver delivers pointer events to
-// the *innermost* object under the cursor — so that overlay takes the click and
-// answers it with Fyne's own one-item "Copy" menu instead of the message's
-// context menu, having first pulled keyboard focus off the composer. Neither is
-// reachable from outside the widget: the overlay is unexported, and its
-// behaviour is not configurable.
-//
-// So the renderer mounts a catcher above it, and the overlay — which the Label's
-// own renderer hands over as a plain fyne.CanvasObject — is driven through the
-// exported interfaces it satisfies. A Fyne that stops exposing it leaves the
-// catcher out entirely (newSelectionCatcher returns nil) and the body degrades to
-// an ordinary selectable Label.
+// The renderer therefore lays a catcher over it and drives the overlay through
+// the exported interfaces it satisfies. A Fyne that stops exposing it leaves the
+// catcher out (newSelectionCatcher returns nil) and the body is a plain Label.
 type bodyText struct {
 	widget.Label
 	onMenu func(*fyne.PointEvent)
@@ -111,9 +95,8 @@ func newBodyText(text string, onMenu func(*fyne.PointEvent)) *bodyText {
 }
 
 func (t *bodyText) CreateRenderer() fyne.WidgetRenderer {
-	// Label.CreateRenderer is what builds the selection overlay, so it has to run
-	// before one can be found. Its own ExtendBaseWidget call is a no-op here: the
-	// base widget already points at us.
+	// Label.CreateRenderer builds the selection overlay, so it runs before one can
+	// be found. Its own ExtendBaseWidget call is a no-op: the base already points here.
 	renderer := t.Label.CreateRenderer()
 
 	catcher := newSelectionCatcher(renderer.Objects(), t.onMenu)
@@ -124,9 +107,8 @@ func (t *bodyText) CreateRenderer() fyne.WidgetRenderer {
 	return &bodyRenderer{WidgetRenderer: renderer, catcher: catcher}
 }
 
-// bodyRenderer is the Label's own renderer with the catcher laid over it. The
-// catcher goes last because the driver's hit test keeps the last match in tree
-// order, which is what puts it in front of the selection overlay.
+// bodyRenderer is the Label's renderer with the catcher laid over it, last
+// because the hit test keeps the last match in tree order.
 type bodyRenderer struct {
 	fyne.WidgetRenderer
 	catcher *selectionCatcher
@@ -145,9 +127,8 @@ func (r *bodyRenderer) Objects() []fyne.CanvasObject {
 }
 
 // selectionCatcher covers a Label's selection overlay, answering right-clicks
-// itself and passing everything selection needs straight through. It is
-// transparent and not hoverable, so the message row underneath still lights up
-// and still owns the pointer for everything else.
+// itself and passing everything selection needs through. Transparent and not
+// hoverable, so the message row underneath keeps its hover.
 type selectionCatcher struct {
 	widget.BaseWidget
 	onMenu func(*fyne.PointEvent)
@@ -170,10 +151,9 @@ var (
 )
 
 // newSelectionCatcher finds the selection overlay among a Label renderer's
-// objects and builds a catcher for it, or returns nil when there is nothing to
-// catch for — an unselectable label, no menu to show, or a Fyne whose overlay no
-// longer answers the interfaces the forwarding depends on. Nothing else in a
-// Label's renderer is interactive, so answering all four identifies it.
+// objects, or nil when there is nothing to catch for — no menu, or a Fyne whose
+// overlay no longer answers the interfaces the forwarding depends on. Nothing
+// else in a Label's renderer is interactive, so answering all four identifies it.
 func newSelectionCatcher(objects []fyne.CanvasObject, onMenu func(*fyne.PointEvent)) *selectionCatcher {
 	if onMenu == nil {
 		return nil
@@ -210,9 +190,9 @@ func (c *selectionCatcher) Dragged(event *fyne.DragEvent)       { c.drag.Dragged
 func (c *selectionCatcher) DragEnd()                            { c.drag.DragEnd() }
 func (c *selectionCatcher) MouseUp(event *desktop.MouseEvent)   { c.mouse.MouseUp(event) }
 
-// MouseDown withholds the secondary button. The overlay takes keyboard focus on
-// any press, and a right-click that only opens a menu has no business pulling
-// focus out of the composer.
+// MouseDown withholds the secondary button: the overlay takes keyboard focus on
+// any press, and a right-click that opens a menu has no business taking it from
+// the composer.
 func (c *selectionCatcher) MouseDown(event *desktop.MouseEvent) {
 	if event.Button == desktop.MouseButtonSecondary {
 		return
@@ -233,15 +213,15 @@ type flatBody struct {
 	dim   bool               // muted colour (subtext)
 }
 
-// flattenDocument tries to flatten a document into a single styled string,
-// reporting false when blocks or inlines mix styles or need custom visuals.
-// Blocks join with single newlines, matching the breaks RichText emits.
+// flattenDocument flattens a document into one styled string, reporting false
+// when anything mixes styles or needs a custom visual. Blocks join with single
+// newlines, matching the breaks RichText emits.
 func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 	var f flatBody
 	var b strings.Builder
 
-	// merge folds one leaf's effective style into the document style: the first
-	// leaf sets it, every later leaf must agree.
+	// merge folds a leaf's style into the document's: the first sets it, the rest
+	// must agree.
 	styled := false
 	merge := func(style fyne.TextStyle, size fyne.ThemeSizeName, dim bool) bool {
 		if !styled {
@@ -291,9 +271,8 @@ func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 	return f, true
 }
 
-// flattenInlines appends the nodes' text to b, folding each leaf's effective
-// style into merge. It reports false on nodes needing custom visuals, or when a
-// leaf's style conflicts with those seen so far.
+// flattenInlines appends the nodes' text to b, folding each leaf's style into
+// merge. False on a node needing a custom visual, or on a style conflict.
 func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, size fyne.ThemeSizeName, dim bool, merge func(fyne.TextStyle, fyne.ThemeSizeName, bool) bool) bool {
 	for _, node := range nodes {
 		switch n := node.(type) {
@@ -323,15 +302,14 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			if !flattenInlines(b, n.Children, next, size, dim, merge) {
 				return false
 			}
-		default: // Underline, Strike, Spoiler, Link, both mentions, an emoji and a timestamp need custom visuals
+		default: // Underline, Strike, Spoiler, Link, mentions, emoji, timestamp: custom visuals
 			return false
 		}
 	}
 	return true
 }
 
-// emphasis accumulates inline character formatting as the renderer descends the
-// inline tree.
+// emphasis accumulates character formatting as the renderer descends the tree.
 type emphasis struct {
 	bold, italic, underline, strike bool
 }
@@ -340,10 +318,9 @@ func (e emphasis) textStyle() fyne.TextStyle {
 	return fyne.TextStyle{Bold: e.bold, Italic: e.italic}
 }
 
-// mdBuilder accumulates RichText segments. It carries Deps because one inline
-// node — the mention — is only an ID in the AST and needs the session to resolve
-// a name, and onMenu because the segments that answer a tap have to answer a
-// right-click with the message's own menu (see mentionText).
+// mdBuilder accumulates RichText segments. It carries Deps because a mention is
+// only an ID in the AST, and onMenu because a segment that answers a tap must
+// answer a right-click with the message's menu (see mentionText).
 type mdBuilder struct {
 	deps   Deps
 	onMenu func(*fyne.PointEvent)
@@ -354,9 +331,8 @@ type mdBuilder struct {
 	reserve float32
 }
 
-// text appends styled, inline content. Plain runs become native TextSegments;
-// runs that are struck, underlined or inside a spoiler become per-word
-// decoratedSegments so they wrap like ordinary words.
+// text appends styled, inline content: a native TextSegment for a plain run,
+// per-word decoratedSegments for anything struck, underlined or spoilered.
 func (b *mdBuilder) text(s string, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
 	if s == "" {
 		return
@@ -368,21 +344,26 @@ func (b *mdBuilder) text(s string, em emphasis, base widget.RichTextStyle, sp *s
 
 	style := base
 	style.Inline = true
-	ts := em.textStyle()
-	ts.Bold = ts.Bold || base.TextStyle.Bold
-	ts.Monospace = base.TextStyle.Monospace
-	style.TextStyle = ts
+	style.TextStyle = em.over(base)
 
 	b.segs = append(b.segs, &widget.TextSegment{Text: s, Style: style})
 }
 
-// decorated splits a decorated run into per-word custom segments separated by
-// ordinary (break-point) spaces. Each word bridges the trailing space so its
-// line/cover joins the next word's.
+// over is the emphasis a run carries laid over what its enclosing block already
+// decided — a heading's bold and a code block's monospace are the block's.
+func (e emphasis) over(base widget.RichTextStyle) fyne.TextStyle {
+	style := e.textStyle()
+	style.Bold = style.Bold || base.TextStyle.Bold
+	style.Monospace = base.TextStyle.Monospace
+
+	return style
+}
+
+// decorated splits a run into per-word segments separated by ordinary
+// break-point spaces, each bridging its trailing space so the decoration joins
+// the next word's.
 func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
-	ts := em.textStyle()
-	ts.Bold = ts.Bold || base.TextStyle.Bold
-	ts.Monospace = base.TextStyle.Monospace
+	ts := em.over(base)
 
 	toks := splitTokens(s)
 	words := 0
@@ -415,18 +396,17 @@ func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, 
 	}
 }
 
-// lineBreak terminates the current row with an empty, non-inline segment so the
-// next content starts on a fresh line. base carries the size, so the break's row
-// height matches the surrounding text.
+// lineBreak terminates the row with an empty, non-inline segment. base carries
+// the size, so the break's row height matches the text around it.
 func (b *mdBuilder) lineBreak(base widget.RichTextStyle) {
 	style := base
 	style.Inline = false
 	b.segs = append(b.segs, &widget.TextSegment{Style: style})
 }
 
-// block renders one block over base, which carries what an enclosing block has
-// already decided — the muted colour of a quote is the only such thing today, and
-// it is why base is a parameter rather than each case starting from zero.
+// block renders one block over base, which carries what an enclosing block
+// decided — a quote's muted colour being the only one today, and why base is a
+// parameter rather than each case starting from zero.
 func (b *mdBuilder) block(block markdown.Block, base widget.RichTextStyle) {
 	switch n := block.(type) {
 	case *markdown.Paragraph:
@@ -446,8 +426,8 @@ func (b *mdBuilder) block(block markdown.Block, base widget.RichTextStyle) {
 	case *markdown.Blockquote:
 		b.blockquote(n, base)
 	case *markdown.CodeBlock:
-		// A non-inline block segment renders its multi-line text literally and
-		// separates itself from surrounding content.
+		// A non-inline segment renders its multi-line text literally and separates
+		// itself from what surrounds it.
 		b.segs = append(b.segs, &widget.TextSegment{
 			Text:  n.Text,
 			Style: widget.RichTextStyle{TextStyle: fyne.TextStyle{Monospace: true}},
@@ -460,14 +440,13 @@ func (b *mdBuilder) block(block markdown.Block, base widget.RichTextStyle) {
 // quoteBar is the indent mark drawn at the start of every quoted row.
 const quoteBar = "▏ "
 
-// blockquote renders a quote's blocks with the bar repeated at the start of every
-// source line (continuation of wrapped lines is not bar-prefixed — RichText owns
-// that wrapping).
+// blockquote renders a quote's blocks with the bar at the start of every source
+// line — a wrapped continuation gets none, RichText owning that wrapping.
 //
-// The blocks are built first and the bars spliced in afterwards, because what
-// ends a row is a block's own non-inline break segment and nothing before it
-// knows where those land. A quote holding a heading or a list is therefore the
-// ordinary block path with a prefix, and nested quotes stack their bars for free.
+// Blocks are built first and the bars spliced in after, because what ends a row
+// is a block's own non-inline break and nothing before it knows where those land.
+// A quote holding a heading or a list is thus the ordinary path with a prefix,
+// and nested quotes stack their bars for free.
 func (b *mdBuilder) blockquote(n *markdown.Blockquote, base widget.RichTextStyle) {
 	base.ColorName = fynetheme.ColorNamePlaceHolder
 
@@ -549,26 +528,23 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Emoji:
 			b.emoji(n.EmojiID, base)
 		case *markdown.Timestamp:
-			// Drawn as a mention is, and for the same reason: it is a fact the client
-			// resolved rather than something the author typed, so it has to read as
-			// standing apart from the sentence around it. It opens nothing — there is
-			// nowhere for an instant to lead — hence the nil tap.
+			// Drawn as a mention and for the same reason: a fact the client resolved
+			// rather than something the author typed, so it stands apart from the
+			// sentence. It opens nothing — an instant leads nowhere — hence the nil tap.
 			b.mention(util.MessageTimestamp(n.Time, n.Style), em, base, nil)
 		}
 	}
 }
 
-// mention renders an already-marked "@Name" or "#channel" as bold, accent-
-// coloured text that opens what it names when tapped. A nil onTap draws the same
-// highlight with nothing behind it, which is what a rendered timestamp is.
+// mention renders an already-marked "@Name" or "#channel" as bold accent text
+// opening what it names. A nil onTap draws the highlight with nothing behind it,
+// which is what a rendered timestamp is.
 //
-// It is inline text rather than the tinted pill other clients use: a pill needs
-// a background bleeding behind the row's line spacing, and RichText gives a
-// segment no way to do that without colliding on wrapped lines.
-//
-// The words are emitted separately, as a decorated span's are: a segment is
-// atomic to RichText, which breaks a row only at a space *between* segments, so
-// a two-word name kept whole could not wrap. Each word carries the same tap.
+// Inline text rather than the tinted pill other clients use: a pill needs a
+// background bleeding behind the row's line spacing, which RichText gives a
+// segment no way to do without colliding on wrapped lines. The words are emitted
+// separately, as a decorated span's are — a segment is atomic to RichText, so a
+// two-word name kept whole could not wrap.
 func (b *mdBuilder) mention(text string, em emphasis, base widget.RichTextStyle, onTap func(anchor fyne.CanvasObject)) {
 	style := fyne.TextStyle{Bold: true, Italic: em.italic, Monospace: base.TextStyle.Monospace}
 
@@ -594,10 +570,9 @@ func (b *mdBuilder) mention(text string, em emphasis, base widget.RichTextStyle,
 	}
 }
 
-// mentionName is what a mention says for a target the store cannot resolve:
-// "unknown" rather than the raw ID, which is noise wherever it lands. Lazy
-// author resolution fills a user in shortly and re-renders the message; a
-// channel the account cannot see never resolves, and reads as one it cannot see.
+// mentionName is what an unresolved target says: "unknown" rather than the raw
+// ID, which is noise wherever it lands. Lazy resolution fills a user in shortly;
+// a channel the account cannot see never resolves, and reads as one it cannot see.
 func mentionName(resolved string) string {
 	if resolved == "" {
 		return "unknown"
@@ -606,13 +581,10 @@ func mentionName(resolved string) string {
 	return resolved
 }
 
-// mentionSegment is one word of a rendered mention. A native TextSegment can
-// carry the colour but not the tap, so the word is a widget — the same trade
-// decoratedSegment makes for a decoration RichText cannot draw, and it costs the
-// same thing: RichText measures a segment it cannot read as text only to subtract
-// it, so a word here can neither break nor be broken before. Splitting per word
-// is what lets a two-word name wrap at all, and mdBuilder.reserve is what keeps
-// the one that lands at a line end from being cut off.
+// mentionSegment is one word of a rendered mention. A native TextSegment carries
+// the colour but not the tap, so the word is a widget — the same trade
+// decoratedSegment makes, at the same cost: RichText can neither break such a
+// segment nor break before it, which is what mdBuilder.reserve answers.
 type mentionSegment struct {
 	text     string
 	style    fyne.TextStyle
@@ -633,8 +605,8 @@ func (s *mentionSegment) Visual() fyne.CanvasObject {
 	return newMentionText(s.text, mentionSize(s.sizeName), s.style, s.onTap, s.onMenu)
 }
 
-// mentionSize resolves the size a mention is drawn at, which is whatever the text
-// around it is drawn at — a mention inside a heading is a heading.
+// mentionSize is whatever the text around it is drawn at — a mention inside a
+// heading is a heading.
 func mentionSize(name fyne.ThemeSizeName) float32 {
 	if name == "" {
 		name = fynetheme.SizeNameText
@@ -649,15 +621,14 @@ func (s *mentionSegment) Update(o fyne.CanvasObject) {
 	}
 }
 
-// mentionText is a rendered mention drawn as a widget: accent-coloured text that
-// opens the profile or the channel it names. A system line uses one for the name
-// it announces, which is why the size is given rather than read — that line is
-// drawn at its own.
+// mentionText is a rendered mention: accent text opening the profile or channel
+// it names. The size is given rather than read because a system line mounts one
+// at its own.
 //
 // It answers a right-click with the menu of the message it sits in. The driver
-// hands a click to the innermost object accepting one and does not walk back up
-// when that object has no answer for the button, so a tappable word in a message
-// row that did not carry the menu would be a hole in it.
+// gives a click to the innermost object accepting one and does not walk back up
+// when that object has no answer for the button, so a tappable word without the
+// menu would be a hole in the row.
 type mentionText struct {
 	tapBase
 	textObj *canvas.Text
@@ -671,12 +642,11 @@ var (
 )
 
 func newMentionText(text string, size float32, style fyne.TextStyle, onTap func(anchor fyne.CanvasObject), onMenu func(*fyne.PointEvent)) *mentionText {
-	w := &mentionText{textObj: canvas.NewText(text, theme.Colors.MentionText)}
-	w.textObj.TextSize = size
+	w := &mentionText{textObj: newText(text, theme.Colors.MentionText, size)}
 	w.textObj.TextStyle = style
 
-	// The profile card is anchored on the word, so the tap hands back the widget
-	// itself; tapBase's handler takes no argument, hence the closure.
+	// The profile card anchors on the word, so the tap hands back the widget itself;
+	// tapBase's handler takes no argument, hence the closure.
 	if onTap != nil {
 		w.onTap = func() { onTap(w) }
 	}
@@ -701,9 +671,9 @@ func (w *mentionText) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(w.textObj)
 }
 
-// Cursor keeps tapBase's hand for a mention that opens something, and the
-// ordinary pointer for one that does not: a timestamp is drawn as a highlight
-// but leads nowhere, and a hand over it would promise a click that does nothing.
+// Cursor keeps the hand for a mention that opens something and the ordinary
+// pointer for one that does not: a timestamp is drawn as a highlight but leads
+// nowhere, and a hand would promise a click that does nothing.
 func (w *mentionText) Cursor() desktop.Cursor {
 	if w.onTap == nil {
 		return desktop.DefaultCursor
@@ -728,31 +698,23 @@ func (b *mdBuilder) emoji(emojiID string, base widget.RichTextStyle) {
 	b.segs = append(b.segs, &emojiSegment{id: emojiID, url: url, side: side, images: b.deps.Emojis})
 }
 
-// emojiSide is the square an emoji is drawn in: one line of the text it sits
-// among, so one inside a heading is heading-sized as a mention is.
+// emojiSide is the square an emoji is drawn in: one line of the text around it,
+// so one inside a heading is heading-sized as a mention is.
 //
-// It is measured rather than named, and that is not only proportion. RichText
-// baseline-aligns a row as soon as its objects differ in height, and it reads the
+// Measured rather than named, and not only for proportion. RichText
+// baseline-aligns a row as soon as its objects differ in height, reading the
 // baseline of a segment it cannot measure as text as zero — so an emoji a pixel
-// taller than the words beside it is moved *down* by a whole baseline and draws
-// through the line below. Matching the line exactly is what keeps the row
-// unaligned and the emoji on it.
-//
-// It is measured here rather than read from lineHeight's memo because it has to
-// agree with the row *exactly*: the memo is keyed by size alone, so an entry it
-// answers with was not necessarily measured in the font now installed.
+// taller is moved *down* a whole baseline and draws through the line below.
+// Measured here rather than through lineHeight's memo, which is keyed by size
+// alone and so may answer from a font no longer installed.
 func emojiSide(sizeName fyne.ThemeSizeName) float32 {
 	return fyne.MeasureText("M", mentionSize(sizeName), fyne.TextStyle{}).Height
 }
 
-// emojiSegment is one custom emoji in a body. Like a mention it is a segment
-// RichText cannot read as text, so it can neither break nor be broken before —
-// hence the reserve above.
-//
-// Unlike a mention it draws nothing interactive: an emoji has nothing to open,
-// and a canvas image accepts no events, so the hover and the right-click menu
-// stay with the message row underneath it. That is the same trade an embed's
-// card makes.
+// emojiSegment is one custom emoji in a body — like a mention, a segment RichText
+// cannot read as text, hence the reserve above. Unlike a mention it draws nothing
+// interactive, so the hover and menu stay with the row underneath, the same trade
+// an embed card makes.
 type emojiSegment struct {
 	id     string
 	url    string
@@ -768,14 +730,12 @@ func (s *emojiSegment) SelectedText() string      { return "" }
 func (s *emojiSegment) Unselect()                 {}
 func (s *emojiSegment) Update(fyne.CanvasObject)  {}
 
-// Textual is empty because the picture is the whole of it: a body flattens on
-// what it renders, not on what it says, and RichText measures this segment by its
-// visual rather than by its text.
+// Textual is empty because the picture is the whole of it: RichText measures this
+// segment by its visual rather than by its text.
 func (s *emojiSegment) Textual() string { return "" }
 
-// Visual is the square the picture lands in. The square is reserved before the
-// load starts, so an emoji arriving repaints its own cell rather than re-flowing
-// the line it is in.
+// Visual is the square the picture lands in, reserved before the load starts so
+// an emoji arriving repaints its own cell rather than re-flowing the line.
 func (s *emojiSegment) Visual() fyne.CanvasObject {
 	size := fyne.NewSize(s.side, s.side)
 	frame := container.NewGridWrap(size, canvas.NewRectangle(color.Transparent))
@@ -792,9 +752,9 @@ func (b *mdBuilder) list(n *markdown.List, base widget.RichTextStyle) {
 	}
 }
 
-// listMarker is an item's indent and bullet or number, as the one run of text
-// that opens its row. The indent is spaces rather than a layout: a row here is a
-// RichText row, and the only thing that can push one in is its first segment.
+// listMarker is an item's indent and bullet or number, the one run of text that
+// opens its row. Spaces rather than a layout: the only thing that can push a
+// RichText row in is its first segment.
 func listMarker(ordered bool, item markdown.ListItem) string {
 	indent := strings.Repeat("   ", item.Indent)
 	if ordered {
@@ -811,24 +771,30 @@ type token struct {
 }
 
 // splitTokens splits s into alternating whitespace / non-whitespace runs,
-// preserving all characters.
+// preserving every character. The runs are slices of s rather than copies, and
+// the walk is in place: this runs over every text run of every rendered body.
 func splitTokens(s string) []token {
-	var toks []token
-	r := []rune(s)
-	for i := 0; i < len(r); {
-		space := unicode.IsSpace(r[i])
-		j := i
-		for j < len(r) && unicode.IsSpace(r[j]) == space {
-			j++
-		}
-		toks = append(toks, token{text: string(r[i:j]), space: space})
-		i = j
+	if s == "" {
+		return nil
 	}
-	return toks
+
+	var tokens []token
+	start, space := 0, false
+	for i, r := range s {
+		switch isSpace := unicode.IsSpace(r); {
+		case i == 0:
+			space = isSpace
+		case isSpace != space:
+			tokens = append(tokens, token{text: s[start:i], space: space})
+			start, space = i, isSpace
+		}
+	}
+
+	return append(tokens, token{text: s[start:], space: space})
 }
 
-// headingSize maps a header level to the nearest themed text size. Discord has
-// three header levels; Fyne offers two heading sizes plus the body size.
+// headingSize maps a header level to the nearest themed size: three levels onto
+// Fyne's two heading sizes plus the body size.
 func headingSize(level int) fyne.ThemeSizeName {
 	switch level {
 	case 1:
@@ -866,9 +832,8 @@ func (s *spoilerState) toggle() {
 	}
 }
 
-// decoratedSegment is one word of a strikethrough / underline / spoiler span.
-// Word-level granularity lets the span wrap; the shared spoilerState (when set)
-// keeps reveal atomic across the whole span.
+// decoratedSegment is one word of a strike / underline / spoiler span. Per-word
+// is what lets the span wrap; the shared spoilerState keeps reveal atomic.
 type decoratedSegment struct {
 	text      string
 	style     fyne.TextStyle
@@ -897,10 +862,10 @@ func (s *decoratedSegment) Update(o fyne.CanvasObject) {
 	}
 }
 
-// decoratedText draws one word with any combination of a strike line, an
-// underline and a tappable spoiler cover. It draws at its intrinsic text width
-// regardless of the size RichText gives it, so decorations never stretch to fill
-// a row; the optional bridge extends them by one space to meet the next word.
+// decoratedText draws one word with any combination of strike line, underline and
+// tappable spoiler cover, at its intrinsic width whatever size RichText gives it —
+// so a decoration never stretches to fill a row. bridge extends it one space to
+// meet the next word.
 type decoratedText struct {
 	widget.BaseWidget
 	colorName  fyne.ThemeColorName
@@ -937,9 +902,8 @@ func newDecoratedText(seg *decoratedSegment) *decoratedText {
 	}
 	if seg.state != nil {
 		w.cover = canvas.NewRectangle(theme.Colors.SwiftActionBg)
-		// Round a lone spoiler word into a pill; multi-word spoilers use square
-		// covers so adjacent (bridged) words form one continuous bar instead of
-		// pinching into notches at every word boundary.
+		// A lone word rounds into a pill; multi-word covers stay square so bridged
+		// words form one bar rather than pinching at every boundary.
 		if seg.solo {
 			w.cover.CornerRadius = 3
 		}
@@ -951,7 +915,7 @@ func newDecoratedText(seg *decoratedSegment) *decoratedText {
 }
 
 // apply copies a segment's styling onto the widget. Which decorations exist is
-// fixed per segment, so only text and styling are updated here.
+// fixed per segment, so only text and styling move.
 func (w *decoratedText) apply(seg *decoratedSegment) {
 	w.colorName = seg.colorName
 	w.sizeName = seg.sizeName
@@ -987,9 +951,8 @@ func (w *decoratedText) Tapped(*fyne.PointEvent) {
 	}
 }
 
-// TappedSecondary hands the right-click to the message, for the same reason
-// mentionText does: a word that accepts a click and has no answer for this one
-// swallows it where it stands.
+// TappedSecondary hands the right-click to the message, as mentionText does: a
+// word that accepts a click and has no answer for this one swallows it.
 func (w *decoratedText) TappedSecondary(event *fyne.PointEvent) {
 	if w.onMenu != nil {
 		w.onMenu(event)
@@ -1004,10 +967,27 @@ func (w *decoratedText) Cursor() desktop.Cursor {
 }
 
 func (w *decoratedText) CreateRenderer() fyne.WidgetRenderer {
-	return &decoratedRenderer{w: w}
+	// Text first, then decorations, then the cover last so it hides everything
+	// beneath until revealed. Which decorations exist is fixed per segment, so the
+	// list is composed once rather than on every paint.
+	objects := []fyne.CanvasObject{w.textObj}
+	if w.strikeLine != nil {
+		objects = append(objects, w.strikeLine)
+	}
+	if w.underLine != nil {
+		objects = append(objects, w.underLine)
+	}
+	if w.cover != nil {
+		objects = append(objects, w.cover)
+	}
+
+	return &decoratedRenderer{w: w, objects: objects}
 }
 
-type decoratedRenderer struct{ w *decoratedText }
+type decoratedRenderer struct {
+	w       *decoratedText
+	objects []fyne.CanvasObject
+}
 
 func (r *decoratedRenderer) Layout(fyne.Size) {
 	w := r.w
@@ -1022,8 +1002,8 @@ func (r *decoratedRenderer) Layout(fyne.Size) {
 
 	extent := min.Width
 	if w.bridge {
-		// Bridge the break-point space to the next word, plus 1px of overlap so
-		// no sub-pixel seam shows between adjacent decorations.
+		// The break-point space plus 1px, so no sub-pixel seam shows between two
+		// adjacent decorations.
 		extent += spaceWidth(size, w.textObj.TextStyle) + 1
 	}
 
@@ -1045,9 +1025,8 @@ func (r *decoratedRenderer) Layout(fyne.Size) {
 	}
 }
 
-// spaceWidths memoises the measured width of a single space per size and style,
-// so Layout doesn't re-measure for every bridged word on every pass. UI thread
-// only, hence unsynchronised.
+// spaceWidths memoises one space's width per size and style, so Layout does not
+// re-measure for every bridged word on every pass. UI thread only.
 var spaceWidths = map[spaceKey]float32{}
 
 type spaceKey struct {
@@ -1069,25 +1048,11 @@ func (r *decoratedRenderer) MinSize() fyne.Size { return r.w.MinSize() }
 
 func (r *decoratedRenderer) Refresh() {
 	r.Layout(r.w.Size())
-	for _, o := range r.Objects() {
-		canvas.Refresh(o)
+	for _, object := range r.objects {
+		canvas.Refresh(object)
 	}
 }
 
-// Objects lists the text first, then decorations, then the cover last so the
-// cover sits on top and hides everything beneath it until revealed.
-func (r *decoratedRenderer) Objects() []fyne.CanvasObject {
-	objs := []fyne.CanvasObject{r.w.textObj}
-	if r.w.strikeLine != nil {
-		objs = append(objs, r.w.strikeLine)
-	}
-	if r.w.underLine != nil {
-		objs = append(objs, r.w.underLine)
-	}
-	if r.w.cover != nil {
-		objs = append(objs, r.w.cover)
-	}
-	return objs
-}
+func (r *decoratedRenderer) Objects() []fyne.CanvasObject { return r.objects }
 
 func (r *decoratedRenderer) Destroy() {}

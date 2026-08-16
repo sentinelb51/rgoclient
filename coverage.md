@@ -5,20 +5,22 @@
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` (module cache:
 `revoltgo@v0.0.0-20260810192541-889490ef5cb5/session.go`) exposes ~110 REST methods plus the
-socket pair. The client calls **38** of them, and registers **31** of revoltgo's 49 gateway
-event types. Four routes are reached without revoltgo's types at all, because revoltgo
+socket pair. The client calls **39** of them, and registers **31** of revoltgo's 49 gateway
+event types. Six routes are reached without revoltgo's types at all, because revoltgo
 cannot express them — see *Round the typed API* below.
 
 `ChannelMessages` counts once but is now asked four ways: the newest page, `Before` into
 the cache, and `Nearby` / `After` / an uncached `Before` for a jump window, which is why
-`ChannelMessagesParams` no longer has an unused field.
+`ChannelMessagesParams` no longer has an unused field. `ChannelSearch` counts once and is
+asked two ways, `pinned` and `query`, which Revolt takes as alternatives rather than
+together.
 
 This is a map, kept so targets can be picked from it. Anything moved out of *Not covered*
 is built and working, not merely planned.
 
 ---
 
-## Covered today (38 calls)
+## Covered today (39 calls)
 
 | Area | revoltgo call | Client action |
 |---|---|---|
@@ -27,7 +29,8 @@ is built and working, not merely planned.
 | | `SessionsDeleteAll(true)` | `Client.LogoutEverywhere` |
 | This account | `UserEdit` (`Status`) | `Client.SetPresence`, `Client.SetStatusText` |
 | | `UserEdit` (`DisplayName`) | `Client.SetDisplayName` |
-| Files | `AttachmentUpload` | `uploadAttachments` (inside `SendMessage`) |
+| | `UserEdit` (`Avatar`) | `Client.SetAvatar`, `Client.RemoveAvatar` |
+| | `SetUsername` | `Client.SetUsername` (the one edit that re-authenticates) |
 | Messages | `ChannelMessageSend` | `SendMessage` |
 | | `ChannelMessageEdit` | `EditMessage` |
 | | `ChannelMessageDelete` | `DeleteMessage` |
@@ -38,6 +41,7 @@ is built and working, not merely planned.
 | | `ChannelMessages` (`Nearby`, `After`, uncached `Before`) | `MessagesAround`, `MessagesAfter`, `MessagesBefore` (jump windows) |
 | | `ChannelMessage` | `ResolveMessages` (reply targets) |
 | | `ChannelSearch` (`Pinned`) | `PinnedMessages` (the pinned-messages panel) |
+| | `ChannelSearch` (`Query`) | `SearchMessages` (channel search) |
 | Read state | `MessageAck`, `ServerAck` | `AckMessage`, `AckServer` |
 | Typing | `ChannelBeginTyping`, `ChannelEndTyping` | `BeginTyping`, `EndTyping` |
 | Channels | `Channel` | `OpenConversation` (State backfill) |
@@ -48,12 +52,15 @@ is built and working, not merely planned.
 | Relationships | `FriendAdd` | `AcceptFriend` (accepts an arrived request) |
 | | `FriendDelete` | `RemoveFriend` (unfriend, decline, withdraw) |
 | | `UserBlock` / `UserUnblock` | `BlockUser` / `UnblockUser` |
-| Servers | `ServerMembers` | `FetchMembers` |
+| Servers | `ServerCreate` | `CreateServer` (the join dialog's other half) |
+| | `ServerMembers` | `FetchMembers` |
 | | `ServerDelete` | `LeaveServer` |
 | | `ServerMemberDelete` | `KickMember` |
 | Invites | `Invite`, `InviteJoin` | `FetchInvite`, `JoinInvite` |
 | | `ChannelInviteCreate` | `CreateInvite` |
-| Raw | `HTTP.Request` → `EndpointChannel` | `FetchSlowmode` (revoltgo models no `slowmode`) |
+| Raw | `HTTP.Request` → `EndpointAutumn(bucket)` | `uploadFile` — attachments, avatars and banners alike |
+| | `HTTP.Request` → `EndpointUser` (`profile`) | `SetBio`, `SetBanner`, `RemoveBanner` |
+| | `HTTP.Request` → `EndpointChannel` | `FetchSlowmode` (revoltgo models no `slowmode`) |
 | | `HTTP.Request` → `EndpointAuthSession("login")` | `Client.Login`, `Client.AnswerMFA` |
 | | `HTTP.Request` → `EndpointUserFriend("")` | `Client.AddFriend` (revoltgo has no *send* route) |
 | | `HTTP.Request` → `EndpointUserMutual` | `Client.Mutual` (revoltgo's decodes into the wrong shape) |
@@ -69,8 +76,21 @@ answer. `NewWithLogin` and `Session.Login` are no longer called either — see b
 
 ### Round the typed API
 
-Four things the client needs are not reachable through revoltgo's types, and all go
+Six things the client needs are not reachable through revoltgo's types, and all go
 through `Session.HTTP.Request`, which takes any struct and any result.
+
+**An upload names its bucket.** `Session.AttachmentUpload` posts to Autumn's *attachments*
+bucket and nothing else, while Revolt looks a file up by ID **and** bucket at the moment it
+is used — so an attachment's ID offered as an avatar is refused as a file that does not
+exist. `uploadFile` is the same request with the bucket as an argument, which is the whole
+difference between an attachment, an avatar and a banner; `AttachmentUpload` is therefore
+no longer called at all.
+
+**A profile edit cannot carry a banner.** `UserEditParams.Profile` is a `*UserProfile`
+whose `Background` is a `*File` — the shape a profile is *read* in — where the route takes
+an attachment ID. `Client.editProfile` sends its own body, and the bio rides along in it
+rather than being sent the one way the typed API can express: one field pair sent two
+different ways is worth less than the one shape.
 
 **`slowmode`** is a field revoltgo models neither on `Channel` nor on `PartialChannel`, so
 the number never arrives with the channel and nothing announces a change. `FetchSlowmode`
@@ -113,16 +133,28 @@ Pinning needs `ManageMessages` even over your own message — a pin is a change 
 not to the message — which is why `canPin` does not fall back to authorship the way `canDelete`
 does.
 
-**Listing the pins** is the one read that has to be a *search*. Revolt publishes no
-collection of them — the pin is a flag on the message — so `ChannelSearch` asked with
-`pinned` and no query is the only route that enumerates them, and `Sort` is named because the
-route's default is `Relevance`, which with nothing to be relevant to is an order nobody chose.
-It also may not ask for the users: `include_users` turns the response from an array into an
-object and revoltgo's method decodes only the array, so `Client.PinnedMessages` hands back
-author IDs and `app/pins.go` resolves what the store cannot name, in the worker that fetched
-them. Nothing is cached — the panel is a snapshot for as long as it is up — and taking a pin
-off from it goes through `App.setPinned`, `OnPin` with a hook, the message being one the
-column need not be holding at all.
+**Creating a server** is the one action whose response says nothing. `/servers/create`
+answers with the server *and* its default channels, while `Session.ServerCreate` decodes
+into a bare `Server` — every field arrives zero, the ID included — so `Client.CreateServer`
+reports only the error and the server itself arrives as `ServerCreate` on the gateway. That
+is the path a *join* already takes for the same class of reason, so both mark `App.pendingJoin`
+and let `onServerJoined` select what turns up. A name is all Revolt takes at creation: no
+icon, no description, which is why the card is one field.
+
+**The two searches** are one route asked either way it can be. `ChannelSearch` takes
+`pinned` *or* `query` — Revolt refuses them together — so `Client.PinnedMessages` and
+`Client.SearchMessages` share `Client.search` and differ in which field they fill.
+Listing the pins has to be a search at all because Revolt publishes no collection of them,
+the pin being a flag on the message. `Sort` is named in the shared half because the route's
+default is `Relevance`, which with nothing to be relevant to is an order nobody chose, and
+which for a list read as a channel's history is not the one wanted either. Neither may ask
+for the users: `include_users` turns the response from an array into an object and revoltgo's
+method decodes only the array, so both hand back author IDs and `app/pins.go` /
+`app/search.go` resolve what the store cannot name, in the worker that fetched them.
+Nothing is cached — either panel is a snapshot for as long as it is up — and taking a pin off
+from one goes through `App.setPinned`, `OnPin` with a hook, the message being one the column
+need not be holding at all. A query is 1–64 characters, past which the route refuses rather
+than truncates, so `SearchMessages` cuts it before sending.
 
 **Logout** drops the session before it revokes, deliberately: being logged out is a local fact
 that must not wait on the network or depend on it succeeding. `Session.Logout` is a REST call,
@@ -156,6 +188,20 @@ whichever half is not being changed is read back out of `State` and sent again u
 either setter omitting the other's half being enough to destroy it. `editStatus` is that
 read-and-resend, shared by both. Clearing the line is the one change that cannot be a value:
 an empty `Text` is omitted from the request, so it goes as `Remove: ["StatusText"]`.
+
+**The picture, the profile and the username** are the rest of what an account is, and each
+is a different shape of the same edit. The **avatar** is `UserEdit` with an ID, so the file
+is uploaded first and into the *avatars* bucket — see above — and removing it is
+`Remove: ["Avatar"]`, the shape a display name already uses. The **bio and banner** are not
+on the user record at all: a profile is a request of its own, `PartialUser` carries a
+`Profile` that revoltgo's own `User.update` ignores, and no gateway event announces either
+— so `App.loadSelfProfile` asks once per session and again after every edit made here, and
+one made from another client is not seen until the page is reopened. That re-read is also
+what tells the Banner row it now has something to remove. The **username** is the one edit
+that re-authenticates: Revolt takes the account password with the new name, which is why it
+is a card on the modal layer rather than a row on a page that stays open, and why
+`validUsername` refuses a malformed name here — the server answers a name it will not take
+and one somebody else already has alike, with a status code and no sentence.
 
 **The display name** is the same route asked a third way and needs none of that: it is a
 single field and Revolt applies the edit as a partial, so `SetDisplayName` sends it alone.
@@ -231,16 +277,14 @@ users are a member of some server and nothing more.
 
 | Call(s) | What it unlocks | Also needs |
 |---|---|---|
-| `UserEdit` (`Avatar`, `Profile`), `SetUsername` | The rest of editing your own account: picture, bio, username. The name, the presence and the status line are all that can be changed from here. | An avatar needs the upload path `SendMessage` already has; a bio needs `UserProfile` fetched before the row can be filled, the account's own not being in `State`; a username change needs the password. |
-| `Emoji` (metadata by ID) | Naming an emoji the picker cannot: one from a server the account is not in renders in a message and in a chip, and `State` has no record of it. Marginal — the ID draws the picture regardless. | Somewhere to say a name; nothing tooltips one today. |
+| `Emoji` (metadata by ID) | Naming an emoji the picker cannot: one from a server the account is not in renders in a message and in a chip, and `State` has no record of it. Marginal — the ID draws the picture regardless. | Somewhere to say a name. The picker's own cells have a tooltip now, but they are the emoji this *would not* cover; naming one in a message body means making it hoverable, and it is a bare `canvas.Image` precisely so that hover and the row's menu pass through it. |
 
 ### Tier 2 — new but ordinary user-client features
 
 | Call(s) | Feature |
 |---|---|
 | `AuthMFA*` (8 calls) | **Managing** a second factor — enabling or disabling TOTP, generating and listing recovery codes. Signing *in* with one is built (see above); configuring one is not, so an account can be reached but not secured from here. |
-| `ChannelSearch` (`Query`) | Channel search. |
-| `ServerCreate`, `ServerChannelCreate`, `ChannelEdit` | `App.createServer` (a named gap), channel create and rename. `EventChannelCreate`/`Update` are handled, so the results would already reflect. |
+| `ServerChannelCreate`, `ChannelEdit` | Channel create and rename. `EventChannelCreate`/`Update` are handled, so the results would already reflect. |
 | `ServerInvites`, `InviteDelete` | Listing and revoking a server's invites. Creating one is built; nothing can see or withdraw them afterwards, and Revolt offers no expiry or use limit to set at creation either. |
 | `GroupCreate`, `GroupMemberAdd` / `Delete`, `GroupMembers` | Group DMs beyond viewing one. |
 | `SyncUnreads` | Refreshing unread state after a resume; only Ready carries it now. |
@@ -333,6 +377,16 @@ channel visit rather than trusting the event now that the event is listened to.
   is a flattened one-line summary and leads to the message; a body with no text says what it
   carries instead. It is capped at the hundred newest, Revolt's own ceiling on a search, with
   no way to page past it.
+- **Channel search is that panel with a query**, and inherits all of it: a snapshot, the
+  hundred newest matches with no paging, one-line summaries, and the open channel alone —
+  there is no search across a server, Revolt's route being per channel. It asks on Enter
+  rather than as you type, since each query is a request. Revolt's matching is MongoDB's
+  full-text search, so it is words rather than substrings: half a word finds nothing, and
+  what counts as a word is the server's business.
+- **A reaction now says who**, on hover, and only as far as the store can name them: a
+  chip's tooltip is `domain.Reaction.Users` folded through `Store.UserName`, so anybody the
+  client has never fetched is counted rather than named. It names the first ten and counts
+  the rest.
 - **An unpin made from another client is believed only through its system message.** If
   Revolt ever stops emitting one, the flag would go stale until the channel is re-fetched;
   the partial update alongside it cannot be read for the reason given above.
@@ -343,6 +397,21 @@ channel visit rather than trusting the event now that the event is listened to.
   what the store last said rather than what was just typed, the change returning as a
   gateway event that does not rebuild the page. Over `MaxStatusText` is truncated by rune
   rather than refused, the limit being Revolt's.
+- **An account is edited whole, except for the parts Revolt does not send back.** The
+  picture, the banner, the description, the display name, the presence, the status line and
+  the username can all be changed from the Account section. What that section cannot do is
+  *follow* two of them: nothing announces a bio or a banner, so both are a snapshot asked
+  for once per session and re-read after each edit made here. Nothing checks a picture
+  before it is uploaded either — Autumn owns the size and the type, and a refusal is a
+  status code — so the notice can only offer "it may be too large". `pronouns` is a field
+  Revolt takes and revoltgo models nowhere, so it is neither read nor set.
+  The section is **rebuilt** when a user update moves the picture or the handle, and
+  deliberately not when it moves the display name: that field is on the same section and
+  Enter leaves the cursor in it, so an echo would rebuild the page under whoever was typing.
+- **A username change cannot say why it failed.** Revolt answers a name somebody else
+  already has and a wrong password alike, with a status code and a body revoltgo formats
+  into a string, so the card names both possibilities rather than guessing between them.
+  What it *can* answer for is the pattern, which `validUsername` holds a copy of.
 - **A second factor is a code, and only a code.** Signing in with TOTP, a recovery code or a
   password challenge works; nothing enables, disables or lists one (`AuthMFA*`, Tier 2). A
   security key is refused by `answerFor` rather than offered — Revolt names the method, and
@@ -355,18 +424,17 @@ channel visit rather than trusting the event now that the event is listened to.
   an edit, a pin or a reaction made while a jump is showing does not reflect until "Jump
   to present" brings the tail back. A delete does, `removeMessages` walking the mounted
   widgets instead. There is no way back to the *position* the jump left, only to the tail.
-  The pinned-messages panel is now a second way in — a row leads to its message the way a
-  quote does — and channel search would be a third.
+  The pinned-messages panel and channel search are the second and third ways in — a row in
+  either leads to its message the way a quote does.
   A quote that resolved to nothing is not tappable, a failed fetch keeping its guard rather
   than releasing it the way an author's does — the usual reason is that the message was
   deleted, which stays true, and a quote remounts on every scroll past it. So a quote
   missed through a dropped connection keeps its placeholder, and stays a dead end, until
   the channel is reopened.
-- **A reaction says how many, not who.** The names are carried (`domain.Reaction.Users`) and
-  what is drawn is a count; a chip has no tooltip to name them in. The chips are ordered by
-  emoji rather than by who reacted first, there being no first in a JSON object, so a busy
-  message reads in an order nobody chose. **A clear made from another client does not
-  reflect**, for the reason above — the update announcing it cannot be told from an edit.
+- **A reaction draws a count and names who on hover.** The chips are ordered by emoji rather
+  than by who reacted first, there being no first in a JSON object, so a busy message reads
+  in an order nobody chose. **A clear made from another client does not reflect**, for the
+  reason above — the update announcing it cannot be told from an edit.
 - **A confirmation is skipped by holding Shift, on Windows only.** Fyne answers no question
   about a modifier outside an event it delivers: a canvas key handler fires only while
   nothing holds focus, and a context-menu item reports no modifiers at all — so `ui.ShiftHeld`

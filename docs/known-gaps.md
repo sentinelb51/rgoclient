@@ -4,15 +4,14 @@ What is not built, and what is limited by revoltgo or Fyne rather than by
 effort. Linked from the root `CLAUDE.md`; read it before concluding something
 is missing by accident.
 
-Simply not built, no constraint behind it: `App.createServer`,
-an attach button (files arrive by drag or paste), nothing listing who is in a
-reaction, role mentions, a notice history panel,
+Simply not built, no constraint behind it: an attach button (files arrive by drag
+or paste), role mentions, a notice history panel,
 code-block highlighting, a hue wheel/alpha/eyedropper in the colour picker,
-`MessageEmbedSpecial` (YouTube, Spotify, …), channel search (`ChannelSearch`
-with a query), listing or revoking the invites this client can now
-create (`ServerInvites` / `InviteDelete`), and moderation beyond the three
-destructive sidebar items (banning, role edits, nicknames, channel deletion are
-one call away but deliberately not offered).
+`MessageEmbedSpecial` (YouTube, Spotify, …), creating or renaming a channel
+(`ServerChannelCreate` / `ChannelEdit`), listing or revoking the invites this
+client can now create (`ServerInvites` / `InviteDelete`), and moderation beyond
+the three destructive sidebar items (banning, role edits, nicknames, channel
+deletion are one call away but deliberately not offered).
 
 The gateway events still unregistered are the ones nothing here has to do about:
 `EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
@@ -59,8 +58,8 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   is up does not reflect until the column comes back to the present. A delete does,
   `removeMessages` walking the mounted widgets rather than the cache. Live messages
   do not mount either, which is the behaviour any detached scrollback already has.
-  The pinned-messages panel is the second thing that opens one; channel search
-  would be a third. There is no way back to where the reader *was* — "Jump to
+  The pinned-messages panel and channel search are the second and third things
+  that open one. There is no way back to where the reader *was* — "Jump to
   present" is the tail, not the position the jump left.
 - **The pinned-messages panel is a snapshot.** A pin is a flag on the message and
   Revolt publishes no collection of them, so the panel is one `ChannelSearch`
@@ -72,6 +71,23 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   capped at the hundred newest pins, Revolt's own ceiling on a search, with no way
   to page past it, and a row is a flattened one-line summary — a body with no text
   says what it carries instead of quoting nothing.
+- **Channel search is that panel with a query and inherits every one of those
+  limits**, plus two of its own. It searches the **open channel** only: Revolt's
+  route is per channel, so there is no search across a server, let alone across
+  the account. And the matching is MongoDB's full-text search rather than a
+  substring scan — words, not fragments, with what counts as a word decided by
+  the server — so half a word finds nothing and there is no way to ask for a
+  phrase. A query is 1–64 characters (a longer one is cut before it is sent), it
+  runs on Enter rather than as you type since each one is a request, and results
+  come back newest first: `Relevance` is the route's default and is not asked for,
+  a list that leads into a channel's history reading better in the order that
+  history has.
+- **A server is created with a name and nothing else.** Revolt takes no icon and
+  no description at creation, so the card is one field; the icon has to be set
+  from another client, `ServerEdit` being moderation and deliberately not offered.
+  Nothing in the response can be believed either (see the revoltgo note), so the
+  new server appears when the gateway says so rather than when the request
+  returns.
 - **A composed mention** stays a visible `<@id>` until sent — Fyne can't draw a chip
   inside an entry, and mapping names back to IDs at send time breaks on duplicates.
   `markdown.PlainText` has no session, so a reply preview of a message opening with
@@ -119,10 +135,13 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the field is the only way through — and it lists only what `State` holds, which
   is the servers the account is in: an emoji from anywhere else renders in a
   message and in a chip but is in nothing to be picked from.
-- **A reaction says how many, not who.** The names are in `domain.Reaction.Users`
-  and nothing draws them: a chip has no tooltip, so a reaction is a number.
-  Ordering is by emoji rather than by who reacted first — the payload is a map,
-  and there is no first to read. **Clearing them all is offered but only reflects
+- **A reaction says how many, and who only on hover.** The chip draws a count and
+  its tooltip names the first ten people in `domain.Reaction.Users`; anybody the
+  store cannot name is counted rather than named, which for a reaction reaching
+  accounts nothing on the page has fetched is the ordinary case, and nothing
+  fetches them for the sake of a label. Ordering is by emoji rather than by who
+  reacted first — the payload is a map, and there is no first to read. **Clearing
+  them all is offered but only reflects
   when this client does it:** Revolt announces a clear as a message update
   carrying an empty reaction map, and revoltgo's `EventMessageUpdate.Data` is a
   whole `Message`, so an empty map is also what an ordinary content edit brings —
@@ -183,8 +202,17 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   status text, this account's included, so the settings row is the only place it
   appears and it shows what the store last said rather than what was just typed:
   the change returns as a gateway event, and the page is not rebuilt for one.
-  Editing anything else about the account — display name, username, avatar,
-  profile — is unbuilt (`UserEdit`, `SetUsername`).
+- **A picture is sent as it is, and a profile is a snapshot.** Nothing is checked
+  about a file before it is uploaded: Autumn owns the size limit and the accepted
+  types, and a refusal arrives as a status code, so the notice can only offer
+  "it may be too large". The bio and the banner are not on the user record —
+  `PartialUser` carries a `Profile` that revoltgo's own `User.update` ignores, so
+  no event announces either — which makes them a request asked once per session
+  and again after each edit made here; one made from another client appears when
+  the page is reopened. The banner is not previewed in the row that sets it, and
+  a *username* refusal cannot be told apart: Revolt answers a taken name and a
+  wrong password alike. Revolt's `pronouns` is modelled by neither revoltgo's
+  `User` nor its edit params, so it is neither read nor set.
 - **A second factor is a code, and only a code.** `AuthMFA*` beyond the login
   itself is uncovered: nothing enables or disables 2FA, generates recovery codes
   or lists them (`AuthMFAGenerateTOTPSecret`, `AuthMFARecoveryCodes`), so an
@@ -208,3 +236,10 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - `ui.NewInviteCardFor` — the entry point for a caller already holding a resolved
   `domain.Invite` — is built and unreferenced. The join dialog still validates a
   pasted code without previewing what it opens, which is what it is for.
+- **`ui.TestAttachmentViewerFits` is intermittently flaky**, roughly one run in
+  fifteen. `ui.viewerText` starts a goroutine that fetches the file and calls
+  `DoOnUI`, and Fyne's *test* driver runs that work concurrently with the test
+  rather than serialising it onto a UI thread — so it races the harness inside
+  `go-text`'s unsynchronised font-shaper LRU (`concurrent map writes`) or Fyne's
+  own `RichText` row bounds. Nothing is wrong with the widget: the real driver has
+  one UI thread and `DoFromGoroutine` queues onto it. Re-run the package.

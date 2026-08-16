@@ -30,6 +30,11 @@ type Deps struct {
 	Emojis  *cache.ImageCache // custom emoji, kept in a pool of their own
 	Texts   *cache.TextCache  // text-attachment previews
 	Actions MessageActions    // user-interaction callbacks
+
+	// Tooltip is the app's floating label, the one layer that can overhang a
+	// widget's column. The widget's to show and hide: where a label goes is a
+	// question about the thing being hovered.
+	Tooltip *Tooltip
 }
 
 // MessageActions handles the user interactions that originate from widgets. It
@@ -54,11 +59,10 @@ type MessageActions interface {
 	// gateway, so nothing is expected back.
 	OnJoinInvite(code string)
 
-	// ResolveInvite fills in what an invite code opens. Alone among the reads it
-	// is a request rather than a cache lookup — an invite names a server the
-	// account is by definition not in — so the answer arrives through done,
-	// called on the UI thread. The controller is expected to remember it, since
-	// the same card remounts on every scroll past it.
+	// ResolveInvite fills in what an invite code opens. Alone among the reads it is
+	// a request rather than a lookup — an invite names a server the account is by
+	// definition not in — so the answer arrives through done, on the UI thread. The
+	// controller remembers it: the same card remounts on every scroll past it.
 	ResolveInvite(code string, done func(domain.Invite, error))
 
 	OnAttachmentTapped(attachment *domain.File)
@@ -71,51 +75,43 @@ type MessageActions interface {
 	// and re-deriving it in the controller could only disagree.
 	OnPin(message *domain.Message, pinned bool)
 
-	// OnReact adds or removes this account's reaction, for the same reason
-	// stated either way: the chip that raised it has already read whether the
-	// account is in that reaction, having drawn itself from it.
+	// OnReact adds or removes this account's reaction, stated either way for the
+	// same reason: the chip has already read whether the account is in it.
 	OnReact(message *domain.Message, emoji string, add bool)
 
-	// OnClearReactions takes every reaction off a message, which is a moderator's
-	// action rather than a reader's — one request where unreacting for everybody
-	// would be one per person per emoji.
+	// OnClearReactions takes every reaction off a message — a moderator's action,
+	// one request where unreacting for everybody is one per person per emoji.
 	OnClearReactions(message *domain.Message)
 
 	// OnPickEmoji opens the emoji picker beside anchor and reports what is chosen.
-	// The controller opens it rather than the caller because what is on offer is a
-	// walk of every server the account is in, ordered around the open one — which
-	// no widget knows and none should have to ask.
+	// The controller opens it because what is on offer is a walk of every server the
+	// account is in, ordered around the open one, which no widget knows.
 	OnPickEmoji(anchor fyne.CanvasObject, onPick func(EmojiChoice))
 
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message
 
-	// OnJumpToMessage brings a message into view, which for one older than
-	// anything mounted means fetching the page around it. Unlike ResolveMessage
-	// the caller is not told whether it worked: what a jump does about a message
-	// that cannot be found is the controller's to say.
+	// OnJumpToMessage brings a message into view, fetching the page around one older
+	// than anything mounted. Unlike ResolveMessage the caller is not told whether it
+	// worked: what a jump does about a message it cannot find is the controller's.
 	OnJumpToMessage(channelID, messageID string)
 }
 
 /* UI thread */
 
-// DoOnUI schedules fn on the Fyne UI thread and returns immediately. Widgets may
-// only be touched from that thread, so every background callback in this package
-// funnels through here.
-//
-// App.doOnUI is the controller's equivalent and can also block until fn returns;
-// internal/cache reaches the driver directly, since it cannot import this
-// package.
+// DoOnUI schedules fn on the Fyne UI thread and returns at once — every
+// background callback in this package funnels through here. App.doOnUI is the
+// controller's equivalent and can also block; internal/cache reaches the driver
+// directly, being unable to import this package.
 func DoOnUI(fn func()) {
 	fyne.CurrentApp().Driver().DoFromGoroutine(fn, false)
 }
 
 /* Icons */
 
-// newScaledIcon builds a smoothly scaled image for a resource. A positive side
-// pins it to that square minimum; zero leaves it free to take whatever its
-// parent gives. Every icon-bearing widget here draws through this, so they share
-// one fill and scale policy.
+// newScaledIcon is a smoothly scaled image for a resource, pinned to a square
+// minimum by a positive side and free to fill its parent at zero. Every
+// icon-bearing widget here draws through it, so they share one scale policy.
 func newScaledIcon(res fyne.Resource, side float32) *canvas.Image {
 	icon := canvas.NewImageFromResource(res)
 	icon.FillMode = canvas.ImageFillContain
@@ -134,18 +130,14 @@ func newScaledIcon(res fyne.Resource, side float32) *canvas.Image {
 // substitution in the source instead.
 const iconStroke = "#ffffff"
 
-// tintedIcons memoises the substitution below. Every message row asks for its
-// marks as it is built, and the answer depends only on the pair, so a channel of
-// system events would otherwise rewrite the same handful of files a hundred times.
-// UI thread only, like the measurement caches.
+// tintedIcons memoises the substitution below — every message row asks for its
+// marks as it is built. UI thread only, like the measurement caches.
 var tintedIcons = map[string]fyne.Resource{}
 
-// tintedIcon recolours one of the client's own stroked marks. The colour is part
-// of the resource's name because Fyne caches a rasterised SVG under it: two
-// resources sharing a name would share one raster, and the second colour asked
-// for would come back as the first. That name is also this cache's key, so a
-// restyle — which changes the colour, hence the name — misses it rather than
-// handing back what the palette used to say.
+// tintedIcon recolours one of the client's stroked marks. The colour is part of
+// the resource's *name* because Fyne caches a rasterised SVG under it, so two
+// resources sharing a name would share one raster. That name is also this cache's
+// key, so a restyle misses rather than returning what the palette used to say.
 func tintedIcon(res fyne.Resource, c color.Color) fyne.Resource {
 	hex := theme.Hex(c)
 	name := hex + "-" + res.Name()
@@ -178,16 +170,12 @@ func ShowContextMenu(anchor fyne.CanvasObject, items []*fyne.MenuItem, pos fyne.
 	newContextMenu(fyne.NewMenu("", items...), c).ShowAtPosition(pos)
 }
 
-// contextMenu is Fyne's menu wearing the client's hairline.
-//
-// widget.PopUpMenu paints its background from inside the menu's own renderer,
-// which nothing outside can reach to add a stroke to — and the menu's
-// constructor pins its impl, so the renderer cannot be composed the way
-// ObservableScroll composes the scroll's. The menu therefore goes in a plain
-// PopUp with the border stacked over it, and what PopUpMenu did *around* the
-// menu is done here: keeping it inside the canvas, since a PopUp shows wherever
-// it is put, half off the edge included, and the key handling, which is exported
-// Menu calls throughout.
+// contextMenu is Fyne's menu wearing the client's hairline. widget.PopUpMenu
+// paints its background inside the menu's own renderer, which nothing outside can
+// reach, and NewMenu pins the impl so the renderer cannot be composed the way
+// ObservableScroll composes the scroll's. The menu therefore goes in a plain PopUp
+// with the border stacked over it, and what PopUpMenu did *around* the menu is
+// done here: clamping into the canvas, and the key handling — exported Menu calls.
 type contextMenu struct {
 	widget.BaseWidget
 
@@ -270,10 +258,9 @@ func AnchorBelow(obj fyne.CanvasObject) fyne.Position {
 	return fyne.NewPos(pos.X, pos.Y+obj.Size().Height)
 }
 
-// showMenuHook pops the items hook supplies at the cursor. It is what the
-// sidebar widgets' exported Menu fields are wired to: the items themselves are
-// the controller's business, and building them on demand keeps the menu in step
-// with state that changed since the row was mounted. A nil hook is a no-op.
+// showMenuHook pops the items hook supplies at the cursor — what the sidebar
+// widgets' Menu fields are wired to. Building them on demand keeps the menu in
+// step with state that moved since the row was mounted. A nil hook is a no-op.
 func showMenuHook(anchor fyne.CanvasObject, hook func() []*fyne.MenuItem, event *fyne.PointEvent) {
 	if hook == nil {
 		return
@@ -294,12 +281,10 @@ func CopyToClipboard(text string) {
 // are drawn from plainer parts and ask for themselves.
 func openURL(raw string) {
 	link, err := url.Parse(raw)
-	if err != nil {
-		log.Printf("open %s: %v", raw, err)
-		return
+	if err == nil {
+		err = fyne.CurrentApp().OpenURL(link)
 	}
-
-	if err := fyne.CurrentApp().OpenURL(link); err != nil {
+	if err != nil {
 		log.Printf("open %s: %v", raw, err)
 	}
 }
@@ -311,11 +296,10 @@ func openURL(raw string) {
 // — collapsing the caret to nothing with it.
 const caretWidth = 2
 
-// caretTheme restores a visible caret inside a single entry without bringing the
-// outline back: it reports a non-zero input border (the caret width) and turns
-// both border stroke colours transparent. The caret stays accent-coloured
-// because Fyne paints it with the application theme's Primary, while the border
-// strokes with the widget-scoped Primary overridden here.
+// caretTheme restores a visible caret in one entry without bringing the outline
+// back: a non-zero input border with both border strokes transparent. The caret
+// keeps its accent because Fyne paints it from the *application* theme's Primary,
+// where the strokes take the widget-scoped one overridden here.
 type caretTheme struct{ fyne.Theme }
 
 func (t *caretTheme) Size(name fyne.ThemeSizeName) float32 {

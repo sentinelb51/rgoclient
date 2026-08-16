@@ -85,10 +85,7 @@ func (c *MessageCache) Set(channelID string, page []*domain.Message) []*domain.M
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	messages := chronological(page)
-	if len(messages) > c.maxMessages {
-		messages = messages[len(messages)-c.maxMessages:]
-	}
+	messages := c.trimmed(chronological(page))
 
 	c.byChannel[channelID] = messages
 	c.touch(channelID)
@@ -106,12 +103,8 @@ func (c *MessageCache) Prepend(channelID string, page []*domain.Message) []*doma
 	defer c.mu.Unlock()
 
 	older := chronological(page)
-	messages := append(older, c.byChannel[channelID]...)
-	if len(messages) > c.maxMessages {
-		messages = messages[len(messages)-c.maxMessages:]
-	}
 
-	c.byChannel[channelID] = messages
+	c.byChannel[channelID] = c.trimmed(append(older, c.byChannel[channelID]...))
 	c.touch(channelID)
 
 	return older
@@ -129,15 +122,20 @@ func (c *MessageCache) Append(channelID string, message *domain.Message) *domain
 		prev = existing[len(existing)-1]
 	}
 
-	messages := append(c.byChannel[channelID], message)
-	if len(messages) > c.maxMessages {
-		messages = messages[1:]
-	}
-
-	c.byChannel[channelID] = messages
+	c.byChannel[channelID] = c.trimmed(append(c.byChannel[channelID], message))
 	c.touch(channelID)
 
 	return prev
+}
+
+// trimmed drops the oldest messages past the per-channel cap. Reslicing rather
+// than copying is safe because every caller passes a slice it has just grown.
+func (c *MessageCache) trimmed(messages []*domain.Message) []*domain.Message {
+	if len(messages) <= c.maxMessages {
+		return messages
+	}
+
+	return messages[len(messages)-c.maxMessages:]
 }
 
 // Remove deletes a message from a channel, reporting whether it was present. The
@@ -205,10 +203,8 @@ func (c *MessageCache) Clear() {
 // chronological reverses an API page (newest first) into a new oldest-first
 // slice, leaving the input untouched.
 func chronological(page []*domain.Message) []*domain.Message {
-	messages := make([]*domain.Message, len(page))
-	for i, m := range page {
-		messages[len(page)-1-i] = m
-	}
+	messages := slices.Clone(page)
+	slices.Reverse(messages)
 
 	return messages
 }

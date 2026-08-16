@@ -18,8 +18,13 @@ import (
 
 /* Server icons */
 
-// serverHoverGrowth is how much a server icon grows when hovered or selected.
-const serverHoverGrowth = 1.1
+const (
+	// serverHoverGrowth is how much a server icon grows when hovered or selected.
+	serverHoverGrowth = 1.1
+
+	// categoryTitleSize is the caption over a group of channels.
+	categoryTitleSize = 13
+)
 
 // ServerWidget is a circular server icon that grows and recolours when hovered
 // or selected, and wears the same selection bar on its left edge as the channel
@@ -38,8 +43,8 @@ type ServerWidget struct {
 	marker      *canvas.Rectangle
 	iconWrapper *fyne.Container
 
-	// baseLayout and grownLayout size the icon at rest and when hovered or
-	// selected; built once so hovering doesn't allocate a layout per event.
+	// The icon's size at rest and when hovered or selected, built once so hovering
+	// allocates no layout per event.
 	baseLayout  fyne.Layout
 	grownLayout fyne.Layout
 
@@ -71,8 +76,8 @@ func NewServerWidget(images *cache.ImageCache, server domain.Server, onTap func(
 	return w
 }
 
-// SetSelected updates the selection state. Unchanged state is a no-op, so a
-// sidebar-wide sync only repaints the icons that actually changed.
+// SetSelected updates the selection. A no-op when unchanged, so a sidebar-wide
+// sync only repaints what moved.
 func (w *ServerWidget) SetSelected(selected bool) {
 	if w.selected == selected {
 		return
@@ -85,15 +90,7 @@ func (w *ServerWidget) SetSelected(selected bool) {
 func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	iconSize := fyne.NewSize(theme.Sizes.ServerIconSize, theme.Sizes.ServerIconSize)
 
-	initial := ""
-	if len(w.Server.Name) > 0 {
-		initial = string(w.Server.Name[0])
-	}
-	label := canvas.NewText(initial, theme.Colors.TextPrimary)
-	label.TextStyle = fyne.TextStyle{Bold: true}
-	label.Alignment = fyne.TextAlignCenter
-
-	icon := container.NewStack(w.background, container.NewCenter(label))
+	icon := container.NewStack(w.background, container.NewCenter(newInitial(w.Server.Name)))
 	if w.Server.IconURL != "" {
 		w.images.LoadIntoContainer(w.Server.IconID, w.Server.IconURL, iconSize, icon, true, w.background)
 	}
@@ -107,8 +104,7 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	w.refreshAppearance()
 
 	// The bar is flush with the rail's left edge, so it is laid out apart from the
-	// icon rather than beside it: an HBox pins it left and stretches it to the row,
-	// the Center inside gives it back its own height, centred on the icon.
+	// icon: the HBox pins it left, the Center inside gives it back its own height.
 	markerRow := container.NewHBox(container.NewCenter(w.marker))
 
 	return widget.NewSimpleRenderer(container.NewStack(markerRow, container.NewCenter(w.iconWrapper)))
@@ -189,12 +185,11 @@ var (
 	_ desktop.Hoverable      = (*ChannelWidget)(nil)
 )
 
-// NewChannelWidget creates a channel row. The name and what precedes it are
-// already resolved on the channel — a DM has no name of its own, and the store
-// is what turned it into the other participant.
+// NewChannelWidget creates a channel row. The name is already resolved on the
+// channel — a DM has none of its own, and the store is what turned it into the
+// other participant.
 func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelWidget {
-	label := canvas.NewText(channel.Name, theme.Colors.CategoryText)
-	label.TextSize = theme.Sizes.ChannelLabelSize
+	label := newText(channel.Name, theme.Colors.CategoryText, theme.Sizes.ChannelLabelSize)
 	label.Alignment = fyne.TextAlignLeading
 
 	height := theme.Sizes.ChannelItemHeight
@@ -211,9 +206,8 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 		leading:            channelLeading(deps, channel),
 		height:             height,
 		label:              label,
-		// Wrapped here rather than in CreateRenderer, which Fyne may run again
-		// after a renderer is dropped: by then the label holds the shortened text,
-		// and wrapping that would take the full name to be whatever survived.
+		// Wrapped here rather than in CreateRenderer, which Fyne may run again after
+		// a renderer is dropped: by then the label holds the shortened text.
 		labelBox: NewEllipsisText(label),
 	}
 
@@ -226,8 +220,7 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 	return w
 }
 
-// SetState updates selection and unread together. Unchanged state is a no-op, so
-// a sidebar-wide sync only repaints the rows that actually changed.
+// SetState updates selection and unread together, a no-op when unchanged.
 func (w *ChannelWidget) SetState(selected, unread bool) {
 	if w.selected == selected && w.unread == unread {
 		return
@@ -239,21 +232,18 @@ func (w *ChannelWidget) SetState(selected, unread bool) {
 	w.Refresh()
 }
 
-// SetTyping marks the row as one somebody is composing in. It is separate from
-// SetState rather than a third argument to it because every caller of that pair
-// depends on its no-op guard, and typing arrives on its own schedule. Carries the
-// same guard: the mark is idle for the life of most rows.
+// SetTyping marks the row as one somebody is composing in. Separate from SetState
+// because every caller of that pair depends on its no-op guard, and typing
+// arrives on its own schedule.
 func (w *ChannelWidget) SetTyping(typing, animate bool) {
 	w.typing, w.animate = typing, animate
 	w.applyTyping()
 }
 
 // Hide and Show carry the mark's animation with the row. A collapsed category
-// hides its channels, and Fyne's Visible() is per object rather than per tree — so
-// a mark left running inside one goes on moving its rectangles sixty times a
-// second, and every one of those moves asks the canvas to repaint something
-// nobody can see. What the row was told is kept, so opening the category again
-// puts the sweep back without waiting for the next event.
+// hides its channels, and Visible() is per object rather than per tree, so a mark
+// left running would repaint something nobody can see sixty times a second. What
+// the row was told is kept, so re-opening puts the sweep back at once.
 func (w *ChannelWidget) Hide() {
 	w.typingMark.SetActive(false, false)
 	w.BaseWidget.Hide()
@@ -276,11 +266,9 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// HBox so it keeps its own narrower width and stays left-aligned.
 	indicators := container.NewStack(w.selectionIndicator, container.NewHBox(w.unreadIndicator))
 
-	// The name takes the leftover width rather than its natural width: a long DM
-	// title would otherwise widen the whole channel column.
-	// The typing mark rides in the row's right gutter, which held nothing but that
-	// gap before: hidden it costs the row no width, and it is the one place a mark
-	// reads as something other than the unread bar at the opposite edge.
+	// The name takes the leftover width, or a long DM title widens the column. The
+	// typing mark rides in the right gutter, which held nothing but that gap: hidden
+	// it costs no width, and it cannot be read as the unread bar at the other edge.
 	content := container.NewBorder(nil, nil,
 		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
 		HBoxNoSpacing(container.NewCenter(w.typingMark), HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
@@ -331,13 +319,10 @@ func (w *ChannelWidget) MouseOut() { w.refreshAppearance() }
 
 /* Channel categories */
 
-// CategoryWidget is a collapsible category header. Toggling it shows or hides
-// the channel widgets registered through SetChannels.
-//
-// Through tapBase it accepts a right-click and does nothing with it, having no
-// menu of its own. That is the same outcome as refusing one — nothing above it in
-// the channel column answers a right-click either — but it is the innermost
-// object, so it is worth knowing that the event stops here.
+// CategoryWidget is a collapsible category header, toggling the channel widgets
+// registered through SetChannels. Through tapBase it accepts a right-click and,
+// having no menu, does nothing with it — the same outcome as refusing one, but
+// worth knowing the event stops here.
 type CategoryWidget struct {
 	tapBase
 	title    string
@@ -392,12 +377,8 @@ func (w *CategoryWidget) applyCollapsed() {
 	w.indicator.Objects = []fyne.CanvasObject{drawIndicator(!w.collapsed)}
 	w.indicator.Refresh()
 
-	for _, ch := range w.channels {
-		if w.collapsed {
-			ch.Hide()
-		} else {
-			ch.Show()
-		}
+	for _, channel := range w.channels {
+		showIf(channel, !w.collapsed)
 	}
 
 	if w.channelHost != nil {
@@ -415,9 +396,7 @@ func (w *CategoryWidget) MinSize() fyne.Size {
 }
 
 func (w *CategoryWidget) CreateRenderer() fyne.WidgetRenderer {
-	title := canvas.NewText(w.title, theme.Colors.CategoryText)
-	title.TextStyle = fyne.TextStyle{Bold: true}
-	title.TextSize = 13
+	title := newBoldText(w.title, theme.Colors.CategoryText, categoryTitleSize)
 
 	indicatorRow := container.NewHBox(w.indicator, HorizontalSpacer(8))
 	content := container.NewBorder(nil, nil, title, indicatorRow, nil)
@@ -469,8 +448,8 @@ func (r *categoryRenderer) Destroy()                     {}
 
 /* Drawn glyphs */
 
-// drawIndicator renders a category's expand/collapse glyph: a minus when
-// expanded, a plus when collapsed.
+// drawIndicator is a category's expand/collapse glyph: a minus when expanded, a
+// plus when collapsed.
 func drawIndicator(expanded bool) fyne.CanvasObject {
 	const pad = 3
 
@@ -495,17 +474,15 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
-// avatarLed reports whether a channel's row is led by a picture rather than by a
-// glyph, which is also what makes it the taller card. Every conversation but
-// Saved Notes is: that one is the account's own, so its picture would be this
-// user's avatar standing in for a notepad.
+// avatarLed reports whether a row is led by a picture rather than a glyph, which
+// is also what makes it the taller card. Every conversation but Saved Notes,
+// whose picture would be this account's own avatar standing in for a notepad.
 func avatarLed(kind domain.ChannelKind) bool {
 	return kind.IsConversation() && kind != domain.ChannelSavedMessages
 }
 
-// channelLeading returns what precedes a channel's name in its sidebar row: a
-// conversation is led by its avatar, everything else by its type glyph. Centred,
-// because the row is taller than either.
+// channelLeading is what precedes a channel's name in its row: a conversation's
+// avatar, or the type glyph. Centred, the row being taller than either.
 func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
 	if !avatarLed(channel.Kind) {
 		return ChannelGlyph(channel.Kind)
@@ -517,11 +494,9 @@ func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
 	return container.NewCenter(avatar)
 }
 
-// ChannelGlyph returns the glyph that prefixes a channel's name, both in the
-// sidebar row and in the message-area header: "#" for a server text channel, a
-// speaker for a voice one, "@" for a direct message, and a two-head mark for a
-// group. Anything else — including the zero value, meaning nothing is selected
-// yet — falls back to the hashtag.
+// ChannelGlyph prefixes a channel's name in the sidebar row and the message
+// header. Anything unrecognised — the zero value included, meaning nothing is
+// selected yet — falls back to the hashtag.
 func ChannelGlyph(kind domain.ChannelKind) fyne.CanvasObject {
 	switch kind {
 	case domain.ChannelVoice:
@@ -537,85 +512,62 @@ func ChannelGlyph(kind domain.ChannelKind) fyne.CanvasObject {
 	return HashtagIcon()
 }
 
-// HashtagIcon returns a drawn "#" glyph used to prefix channel names.
+// glyphScale is the factor taking the 20-unit grid to the square a channel mark
+// is drawn in.
+func glyphScale() float32 { return theme.Sizes.HashtagIconSize / 20 }
+
+// tintedGlyph is one of the client's own marks standing in for a drawn one, in
+// the drawn glyphs' colour so the set reads as one. Used where the shape is more
+// strokes than it is worth in canvas objects.
+func tintedGlyph(res fyne.Resource) fyne.CanvasObject {
+	return glyphBox(newScaledIcon(tintedIcon(res, theme.Colors.HashtagIcon), theme.Sizes.HashtagIconSize))
+}
+
+// HashtagIcon is the drawn "#" prefixing channel names.
 func HashtagIcon() fyne.CanvasObject {
-	col := theme.Colors.HashtagIcon
-	size := theme.Sizes.HashtagIconSize
-	scale := size / 20
+	line := glyphLine(theme.Colors.HashtagIcon, glyphScale())
 
-	line := func(x1, y1, x2, y2 float32) *canvas.Line {
-		l := canvas.NewLine(col)
-		l.Position1 = fyne.NewPos(x1*scale, y1*scale)
-		l.Position2 = fyne.NewPos(x2*scale, y2*scale)
-		l.StrokeWidth = 2 * scale
-		return l
-	}
-
-	glyph := container.NewWithoutLayout(
+	return glyphBox(container.NewWithoutLayout(
 		line(7, 2, 7, 18),
 		line(13, 2, 13, 18),
 		line(2, 7, 18, 7),
 		line(2, 13, 18, 13),
-	)
-
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), glyph))
+	))
 }
 
-// AtIcon returns the "@" glyph prefixing direct messages. Unlike the hashtag it
-// is set as text rather than drawn: the shape is a spiral, which no small set of
-// straight lines renders convincingly.
+// AtIcon is the "@" prefixing direct messages — set as text rather than drawn,
+// the shape being a spiral no small set of straight lines renders convincingly.
 func AtIcon() fyne.CanvasObject {
-	size := theme.Sizes.HashtagIconSize
-
-	glyph := canvas.NewText("@", theme.Colors.HashtagIcon)
-	glyph.TextSize = size * 0.9
+	glyph := newText("@", theme.Colors.HashtagIcon, theme.Sizes.HashtagIconSize*0.9)
 	glyph.Alignment = fyne.TextAlignCenter
 
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewCenter(glyph)))
+	return glyphBox(container.NewCenter(glyph))
 }
 
-// VoiceIcon returns the speaker glyph prefixing a voice channel, one of the
-// client's own marks tinted like the drawn glyphs beside it. A voice channel is
-// still a channel this client can only type in, so the row it leads is the same
-// row as a text channel's — the mark is the whole of what tells them apart.
-func VoiceIcon() fyne.CanvasObject {
-	size := theme.Sizes.HashtagIconSize
-	icon := newScaledIcon(tintedIcon(assets.VoiceIcon, theme.Colors.HashtagIcon), size)
+// VoiceIcon is the speaker prefixing a voice channel. That channel is still one
+// this client can only type in, so its row is a text channel's row and the mark
+// is the whole of what tells them apart.
+func VoiceIcon() fyne.CanvasObject { return tintedGlyph(assets.VoiceIcon) }
 
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), icon))
-}
+// NotesIcon is the notepad prefixing Saved Notes.
+func NotesIcon() fyne.CanvasObject { return tintedGlyph(assets.NotesIcon) }
 
-// NotesIcon returns the notepad glyph prefixing Saved Notes. It is one of the
-// client's own marks rather than a drawn one because a page with lines on it is
-// more strokes than the sidebar's glyphs are worth in canvas objects; it is
-// tinted to the same colour as they are, so the four read as one set.
-func NotesIcon() fyne.CanvasObject {
-	size := theme.Sizes.HashtagIconSize
-	icon := newScaledIcon(tintedIcon(assets.NotesIcon, theme.Colors.HashtagIcon), size)
-
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), icon))
-}
-
-// GroupIcon returns the two-head glyph prefixing group channels: a pair of
-// overlapping outlined circles, drawn on the same 20-unit grid as the hashtag so
-// the two read as one icon set.
+// GroupIcon is the two-head mark prefixing group channels: a pair of overlapping
+// outlined circles.
 func GroupIcon() fyne.CanvasObject {
-	col := theme.Colors.HashtagIcon
-	size := theme.Sizes.HashtagIconSize
-	scale := size / 20
+	scale := glyphScale()
 
 	head := func(cx, cy, r float32) *canvas.Circle {
 		c := canvas.NewCircle(color.Transparent)
-		c.StrokeColor = col
+		c.StrokeColor = theme.Colors.HashtagIcon
 		c.StrokeWidth = 2 * scale
 		c.Move(fyne.NewPos((cx-r)*scale, (cy-r)*scale))
 		c.Resize(fyne.NewSize(2*r*scale, 2*r*scale))
+
 		return c
 	}
 
-	glyph := container.NewWithoutLayout(head(13, 10, 5.5), head(7, 10, 5.5))
-
-	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), glyph))
+	return glyphBox(container.NewWithoutLayout(head(13, 10, 5.5), head(7, 10, 5.5)))
 }
 
 /* Saved sessions */

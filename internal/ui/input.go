@@ -52,9 +52,9 @@ var (
 	_ desktop.Mouseable = (*MessageInput)(nil)
 )
 
-// Reply is a reply queued in the composer. It is domain.Reply plus the channel
-// the quoted message lives in, which is bookkeeping of the composer's own: it is
-// what the preview is resolved against and is not part of what gets sent.
+// Reply is a reply queued in the composer: domain.Reply plus the channel the
+// quoted message lives in, which the preview is resolved against and which is not
+// part of what gets sent.
 type Reply struct {
 	ID        string
 	ChannelID string
@@ -76,24 +76,20 @@ type MessageInput struct {
 	// outline while the entry is live.
 	OnFocusChanged func(focused bool)
 
-	// OnRefused reports something the composer would not take, so the app can say
-	// why. Dropping a file into a channel that forbids uploads is what it exists
-	// for: nothing else would happen, and nothing happening is indistinguishable
-	// from a bug.
+	// OnRefused reports an input the composer would not take, so the app can say
+	// why — dropping a file into a channel that forbids uploads would otherwise be
+	// nothing happening, which is indistinguishable from a bug.
 	OnRefused func(reason string)
 
-	// OnTyping reports each keystroke, with whether anything is left in the entry
-	// afterwards. It is one callback rather than a started/stopped pair because a
-	// backspace that empties the composer is the clearest "stopped" there is, and
-	// it arrives on the same path as the rest. Whether any of it reaches the
-	// gateway is the app's to decide.
+	// OnTyping reports each keystroke and whether anything survived it. One callback
+	// rather than a started/stopped pair: a backspace that empties the composer is
+	// the clearest "stopped" there is, and arrives on the same path as the rest.
 	OnTyping func(typing bool)
 
-	// Mentions is the autocomplete list, mounted by the composer above the reply
-	// cards and hidden until the caret sits inside a mention. mentionStart is the
-	// byte offset of the marker being completed, or -1, and mentionKind what it
-	// opened — used only to notice when the caret has moved to a *different*
-	// mention, so the highlight restarts.
+	// Mentions is the autocomplete list, mounted above the reply cards and hidden
+	// until the caret sits inside a mention. mentionStart is the marker's byte
+	// offset, or -1, and mentionKind what it opened — together only used to notice
+	// the caret moving to a *different* mention, so the highlight restarts.
 	Mentions     *MentionPicker
 	mentionStart int
 	mentionKind  MentionKind
@@ -103,16 +99,14 @@ type MessageInput struct {
 	Replies             []Reply
 	ReplyContainer      *fyne.Container
 
-	// EmojiButton opens the picker. It belongs to the composer rather than to the
-	// card around it so that one thing decides whether it is offered: a channel
-	// that will not take a message has a disabled entry, and a button that inserts
-	// into one is a control with nowhere to put its answer.
+	// EmojiButton opens the picker. It belongs to the composer rather than the card
+	// around it so one thing decides whether it is offered: a button that inserts
+	// into a disabled entry has nowhere to put its answer.
 	EmojiButton *IconButton
 
-	// permissions is what the account may do in the open channel. It is *pushed*
-	// by the app rather than looked up: the composer has no channel of its own, and
-	// the app already knows which one is open. Zero — the state it starts in, and
-	// the one it returns to when nothing is selected — allows nothing.
+	// permissions is what the account may do in the open channel, *pushed* by the
+	// app rather than looked up — the composer has no channel of its own. Zero, the
+	// state it starts and ends in, allows nothing.
 	permissions domain.Permission
 
 	deps         Deps
@@ -121,11 +115,10 @@ type MessageInput struct {
 	ctrlPressed  bool
 }
 
-// NewMessageInput creates a message input wired to the given dependencies. The
-// window is what lets the composer accept dropped files and take keyboard focus
-// back after a mouse interaction (picking a mention with the pointer blurs the
-// entry, because Fyne unfocuses whenever a click lands on something that isn't
-// focusable).
+// NewMessageInput creates a message input wired to deps. The window is what lets
+// the composer accept dropped files and take focus back after a mouse
+// interaction — Fyne unfocuses on any click that lands on a non-focusable thing,
+// which includes picking a mention.
 func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m := &MessageInput{
 		deps:                deps,
@@ -140,29 +133,25 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
 
-	// Empty reply/attachment rows would still reserve a gap above the input bar,
-	// so keep them hidden until they hold something.
+	// An empty row still reserves its gap above the input bar — see refill.
 	m.ReplyContainer.Hide()
 	m.AttachmentContainer.Hide()
 
 	return m
 }
 
-// pickEmoji opens the picker beside the button and writes what comes back into
-// the message. The controller owns the picker, so this hands it an anchor and
-// takes an answer.
+// pickEmoji opens the picker beside the button and writes back what it answers.
+// The controller owns the picker, so this hands it an anchor.
 func (m *MessageInput) pickEmoji() {
 	m.deps.Actions.OnPickEmoji(m.EmojiButton, func(choice EmojiChoice) {
 		m.insert(choice.Token() + " ")
 	})
 }
 
-// insert writes text at the caret and leaves the caret after it. The picker took
-// canvas focus to be typed at, so the entry is given it back — otherwise the next
-// keystroke after a pick would go nowhere.
-//
-// Any selection is left alone rather than replaced: Fyne exposes no way to read
-// one back, and picking from a pop-up has already blurred the entry that held it.
+// insert writes text at the caret and leaves the caret after it, taking canvas
+// focus back off the picker so the next keystroke lands here. Any selection is
+// left alone: Fyne exposes no way to read one back, and picking from a pop-up has
+// already blurred the entry that held it.
 func (m *MessageInput) insert(text string) {
 	if text == "" {
 		return
@@ -183,18 +172,15 @@ func (m *MessageInput) insert(text string) {
 // MinSize grows the entry up to ComposerMaxLines as the user types.
 func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 
-// SetPermissions tells the composer what the account may do in the open channel.
-// Without SendMessage the entry is disabled outright rather than left to refuse
-// on submit: the placeholder is then the only thing in the card, so it is what
-// has to carry the reason, and a caret blinking in a box that will not send is
-// worse than no caret.
+// SetPermissions tells the composer what the account may do here. Without
+// SendMessage the entry is disabled outright rather than refusing on submit — a
+// caret blinking in a box that will not send is worse than no caret, and the
+// placeholder is then the only thing left to carry the reason.
 //
-// Whatever was typed before the permission went away is kept. It is still the
-// user's text, the channel may hand the permission straight back, and clearing
-// it would be the client destroying work over a state it does not control.
-// The emoji button goes with it. Left showing beside a dead entry it would be
-// the only live control in the card, and the one thing it does is put text in
-// there.
+// Whatever was typed is kept: the channel may hand the permission straight back,
+// and clearing it would destroy the user's work over a state the client does not
+// control. The emoji button goes with the entry, being a control whose one job is
+// to put text into it.
 func (m *MessageInput) SetPermissions(permissions domain.Permission) {
 	m.permissions = permissions
 
@@ -216,13 +202,11 @@ func (m *MessageInput) refuse(reason string) {
 	}
 }
 
-// composerMinSize sizes a growing composer-style entry: one line per newline up
-// to maxInputLines, plus the padding Fyne draws around the entry's text.
-//
-// That padding is InnerPadding above and below, and nothing else. The input
-// border looks like it should be added on top, but entryRenderer.Layout pays for
-// that inset out of the text provider's own padding, so the border is already
-// *inside* InnerPadding. Counting it twice left four dead pixels under the caret.
+// composerMinSize sizes a growing entry: one line per newline up to
+// ComposerMaxLines, plus InnerPadding above and below and nothing else. The input
+// border is *not* added on top — entryRenderer.Layout pays for that inset out of
+// the text provider's own padding, and counting it twice left dead pixels under
+// the caret.
 func composerMinSize(e *widget.Entry) fyne.Size {
 	size := e.MinSize()
 	lines := min(max(strings.Count(e.Text, "\n")+1, 1), int(theme.Sizes.ComposerMaxLines))
@@ -233,9 +217,8 @@ func composerMinSize(e *widget.Entry) fyne.Size {
 	return size
 }
 
-// lineHeights memoises the measured height of one text line per size: MinSize
-// runs on every layout pass, so re-measuring there is wasted work. UI thread
-// only, hence unsynchronised.
+// lineHeights memoises one line's height per text size — MinSize runs on every
+// layout pass. UI thread only, hence unsynchronised.
 var lineHeights = map[float32]float32{}
 
 func lineHeight(textSize float32) float32 {
@@ -248,12 +231,10 @@ func lineHeight(textSize float32) float32 {
 	return h
 }
 
-// NewComposerButtonSlot bottom-anchors a control against the growing entry
-// beside it — the entry grows upward, so one riding the middle would drift away
-// from the line being typed — and lifts it off the bottom by enough to centre on
-// that line rather than on the entry's box. The box carries InnerPadding under
-// its last line, and a control flush with it sits that far below what is being
-// written.
+// NewComposerButtonSlot bottom-anchors a control against the growing entry — one
+// riding the middle would drift away from the line being typed — and lifts it by
+// the entry's InnerPadding, so it centres on that last *line* rather than on the
+// box, whose padding sits below it.
 func NewComposerButtonSlot(obj fyne.CanvasObject) fyne.CanvasObject {
 	lift := fynetheme.InnerPadding() + (lineHeight(fynetheme.TextSize())-obj.MinSize().Height)/2
 
@@ -270,12 +251,10 @@ func (m *MessageInput) FocusGained() {
 }
 
 // FocusLost deliberately leaves the picker open. Fyne unfocuses on the mouse
-// *press* and then decides where the tap lands by hit-testing again on the
-// release, so closing the picker here resized the composer out from under the
-// click: the first click on anything — a picker row included — was spent
-// dismissing the picker and never reached its target. Visibility follows the
-// caret instead, which is also the truth of it: a half-typed mention is still in
-// the text whether or not the entry is live.
+// *press* and hit-tests again on the release, so closing it here resized the
+// composer out from under the click and the first click on anything was spent
+// dismissing the picker. Visibility follows the caret instead — a half-typed
+// mention is still in the text whether or not the entry is live.
 func (m *MessageInput) FocusLost() {
 	m.shiftPressed = false
 	m.Entry.FocusLost()
@@ -284,15 +263,10 @@ func (m *MessageInput) FocusLost() {
 	}
 }
 
-// MouseDown lets the embedded entry place the caret, then re-evaluates the
-// picker against where it landed. The caret moves on the press, so this is the
-// hook rather than Tapped — widget.Entry.Tapped does no positioning at all — and
-// clicking out of a half-typed mention has to close the picker now that blurring
-// no longer does.
-//
-// Hiding it here moves nothing under the pointer: the composer card is hung from
-// the bottom of the dock and the picker sits above the entry, so the card loses
-// that height off its top edge and the entry stays where it was pressed.
+// MouseDown lets the entry place the caret, then re-evaluates the picker against
+// where it landed — the caret moves on the press, and widget.Entry.Tapped does no
+// positioning at all. Hiding here moves nothing under the pointer: the card hangs
+// from the bottom of the dock, so it loses that height off its top edge.
 func (m *MessageInput) MouseDown(e *desktop.MouseEvent) {
 	m.Entry.MouseDown(e)
 	m.syncMentions()
@@ -316,17 +290,13 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 	}
 }
 
-// TypedKey sends the message on Enter, inserts a newline on Shift+Enter, cancels
-// pending replies/attachments on Escape, starts editing the last own message on
-// Up in an empty composer, and otherwise defers to the embedded entry, refreshing
-// so MinSize recomputes.
+// TypedKey sends on Enter, newlines on Shift+Enter, cancels pending
+// replies/attachments on Escape, edits the last own message on Up in an empty
+// composer, and otherwise defers to the entry, refreshing so MinSize recomputes.
 //
 // Which of Enter and Ctrl+Enter sends is a setting; Shift+Enter is a newline
-// either way, so the habit that works everywhere else keeps working.
-//
-// An open mention picker gets first refusal on the navigation keys, since it
-// binds the same ones: Enter would send the half-written message and Up would
-// open the editor on the previous one.
+// either way. An open mention picker gets first refusal on the navigation keys,
+// binding the same ones.
 func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	if m.Mentions.Visible() && m.handleMentionKey(key) {
 		return
@@ -362,9 +332,8 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	}
 }
 
-// sends reports whether the Enter now being handled is the sending one. With
-// "Enter sends" off it is Ctrl+Enter instead, which is why the modifier is
-// tracked at all.
+// sends reports whether the Enter being handled is the sending one. With "Enter
+// sends" off it is Ctrl+Enter, which is why the modifier is tracked at all.
 func (m *MessageInput) sends() bool {
 	if config.Current().Behaviour.EnterSends {
 		return !m.ctrlPressed
@@ -382,7 +351,7 @@ func (m *MessageInput) TypedRune(r rune) {
 
 // reportTyping tells the app a keystroke landed and whether anything survived it.
 // It rides the typing methods for the same reason syncMentions does: Entry's
-// OnChanged does not fire for every path that moves the text.
+// OnChanged misses paths that move the text.
 func (m *MessageInput) reportTyping() {
 	if m.OnTyping != nil {
 		m.OnTyping(m.Text != "")
@@ -424,10 +393,9 @@ func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
 	return true
 }
 
-// syncMentions re-evaluates the picker against the caret after an input event.
-// It is driven from the typing methods rather than from Entry.OnChanged because
-// the picker also has to close when the caret merely *moves* out of a mention,
-// which changes no text at all.
+// syncMentions re-evaluates the picker against the caret. Driven from the typing
+// methods rather than Entry.OnChanged because the picker also closes when the
+// caret merely *moves* out of a mention, which changes no text.
 func (m *MessageInput) syncMentions() {
 	start, kind, query, ok := m.mentionQuery()
 	if ok {
@@ -454,22 +422,17 @@ func (m *MessageInput) hideMentions() {
 	m.Mentions.Hide()
 }
 
-// mentionQuery finds the mention the caret sits in: the byte offset of its
-// marker, what that marker mentions, and the text typed since. A mention only
-// opens at the start of the message or after whitespace, so an email address —
-// or any other "foo@bar" in running text — never summons the picker, and a "#"
-// mid-word stays a "#".
-//
-// A heading's "# " opens the channel list for the one keystroke before the
-// space, which then closes it: the marker is the same character, and refusing
-// the picker at the start of a line would cost every mention typed there.
+// mentionQuery finds the mention the caret sits in: the marker's byte offset,
+// what it mentions, and the text typed since. A mention only opens at the start
+// of the message or after whitespace, so "foo@bar" in running text summons
+// nothing. A heading's "# " opens the channel list for the one keystroke before
+// the space — refusing at the start of a line would cost every mention typed there.
 func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string, ok bool) {
 	cursor := m.cursorOffset()
 
-	// Walking back from the caret stops at the first space, so the query can
-	// never span words and the scan is bounded by the current word's length. It
-	// walks the string itself rather than a []rune copy of it: this runs on every
-	// keystroke, before any early-out, and a message is not short.
+	// Bounded by the current word: the walk back stops at the first space. In place
+	// rather than over a []rune copy — this runs on every keystroke before any
+	// early-out, and a message is not short.
 	for i := cursor; i > 0; {
 		r, size := utf8.DecodeLastRuneInString(m.Text[:i])
 		i -= size
@@ -492,12 +455,10 @@ func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string
 	return 0, 0, "", false
 }
 
-// acceptMention swaps the marked query under the caret for a Revolt mention
-// token, leaving the caret after it and a space ready for the next word.
-//
-// The span is re-derived here rather than taken from mentionStart: picking a
-// candidate with the mouse blurs the entry before the tap is delivered, so by
-// then the picker has already been hidden.
+// acceptMention swaps the marked query under the caret for a mention token,
+// leaving the caret after it and a space ready for the next word. The span is
+// re-derived rather than taken from mentionStart: picking with the mouse blurs
+// the entry before the tap is delivered, by which time the picker is hidden.
 func (m *MessageInput) acceptMention(candidate MentionCandidate) {
 	start, _, _, ok := m.mentionQuery()
 	if !ok {
@@ -520,11 +481,10 @@ func (m *MessageInput) acceptMention(candidate MentionCandidate) {
 	}
 }
 
-// cursorOffset returns the caret as a byte offset into Text. Fyne tracks it as a
-// row/column pair — what drawing the caret needs, not what slicing the text
-// around it does. A byte offset is what the mention helpers actually want, and
-// finding one walks the string in place: splitting Text into lines on every
-// keystroke allocated the whole message twice over for one number.
+// cursorOffset returns the caret as a byte offset into Text, which is what the
+// mention helpers want — Fyne tracks a row/column pair, what drawing a caret
+// needs. Walked in place: splitting Text into lines per keystroke allocated the
+// whole message twice over for one number.
 func (m *MessageInput) cursorOffset() int {
 	var offset int
 	for range m.CursorRow {
@@ -540,8 +500,7 @@ func (m *MessageInput) cursorOffset() int {
 		line = line[:i]
 	}
 
-	// The column is counted in runes, so step the line one rune at a time; ranging
-	// a string yields exactly the byte index each rune starts at.
+	// The column is in runes; ranging a string yields the byte index each starts at.
 	var col int
 	for i := range line {
 		if col == m.CursorColumn {
@@ -594,8 +553,8 @@ func (m *MessageInput) pasteAsAttachment() bool {
 }
 
 // RegisterDropHandler attaches files dropped onto the composer's window. The
-// permission is checked once for the whole drop: a folder's worth of files
-// refused one at a time would be a folder's worth of identical notices.
+// permission is checked once for the whole drop, or a folder's worth of files
+// would be a folder's worth of identical notices.
 func (m *MessageInput) RegisterDropHandler() {
 	m.window.SetOnDropped(func(_ fyne.Position, uris []fyne.URI) {
 		if !m.canUpload() {
@@ -611,10 +570,9 @@ func (m *MessageInput) RegisterDropHandler() {
 	})
 }
 
-// AddAttachment queues a file and rebuilds the attachment previews, reporting
-// whether it took it. A channel that does not take uploads refuses here rather
-// than at each of the two ways a file arrives — and a refused paste falls back to
-// pasting what was on the clipboard as text.
+// AddAttachment queues a file and rebuilds the previews, reporting whether it
+// took it — one refusal point for both ways a file arrives, and a refused paste
+// falls back to pasting the clipboard as text.
 func (m *MessageInput) AddAttachment(path string) bool {
 	if !m.canUpload() {
 		m.refuse(uploadRefused)
@@ -650,34 +608,47 @@ func (m *MessageInput) ClearAttachments() {
 }
 
 func (m *MessageInput) rebuildAttachments() {
-	m.AttachmentContainer.Objects = nil
-	if len(m.Attachments) == 0 {
-		m.AttachmentContainer.Hide()
+	m.refill(m.AttachmentContainer, len(m.Attachments), func(i int) fyne.CanvasObject {
+		return m.attachmentCard(m.Attachments[i])
+	})
+}
+
+// refill replaces a dock row's children in one write — Container.Add refreshes
+// the whole row per child — and hides it while it holds nothing, an empty one
+// still reserving its gap above the input bar.
+func (m *MessageInput) refill(box *fyne.Container, count int, build func(i int) fyne.CanvasObject) {
+	box.Objects = make([]fyne.CanvasObject, count)
+	for i := range count {
+		box.Objects[i] = build(i)
+	}
+
+	if count == 0 {
+		box.Hide()
 	} else {
-		m.AttachmentContainer.Show()
+		box.Show()
 	}
 
-	for _, attachment := range m.Attachments {
-		var size int
-		if info, err := os.Stat(attachment.Path); err == nil {
-			size = int(info.Size())
-		}
-
-		path := attachment.Path
-		bar := attachmentBar(attachment.Name, size, func() { m.RemoveAttachment(path) })
-		card := container.NewBorder(nil, bar, nil, nil, attachmentPreview(path))
-
-		// The preview sits inside the card's padding, so the outline goes on the
-		// background itself rather than over the content the way a message
-		// attachment's does.
-		background := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-		background.CornerRadius = 8
-		Outline(background)
-		m.AttachmentContainer.Add(container.NewPadded(container.NewStack(background, container.NewPadded(card))))
-	}
-
-	m.AttachmentContainer.Refresh()
+	box.Refresh()
 	m.Refresh()
+}
+
+func (m *MessageInput) attachmentCard(attachment domain.Attachment) fyne.CanvasObject {
+	var size int
+	if info, err := os.Stat(attachment.Path); err == nil {
+		size = int(info.Size())
+	}
+
+	path := attachment.Path
+	bar := attachmentBar(attachment.Name, size, func() { m.RemoveAttachment(path) })
+	card := container.NewBorder(nil, bar, nil, nil, attachmentPreview(path))
+
+	// The preview sits inside the card's padding, so the outline goes on the
+	// background rather than over the content the way a message attachment's does.
+	background := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
+	background.CornerRadius = 8
+	Outline(background)
+
+	return container.NewPadded(container.NewStack(background, container.NewPadded(card)))
 }
 
 func attachmentPreview(path string) fyne.CanvasObject {
@@ -728,26 +699,14 @@ func (m *MessageInput) ClearReplies() {
 }
 
 func (m *MessageInput) rebuildReplies() {
-	m.ReplyContainer.Objects = nil
-	if len(m.Replies) == 0 {
-		m.ReplyContainer.Hide()
-	} else {
-		m.ReplyContainer.Show()
-	}
-
-	for i := range m.Replies {
-		m.ReplyContainer.Add(m.buildReplyCard(&m.Replies[i]))
-	}
-
-	m.ReplyContainer.Refresh()
-	m.Refresh()
+	m.refill(m.ReplyContainer, len(m.Replies), func(i int) fyne.CanvasObject {
+		return m.buildReplyCard(&m.Replies[i])
+	})
 }
 
-// buildReplyCard renders a slim composer chip for one pending reply: avatar,
-// author, a truncated preview, a mention toggle, and a remove button. The card is
-// outlined in the replied author's role colour, falling back to the app accent,
-// and everything is vertically centred so the row reads as distinct elements
-// rather than one blob.
+// buildReplyCard is the slim chip for one pending reply: avatar, author, a
+// truncated preview, a mention toggle and a remove button, outlined in the
+// author's role colour and falling back to the app accent.
 func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	author, content, avatarURL, accent := resolveReply(m.deps, reply.ChannelID, reply.ID)
 	if author == "" {
@@ -759,15 +718,11 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 
 	avatar := circularAvatar(m.deps.Images, avatarURL, fyne.NewSize(replyAvatarSize, replyAvatarSize))
 
-	authorLabel := canvas.NewText(author, theme.Colors.TextPrimary)
-	authorLabel.TextSize = replyTextSize
-	authorLabel.TextStyle = fyne.TextStyle{Bold: true}
+	authorLabel := newBoldText(author, theme.Colors.TextPrimary, replyTextSize)
+	contentLabel := newText(content, theme.Colors.TimestampText, replyTextSize)
 
-	contentLabel := canvas.NewText(content, theme.Colors.TimestampText)
-	contentLabel.TextSize = replyTextSize
-
-	// container.NewCenter vertically centres each element within the card's full
-	// height; HBoxNoSpacing keeps the horizontal gaps under explicit control.
+	// NewCenter vertically centres each element in the card's height; HBoxNoSpacing
+	// keeps the horizontal gaps explicit rather than inheriting theme padding.
 	left := HBoxNoSpacing(
 		HorizontalSpacer(8),
 		container.NewCenter(avatar),
@@ -799,10 +754,9 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	return container.NewStack(background, row)
 }
 
-// replyIconButton is a small square icon button used on the reply card, so the
-// mention and close controls share one visual language. A momentary button
-// (toggle=false) just brightens on hover; a toggle additionally shows an accent
-// background and stays bright while active, dimming when idle.
+// replyIconButton is the small square button the reply card's mention and close
+// controls share. A momentary one (toggle=false) brightens on hover; a toggle
+// also takes an accent background and stays bright while active.
 type replyIconButton struct {
 	tapBase
 	icon *canvas.Image
@@ -876,13 +830,9 @@ func (b *replyIconButton) applyState() {
 /* The badge row */
 
 // newDockBadgeSurface puts a pill behind one of the two things hanging over the
-// bottom of the message column. Both used to be bare text, which read against
-// whatever message happened to be passing under them; the pill is sized by its
-// content rather than by the row, so it says what it holds apart from the
-// conversation without becoming a bar above the composer.
-//
-// It accepts no pointer event, so the messages underneath stay hoverable and
-// right-clickable.
+// bottom of the message column, sized by its content rather than by the row — a
+// surface spanning the row would read as a bar growing out of the card below. It
+// accepts no pointer event, so the messages underneath stay hoverable.
 func newDockBadgeSurface(content fyne.CanvasObject) fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.DockBadgeBg)
 	background.CornerRadius = theme.Sizes.DockBadgeRadius
@@ -895,28 +845,22 @@ func newDockBadgeSurface(content fyne.CanvasObject) fyne.CanvasObject {
 
 /* Slowmode */
 
-// SlowmodeBadge floats over the bottom-right of the message column, just above
-// the composer card, and reports the channel's send cooldown: what it is while
-// the user may send, and what is left of it while they may not.
+// SlowmodeBadge floats over the bottom-right of the message column and reports
+// the channel's send cooldown: what it is while the user may send, what is left
+// of it while they may not.
 //
-// It sits *outside* the card rather than in it. Inside, it was furniture the
-// entry had to make room for — every relabelling took width off what was being
-// typed. Out here it is a marker on the conversation instead, and the entry
-// spans the card in every channel.
-//
-// What holds it apart from the messages running underneath is the pill
-// newDockBadgeSurface puts behind it, which hugs the text: a surface spanning
-// the row would read as a bar growing out of the card below. The stopwatch is
-// drawn from canvas primitives rather than an icon resource for the same reason
-// the channel glyphs are — a stroked shape takes a palette colour directly, so
-// the mark and the text beside it change tone as one.
+// It sits *outside* the composer card. Inside, it was furniture the entry had to
+// make room for, every relabelling taking width off what was being typed. The
+// stopwatch is canvas primitives rather than an icon resource, as the channel
+// glyphs are: a stroked shape takes a palette colour directly, so the mark and
+// the text beside it change tone as one.
 type SlowmodeBadge struct {
 	widget.BaseWidget
 
-	// OnResize fires when the chip's width or visibility changes, so whoever
-	// mounted it can re-run that one row's layout: the chip is pinned to the row's
-	// trailing edge, so every relabelling moves where it starts. Fyne re-lays out
-	// for a *growing* minimum on its own; a shrinking one it leaves reserved.
+	// OnResize fires when the chip's width or visibility changes, so its row can be
+	// laid out again — pinned to the trailing edge, every relabelling moves where it
+	// starts. Fyne re-lays out for a *growing* minimum itself; a shrinking one it
+	// leaves reserved.
 	OnResize func()
 
 	glyph   *fyne.Container // holds the stopwatch, redrawn when the tone changes
@@ -932,26 +876,22 @@ var _ fyne.Widget = (*SlowmodeBadge)(nil)
 func NewSlowmodeBadge() *SlowmodeBadge {
 	b := &SlowmodeBadge{
 		glyph: container.NewStack(),
-		label: canvas.NewText("", theme.Colors.SlowmodeText),
+		label: newText("", theme.Colors.SlowmodeText, theme.Sizes.SlowmodeTextSize),
 		tone:  theme.Colors.SlowmodeText,
 	}
-	b.label.TextSize = theme.Sizes.SlowmodeTextSize
 	b.glyph.Objects = []fyne.CanvasObject{stopwatchGlyph(b.tone)}
 
-	// As on the reply card, container.NewCenter is what lines the glyph up with the
-	// text beside it: each takes its own minimum size inside a row as tall as the
-	// larger of them.
+	// NewCenter lines the glyph up with the text: each takes its own minimum inside
+	// a row as tall as the larger.
 	chip := HBoxNoSpacing(
 		container.NewCenter(b.glyph),
 		HorizontalSpacer(theme.Sizes.SlowmodeGap),
 		container.NewCenter(b.label),
 	)
 
-	// The gap to the card below belongs to the chip, not to a spacer in the column
-	// it hangs in: a spacer would hold that room open in every channel that has no
-	// slowmode, where the chip itself simply isn't there. The pill goes inside that
-	// gap and outside the row inset, so what the surface covers is the text and
-	// nothing else.
+	// The gap to the card belongs to the chip rather than a spacer in the column,
+	// which would hold that room open in every channel with no slowmode. The pill
+	// sits inside the gap and outside the row inset, so it covers the text alone.
 	b.content = NewInset(newDockBadgeSurface(chip), 0, theme.Sizes.SlowmodeDockGap, 0, theme.Sizes.SlowmodeInsetH)
 
 	b.Hide()
@@ -981,9 +921,8 @@ func (b *SlowmodeBadge) Set(cooldown, remaining time.Duration) {
 		text, tone = util.ShortDuration(remaining), theme.Colors.SlowmodeWaiting
 	}
 
-	// This runs once a second for the length of a cooldown, so a repaint — and the
-	// relayout of the row it sits in — is worth asking whether anything actually
-	// changed first.
+	// Once a second for the length of a cooldown, so a repaint — and the row's
+	// relayout with it — is worth a change guard.
 	if tone != b.tone {
 		b.tone = tone
 		b.label.Color = tone
@@ -1011,19 +950,12 @@ func (b *SlowmodeBadge) resized() {
 	}
 }
 
-// stopwatchGlyph draws a stopwatch in col, on the same 20-unit grid the channel
-// glyphs are drawn on so the two read as one icon set.
+// stopwatchGlyph draws a stopwatch in col, on the channel glyphs' 20-unit grid so
+// the two read as one icon set.
 func stopwatchGlyph(col color.Color) fyne.CanvasObject {
 	size := theme.Sizes.SlowmodeGlyphSize
 	scale := size / 20
-
-	line := func(x1, y1, x2, y2 float32) *canvas.Line {
-		l := canvas.NewLine(col)
-		l.Position1 = fyne.NewPos(x1*scale, y1*scale)
-		l.Position2 = fyne.NewPos(x2*scale, y2*scale)
-		l.StrokeWidth = 2 * scale
-		return l
-	}
+	line := glyphLine(col, scale)
 
 	dial := canvas.NewCircle(color.Transparent)
 	dial.StrokeColor = col
@@ -1043,24 +975,19 @@ func stopwatchGlyph(col color.Color) fyne.CanvasObject {
 
 /* Typing indicator */
 
-// TypingIndicator is the line naming who is composing, hanging over the
-// bottom-left of the message column at the other end of the row the slowmode
-// chip is pinned to.
+// TypingIndicator names who is composing, at the other end of the row the
+// slowmode chip is pinned to and under the same rules, pill included: a name over
+// a conversation of other names has nothing else to hold it apart.
 //
-// It follows the chip's rules because it is the same kind of thing, pill
-// included: a name over a conversation of other names has nothing else to hold
-// it apart from them.
-//
-// The avatars are rebuilt outright rather than pooled. Who is typing changes
-// every few seconds at worst, where a member row is recycled as fast as a list
-// scrolls — so there is no stale load to guard against, and none of the
-// generation machinery MemberRow needs.
+// Avatars are rebuilt outright rather than pooled — who is typing changes every
+// few seconds at worst, so there is no stale load to guard against and none of
+// the generation machinery MemberRow needs.
 type TypingIndicator struct {
 	widget.BaseWidget
 
-	// OnResize fires when the line's height or visibility changes, so whoever
-	// mounted it can re-hang the dock. Fyne re-lays out for a growing minimum on
-	// its own; a shrinking one it leaves reserved.
+	// OnResize fires when the line's height or visibility changes, so the dock can
+	// be re-hung. Fyne re-lays out for a growing minimum itself; a shrinking one it
+	// leaves reserved.
 	OnResize func()
 
 	images *cache.ImageCache
@@ -1079,10 +1006,9 @@ func NewTypingIndicator(images *cache.ImageCache) *TypingIndicator {
 		images: images,
 		mark:   NewTypingMark(theme.Sizes.TypingMarkSize, theme.Colors.TypingMark),
 		faces:  HBoxNoSpacing(),
-		label:  canvas.NewText("", theme.Colors.TypingText),
+		label:  newText("", theme.Colors.TypingText, theme.Sizes.TypingTextSize),
 	}
 
-	t.label.TextSize = theme.Sizes.TypingTextSize
 	t.faces.Hide()
 
 	line := HBoxNoSpacing(
@@ -1092,9 +1018,8 @@ func NewTypingIndicator(images *cache.ImageCache) *TypingIndicator {
 		container.NewCenter(t.label),
 	)
 
-	// The gap to the card belongs to the line rather than to a spacer in the
-	// column, for the same reason it does on the chip: a spacer would hold the room
-	// open in every channel where nobody is typing.
+	// The gap belongs to the line rather than a spacer in the column, as on the
+	// chip: a spacer holds the room open in every channel where nobody is typing.
 	t.content = NewInset(newDockBadgeSurface(line), 0, theme.Sizes.SlowmodeDockGap, theme.Sizes.TypingInsetH, 0)
 
 	t.Hide()
@@ -1107,12 +1032,10 @@ func (t *TypingIndicator) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(t.content)
 }
 
-// Set draws the line, or hides it when there is nothing to say. avatarURLs is
-// what to draw before the text and may be empty; animate runs the mark.
-//
-// Only a change is acted on. This is called on every typing event and again
-// whenever somebody lapses, so a channel where one person types steadily must not
-// re-mount an avatar row per keystroke.
+// Set draws the line, or hides it when there is nothing to say. avatarURLs may be
+// empty; animate runs the mark. Only a change is acted on: this fires on every
+// typing event and every lapse, so one steady typist must not re-mount an avatar
+// row per keystroke.
 func (t *TypingIndicator) Set(text string, avatarURLs []string, animate bool) {
 	if text == "" {
 		if t.Visible() {
@@ -1144,8 +1067,8 @@ func (t *TypingIndicator) Set(text string, avatarURLs []string, animate bool) {
 	}
 }
 
-// setFaces re-mounts the avatar row. The gap after it is carried by a spacer of
-// its own so that an empty row costs nothing, the whole container being hidden.
+// setFaces re-mounts the avatar row. Each face carries its own trailing spacer,
+// so an empty row costs nothing — the container is hidden whole.
 func (t *TypingIndicator) setFaces(avatarURLs []string) {
 	t.shown = slices.Clone(avatarURLs)
 	t.faces.Objects = nil
@@ -1157,10 +1080,11 @@ func (t *TypingIndicator) setFaces(avatarURLs []string) {
 	}
 
 	side := fyne.NewSize(theme.Sizes.TypingAvatarSize, theme.Sizes.TypingAvatarSize)
+	faces := make([]fyne.CanvasObject, 0, len(avatarURLs)*2)
 	for _, url := range avatarURLs {
-		t.faces.Add(circularAvatar(t.images, url, side))
-		t.faces.Add(HorizontalSpacer(theme.Sizes.TypingGap))
+		faces = append(faces, circularAvatar(t.images, url, side), HorizontalSpacer(theme.Sizes.TypingGap))
 	}
+	t.faces.Objects = faces
 
 	t.faces.Show()
 	t.faces.Refresh()
@@ -1176,15 +1100,14 @@ func (t *TypingIndicator) resized() {
 /* The mention picker */
 
 const (
-	// mentionMaxRows bounds both the picker's height and its per-keystroke work:
-	// filtering stops counting matches past this and the surplus is reported as a
-	// "+N more" hint instead of a scrolling list. A picker you have to scroll is
-	// slower to use than one that tells you to keep typing.
+	// mentionMaxRows bounds the picker's height and its per-keystroke work: the
+	// surplus becomes a "+N more" hint rather than a scrolling list, which is slower
+	// to use than one telling you to keep typing.
 	mentionMaxRows = 8
 
-	// mentionNameMaxRunes keeps one very long display name from stretching a row
-	// wider than the composer. The picker's rows are packed left, so unlike a
-	// sidebar row there is no column to ellipsise against.
+	// mentionNameMaxRunes stops one long display name stretching a row wider than
+	// the composer. The rows are packed left, so there is no column to ellipsise
+	// against the way a sidebar row has.
 	mentionNameMaxRunes = 32
 
 	mentionRowInset = 8 // left/right breathing room inside a row
@@ -1210,9 +1133,8 @@ func (k MentionKind) marker() string {
 	return "@"
 }
 
-// markerKind reports what a rune opens a mention of, or ok=false when it opens
-// nothing. It is marker's inverse and the pair is the only place the two
-// characters are named.
+// markerKind is marker's inverse; the pair is the only place the two characters
+// are named.
 func markerKind(r rune) (MentionKind, bool) {
 	switch r {
 	case '@':
@@ -1241,9 +1163,8 @@ type MentionCandidate struct {
 	// led by their avatar. Meaningless for a user.
 	ChannelKind domain.ChannelKind
 
-	// Lowercased match keys, computed once when the candidate is built. The
-	// picker filters the whole candidate set on every keystroke, so folding case
-	// here rather than per keystroke is what keeps a 2000-member server cheap.
+	// Lowercased match keys, folded once at construction: the picker filters the
+	// whole set on every keystroke, which is what keeps a 2000-member server cheap.
 	nameKey, userKey string
 }
 
@@ -1262,9 +1183,9 @@ func NewMentionCandidate(userID, name, username, avatarURL string, roleColor col
 	}
 }
 
-// NewChannelCandidate builds a candidate for a channel. It takes the resolved
-// channel rather than its parts because that is what the sidebar already holds:
-// one Store.Channel walk builds the rows and the candidates alike.
+// NewChannelCandidate builds a candidate for a channel, taking the resolved
+// channel because that is what the sidebar already holds: one walk builds the
+// rows and the candidates alike.
 func NewChannelCandidate(channel domain.Channel) MentionCandidate {
 	return MentionCandidate{
 		Kind:        MentionChannel,
@@ -1281,25 +1202,19 @@ func (c *MentionCandidate) token() string {
 	return "<" + c.Kind.marker() + c.ID + "> "
 }
 
-// SortCandidates orders a list by display name, case-insensitively, in place.
-// The server's members already arrive sorted; this is for the ones assembled a
-// recipient at a time, which would otherwise shuffle every time the list was
-// rebuilt. It sorts on the key the candidate already carries, so nothing is
-// lowered twice.
+// SortCandidates orders a list by display name in place, on the key the candidate
+// already carries. A server's members arrive sorted; this is for the ones
+// assembled a recipient at a time, which would otherwise shuffle per rebuild.
 func SortCandidates(candidates []MentionCandidate) {
 	slices.SortFunc(candidates, func(x, y MentionCandidate) int {
 		return strings.Compare(x.nameKey, y.nameKey)
 	})
 }
 
-// rank scores a candidate against an already-lowercased query: 0 when the
-// display name or handle starts with it, 1 when either merely contains it, -1
-// for no match. An empty query (the bare "@") matches everyone at rank 0, so
-// typing @ alone opens the picker on the full list.
-//
-// The receiver is a pointer only because filter calls this twice per candidate
-// per keystroke, and a MentionCandidate is wide enough that copying one that
-// many times is the bulk of the work on a large server.
+// rank scores a candidate against an already-lowercased query: 0 for a prefix
+// match on name or handle, 1 for a substring, -1 for none. An empty query — the
+// bare "@" — matches everyone at 0. The receiver is a pointer only because filter
+// calls this twice per candidate per keystroke, and the struct is wide.
 func (c *MentionCandidate) rank(query string) int {
 	switch {
 	case query == "",
@@ -1312,14 +1227,11 @@ func (c *MentionCandidate) rank(query string) int {
 	return -1
 }
 
-// MentionPicker is the autocomplete list the composer shows while a mention is
-// being typed. It lives inside the composer card rather than floating over the
-// message area: a Fyne pop-up takes canvas focus, which would pull it away from
-// the entry and stop the typing that drives the picker in the first place.
-//
-// Its row widgets are pooled — mentionMaxRows of them, built once and re-set as
-// the query changes — so a keystroke re-labels existing widgets instead of
-// building and discarding a list of new ones.
+// MentionPicker is the autocomplete list shown while a mention is typed. It lives
+// inside the composer card rather than floating: a Fyne pop-up takes canvas focus
+// away from the entry, stopping the typing that drives it. Its rows are pooled —
+// mentionMaxRows, built once and re-set — so a keystroke re-labels rather than
+// building and discarding a list.
 type MentionPicker struct {
 	widget.BaseWidget
 	images   *cache.ImageCache
@@ -1334,9 +1246,8 @@ type MentionPicker struct {
 	overflow int // matches beyond mentionMaxRows, reported by the footer
 	selected int
 
-	// The kind and query the rows currently show, and whether they still reflect
-	// them. A keystroke that leaves both alone — a caret move inside the same
-	// mention, a Refresh — then costs nothing at all.
+	// What the rows currently show, and whether they still reflect it. A caret move
+	// inside the same mention then costs nothing.
 	kind  MentionKind
 	query string
 	fresh bool
@@ -1354,16 +1265,17 @@ var _ fyne.Widget = (*MentionPicker)(nil)
 func NewMentionPicker(images *cache.ImageCache, onAccept func(MentionCandidate)) *MentionPicker {
 	p := &MentionPicker{images: images, onAccept: onAccept}
 
-	rowBox := VBoxNoSpacing()
+	pooled := make([]fyne.CanvasObject, mentionMaxRows)
 	for i := range mentionMaxRows {
 		row := newMentionRow(images, func() { p.selectRow(i) }, func() { p.selectRow(i); p.Accept() })
 		row.Hide()
-		p.rows = append(p.rows, row)
-		rowBox.Add(row)
-	}
 
-	p.footer = canvas.NewText("", theme.Colors.MentionHandleText)
-	p.footer.TextSize = theme.Sizes.MentionHandleSize
+		p.rows = append(p.rows, row)
+		pooled[i] = row
+	}
+	rowBox := VBoxNoSpacing(pooled...)
+
+	p.footer = newText("", theme.Colors.MentionHandleText, theme.Sizes.MentionHandleSize)
 	p.footerRow = NewInset(p.footer, 2, 4, mentionRowInset, mentionRowInset)
 	p.footerRow.Hide()
 
@@ -1381,9 +1293,9 @@ func (p *MentionPicker) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(p.content)
 }
 
-// SetCandidates replaces one of the pools the picker filters. Call it when the
-// open channel changes, its membership does, or the channel sidebar is rebuilt;
-// the picker snapshots the list and never goes to the network itself.
+// SetCandidates replaces one of the pools. Call it when the open channel changes,
+// its membership does, or the sidebar is rebuilt; the picker snapshots the list
+// and never goes to the network itself.
 func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCandidate) {
 	if kind == MentionChannel {
 		p.channels = candidates
@@ -1392,16 +1304,14 @@ func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCand
 	}
 	p.fresh = false
 
-	// The rows recognise a candidate by ID and skip rebuilding for one they
-	// already show. The same person can arrive here under a new nickname, colour
-	// or avatar, so a new list is what un-teaches them.
+	// Rows skip a rebuild for a candidate they already show, and the same person can
+	// arrive under a new nickname, colour or avatar.
 	for _, row := range p.rows {
 		row.invalidate()
 	}
 
 	// An open picker outlives the entry's focus, so it can outlive the channel it
-	// was opened in — re-run its query rather than leave it offering people from
-	// the list just replaced.
+	// was opened in: re-run the query rather than offer people from the old list.
 	if p.Visible() && !p.Update(p.kind, p.query) {
 		p.Reset()
 		p.Hide()
@@ -1418,8 +1328,7 @@ func (p *MentionPicker) pool(kind MentionKind) []MentionCandidate {
 }
 
 // Update refilters kind's pool against query — the text between the marker and
-// the caret — and reports whether anything matched. A false result means the
-// caller should hide the picker: there is nothing to offer.
+// the caret — and reports whether anything matched. False means hide the picker.
 func (p *MentionPicker) Update(kind MentionKind, query string) bool {
 	query = strings.ToLower(query)
 	if p.fresh && kind == p.kind && query == p.query {
@@ -1456,9 +1365,8 @@ func (p *MentionPicker) Update(kind MentionKind, query string) bool {
 }
 
 // filter collects the best mentionMaxRows matches, prefix hits before substring
-// hits. Two passes over the candidates beat one pass plus a sort: the set is
-// walked at most twice with a string comparison per entry and nothing is
-// allocated, which is what lets this run on every keystroke.
+// hits. Two passes beat one pass plus a sort: two walks, a string comparison per
+// entry, and nothing allocated — which is what lets it run on every keystroke.
 func (p *MentionPicker) filter(kind MentionKind, query string) {
 	all := p.pool(kind)
 
@@ -1478,9 +1386,8 @@ func (p *MentionPicker) filter(kind MentionKind, query string) {
 	}
 }
 
-// Step moves the highlight by delta, wrapping at both ends so Up from the first
-// row lands on the last. Named Step rather than Move because a fyne.Widget's
-// Move is the one that positions it on the canvas.
+// Step moves the highlight by delta, wrapping at both ends. Named Step because a
+// fyne.Widget's Move is the one that positions it on the canvas.
 func (p *MentionPicker) Step(delta int) {
 	if len(p.matches) == 0 {
 		return
@@ -1509,8 +1416,8 @@ func (p *MentionPicker) Accept() {
 }
 
 // Reset clears the highlight so the next mention starts at the top of its list.
-// The rows no longer reflect their query afterwards — the new first row has to be
-// highlighted — so the next Update refilters even if nothing was typed.
+// The rows no longer reflect their query afterwards, so the next Update refilters
+// even if nothing was typed.
 func (p *MentionPicker) Reset() {
 	if p.selected != 0 && p.selected < len(p.rows) {
 		p.rows[p.selected].setSelected(false)
@@ -1537,10 +1444,9 @@ type mentionRow struct {
 	// image arrives the row may already show somebody else.
 	generation int
 
-	// What the row currently shows and how it is drawn, so a keystroke that leaves
-	// a row on the same candidate doesn't rebuild it. Filtering re-sets all eight
-	// rows on every character typed, and most of them hold still. The kind is part
-	// of the identity: nothing stops the two pools sharing an ID.
+	// What the row shows and how, so a keystroke leaving it on the same candidate
+	// rebuilds nothing — filtering re-sets every row per character and most hold
+	// still. Kind is part of the identity: nothing stops the pools sharing an ID.
 	kind     MentionKind
 	id       string
 	selected bool
@@ -1560,18 +1466,12 @@ func newMentionRow(images *cache.ImageCache, onHover, onTap func()) *mentionRow 
 		images:      images,
 		background:  canvas.NewRectangle(color.Transparent),
 		placeholder: canvas.NewCircle(theme.Colors.AvatarPlaceholder),
-		name:        canvas.NewText("", theme.Colors.TextPrimary),
-		handle:      canvas.NewText("", theme.Colors.MentionHandleText),
+		name:        newBoldText("", theme.Colors.TextPrimary, theme.Sizes.MentionNameSize),
+		handle:      newText("", theme.Colors.MentionHandleText, theme.Sizes.MentionHandleSize),
 		onHover:     onHover,
 	}
 	r.lead = container.NewGridWrap(size, r.placeholder)
-	r.name.TextSize = theme.Sizes.MentionNameSize
-	r.name.TextStyle = fyne.TextStyle{Bold: true}
-	r.handle.TextSize = theme.Sizes.MentionHandleSize
 
-	// As on the reply card, container.NewCenter is what vertically centres each
-	// element inside the row's full height; HBoxNoSpacing keeps the horizontal
-	// gaps explicit rather than inheriting theme padding.
 	row := HBoxNoSpacing(
 		HorizontalSpacer(mentionRowInset),
 		container.NewCenter(r.lead),
@@ -1604,9 +1504,8 @@ func (r *mentionRow) MouseIn(*desktop.MouseEvent) {
 
 func (r *mentionRow) MouseOut() {}
 
-// set re-labels the row for a candidate. Only the avatar can be slow, and it is
-// fetched through the shared cache, so a row that scrolls past under a fast
-// typist costs one map lookup.
+// set re-labels the row for a candidate. Only the avatar can be slow, and it goes
+// through the shared cache, so a row passing under a fast typist costs a lookup.
 func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	if r.id != "" && r.id == candidate.ID && r.kind == candidate.Kind {
 		r.setSelected(selected)
@@ -1623,8 +1522,7 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 		r.name.Color = solidColor(candidate.Color)
 	}
 
-	// A channel has no handle behind its name; the marker it was found by is
-	// already in the glyph beside it, so the slot is simply left empty.
+	// A channel has no handle: the marker it was found by is already in its glyph.
 	r.handle.Text = ""
 	if candidate.Kind == MentionUser {
 		r.handle.Text = "@" + candidate.Username
@@ -1639,8 +1537,8 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 		return
 	}
 
-	// Back to the placeholder first: the row may be showing the previous
-	// candidate's face, and this one may have no avatar at all.
+	// Back to the placeholder first: the row may still show the previous face, and
+	// this candidate may have no avatar at all.
 	r.lead.Objects = []fyne.CanvasObject{r.placeholder}
 	r.lead.Refresh()
 	if candidate.AvatarURL == "" || r.images == nil {

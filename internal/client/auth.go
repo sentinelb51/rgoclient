@@ -2,16 +2,11 @@ package client
 
 // Signing in, including the second factor.
 //
-// This is the second place the client goes round revoltgo's typed API, and for a
-// harder reason than FetchSlowmode's missing field: revoltgo cannot express an
-// MFA login at all. Its LoginResponse carries no ticket and no allowed methods,
-// so the challenge is invisible; its LoginParams carries no mfa_ticket, so the
-// challenge could not be answered; and its MFAResponse carries only a password,
-// so the answer could not be a code. Three gaps on one route — hence the types
-// below, which are Revolt's own shapes rather than a translation of anything.
-//
-// Everything else about a session still goes through revoltgo. What this file
-// produces is a token, which Open takes like any other.
+// revoltgo cannot express an MFA login at all — three gaps on one route: no
+// ticket or allowed methods in its response, no mfa_ticket in its params, and an
+// MFAResponse carrying only a password. Hence the types below, which are
+// Revolt's own shapes. What this file produces is a token, which Open takes like
+// any other.
 
 import (
 	"fmt"

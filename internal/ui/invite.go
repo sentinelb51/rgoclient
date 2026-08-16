@@ -1,17 +1,16 @@
 package ui
 
-// Invite cards — what an invite code unfurls into: the server it opens, and the
+// Invite cards — what an invite code unfurls into: the server it opens and the
 // one action that applies to it.
 //
-// The card is built from a code rather than from an invite, because the code is
-// all a message carries. Resolving one is a request, so a card mounts in its
-// loading state and fills itself in through SetInvite — which is also the seam a
-// caller that already holds a domain.Invite uses to skip the request entirely.
+// Built from a code rather than an invite, the code being all a message carries.
+// Resolving one is a request, so a card mounts loading and fills itself in
+// through SetInvite — also the seam a caller already holding a domain.Invite uses
+// to skip the request.
 //
-// Its width is fixed rather than measured from its contents, unlike an embed's.
-// An embed arrives whole and is sized to what it says; this one is mounted
-// saying nothing and is filled in a moment later, and a card that resized on
-// arrival would shuffle the message column under someone already reading it.
+// Its width is fixed rather than measured, unlike an embed's: an embed arrives
+// whole, where this is mounted saying nothing, and a card that resized on arrival
+// would shuffle the column under someone already reading it.
 
 import (
 	"slices"
@@ -47,14 +46,14 @@ type InviteCard struct {
 	deps Deps
 	code string
 
-	// iconURL is held rather than passed down because setBody rebuilds the whole
-	// row for every state, and the picture outlives the state that brought it.
+	// iconURL is held rather than passed down: setBody rebuilds the whole row per
+	// state, and the picture outlives the state that brought it.
 	iconURL string
 	caption *canvas.Text
 
-	// body is everything below the caption, replaced whole on each state rather
-	// than edited in place: an ellipsis text fixes the string it shortens when it
-	// is built, and the action button exists in one state out of three.
+	// body is everything below the caption, replaced whole per state rather than
+	// edited: an ellipsis text fixes the string it shortens when it is built, and
+	// the action button exists in one state out of three.
 	body *fyne.Container
 }
 
@@ -86,20 +85,17 @@ func NewInviteCardFor(deps Deps, invite domain.Invite) *InviteCard {
 func newInviteCard(deps Deps, code string) *InviteCard {
 	c := &InviteCard{deps: deps, code: code, body: container.NewStack()}
 
-	c.caption = canvas.NewText(inviteCaptionLoading, theme.Colors.InviteCaption)
-	c.caption.TextSize = theme.Sizes.InviteCaptionSize
-	c.caption.TextStyle = fyne.TextStyle{Bold: true}
+	c.caption = newBoldText(inviteCaptionLoading, theme.Colors.InviteCaption, theme.Sizes.InviteCaptionSize)
 
-	// The same card surface an embed is drawn on, wearing the client's one
-	// hairline on its own background — everything inside sits within the padding,
-	// so nothing ever paints over the edge.
+	// The card surface an embed is drawn on, wearing the hairline on its own
+	// background — everything inside sits within the padding.
 	background := canvas.NewRectangle(theme.Colors.EmbedBg)
 	background.CornerRadius = theme.Sizes.EmbedRadius
 	Outline(background)
 
-	// The caption is not wrapped in an ellipsis text, unlike the name below it: one
-	// fixes the string it shortens when it is built, and this is the one line on
-	// the card that is rewritten in place. The captions are ours and they fit.
+	// Not an ellipsis text, unlike the name below it: one fixes the string it
+	// shortens at construction, and this is the one line rewritten in place. The
+	// captions are ours and they fit.
 	column := VBoxNoSpacing(
 		c.caption,
 		VerticalSpacer(theme.Sizes.EmbedRowGap),
@@ -155,10 +151,10 @@ func (c *InviteCard) Fail() {
 	c.setBody(inviteState{caption: inviteCaptionFailed, title: "Invite expired or invalid"})
 }
 
-// inviteState is everything one of the card's three states says. It is a value
-// rather than four arguments because the states differ in which parts they fill
-// — and because initial is not derived from title: a card that failed has a
-// sentence where the name would be, and no server to stand for.
+// inviteState is everything one of the card's three states says — a value rather
+// than four arguments because the states differ in which parts they fill, and
+// because initial is not derived from title: a failed card has a sentence where
+// the name would be, and no server to stand for.
 type inviteState struct {
 	caption string
 	title   string
@@ -187,22 +183,13 @@ func (c *InviteCard) setBody(state inviteState) {
 	c.body.Refresh()
 }
 
-// icon is the server's picture over the initial it falls back to — the same pair
-// the server rail draws, so a server reads the same in both places. A card with
-// no server yet, or one whose invite never resolved, passes no initial and keeps
-// the empty circle: it is a placeholder either way, and a letter taken from
-// "Invite expired" would be a server that does not exist.
+// icon is the server's picture over the initial it falls back to. A card with no
+// server yet, or one whose invite never resolved, passes no initial and keeps the
+// empty circle — a letter taken from "Invite expired" would name a server that
+// does not exist.
 func (c *InviteCard) icon(initial string, size fyne.Size) fyne.CanvasObject {
 	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
-
-	letter := canvas.NewText("", theme.Colors.TextPrimary)
-	if initial != "" {
-		letter.Text = strings.ToUpper(string([]rune(initial)[0]))
-	}
-	letter.TextStyle = fyne.TextStyle{Bold: true}
-	letter.Alignment = fyne.TextAlignCenter
-
-	slot := container.NewStack(background, container.NewCenter(letter))
+	slot := container.NewStack(background, container.NewCenter(newInitial(initial)))
 	if c.iconURL != "" {
 		c.deps.Images.LoadIntoContainer(imageCacheID(c.iconURL), c.iconURL, size, slot, true, background)
 	}
@@ -214,16 +201,13 @@ func (c *InviteCard) icon(initial string, size fyne.Size) fyne.CanvasObject {
 // what is known about it. Both shorten rather than wrap — a card is a summary,
 // and the name is the only part of it somebody reads twice.
 func inviteText(name, detail string) fyne.CanvasObject {
-	title := canvas.NewText(name, theme.Colors.TextPrimary)
-	title.TextSize = theme.Sizes.InviteNameSize
-	title.TextStyle = fyne.TextStyle{Bold: true}
+	title := newBoldText(name, theme.Colors.TextPrimary, theme.Sizes.InviteNameSize)
 
 	if detail == "" {
 		return NewFillRow(0, NewEllipsisText(title))
 	}
 
-	subtitle := canvas.NewText(detail, theme.Colors.InviteDetail)
-	subtitle.TextSize = theme.Sizes.InviteDetailSize
+	subtitle := newText(detail, theme.Colors.InviteDetail, theme.Sizes.InviteDetailSize)
 
 	return VBoxNoSpacing(
 		NewFillRow(0, NewEllipsisText(title)),
@@ -233,10 +217,9 @@ func inviteText(name, detail string) fyne.CanvasObject {
 }
 
 // inviteButton is the card's one action. A Fyne button survives here where the
-// settings page's would not: nothing about it is derived from SizeNameInputBorder
-// or ColorNameInputBackground, which are the two AppTheme zeroes that made a
-// slider unusable. It is the only thing on the card that takes a pointer, so it
-// is also the only place the message row's hover is given up.
+// settings page's would not: nothing about it derives from SizeNameInputBorder or
+// ColorNameInputBackground, the two AppTheme zeroes that made a slider unusable.
+// It is also the only thing on the card taking a pointer.
 func inviteButton(label string, importance widget.Importance, onTap func()) fyne.CanvasObject {
 	action := widget.NewButton(label, onTap)
 	action.Importance = importance
@@ -294,13 +277,10 @@ func groupDigits(n int) string {
 // message around it.
 const inviteCardsPerMessage = 3
 
-// inviteCodesIn reports the distinct invite codes a message body links to, in
-// reading order.
-//
-// The parse is the accurate way to do this — a URL inside a code span is not a
-// link, and only the AST knows that — but it runs per mounted message, so it is
-// guarded by a substring scan first. Almost every message fails that in a few
-// bytes and is never parsed at all.
+// inviteCodesIn is the distinct invite codes a body links to, in reading order.
+// The parse is the accurate way — a URL inside a code span is not a link, and
+// only the AST knows that — but it runs per mounted message, so a substring scan
+// guards it: almost every message fails that in a few bytes and is never parsed.
 func inviteCodesIn(content string) []string {
 	if !util.MayContainInvite(content) {
 		return nil
@@ -322,19 +302,18 @@ func inviteCodesIn(content string) []string {
 	return codes
 }
 
-// buildInvites stacks a card for each distinct invite a message links to,
-// separated by the gap that separates its embeds. It is given codes rather than
-// URLs: the same server is routinely linked twice in one message, once as a bare
-// link and once masked, and two identical cards under it would be a bug.
+// buildInvites stacks a card per distinct invite, separated by the gap that
+// separates embeds. Codes rather than URLs: the same server is routinely linked
+// twice in one message, bare and masked, and two identical cards would be a bug.
 func buildInvites(deps Deps, codes []string) *fyne.Container {
-	box := container.NewVBox()
+	rows := make([]fyne.CanvasObject, 0, max(len(codes)*2-1, 0))
 
 	for i, code := range codes {
 		if i > 0 {
-			box.Add(VerticalSpacer(theme.Sizes.EmbedSpacing))
+			rows = append(rows, VerticalSpacer(theme.Sizes.EmbedSpacing))
 		}
-		box.Add(HBoxNoSpacing(NewInviteCard(deps, code).Content))
+		rows = append(rows, HBoxNoSpacing(NewInviteCard(deps, code).Content))
 	}
 
-	return box
+	return container.NewVBox(rows...)
 }

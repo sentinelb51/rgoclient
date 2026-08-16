@@ -1,8 +1,8 @@
 package app
 
 import (
-	"fmt"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -11,33 +11,27 @@ import (
 	"RGOClient/internal/util"
 )
 
-// The typing indicator, both halves of it: who else is composing, and telling
-// everyone else that we are.
-//
-// The state lives here rather than in internal/client because revoltgo's State
-// does not model typing — there is nothing for domain.Store to answer from, and
-// nothing worth widening that interface for. What it looks like instead is
-// slowmode: maps confined to the UI thread and one timer re-armed only while
-// there is something to wait for.
+// The typing indicator, both halves: who else is composing, and telling everyone
+// else that we are. The state lives here rather than in internal/client because
+// revoltgo's State does not model typing — there is nothing for domain.Store to
+// answer from. It looks like slowmode instead: maps confined to the UI thread and
+// one timer re-armed only while there is something to wait for.
 
 const (
 	// typingLifetime is how long one gateway event vouches for somebody. Revolt
-	// sends no heartbeat of its own and a client that goes away sends no stop, so
-	// every entry expires on its own and a live typist is carried by the events
-	// that keep arriving.
+	// sends no heartbeat and a client that goes away sends no stop, so every entry
+	// expires on its own and a live typist is carried by the events that keep coming.
 	typingLifetime = 10 * time.Second
 
 	// typingSendInterval is the most often this account announces itself, and
-	// typingIdleTimeout how long the composer may sit untouched before it takes
-	// that back. Both are well inside a reader's typingLifetime, so a lost frame
-	// costs a few seconds of staleness rather than a mark that never leaves.
+	// typingIdleTimeout how long the composer may sit untouched before it takes that
+	// back. Both are well inside a reader's typingLifetime, so a lost frame costs a
+	// few seconds of staleness rather than a mark that never leaves.
 	typingSendInterval = 3 * time.Second
 	typingIdleTimeout  = 5 * time.Second
 
-	// typingNameMaxRunes caps one name on the line. The line shares its row
-	// with the slowmode chip, which is pinned to the far edge and would be pushed
-	// off it by a long enough line — and five unabridged display names is long
-	// enough on a narrow window.
+	// typingNameMaxRunes caps one name on the line, which shares its row with the
+	// slowmode chip and would push it off the far edge if it ran long enough.
 	typingNameMaxRunes = 20
 )
 
@@ -48,21 +42,17 @@ const (
 // no work done for an event that arrives.
 func typingNames() int { return config.Current().Behaviour.TypingNames }
 
-// onTypingChanged records that somebody started or stopped composing, and
-// repaints whichever surface shows it. Call on the UI thread.
-//
-// Typing is tracked for every channel rather than only the open one — that is
-// what feeds the sidebar. It cannot grow without bound: nothing outlives
-// typingLifetime.
+// onTypingChanged records that somebody started or stopped composing and repaints
+// whichever surface shows it. Tracked for every channel rather than only the open
+// one — that is what feeds the sidebar — and bounded by nothing outliving
+// typingLifetime. Call on the UI thread.
 func (a *App) onTypingChanged(event client.TypingChanged) {
 	if typingNames() == 0 {
 		return
 	}
 
-	// This account's own composing is recorded by noteSelfTyping rather than waited
-	// for, so an event naming us is either an echo of that or the same account
-	// typing from another client. Either way it is only wanted by somebody who has
-	// asked to be shown.
+	// noteSelfTyping records our own composing rather than waiting for this, so an
+	// event naming us is an echo or another client — wanted only if asked for.
 	if event.UserID == a.store.SelfID() && !config.Current().Behaviour.TypingShowSelf {
 		return
 	}
@@ -72,9 +62,8 @@ func (a *App) onTypingChanged(event client.TypingChanged) {
 		return
 	}
 
-	// A name the client has never resolved would read as an ID, so ask for it. The
-	// line redraws when the answer lands; until then that person is counted rather
-	// than named.
+	// An unresolved name would read as an ID, so ask. The line redraws when the
+	// answer lands; until then they are counted rather than named.
 	if event.ChannelID == a.currentChannelID {
 		a.ensureAuthor(a.currentServerID, event.UserID)
 	}
@@ -108,9 +97,8 @@ func (a *App) forgetTyping(channelID, userID string) {
 }
 
 // forgetSelfTyping drops this account from wherever it is shown, for the setting
-// being turned off mid-sentence. Every channel is walked rather than only the one
-// being composed in, since an echo from another client can file us anywhere. Call
-// on the UI thread.
+// being turned off mid-sentence. Every channel is walked, an echo from another
+// client being able to file us anywhere. Call on the UI thread.
 func (a *App) forgetSelfTyping() {
 	selfID := a.store.SelfID()
 
@@ -120,13 +108,11 @@ func (a *App) forgetSelfTyping() {
 }
 
 // showTyping repaints the one surface a channel is shown on: the line above the
-// composer while it is open, its sidebar row otherwise. It is one or the other and
-// never both — the open channel's row carries no mark to leave behind, see
-// isTypingIn. Call on the UI thread.
-//
-// A background channel is found by walking the sidebar, and typing arrives for
-// every channel the account can see — including those of servers the sidebar is
-// not currently showing. So the setting is asked before the walk, not after it.
+// composer while it is open, its sidebar row otherwise — never both, the open
+// channel's row carrying no mark to leave behind (see isTypingIn). A background
+// channel is found by walking the sidebar, and typing arrives for channels the
+// sidebar is not showing, so the setting is asked *before* the walk. Call on the
+// UI thread.
 func (a *App) showTyping(channelID string) {
 	if channelID == a.currentChannelID {
 		a.refreshTyping()
@@ -160,11 +146,10 @@ func (a *App) armTypingTimer() {
 		return
 	}
 
-	// The wake answers for itself rather than for whatever timer is current. A
-	// timer that has already fired cannot be stopped, so an event landing while its
-	// hop onto the UI thread is in flight arms a replacement that the older wake
-	// would then forget it had — leaving that one running unreferenced, and a fresh
-	// one armed beside it on every lapse after.
+	// The wake answers for *itself* rather than for whatever timer is current: one
+	// that has fired cannot be stopped, so an event landing while its hop is in
+	// flight arms a replacement the older wake would then forget it had — leaving
+	// that one unreferenced, and another armed beside it on every lapse after.
 	epoch := a.epoch
 	var timer *time.Timer
 
@@ -227,17 +212,12 @@ func (a *App) typistsIn(channelID string) []string {
 	return userIDs
 }
 
-// isTypingIn reports whether a channel's sidebar row should carry the mark.
-//
-// The open channel never carries one. Its line above the composer is already
-// naming who is there, and a row that could be marked while it is the open one is
-// a row nothing puts back: showTyping sends that channel to the line, so the mark
-// would sit there sweeping until some unrelated sidebar-wide sync happened to
-// clear it. Selecting a channel and leaving one both run that sync, which is what
-// takes the mark off on the way in and puts it back on the way out.
-//
-// TypingNames is the feature's off switch as well as its limit, so a row must not
-// keep a mark it was given before it was turned to zero.
+// isTypingIn reports whether a channel's sidebar row carries the mark. The open
+// channel never does: its line already names who is there, and a mark given to
+// the open row is one nothing puts back — showTyping sends that channel to the
+// line, so it would sweep until an unrelated sidebar sync cleared it. Selecting
+// and leaving both run that sync. TypingNames is the feature's off switch as well
+// as its limit, so a row must not keep a mark given before it went to zero.
 func (a *App) isTypingIn(channelID string) bool {
 	behaviour := config.Current().Behaviour
 
@@ -259,27 +239,25 @@ func (a *App) refreshTyping() {
 	names, avatars, hidden, self := a.resolveTypists(a.currentChannelID, limit, behaviour.TypingAvatars)
 	a.typingIndicator.Set(typingPhrase(names, hidden, self), avatars, behaviour.TypingAnimation)
 
-	// The line is part of the dock's height, and Fyne reclaims nothing for a
-	// shrinking minimum — so appearing or leaving has to re-hang the whole stack,
-	// as the slowmode chip does.
+	// The line is part of the dock's height and Fyne reclaims nothing for a shrinking
+	// minimum, so appearing or leaving re-hangs the stack, as the slowmode chip does.
 	if a.typingIndicator.Visible() != shown {
 		a.resizeDock()
 	}
 }
 
 // resolveTypists turns a channel's typists into what the line draws: the names it
-// can, up to limit, the avatars beside them, how many are left over, and whether
-// this account is among them. Somebody the client cannot name yet is counted
-// rather than named — ensureAuthor has already been asked for them, and the line
-// redraws when the answer lands.
+// can up to limit, the avatars beside them, how many are left over, and whether
+// this account is among them. Somebody unnameable is counted rather than named —
+// ensureAuthor has been asked, and the line redraws when the answer lands.
 func (a *App) resolveTypists(channelID string, limit int, wantAvatars bool) (names, avatars []string, hidden int, self bool) {
 	if limit == 0 {
 		return nil, nil, 0, false
 	}
 
-	// This account is drawn first and out of the sorted order, because "You and
-	// Bob" is one sentence where "Bob and You" is two names, one of them wrong. It
-	// takes a slot like anybody else, so the limit still bounds the whole line.
+	// This account is drawn first, out of the sorted order: "You and Bob" is one
+	// sentence where "Bob and You" is two names. It takes a slot like anybody else,
+	// so the limit still bounds the whole line.
 	selfID := a.store.SelfID()
 	room := limit
 
@@ -324,17 +302,14 @@ func (a *App) typistIdentity(userID string) (name, avatarURL string) {
 	return "", ""
 }
 
-// typingPhrase is what the line names. It is the people and nothing else: the
-// mark sweeping beside them is what says they are typing, so a sentence saying it
-// again would be the longest part of a line that has to share its row with the
-// slowmode chip.
-//
-// hidden counts everyone past the limit as well as everyone the client cannot yet
-// name, which is why it can be non-zero with no names at all. self puts this
-// account at the head of it.
+// typingPhrase is the people and nothing else: the mark sweeping beside them says
+// they are typing, so a sentence saying it again would be the longest part of a
+// line already sharing its row with the slowmode chip. hidden counts everyone
+// past the limit *and* everyone unnameable, which is why it can be non-zero with
+// no names at all.
 func typingPhrase(names []string, hidden int, self bool) string {
 	if self {
-		names = append([]string{"You"}, names...)
+		names = slices.Insert(names, 0, "You")
 	}
 
 	if len(names) == 0 {
@@ -344,13 +319,13 @@ func typingPhrase(names []string, hidden int, self bool) string {
 		case hidden == 1:
 			return "Someone"
 		default:
-			return fmt.Sprintf("%d people", hidden)
+			return strconv.Itoa(hidden) + " people"
 		}
 	}
 
 	line := strings.Join(names, ", ")
 	if hidden > 0 {
-		line += fmt.Sprintf(" +%d", hidden)
+		line += " +" + strconv.Itoa(hidden)
 	}
 
 	return line
@@ -359,17 +334,14 @@ func typingPhrase(names []string, hidden int, self bool) string {
 /* Sending */
 
 // noteTyping is every keystroke in the composer, with whether anything survived
-// it. Call on the UI thread.
-//
-// Announcing is throttled to typingSendInterval rather than sent per keystroke:
-// a reader's entry lives far longer than that, so re-stating it more often buys
-// nothing. Emptying the composer is taken as stopping outright — it is the same
-// gesture as never having started.
+// it. Announcing is throttled to typingSendInterval: a reader's entry lives far
+// longer, so re-stating it more often buys nothing. Emptying the composer is
+// stopping outright.
 //
 // typingChannelID marks where this account counts as composing whether or not it
-// is being announced, since the local preview has to be taken back in the same
-// places the announcement is. sentTypingAt zero means nothing was ever said out
-// loud, and so nothing is owed a retraction.
+// is announced, the local preview having to be taken back in the same places. A
+// zero sentTypingAt means nothing was said out loud, so nothing is owed a
+// retraction. Call on the UI thread.
 func (a *App) noteTyping(typing bool) {
 	behaviour := config.Current().Behaviour
 	if a.currentChannelID == "" || (!behaviour.SendTyping && !behaviour.TypingShowSelf) {
@@ -398,13 +370,13 @@ func (a *App) noteTyping(typing bool) {
 }
 
 // noteSelfTyping files this account among the channel's typists, so the line
-// shows what everyone else is being shown. It is a local echo rather than a
-// reflected event: nothing guarantees Revolt sends our own typing back to us, and
-// the preview is wanted whether or not we are announcing at all.
+// shows what everyone else is shown. A local echo rather than a reflected event:
+// nothing guarantees Revolt sends our own typing back, and the preview is wanted
+// whether or not we announce at all.
 //
-// The repaint is only on the way in. Every later keystroke moves the moment the
-// entry lapses and nothing else, and a timer left armed at the older moment costs
-// one wake that prunes nothing and re-arms itself. Call on the UI thread.
+// The repaint is only on the way in. Every later keystroke moves the lapse moment
+// and nothing else, and a timer armed at the older one costs a wake that prunes
+// nothing and re-arms itself. Call on the UI thread.
 func (a *App) noteSelfTyping(channelID string) {
 	selfID := a.store.SelfID()
 	if !config.Current().Behaviour.TypingShowSelf || typingNames() == 0 || selfID == "" {
@@ -428,10 +400,9 @@ func (a *App) noteSelfTyping(channelID string) {
 	a.armTypingTimer()
 }
 
-// stopTyping takes back what this account is counted as composing in a channel,
-// locally and on the wire. Nothing is said when the retraction fails: the entry
-// lapses on its own at the other end, which is what typingLifetime is for. Call
-// on the UI thread.
+// stopTyping takes back what this account is counted as composing, locally and on
+// the wire. A failed retraction is silent: the entry lapses at the other end
+// anyway, which is what typingLifetime is for. Call on the UI thread.
 func (a *App) stopTyping(channelID string) {
 	a.cancelTypingIdle()
 
@@ -450,14 +421,12 @@ func (a *App) stopTyping(channelID string) {
 	}
 }
 
-// armTypingIdle restarts the quiet period after which a composer nobody has
-// touched stops counting as being typed in. Call on the UI thread.
-//
-// The wake decides nothing on its own: a timer that has already fired cannot be
-// called back, so a keystroke landing between the fire and the hop onto the UI
-// thread would be answered by a stop for typing still in progress — Reset there
-// re-arms a timer whose old callback is already on its way. The keystroke is
-// recorded instead, and a wake that finds a fresh one waits out the remainder.
+// armTypingIdle restarts the quiet period after which an untouched composer stops
+// counting as being typed in. The wake decides nothing on its own: a fired timer
+// cannot be called back, so a keystroke landing between the fire and the hop would
+// be answered by a stop for typing still in progress. The keystroke is recorded
+// instead, and a wake that finds a fresh one waits out the remainder. Call on the
+// UI thread.
 func (a *App) armTypingIdle() {
 	a.lastTypedAt = time.Now()
 
@@ -469,8 +438,8 @@ func (a *App) armTypingIdle() {
 	epoch := a.epoch
 	a.typingIdleTimer = time.AfterFunc(typingIdleTimeout, func() {
 		a.doOnUI(func() {
-			// A nil timer is a composer already given up while this wake was in
-			// flight — a submit, a channel switch — and there is nothing left to stop.
+			// A nil timer is a composer already given up while this wake was in flight
+			// — a submit, a channel switch — with nothing left to stop.
 			if a.stale(epoch) || a.typingIdleTimer == nil {
 				return
 			}

@@ -90,7 +90,7 @@ func userIDs(targets []client.AuthorRef) []string {
 // be a name over a blank line, and nothing else in the panel says what the pin
 // is. The flattening matters for the same reason — a pinned code block is worth
 // keeping and is several lines of it.
-func TestPinPreview(t *testing.T) {
+func TestMessagePreview(t *testing.T) {
 	cases := []struct {
 		name    string
 		message domain.Message
@@ -104,7 +104,7 @@ func TestPinPreview(t *testing.T) {
 		{
 			name:    "a long body is cut",
 			message: domain.Message{Content: strings.Repeat("a", 200)},
-			want:    strings.Repeat("a", pinPreviewRunes-3) + "...",
+			want:    strings.Repeat("a", previewRunes-3) + "...",
 		},
 		{
 			name:    "one attachment is named",
@@ -136,7 +136,7 @@ func TestPinPreview(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := pinPreview(&c.message); got != c.want {
+		if got := messagePreview(&c.message); got != c.want {
 			t.Errorf("%s: summarised as %q, want %q", c.name, got, c.want)
 		}
 	}

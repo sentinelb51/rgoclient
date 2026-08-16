@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sentinelb51/revoltgo"
@@ -30,6 +31,20 @@ var ErrBusy = errors.New("request already in flight")
 // connections.
 const resolveWorkers = 4
 
+// maxSearchQuery is Revolt's own ceiling on a search query. Past it the route
+// refuses the request outright, so a longer one is cut rather than sent.
+const maxSearchQuery = 64
+
+// Autumn's buckets. A file is looked up by its ID *and* the bucket it was put
+// in at the moment it is used, so which one a picture is uploaded to is what
+// decides whether Revolt will take it as an avatar, as a banner or as an
+// attachment — see uploadTo.
+const (
+	bucketAttachments = "attachments"
+	bucketAvatars     = "avatars"
+	bucketBackgrounds = "backgrounds"
+)
+
 // AvatarURL builds the URL an avatar is served from. It exists for the saved
 // login cards, which persist an avatar ID from a session that no longer exists
 // and so cannot ask the store for one.
@@ -38,7 +53,20 @@ func AvatarURL(avatarID string) string {
 		return ""
 	}
 
-	return revoltgo.EndpointAutumnFile("avatars", avatarID, avatarSize)
+	return revoltgo.EndpointAutumnFile(bucketAvatars, avatarID, avatarSize)
+}
+
+// trimTo trims s and shortens it to at most limit runes, trimming again in case
+// the cut left a space on the end. Every ceiling Revolt puts on a field is
+// counted in characters and refuses anything longer outright, so cutting here
+// spares a round trip that could only come back a refusal.
+func trimTo(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if utf8.RuneCountInString(s) <= limit {
+		return s
+	}
+
+	return strings.TrimSpace(string([]rune(s)[:limit]))
 }
 
 /* Messages */
@@ -67,22 +95,35 @@ func uploadAttachments(session *revoltgo.Session, attachments []domain.Attachmen
 	ids := make([]string, 0, len(attachments))
 
 	for _, attachment := range attachments {
-		file, err := os.Open(attachment.Path)
-		if err != nil {
-			log.Printf("open attachment %s: %v", attachment.Path, err)
-			continue
-		}
-
-		uploaded, err := session.AttachmentUpload(&revoltgo.FileParams{Name: attachment.Name, Reader: file})
-		_ = file.Close()
+		id, err := uploadFile(session, bucketAttachments, attachment.Path, attachment.Name)
 		if err != nil {
 			log.Printf("upload attachment %s: %v", attachment.Name, err)
 			continue
 		}
-		ids = append(ids, uploaded.ID)
+		ids = append(ids, id)
 	}
 
 	return ids
+}
+
+// uploadFile puts a file in one of Autumn's buckets and hands back the ID Revolt
+// will take for it. It goes round Session.AttachmentUpload, which names the
+// attachments bucket and nothing else — Revolt looks a file up by ID *and*
+// bucket, so an attachment's ID offered as an avatar does not exist.
+func uploadFile(session *revoltgo.Session, bucket, path, name string) (string, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = file.Close() }()
+
+	var uploaded revoltgo.FileParamsData
+	if err := session.HTTP.Request(http.MethodPost, revoltgo.EndpointAutumn(bucket),
+		&revoltgo.FileParams{Name: name, Reader: file}, &uploaded); err != nil {
+		return "", err
+	}
+
+	return uploaded.ID, nil
 }
 
 func toMessageReplies(replies []domain.Reply) []*revoltgo.MessageReplies {
@@ -122,12 +163,9 @@ func (c *Client) DeleteMessage(channelID, messageID string) error {
 }
 
 // PinMessage pins or unpins a message and records the result, so the menu that
-// raised it reads the other way round immediately.
-//
-// The cache update is done here rather than left to the gateway because the
-// event Revolt sends alongside cannot carry the answer: see markPinned and the
-// note in events.go. A rejected request leaves the flag exactly as it was, this
-// being written only once the server has agreed.
+// raised it reads the other way round immediately. The cache update is done here
+// because the event Revolt sends alongside cannot carry the answer — see
+// events.go. Writing only once the server agrees leaves a rejection a no-op.
 func (c *Client) PinMessage(channelID, messageID string, pinned bool) error {
 	session := c.session.Load()
 	if session == nil {
@@ -146,33 +184,45 @@ func (c *Client) PinMessage(channelID, messageID string, pinned bool) error {
 	return nil
 }
 
-// markPinned writes a message's pin state into the cache, reporting whether
-// anything moved — an unpin of a message already known to be unpinned is what a
-// caller drops rather than announcing.
+// reviseMessage replaces a cached message with a copy that change has been
+// applied to, reporting whether anything moved — a change reporting false, and
+// an echo of something already recorded, are both dropped rather than announced.
 //
-// The entry is replaced with a copy: cached messages are read without the cache
-// lock, so they stay immutable.
-func (c *Client) markPinned(channelID, messageID string, pinned bool) bool {
+// A copy rather than a write in place: cached messages are read without the
+// cache lock, so everything reachable from one stays immutable.
+func (c *Client) reviseMessage(channelID, messageID string, change func(*domain.Message) bool) bool {
 	current := c.messages.Find(channelID, messageID)
-	if current == nil || current.Pinned == pinned {
+	if current == nil {
 		return false
 	}
 
 	updated := *current
-	updated.Pinned = pinned
+	if !change(&updated) {
+		return false
+	}
 
 	return c.messages.Replace(channelID, &updated)
 }
 
-// React adds or removes this account's reaction to a message. Which of the two
-// is asked for rather than toggled: the chip that raised it has already read the
-// state to draw itself, and re-deriving it here could only disagree.
+// markPinned writes a message's pin state into the cache.
+func (c *Client) markPinned(channelID, messageID string, pinned bool) bool {
+	return c.reviseMessage(channelID, messageID, func(message *domain.Message) bool {
+		if message.Pinned == pinned {
+			return false
+		}
+		message.Pinned = pinned
+
+		return true
+	})
+}
+
+// React adds or removes this account's reaction. Which of the two is asked for
+// rather than toggled: the chip that raised it has already read the state to
+// draw itself, and re-deriving it here could only disagree.
 //
-// The cache is written once the server has agreed, exactly as a pin is, and for
-// a related reason: the gateway does echo a reaction back, but nothing here may
-// depend on that. A chip the user has just clicked has to answer immediately,
-// and applyReaction reports "nothing moved" when the echo lands on what this
-// already holds, so the round trip costs one repaint rather than two.
+// The cache is written once the server agrees, as a pin is: a clicked chip has
+// to answer immediately, and applyReaction reports nothing moved when the
+// gateway echo lands on what this already holds — one repaint, not two.
 func (c *Client) React(channelID, messageID, emoji string, add bool) error {
 	session := c.session.Load()
 	if session == nil {
@@ -196,77 +246,64 @@ func (c *Client) React(channelID, messageID, emoji string, add bool) error {
 	return nil
 }
 
-// applyReaction records one person joining or leaving one reaction, reporting
-// whether anything moved — a caller drops what did not rather than announcing it.
-//
-// The entry, its reaction slice and the user list inside it are all replaced
-// rather than written into: cached messages are read without the cache lock, so
-// everything reachable from one stays immutable.
+// applyReaction records one person joining or leaving one reaction.
 func (c *Client) applyReaction(channelID, messageID, emoji, userID string, add bool) bool {
-	current := c.messages.Find(channelID, messageID)
-	if current == nil {
-		return false
-	}
+	return c.reviseMessage(channelID, messageID, func(message *domain.Message) bool {
+		index := reactionIndex(message.Reactions, emoji)
 
-	index := slices.IndexFunc(current.Reactions, func(r domain.Reaction) bool { return r.Emoji == emoji })
+		switch {
+		case index == -1 && !add:
+			return false
 
-	var reactions []domain.Reaction
-	switch {
-	case index == -1 && !add:
-		return false
+		case index == -1:
+			// One nobody had chosen yet, filed where toReactions would have put it.
+			message.Reactions = slices.Insert(slices.Clone(message.Reactions),
+				sortedIndex(message.Reactions, emoji),
+				domain.Reaction{Emoji: emoji, Users: []string{userID}})
 
-	case index == -1:
-		// A reaction nobody had chosen yet, filed where toReactions would have put it.
-		reactions = slices.Insert(slices.Clone(current.Reactions), sortedIndex(current.Reactions, emoji),
-			domain.Reaction{Emoji: emoji, Users: []string{userID}})
+			return true
+		}
 
-	default:
-		users, changed := withUser(current.Reactions[index].Users, userID, add)
+		users, changed := withUser(message.Reactions[index].Users, userID, add)
 		if !changed {
 			return false
 		}
 
-		reactions = slices.Clone(current.Reactions)
+		message.Reactions = slices.Clone(message.Reactions)
 		if len(users) == 0 {
 			// The last person left it: a chip reading zero is not a chip.
-			reactions = slices.Delete(reactions, index, index+1)
+			message.Reactions = slices.Delete(message.Reactions, index, index+1)
 		} else {
-			reactions[index].Users = users
+			message.Reactions[index].Users = users
 		}
-	}
 
-	updated := *current
-	updated.Reactions = reactions
-
-	return c.messages.Replace(channelID, &updated)
+		return true
+	})
 }
 
 // clearReaction drops one emoji from a message entirely, for the bulk removal a
 // moderator makes.
 func (c *Client) clearReaction(channelID, messageID, emoji string) bool {
-	current := c.messages.Find(channelID, messageID)
-	if current == nil {
-		return false
-	}
+	return c.reviseMessage(channelID, messageID, func(message *domain.Message) bool {
+		index := reactionIndex(message.Reactions, emoji)
+		if index == -1 {
+			return false
+		}
+		message.Reactions = slices.Delete(slices.Clone(message.Reactions), index, index+1)
 
-	index := slices.IndexFunc(current.Reactions, func(r domain.Reaction) bool { return r.Emoji == emoji })
-	if index == -1 {
-		return false
-	}
+		return true
+	})
+}
 
-	updated := *current
-	updated.Reactions = slices.Delete(slices.Clone(current.Reactions), index, index+1)
-
-	return c.messages.Replace(channelID, &updated)
+// reactionIndex is where emoji sits among a message's reactions, or -1.
+func reactionIndex(reactions []domain.Reaction, emoji string) int {
+	return slices.IndexFunc(reactions, func(r domain.Reaction) bool { return r.Emoji == emoji })
 }
 
 // ClearReactions takes every reaction off a message at once, which Revolt allows
-// only with ManageMessages.
-//
-// The cache is written here, as a pin's is, and for the same reason: Revolt
-// announces this as an ordinary message update carrying an empty reaction map,
-// and a field revoltgo did not receive arrives empty too — so the event cannot be
-// read for it. What this client clears is the only clear that reflects.
+// only with ManageMessages. The cache is written here because Revolt announces
+// it as an ordinary message update carrying an empty reaction map — which is
+// also what every edit carries — so a clear made elsewhere never lands.
 func (c *Client) ClearReactions(channelID, messageID string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -281,19 +318,16 @@ func (c *Client) ClearReactions(channelID, messageID string) error {
 	return nil
 }
 
-// clearAllReactions empties a cached message's reactions, reporting whether
-// anything moved. The entry is replaced with a copy, as everywhere here: cached
-// messages are read without the cache lock.
+// clearAllReactions empties a cached message's reactions.
 func (c *Client) clearAllReactions(channelID, messageID string) bool {
-	current := c.messages.Find(channelID, messageID)
-	if current == nil || len(current.Reactions) == 0 {
-		return false
-	}
+	return c.reviseMessage(channelID, messageID, func(message *domain.Message) bool {
+		if len(message.Reactions) == 0 {
+			return false
+		}
+		message.Reactions = nil
 
-	updated := *current
-	updated.Reactions = nil
-
-	return c.messages.Replace(channelID, &updated)
+		return true
+	})
 }
 
 // withUser adds or removes one user from a reaction's list, reporting whether it
@@ -345,13 +379,12 @@ func (c *Client) AckServer(serverID string) error {
 /* Typing */
 
 // BeginTyping announces this account as typing in a channel, and EndTyping takes
-// it back. Both are websocket frames rather than requests: they cost a write, no
-// rate limiter sees them, and there is nothing to wait for.
+// it back. Both are websocket frames rather than requests — a write, no rate
+// limiter, nothing to wait for.
 //
-// The socket is the reason for the second guard. A session is published before
-// its websocket is opened, and closing one leaves the field pointing at a socket
-// that has gone — so Session.WS is nil in the window either side of a login, and
-// revoltgo writes through it without looking.
+// The socket is the second guard: a session is published before its websocket
+// opens and closing one leaves the field stale, so Session.WS is nil either side
+// of a login and revoltgo writes through it without looking.
 func (c *Client) BeginTyping(channelID string) error {
 	session := c.session.Load()
 	if session == nil || session.WS == nil {
@@ -373,14 +406,9 @@ func (c *Client) EndTyping(channelID string) error {
 /* Slowmode */
 
 // FetchSlowmode reads a channel's send cooldown and records it, so the store can
-// answer for it afterwards without going back to the network.
-//
-// It is the one action that goes round revoltgo's typed API. Revolt carries
-// slowmode on a text channel and announces a changed one through ChannelUpdate,
-// but revoltgo models neither field — so the number never arrives with the
-// channel and nothing ever says it moved. Asking for the raw channel is the only
-// route to it. When revoltgo grows the field this becomes a line in store.go and
-// the request goes away.
+// answer for it without going back to the network. revoltgo models neither the
+// field nor its ChannelUpdate, so asking for the raw channel is the only route
+// to it; when it grows the field this becomes a line in store.go.
 func (c *Client) FetchSlowmode(channelID string) (time.Duration, error) {
 	session := c.session.Load()
 	if session == nil {
@@ -510,14 +538,12 @@ func (c *Client) MessagesAfter(channelID, afterID string, limit int) ([]*domain.
 }
 
 // messagePage is the request those three share, and none of them writes to the
-// cache. That cache is the contiguous tail of a channel, and a jump lands
-// wherever somebody was quoted — a page from there filed among its messages
-// would leave a hole that scrollback would mount as though it were history. The
-// caller holds what comes back for as long as it has it on screen.
+// cache: that cache is a channel's contiguous tail, and a page from wherever
+// somebody was quoted would leave a hole scrollback would mount as history. The
+// caller holds what comes back for as long as it is on screen.
 //
-// The page is sorted rather than reversed: only Before and After promise an
-// order, and the one Nearby answers in is written down nowhere. Message IDs are
-// ULIDs, so ordering them is ordering them by time.
+// Sorted rather than reversed — only Before and After promise an order, and the
+// one Nearby answers in is written down nowhere.
 func (c *Client) messagePage(channelID string, params revoltgo.ChannelMessagesParams) ([]*domain.Message, error) {
 	session := c.session.Load()
 	if session == nil {
@@ -534,57 +560,78 @@ func (c *Client) messagePage(channelID string, params revoltgo.ChannelMessagesPa
 	}
 
 	messages := toMessages(page.Messages)
-	slices.SortFunc(messages, func(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(messages, oldestFirst)
 
 	return messages, nil
 }
 
-// PinnedMessages lists what is pinned in a channel, newest first. It is the only
-// way to enumerate them: a pin is a flag on the message and Revolt publishes no
-// collection of them, so the search route asked with pinned and no query is what
-// answers.
+// oldestFirst orders messages chronologically. IDs are ULIDs, so ordering them
+// is ordering them by time.
+func oldestFirst(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) }
+
+// PinnedMessages lists what is pinned in a channel, newest first. A pin is a
+// flag on the message and Revolt publishes no collection of them, so the search
+// route asked with pinned and no query is the only enumeration there is.
 //
-// Nothing is written to the message cache, for the reason messagePage gives — a
-// pin reaches as far back as anybody cared to keep something, while the cache is
-// a channel's contiguous tail — and nothing may ask for the users either: with
-// include_users the route answers with an object rather than an array, which is
-// a shape revoltgo's ChannelSearch cannot decode. The caller resolves the authors
-// it does not already know.
-//
-// Sort is named rather than left out. The route's default is Relevance, and with
-// no query to be relevant to that is an order nobody chose.
+// Nothing is written to the message cache, for the reason messagePage gives, and
+// nothing may ask for the users: with include_users the route answers with an
+// object rather than an array, a shape ChannelSearch cannot decode. The caller
+// resolves the authors it does not already know.
 func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
+	return c.search(channelID, revoltgo.ChannelSearchParams{
+		ChannelMessagesParams: revoltgo.ChannelMessagesParams{Limit: limit},
+		Pinned:                true,
+	})
+}
+
+// SearchMessages is the same route asked the other way it can be — Revolt
+// refuses a query and pinned together — and the only way to reach a message by
+// what it says. An empty query is a request nothing comes back from, so it is
+// not made. Cache and authors are as PinnedMessages leaves them.
+func (c *Client) SearchMessages(channelID, query string, limit int) ([]*domain.Message, error) {
+	query = trimTo(query, maxSearchQuery)
+	if query == "" {
+		return nil, nil
+	}
+
+	return c.search(channelID, revoltgo.ChannelSearchParams{
+		ChannelMessagesParams: revoltgo.ChannelMessagesParams{Limit: limit},
+		Query:                 query,
+	})
+}
+
+// search is the request both share, newest first. Sort is named here because the
+// route's default is Relevance, which for a list read as a channel's history —
+// and with no query, relevant to nothing — is an order nobody chose.
+//
+// Unguarded by c.fetching: a search comes from a keystroke rather than a scroll,
+// and writes nothing two answers could interleave in.
+func (c *Client) search(channelID string, params revoltgo.ChannelSearchParams) ([]*domain.Message, error) {
 	session := c.session.Load()
 	if session == nil {
 		return nil, ErrNoSession
 	}
+	params.Sort = revoltgo.ChannelMessagesParamsSortTypeLatest
 
-	page, err := session.ChannelSearch(channelID, revoltgo.ChannelSearchParams{
-		ChannelMessagesParams: revoltgo.ChannelMessagesParams{
-			Limit: limit,
-			Sort:  revoltgo.ChannelMessagesParamsSortTypeLatest,
-		},
-		Pinned: true,
-	})
+	page, err := session.ChannelSearch(channelID, params)
 	if err != nil {
 		return nil, err
 	}
 
 	messages := toMessages(page)
-	slices.SortFunc(messages, func(a, b *domain.Message) int { return strings.Compare(b.ID, a.ID) })
+	slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
 
 	return messages, nil
 }
 
-// claim reserves key in one of the in-flight guards, reporting false when another
-// request already holds it; release gives it back. They are what turns a
+// claim reserves key in one of the in-flight guards, reporting false when
+// another request already holds it; release gives it back. They turn a
 // superseded request into ErrBusy — revoltgo's REST layer takes no context, so a
 // request cannot be cancelled, only not made twice.
 //
-// The guard is passed in rather than named because the two of them key different
-// things — channels and servers — and Revolt does not promise an ID is unique
-// across both. Reading the field to pass it is safe without the lock: the maps
-// are built once in New and only ever cleared, never replaced.
+// The guard is passed in because the two key different things — channels and
+// servers — and no ID is promised unique across both. Reading the field to pass
+// it needs no lock: the maps are built in New and only ever cleared.
 func (c *Client) claim(guard map[string]bool, key string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -634,13 +681,10 @@ type AuthorRef struct {
 }
 
 // AuthorResolution is what one batch came back with. Failed refs are handed back
-// so the caller can drop its guard and let a later message retry.
-//
-// It does not report whether a *member* record in particular was fetched. It used
-// to, so the caller could skip rebuilding the member sidebar for a pure user
-// fetch — but resolving the account behind an already-cached membership is what
-// gives that membership a name, so the sidebar and its mention candidates change
-// either way.
+// so the caller can drop its guard and let a later message retry. It does not
+// say whether a *member* was fetched: resolving the account behind an already
+// cached membership is what gives that membership a name, so the sidebar and its
+// mention candidates change either way.
 type AuthorResolution struct {
 	Resolved []string
 	Failed   []AuthorRef
@@ -708,19 +752,14 @@ type MessageRef struct {
 	MessageID string
 }
 
-// ResolveMessages fetches a batch of messages by ID, bounded by resolveWorkers,
-// and reports what came back. It is what a reply preview whose target is not in
-// the cache is filled in from: Revolt offers no route taking a list of IDs, so a
-// batch is only a batch in that the caller gets one answer for it.
+// ResolveMessages fetches a batch of messages by ID, bounded by resolveWorkers.
+// It fills in a reply preview whose target is not cached: Revolt offers no route
+// taking a list of IDs, so a batch is only a batch in that the caller gets one
+// answer for it.
 //
-// Unlike ResolveAuthors it does not report what failed, because nothing retries.
-// The usual reason a message cannot be fetched is that it was deleted, and a
-// quoted line remounts on every scroll past it.
-//
-// Nothing is written to the message cache. That cache is the contiguous tail of a
-// channel, and a reply reaches as far back as somebody cares to answer — dropping
-// one into the middle would leave a hole that loadMoreHistory would mount as
-// though it were history.
+// Nothing failed is reported because nothing retries — the usual reason is that
+// the message was deleted, and a quoted line remounts on every scroll past it.
+// Nothing is written to the message cache, for the reason messagePage gives.
 func (c *Client) ResolveMessages(targets []MessageRef) []*domain.Message {
 	session := c.session.Load()
 	if session == nil || len(targets) == 0 {
@@ -848,23 +887,46 @@ func (c *Client) CloseChannel(channelID string) error {
 
 /* Servers and members */
 
+// MaxServerName is Revolt's ceiling on a server name; ErrServerNameEmpty is the
+// other end of the same rule, the route taking nothing shorter than a character.
+const MaxServerName = 32
+
+var ErrServerNameEmpty = errors.New("server name is empty")
+
+// CreateServer makes a server owned by this account. A long name is cut rather
+// than refused; an empty one has no repair, so it is the one case reported back.
+//
+// Nothing comes back that can be believed — revoltgo decodes the response into a
+// bare Server no field of which matches — so the created server reaches the
+// client the way a joined one does, as ServerCreate on the gateway.
+func (c *Client) CreateServer(name string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	name = trimTo(name, MaxServerName)
+	if name == "" {
+		return ErrServerNameEmpty
+	}
+
+	_, err := session.ServerCreate(revoltgo.ServerCreateParams{Name: name})
+
+	return err
+}
+
 // FetchMembers pulls a server's whole membership into the local cache, the
-// accounts behind it included, so the store can answer for everybody afterwards
-// without going back to the network. Concurrent calls for the same server return
-// ErrBusy.
+// accounts behind it included, so the store can answer for everybody without
+// going back to the network. Concurrent calls for one server return ErrBusy.
 //
-// Revolt's members endpoint has no pagination and no search, so a server is one
-// request or nothing at all. exclude_offline is the only lever it offers and the
-// client declines it: the offline half is most of what a member list is for, and
-// asking without it is the only way to know the membership at all.
+// The endpoint has no pagination and no search, so a server is one request or
+// nothing. exclude_offline is declined: the offline half is most of what a
+// member list is for.
 //
-// The users matter as much as the memberships. revoltgo's State silently drops
-// an update for an account it has never cached, so somebody nobody had fetched
-// could never be seen to come online — this is what puts them there.
-//
-// The State write happens inside revoltgo and is gated on its TrackBulkAPICalls
-// option, which the client leaves at the default. Turn that off and this
-// succeeds while quietly recording nothing.
+// The users matter as much as the memberships — State silently drops an update
+// for an account it has never cached, so somebody nobody fetched could never be
+// seen to come online. That write is gated on revoltgo's TrackBulkAPICalls,
+// which the client leaves at the default.
 func (c *Client) FetchMembers(serverID string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -881,13 +943,11 @@ func (c *Client) FetchMembers(serverID string) error {
 }
 
 // FetchInvite resolves an invite code into the server it opens, without
-// redeeming it. It is what an invite card is drawn from, so it is asked for
-// every distinct code that appears in a channel — the caller is expected to
-// remember the answer rather than ask again on every scroll.
+// redeeming it. It is asked for every distinct code in a channel, so the caller
+// is expected to remember the answer rather than ask again on every scroll.
 //
-// Unlike the rest of the read side this cannot go through Store: State caches
-// only what the account is a member of, and an invite's whole purpose is naming
-// a server it is not.
+// It cannot go through Store: State caches only what the account is a member of,
+// and an invite's whole purpose is naming a server it is not.
 func (c *Client) FetchInvite(code string) (domain.Invite, error) {
 	session := c.session.Load()
 	if session == nil {
@@ -902,12 +962,9 @@ func (c *Client) FetchInvite(code string) (domain.Invite, error) {
 	return toInvite(code, invite), nil
 }
 
-// CreateInvite makes an invite to a channel and returns its code. The client
-// only ever consumed invites before this; the code it hands back is what
-// util.InviteLink turns into something shareable.
-//
-// Revolt has no way to ask for a limited one — no expiry, no use count — so an
-// invite made here is permanent until somebody deletes it.
+// CreateInvite makes an invite to a channel and returns its code, which
+// util.InviteLink turns into something shareable. Revolt offers no expiry and no
+// use count, so one made here is permanent until somebody deletes it.
 func (c *Client) CreateInvite(channelID string) (code string, err error) {
 	session := c.session.Load()
 	if session == nil {
@@ -925,12 +982,9 @@ func (c *Client) CreateInvite(channelID string) (code string, err error) {
 	return invite.ID, nil
 }
 
-// JoinInvite redeems an invite code.
-//
-// The joined server reaches the caller through ServerJoined rather than this
-// response: the join payload carries the server as an object, and revoltgo
-// decodes it into an Invite whose ServerID comes from a "server_id" field that
-// payload never sets.
+// JoinInvite redeems an invite code. The joined server reaches the caller
+// through ServerJoined rather than this response, whose ServerID revoltgo reads
+// off a "server_id" field the join payload never sets.
 func (c *Client) JoinInvite(code string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -967,25 +1021,42 @@ func (c *Client) KickMember(serverID, userID string) error {
 
 /* This account */
 
+// account is the session and this account's own user record. Every edit here
+// needs both, and a client missing either is one that is logged out.
+func (c *Client) account() (*revoltgo.Session, *revoltgo.User, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, nil, ErrNoSession
+	}
+
+	self := session.State.Self()
+	if self == nil {
+		return nil, nil, ErrNoSession
+	}
+
+	return session, self, nil
+}
+
 // MaxStatusText is how long a status line may be. Revolt refuses a longer one
 // outright, so the client clamps rather than spending a round trip finding out.
 const MaxStatusText = 128
 
-// fieldStatusText names the status line in Revolt's list of fields an edit may
-// remove. An empty Text is *omitted* from the request rather than sent, so
-// clearing the line is the one change that cannot be expressed as a value.
-const fieldStatusText = "StatusText"
+// The fields a user edit may name in its remove list. A value it is meant to
+// clear is *omitted* from the request when it is empty, so removing anything
+// here is a name rather than a blank.
+const (
+	fieldStatusText        = "StatusText"
+	fieldDisplayName       = "DisplayName"
+	fieldAvatar            = "Avatar"
+	fieldProfileContent    = "ProfileContent"
+	fieldProfileBackground = "ProfileBackground"
+)
 
 // The display name's bounds are Revolt's, which refuses anything outside them.
 const (
 	MinDisplayName = 2
 	MaxDisplayName = 32
 )
-
-// fieldDisplayName names the display name in that same list. UserEditParams
-// models it as a plain string with omitempty, so clearing it is the same shape
-// clearing the status line is.
-const fieldDisplayName = "DisplayName"
 
 // ErrDisplayNameShort reports a name too short for Revolt to take. Empty is not
 // short — it is the removal — so the two cannot share an answer.
@@ -997,14 +1068,9 @@ var ErrDisplayNameShort = errors.New("display name too short")
 // Unlike a status line the name is a single field, so nothing has to be read back
 // and sent again with it: Revolt applies the edit as a partial.
 func (c *Client) SetDisplayName(name string) error {
-	session := c.session.Load()
-	if session == nil {
-		return ErrNoSession
-	}
-
-	self := session.State.Self()
-	if self == nil {
-		return ErrNoSession
+	session, self, err := c.account()
+	if err != nil {
+		return err
 	}
 
 	name, ok := cleanDisplayName(name)
@@ -1017,16 +1083,15 @@ func (c *Client) SetDisplayName(name string) error {
 		params.Remove = []string{fieldDisplayName}
 	}
 
-	_, err := session.UserEdit(self.ID, params)
+	_, err = session.UserEdit(self.ID, params)
 
 	return err
 }
 
 // cleanDisplayName is what Revolt will take of a typed name, and whether it can
-// be sent at all. The characters its pattern forbids are dropped rather than
-// refused — a newline arriving with a pasted name is nobody's decision — and a
-// long name is cut, as a status line is. A name too short has no honest repair,
-// so it is the one case reported back; empty is the removal and always allowed.
+// be sent at all. Forbidden characters are dropped rather than refused — a
+// newline arriving with a pasted name is nobody's decision — and a long name is
+// cut. Too short has no honest repair; empty is the removal and always allowed.
 func cleanDisplayName(name string) (string, bool) {
 	name = strings.Map(func(r rune) rune {
 		if r == '\n' || r == '\r' || r == '\u200b' { // the zero-width space Revolt's pattern forbids
@@ -1036,10 +1101,7 @@ func cleanDisplayName(name string) (string, bool) {
 		return r
 	}, name)
 
-	name = strings.TrimSpace(name)
-	if runes := []rune(name); len(runes) > MaxDisplayName {
-		name = strings.TrimSpace(string(runes[:MaxDisplayName]))
-	}
+	name = trimTo(name, MaxDisplayName)
 
 	return name, name == "" || utf8.RuneCountInString(name) >= MinDisplayName
 }
@@ -1060,13 +1122,9 @@ func (c *Client) SetPresence(presence domain.Presence) error {
 // is Revolt's and the difference between "too long" and "as much of it as fits"
 // is not worth a failed send to the person who typed it.
 func (c *Client) SetStatusText(text string) error {
-	text = strings.TrimSpace(text)
+	text = trimTo(text, MaxStatusText)
 	if text == "" {
 		return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = "" }, fieldStatusText)
-	}
-
-	if runes := []rune(text); len(runes) > MaxStatusText {
-		text = string(runes[:MaxStatusText])
 	}
 
 	return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = text })
@@ -1077,14 +1135,9 @@ func (c *Client) SetStatusText(text string) error {
 // not being changed has to be read back out of State and sent again unchanged —
 // either caller omitting the other's half would silently destroy it.
 func (c *Client) editStatus(change func(*revoltgo.UserStatus), remove ...string) error {
-	session := c.session.Load()
-	if session == nil {
-		return ErrNoSession
-	}
-
-	self := session.State.Self()
-	if self == nil {
-		return ErrNoSession
+	session, self, err := c.account()
+	if err != nil {
+		return err
 	}
 
 	var status revoltgo.UserStatus
@@ -1093,19 +1146,174 @@ func (c *Client) editStatus(change func(*revoltgo.UserStatus), remove ...string)
 	}
 	change(&status)
 
-	_, err := session.UserEdit(self.ID, revoltgo.UserEditParams{Status: &status, Remove: remove})
+	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Status: &status, Remove: remove})
 
 	return err
+}
+
+/* This account's pictures and profile */
+
+// SetAvatar hangs a picture on this account. Revolt takes an ID rather than the
+// picture, so the file is uploaded first — into the avatars bucket, which is
+// what makes the ID usable as one.
+//
+// Nothing is recorded here: the new avatar comes back as an ordinary user
+// update, which is also what makes one set from another client arrive.
+func (c *Client) SetAvatar(path, name string) error {
+	session, self, err := c.account()
+	if err != nil {
+		return err
+	}
+
+	id, err := uploadFile(session, bucketAvatars, path, name)
+	if err != nil {
+		return err
+	}
+
+	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Avatar: id})
+
+	return err
+}
+
+// RemoveAvatar takes it off again, leaving the default Revolt draws from the ID.
+func (c *Client) RemoveAvatar() error {
+	session, self, err := c.account()
+	if err != nil {
+		return err
+	}
+
+	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Remove: []string{fieldAvatar}})
+
+	return err
+}
+
+// MaxBio is how long the description on a profile may be. Revolt refuses a
+// longer one, so it is cut here rather than spent on a round trip.
+const MaxBio = 2000
+
+// SetBio publishes the description under this account's name on its profile.
+// Blank removes it.
+func (c *Client) SetBio(text string) error {
+	text = trimTo(text, MaxBio)
+	if text == "" {
+		return c.editProfile(nil, fieldProfileContent)
+	}
+
+	return c.editProfile(&profileEdit{Content: &text})
+}
+
+// SetBanner puts a picture behind the profile, and RemoveBanner takes it away
+// again, leaving the role colour showing.
+func (c *Client) SetBanner(path, name string) error {
+	session, _, err := c.account()
+	if err != nil {
+		return err
+	}
+
+	id, err := uploadFile(session, bucketBackgrounds, path, name)
+	if err != nil {
+		return err
+	}
+
+	return c.editProfile(&profileEdit{Background: &id})
+}
+
+func (c *Client) RemoveBanner() error {
+	return c.editProfile(nil, fieldProfileBackground)
+}
+
+// profileEdit is the profile half of a user edit, sent round revoltgo's typed
+// API: UserEditParams models Profile as a *UserProfile whose Background is a
+// *File — the shape a profile is *read* in — where the route takes an attachment
+// ID. The bio could go through it and does not: one field pair sent two
+// different ways is worth less than the one shape.
+type profileEdit struct {
+	Content    *string `json:"content,omitempty"`
+	Background *string `json:"background,omitempty"`
+}
+
+// editProfile sends one partial profile. Revolt applies it as a partial, so the
+// half not named is left alone, and a nil edit is a removal on its own.
+//
+// Nothing about a profile is recorded anywhere: it is not on the user record,
+// State has no room for it, and no gateway event announces a change — so a
+// caller drawing what took has to ask for it again.
+func (c *Client) editProfile(edit *profileEdit, remove ...string) error {
+	session, self, err := c.account()
+	if err != nil {
+		return err
+	}
+
+	body := struct {
+		Profile *profileEdit `json:"profile,omitempty"`
+		Remove  []string     `json:"remove,omitempty"`
+	}{Profile: edit, Remove: remove}
+
+	return session.HTTP.Request(http.MethodPatch, revoltgo.EndpointUser(self.ID), body, nil)
+}
+
+/* This account's username */
+
+// Revolt's bounds on a username, which it refuses anything outside of.
+const (
+	MinUsername = 2
+	MaxUsername = 32
+)
+
+// ErrUsernameInvalid reports a username Revolt's pattern will not take. Refused
+// here rather than sent because the server answers a malformed name and a taken
+// one alike, and only one of the two can be explained to whoever typed it.
+var ErrUsernameInvalid = errors.New("username has characters Revolt will not take")
+
+// SetUsername changes the handle that tells two identical display names apart.
+// It is the one edit of this account that re-authenticates: Revolt takes the
+// account password with the new name.
+//
+// Like a display name the change comes back as a user update, so nothing is
+// recorded here either.
+func (c *Client) SetUsername(name, password string) error {
+	session, _, err := c.account()
+	if err != nil {
+		return err
+	}
+
+	name = strings.TrimSpace(name)
+	if !validUsername(name) {
+		return ErrUsernameInvalid
+	}
+
+	_, err = session.SetUsername(revoltgo.UsernameParams{Username: name, Password: password})
+
+	return err
+}
+
+// validUsername is Revolt's pattern spelled out: letters, digits and the three
+// marks it allows, between the bounds above. Unlike a display name there is
+// nothing here to repair — a username with a space in it is not one somebody
+// nearly typed, and a silent repair would take an account name they never chose.
+func validUsername(name string) bool {
+	if count := utf8.RuneCountInString(name); count < MinUsername || count > MaxUsername {
+		return false
+	}
+
+	for _, r := range name {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r), r == '_', r == '.', r == '-':
+		default:
+			return false
+		}
+	}
+
+	return true
 }
 
 /* Relationships */
 
 // relationshipWith is how this account stands with a user: what the client has
 // recorded since Ready, falling back to what Ready itself said. Somebody State
-// cannot name is a stranger, which is also what a logged-out client answers.
-//
-// The overlay is what makes a relationship survive at all past the opening
-// snapshot — see Client.relations. Safe from any goroutine; the store reads it.
+// cannot name is a stranger, as is anybody to a logged-out client. The overlay
+// is what makes a relationship survive past the opening snapshot — see
+// Client.relations. Safe from any goroutine; the store reads it.
 func (c *Client) relationshipWith(user *revoltgo.User) domain.Relationship {
 	if user == nil {
 		return domain.RelationshipNone
@@ -1134,17 +1342,12 @@ func (c *Client) setRelationship(userID string, relationship domain.Relationship
 	c.relations[userID] = relationship
 }
 
-// AddFriend sends a friend request.
-//
-// It is the second action to go round revoltgo's typed API, and unlike
-// FetchSlowmode it is not a missing field but a missing route: Revolt takes a
-// *sent* request at POST /users/friend, naming the person by handle, where
-// PUT /users/{id}/friend — which is what revoltgo calls FriendAdd — accepts one
-// that has already arrived. The two are not interchangeable, and asking the
-// wrong one of a stranger is a refusal with nothing to say why.
-//
-// The handle is read out of State rather than taken from the caller: it is
-// "username#0001", and the client has it for anybody it can draw.
+// AddFriend sends a friend request. A missing route rather than a missing field:
+// Revolt *sends* one at POST /users/friend, naming the person by handle, where
+// revoltgo's FriendAdd is PUT /users/{id}/friend, which accepts one that has
+// already arrived. Asking the wrong one of a stranger is a refusal with nothing
+// to say why. The handle comes out of State, the client having it for anybody it
+// can draw.
 func (c *Client) AddFriend(userID string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -1205,11 +1408,9 @@ func (c *Client) UnblockUser(userID string) error {
 }
 
 // editRelationship is the shape the four typed routes share: make the request,
-// and record what it says the relationship now is.
-//
-// Every one of them answers with the whole user, which is the only reason the
-// client is told anything at all — the gateway's own EventUserRelationship is
-// what covers a change made somewhere else, and neither writes to State.
+// record what it says the relationship now is. Each answers with the whole user,
+// which is the only reason the client is told anything — neither these nor the
+// gateway's EventUserRelationship write to State.
 func (c *Client) editRelationship(userID string, request func(*revoltgo.Session) (*revoltgo.User, error)) error {
 	session := c.session.Load()
 	if session == nil {
@@ -1256,14 +1457,11 @@ func (c *Client) UserProfile(userID string) (domain.UserProfile, error) {
 }
 
 // Mutual fetches the servers and friends this account has in common with
-// somebody. Like the profile it is a request of its own, made once the dialog is
-// already up.
+// somebody, a request of its own made once the dialog is up.
 //
-// It is the third thing to go round revoltgo's typed API, and the plainest: the
-// route answers with one object, and Session.UserMutual decodes into a *slice* of
-// them — a shape the response can never take, so the call could only ever fail.
-// Its struct also drops `channels`, which is the groups and conversations both
-// are in. Neither is a field this needs, so what goes round it is the whole call.
+// Session.UserMutual decodes one object into a *slice* of them, a shape the
+// response can never take, so the call could only ever fail — hence sending it
+// by hand.
 func (c *Client) Mutual(userID string) (domain.Mutual, error) {
 	session := c.session.Load()
 	if session == nil {

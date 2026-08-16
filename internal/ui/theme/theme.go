@@ -652,16 +652,16 @@ var Sizes = struct {
 	FriendsPadding       float32
 	FriendsGap           float32
 
-	/* Pinned-messages panel */
+	/* Message panels: the pins list and channel search */
 
-	PinsDialogWidth   float32
-	PinsListMaxHeight float32
-	PinsRowHeight     float32
-	PinsAvatarSize    float32
-	PinsNameSize      float32
-	PinsPreviewSize   float32
-	PinsPadding       float32
-	PinsGap           float32
+	PanelDialogWidth   float32
+	PanelListMaxHeight float32
+	PanelRowHeight     float32
+	PanelAvatarSize    float32
+	PanelNameSize      float32
+	PanelPreviewSize   float32
+	PanelPadding       float32
+	PanelGap           float32
 
 	/* Settings */
 
@@ -996,14 +996,14 @@ var Sizes = struct {
 	FriendsPadding:       12,
 	FriendsGap:           6,
 
-	PinsDialogWidth:   480,
-	PinsListMaxHeight: 420,
-	PinsRowHeight:     54,
-	PinsAvatarSize:    32,
-	PinsNameSize:      14,
-	PinsPreviewSize:   12,
-	PinsPadding:       12,
-	PinsGap:           6,
+	PanelDialogWidth:   480,
+	PanelListMaxHeight: 420,
+	PanelRowHeight:     54,
+	PanelAvatarSize:    32,
+	PanelNameSize:      14,
+	PanelPreviewSize:   12,
+	PanelPadding:       12,
+	PanelGap:           6,
 
 	SettingsRailWidth:     210,
 	SettingsRailRowHeight: 34,
@@ -1053,11 +1053,10 @@ var Sizes = struct {
 // changed accent rather than staying on the one compiled in here.
 var selectionTint color.Color = color.RGBA{R: 91, G: 124, B: 250, A: 90}
 
-// noShadow removes Fyne's only other edge treatment. A scroll paints this as a
-// gradient along whichever edge has more content past it — a wide smear across a
-// flat surface rather than a line, which read as a bar welded under the message
-// area once the composer floated free of it. The hairline Outline is the single
-// edge in the client; nothing may draw a competing one.
+// noShadow removes Fyne's only other edge treatment. A scroll paints it as a
+// gradient along whichever edge has more content past it — a smear rather than a
+// line, which read as a bar welded under the message area once the composer
+// floated free. Outline is the single edge in the client.
 var noShadow = color.Transparent
 
 // AppTheme applies the palette to Fyne's built-in widgets so they match the
@@ -1132,17 +1131,14 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 	return t.Theme.Color(name, variant)
 }
 
-// Size hides scrollbars and flattens inputs: no corner radius and no border
-// stroke, so an entry reads as a flat filled bar rather than an outlined box.
-// The zero border also collapses the caret, which Fyne draws InputBorder wide —
-// ui.WithCaret restores it per entry without bringing the outline back.
+// Size hides scrollbars and flattens inputs: no corner radius, no border stroke,
+// so an entry reads as a flat filled bar. The zero border also collapses the
+// caret, which Fyne draws InputBorder wide — ui.WithCaret restores it per entry.
 //
-// Both scrollbar sizes are zeroed, not just the large one. Fyne's bar lives in a
-// scrollBarArea laid over the right edge of the content, and that area is a
-// hover-accepting widget sized SizeNameScrollBarSmall*2 at rest — so a
-// transparent bar still left a strip that, being the innermost object, took the
-// hover a message row underneath it needed. ui.ObservableScroll draws the
-// position indicator the client does want as an inert rectangle instead.
+// *Both* scrollbar sizes are zeroed. Fyne's bar lives in a scrollBarArea over the
+// content's right edge, a hover-accepting widget sized ScrollBarSmall*2 at rest,
+// so zeroing only the large one left a strip that — being innermost — took the
+// hover a message row needed. ui.ObservableScroll draws an inert indicator instead.
 func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
 	switch name {
 	case theme.SizeNameScrollBar, theme.SizeNameScrollBarSmall,

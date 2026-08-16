@@ -15,10 +15,9 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
-// memberFetchTimeout is how long the sidebar keeps saying it is loading a
-// membership before it gives up and offers to ask again. It is a const rather
-// than a setting because it is not a preference: what the user would be choosing
-// is how long to look at a sweeping line before being told nothing came.
+// memberFetchTimeout is how long the sidebar says it is loading before it gives
+// up and offers to ask again. A const rather than a setting: what would be chosen
+// is how long to watch a sweeping line before being told nothing came.
 const memberFetchTimeout = 20 * time.Second
 
 // authorFetchDelay is how long author resolution waits for more authors before
@@ -33,22 +32,18 @@ func authorFetchDelay() time.Duration { return config.Current().Behaviour.Author
 // disagreed would leak a guard and stop that author ever being retried.
 func authorKey(serverID, userID string) string { return serverID + ":" + userID }
 
-// ensureAuthor makes a message author renderable. Messages carry only the
-// author's ID, so a user we haven't seen renders as a raw ID until resolved. This
-// queues both gaps when missing from the store — the user (name, avatar) and, in
-// a server channel, the member (nickname, role colour) — guarded by
-// fetchedAuthors so each pair is queued at most once. The fetching itself happens
-// a moment later in flushAuthors.
+// ensureAuthor makes a message author renderable. A message carries only the
+// author's ID, so an unseen user renders as a raw one. This queues both gaps —
+// the user (name, avatar) and, in a server channel, the member (nickname, role
+// colour) — guarded by fetchedAuthors so each pair is queued once; flushAuthors
+// does the fetching a moment later.
 //
-// It stays useful alongside loadMembers, which pulls a whole server in one go:
-// this covers a webhook's author, somebody who has since left, a server whose
-// fetch failed or was turned off, and every conversation, none of which a
-// membership fetch reaches. Once that fetch has landed the batch simply finds
-// nothing to do.
+// It stays useful alongside loadMembers: this covers a webhook's author, somebody
+// since departed, a server whose fetch failed or was turned off, and every
+// conversation. Once that fetch lands the batch simply finds nothing to do.
 //
-// Call on the UI thread: it touches the maps without locking. The two store
-// lookups are the reason HasUser and HasMember exist — it runs once per mounted
-// message, so it must not allocate.
+// Call on the UI thread: it touches the maps unlocked. HasUser and HasMember
+// exist for this — it runs once per mounted message, so it must not allocate.
 func (a *App) ensureAuthor(serverID, userID string) {
 	if userID == "" {
 		return
@@ -72,14 +67,11 @@ func (a *App) ensureAuthor(serverID, userID string) {
 	}
 }
 
-// flushAuthors resolves everything ensureAuthor has queued and repaints once for
-// the whole batch. Authors that fail lose their guard, so a later message can
-// retry. Call on the UI thread.
-//
-// The repaint is deliberately one hop rather than one per author as it lands:
-// each refresh scans every mounted widget, so a page of unseen people used to
-// walk the column dozens of times and repaint after each — and the names still
-// arrived one flicker at a time. They now settle together.
+// flushAuthors resolves everything ensureAuthor queued and repaints once for the
+// whole batch. Failures lose their guard, so a later message retries. One hop
+// rather than one per author: each refresh scans every mounted widget, so a page
+// of unseen people used to walk the column dozens of times and still arrive one
+// flicker at a time. Call on the UI thread.
 func (a *App) flushAuthors() {
 	a.authorTimer = nil
 
@@ -106,12 +98,9 @@ func (a *App) flushAuthors() {
 			a.refreshFriends() // and somebody the friends list could not name at all
 
 			// In a server this is refreshMemberList's to redo, whether a member record
-			// was fetched or only the account behind one: toMember fills a membership's
-			// name and username from that account, and memberCandidates drops a member
-			// it cannot name — so a resolved *user* is what can make an already-cached
-			// membership mentionable at all. It rebuilds the sidebar and re-derives the
-			// candidates off the same walk, off the UI thread.
-			//
+			// or only the account behind one was fetched: toMember fills a membership's
+			// name from that account, and memberCandidates drops a member it cannot name
+			// — so a resolved *user* can make an already-cached membership mentionable.
 			// A conversation has no membership to rebuild, so it takes the cheap path.
 			if a.currentServerID != "" {
 				a.refreshMemberList()
@@ -122,10 +111,9 @@ func (a *App) flushAuthors() {
 	}()
 }
 
-// refreshAuthorMessages updates the mounted message widgets authored by any of
-// userIDs in place — name, role colour, avatar — after a lazy fetch resolves,
-// avoiding a full re-render of the open channel. A whole batch is passed at once
-// so the column is scanned once rather than once per author.
+// refreshAuthorMessages updates the mounted widgets authored by any of userIDs in
+// place — name, role colour, avatar — rather than re-rendering the channel. A
+// batch at a time, so the column is scanned once rather than once per author.
 func (a *App) refreshAuthorMessages(userIDs ...string) {
 	authors := make(map[string]bool, len(userIDs))
 	for _, userID := range userIDs {
@@ -152,16 +140,15 @@ func (a *App) buildMemberList() fyne.CanvasObject {
 
 	a.memberList = ui.NewMemberList(a.deps())
 
-	// The menu is handed over once for the whole list rather than closed over per
-	// row: the rows are recycled, so one capturing a member would offer to kick
-	// whoever used to be drawn there.
+	// Handed over once for the whole list rather than closed over per row: the rows
+	// are recycled, so one capturing a member would offer to kick whoever used to be
+	// drawn there.
 	a.memberList.RowMenu = func(userID string) []*fyne.MenuItem {
 		return a.memberMenu(a.currentServerID, userID)
 	}
 
-	// The member list is the one column with nothing to its right, so it carries
-	// its seam on the left — and hiding the sidebar takes that seam with it,
-	// leaving the message area flush against the window edge.
+	// The one column with nothing to its right, so it carries its seam on the left —
+	// and hiding it takes the seam too, leaving the message area flush to the window.
 	a.memberSidebar = ui.NewFixedWidthContainer(theme.Sizes.MemberSidebarWidth, background,
 		ui.NewFillRow(1, ui.NewColumnDivider(), a.memberList))
 
@@ -174,12 +161,10 @@ func (a *App) buildMemberList() fyne.CanvasObject {
 }
 
 // toggleMemberList shows or hides the member sidebar, handing its width to the
-// message area.
-//
-// Hiding it is a real saving rather than only a visual one: a hidden list is not
-// modelled at all — see refreshMemberList — which on a large server is the
-// cheapest thing the user can do. Showing it again therefore has to rebuild what
-// it stopped following.
+// message area. Hiding is a real saving rather than a visual one: a hidden list
+// is not modelled at all (see refreshMemberList), which on a large server is the
+// cheapest thing the user can do — so showing it rebuilds what it stopped
+// following.
 func (a *App) toggleMemberList() {
 	if a.memberSidebar == nil {
 		return
@@ -201,22 +186,18 @@ func (a *App) toggleMemberList() {
 	ui.Relayout(a.mainRow)
 }
 
-// refreshMemberList rebuilds the member list for the current server, and hands
-// the composer's picker the mention candidates off the same walk: they are the
-// same people under the same names, and deriving them separately meant a second
-// walk, a second round of name resolution and a second sort per member event.
+// refreshMemberList rebuilds the member list and hands the picker its mention
+// candidates off the same walk — the same people under the same names, where
+// deriving them separately meant a second walk, a second round of resolution and
+// a second sort per member event.
 //
-// The walk is the expensive half — Store.Members resolves a nickname, an avatar,
-// a presence and a role colour per member and then sorts them — so it happens
-// **off the UI thread**, and the model build goes with it. Only installing the
-// result comes back.
+// The walk is the expensive half — Store.Members resolves a nickname, avatar,
+// presence and role colour per member, then sorts — so it happens **off the UI
+// thread** along with the model build. Only installing the result comes back.
 //
-// The candidates are handed over whatever the sidebar was asked to show:
-// somebody hidden from the list is still somebody the composer can mention. A
-// *hidden* sidebar therefore skips the model but never the walk, and records
-// that it has stopped following so toggleMemberList can catch it up.
-//
-// Call on the UI thread.
+// Candidates are handed over whatever the sidebar shows: somebody hidden from the
+// list is still mentionable. A hidden sidebar therefore skips the model but never
+// the walk, and records that it stopped following. Call on the UI thread.
 func (a *App) refreshMemberList() {
 	if a.memberList == nil {
 		return
@@ -235,9 +216,8 @@ func (a *App) refreshMemberList() {
 	visible := a.memberSidebar == nil || a.memberSidebar.Visible()
 	a.memberStale = !visible
 
-	// Two rebuilds can be in flight at once — an event landing beside a server
-	// change — and the store they read moves under them, so the older one has
-	// nothing useful to install.
+	// Two rebuilds can be in flight — an event landing beside a server change — and
+	// the store moves under them, so the older has nothing useful to install.
 	a.memberSeq++
 	seq := a.memberSeq
 	epoch := a.epoch
@@ -268,13 +248,11 @@ func (a *App) refreshMemberList() {
 
 /* What the sidebar says when its rows cannot */
 
-// updateMemberStatus decides the strip drawn over the list. It is computed from
-// the state rather than written at each place that changes it: a fetch starting,
-// finishing, timing out and a model landing can all reach it in either order, and
-// four call sites each setting a message is four chances for the sidebar to be
-// left claiming to be loading something that arrived.
-//
-// Call on the UI thread, after anything either half of it depends on has moved.
+// updateMemberStatus decides the strip over the list, computed from the state
+// rather than written at each place that changes it: a fetch starting, finishing,
+// timing out and a model landing can reach it in any order, and four call sites
+// each setting a message is four chances to be left claiming to load what already
+// arrived. Call on the UI thread, after anything it depends on has moved.
 func (a *App) updateMemberStatus() {
 	if a.memberList == nil {
 		return
@@ -292,13 +270,11 @@ func (a *App) updateMemberStatus() {
 	a.memberList.SetStatus(status)
 }
 
-// memberStatusFor is the decision alone, taken apart from the widget it is
-// installed on so it can be checked without one.
-//
-// Order is the whole of it. A fetch in flight outranks a previous failure —
-// retrying is what put it in flight — and a failure outranks an empty list,
-// because "nobody to show" for a membership that never arrived is a lie the user
-// has no way to see through.
+// memberStatusFor is the decision alone, apart from the widget so it can be
+// checked without one. Order is the whole of it: a fetch in flight outranks a
+// previous failure — retrying is what put it in flight — and a failure outranks
+// an empty list, "nobody to show" for a membership that never arrived being a lie
+// the user cannot see through.
 func memberStatusFor(serverID string, loading, failed, empty bool) ui.MemberListStatus {
 	switch {
 	case serverID == "":
@@ -326,21 +302,17 @@ func (a *App) retryMembers(serverID string) {
 }
 
 // armMemberWatchdog gives the sidebar an answer for a membership that never
-// arrives.
-//
-// It does not cancel anything and cannot: revoltgo's REST layer takes no context,
-// so a request that has stopped being waited for is still out. What the timeout
-// buys is the sidebar no longer claiming to be loading something nothing is
-// watching — and if the answer does land afterwards it is still installed, the
-// fetch having been left alone.
+// arrives. It cancels nothing and cannot — revoltgo's REST layer takes no
+// context — so what the timeout buys is the sidebar no longer claiming to load
+// something nothing is watching. An answer landing afterwards is still installed.
 func (a *App) armMemberWatchdog(serverID string) {
 	a.stopMemberWatchdog()
 
 	var watchdog *time.Timer
 	watchdog = time.AfterFunc(memberFetchTimeout, func() {
 		a.doOnUI(func() {
-			// A fired timer cannot be recalled, so the wake checks it is still the
-			// one the field holds rather than trusting that it was not replaced.
+			// A fired timer cannot be recalled, so the wake checks it is still the one
+			// the field holds.
 			if a.memberWatchdog != watchdog || a.memberLoading != serverID {
 				return
 			}
@@ -365,10 +337,10 @@ func (a *App) stopMemberWatchdog() {
 	a.memberWatchdog = nil
 }
 
-// memberListOptions is what the settings say the list should look like. Read per
-// rebuild rather than held, so a change applies to the next one. Hoisting is
-// only meaningful alongside the presence split — an ungrouped list has no
-// sections to hoist into — and the model reads it that way.
+// memberListOptions is what the settings say the list should look like, read per
+// rebuild so a change applies to the next one. Hoisting only means anything
+// alongside the presence split — an ungrouped list has no sections to hoist into
+// — and the model reads it that way.
 func memberListOptions() ui.MemberListOptions {
 	settings := config.Current().Behaviour
 
@@ -382,8 +354,8 @@ func memberListOptions() ui.MemberListOptions {
 }
 
 // refreshMemberRow redraws one member in place, for a change that does not move
-// them in the list. Somebody who is not mounted is a no-op: their row is built
-// from the store when it scrolls into view.
+// them. Somebody unmounted is a no-op: their row is built from the store when it
+// scrolls into view.
 func (a *App) refreshMemberRow(userID string) {
 	if a.memberList == nil || a.currentServerID == "" {
 		return
@@ -397,15 +369,14 @@ func (a *App) refreshMemberRow(userID string) {
 /* The full membership */
 
 // loadMembers pulls a server's whole membership, once per server per session.
-//
-// Without it the list holds the gateway's members plus whoever lazy author
-// resolution has pulled in — a fraction of a large server, under section counts
-// that mean nothing. Revolt has no pagination and no member search, so it is one
-// request for everybody or none at all; the setting is what turns it off.
+// Without it the list holds the gateway's members plus whoever lazy resolution
+// pulled in — a fraction of a large server, under section counts that mean
+// nothing. Revolt has no pagination and no member search, so it is one request
+// for everybody or none; the setting turns it off.
 //
 // It also fills the *user* cache, which is what makes presence work: revoltgo
-// silently drops an update for an account it has never heard of, so a member
-// nobody has fetched can never come online.
+// drops an update for an account it has never heard of, so a member nobody
+// fetched can never come online.
 //
 // Paint-then-fill: the caller has already drawn what is known, so re-entering a
 // server never blanks its list. Call on the UI thread.
@@ -440,9 +411,8 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 		return
 	}
 
-	// A second attempt made while the first is still out is not a failure and must
-	// not be reported as one: the first request's own answer is still coming, and
-	// it is what finishes this.
+	// A second attempt while the first is still out is not a failure: the first
+	// request's own answer is still coming, and it is what finishes this.
 	if errors.Is(err, client.ErrBusy) {
 		a.fetchedMembers[serverID] = true
 		return
@@ -469,23 +439,17 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 
 /* Mention candidates */
 
-// refreshMentionCandidates hands the composer's picker the people mentionable in
-// a *conversation* — its own recipients, which is a list the channel already
-// carries and so costs nothing to resolve here.
+// refreshMentionCandidates hands the picker the people mentionable in a
+// *conversation* — its own recipients, a list the channel already carries.
 //
-// A server's people are deliberately not this function's business. Store.Members
-// resolves a nickname, an avatar, a presence and a role colour per member and
-// then sorts them, which is far too much for the UI thread; refreshMemberList
-// already makes that walk off-thread and pushes the result through
-// setMentionCandidates. Every path that opens a server channel goes through
-// enterServer first, so by the time a channel is selected the pool is already
-// there — asking again here would walk a whole membership a second time, on the
-// wrong thread, to arrive at what the picker is holding.
+// A server's people are deliberately not its business: that walk is far too much
+// for the UI thread, and refreshMemberList already makes it off-thread and pushes
+// the result through setMentionCandidates. Every path into a server channel goes
+// through enterServer first, so the pool is already there — asking again would
+// walk a whole membership a second time, on the wrong thread, to arrive at what
+// the picker is holding. Channels are pushed separately by refreshChannelList.
 //
-// Its channels are pushed separately again, by refreshChannelList: they change
-// only when the sidebar itself is rebuilt.
-//
-// Call on the UI thread, whenever the open conversation or its recipients change.
+// Call on the UI thread, when the open conversation or its recipients change.
 func (a *App) refreshMentionCandidates() {
 	channel, ok := a.currentChannel()
 	if !ok || channel.ServerID != "" {
@@ -506,13 +470,11 @@ func (a *App) setMentionCandidates(kind ui.MentionKind, candidates []ui.MentionC
 	a.input.Mentions.SetCandidates(kind, candidates)
 }
 
-// recipientCandidates resolves the people mentionable in a conversation from
-// what the client already knows — no network, the same rule the member sidebar
-// follows. A conversation names its own participants, so unlike a server this is
-// bounded by the channel itself and needs no membership walk.
-//
-// It takes the store rather than reading a.store so it stays a pure function of
-// its arguments, which is what lets it be tested against a fake.
+// recipientCandidates resolves a conversation's mentionable people from what the
+// client already knows — no network, the same rule the sidebar follows. A
+// conversation names its own participants, so this is bounded by the channel and
+// needs no membership walk. It takes the store rather than reading a.store, which
+// is what lets it be tested against a fake.
 func recipientCandidates(store domain.Store, channel domain.Channel) []ui.MentionCandidate {
 	candidates := make([]ui.MentionCandidate, 0, len(channel.Recipients))
 	for _, userID := range channel.Recipients {
@@ -528,11 +490,10 @@ func recipientCandidates(store domain.Store, channel domain.Channel) []ui.Mentio
 	return candidates
 }
 
-// memberCandidates turns resolved members into mention candidates, which arrive
-// already ordered. They carry the same nickname, per-server avatar and role
-// colour the member sidebar shows, so the picker looks like the list the user is
-// picking from. A member whose account the store hasn't resolved and who has no
-// nickname either is dropped: there would be nothing to display or match against.
+// memberCandidates turns resolved members into mention candidates, already
+// ordered. They carry the nickname, per-server avatar and role colour the sidebar
+// shows, so the picker looks like the list being picked from. A member with no
+// resolved account and no nickname is dropped: nothing to display or match against.
 func memberCandidates(members []domain.Member) []ui.MentionCandidate {
 	candidates := make([]ui.MentionCandidate, 0, len(members))
 

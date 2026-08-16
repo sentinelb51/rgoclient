@@ -130,5 +130,6 @@ func testDeps() Deps {
 		Emojis:  cache.NewImageCache("", cache.EmojisFolder, cache.DefaultImageLimits()),
 		Texts:   cache.NewTextCache(8),
 		Actions: stubActions{},
+		Tooltip: NewTooltip(),
 	}
 }

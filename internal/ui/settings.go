@@ -2,17 +2,15 @@ package ui
 
 // The settings page: an icon rail of sections beside a scrolling pane of rows.
 //
-// It is a *layer* rather than a canvas overlay or a second window. An overlay
-// would be the obvious choice — it is what every other modal here is — but the
-// modal layer holds exactly one thing at a time, and a settings page has to be
-// able to ask "clear the cache?" over itself. Stacked into the window's content
-// instead, it covers the client while leaving the overlay layer free above it.
-// The cost is that it has to swallow pointer events itself, which is what the
-// opaque backdrop and the tap sink are for.
+// A *layer* rather than a canvas overlay: the modal layer holds one thing at a
+// time, and this page has to ask "clear the cache?" over itself. Stacked into the
+// window's content it covers the client while leaving that layer free above it —
+// at the cost of swallowing pointer events itself, which is what the opaque
+// backdrop and the tap sink are for.
 //
-// Every row is the same shape: a label, an optional line of explanation, and one
-// control — beside the text, or under it when the control is a slider. Sections
-// assemble rows; rows never reach back into a section.
+// Every row is one shape: a label, an optional line of explanation, and one
+// control — beside the text, or under it for a slider. Sections assemble rows;
+// rows never reach back into a section.
 
 import (
 	"image/color"
@@ -68,9 +66,9 @@ var railEntries = []railEntry{
 
 /* The page */
 
-// SettingsHooks is everything the page needs from the controller. It is a bundle
-// of plain functions rather than an extension of Deps, the way the join dialog
-// takes its callbacks: nothing else in the client needs any of them.
+// SettingsHooks is everything the page needs from the controller — plain
+// functions rather than an extension of Deps, as the join dialog takes its
+// callbacks: nothing else in the client needs any of them.
 type SettingsHooks struct {
 	Deps Deps
 
@@ -94,32 +92,50 @@ type SettingsHooks struct {
 	ForgetSession func(userID string)
 	LogOut        func()
 
-	// LogOutEverywhere revokes every session the account has rather than only
-	// this one, which is why it is separate: the two read alike and one of them
-	// signs the user out of their phone.
+	// LogOutEverywhere revokes every session rather than this one, which is why it
+	// is separate: the two read alike and one signs the user out of their phone.
 	LogOutEverywhere func()
 
 	// SetPresence publishes how the account appears to everybody else. The page
-	// does not hear back — the change returns as an ordinary user update and the
-	// store answers for it, exactly as it would for anybody else.
+	// never hears back — the change returns as an ordinary user update, and the
+	// store answers for it exactly as it would for anybody else.
 	SetPresence func(presence domain.Presence)
 
-	// SetStatusText publishes the line beside the account's name, blank clearing
-	// it. It hears back the same way SetPresence does — not at all.
+	// SetStatusText publishes the line beside the account's name, blank clearing it.
 	SetStatusText func(text string)
 
 	// SetDisplayName publishes the name shown in place of the username, blank
-	// removing it. The controller decides what is short enough to refuse and says
-	// so itself, the limit being Revolt's and this page having no business
-	// holding it.
+	// removing it. What is short enough to refuse is Revolt's limit, so the
+	// controller holds it and says so itself.
 	SetDisplayName func(name string)
+
+	// ChangeUsername asks for the new handle and the password Revolt takes with it —
+	// a card on the modal layer rather than a row here, two answers being needed at
+	// once and one of them a password that must not sit on a page that stays open.
+	ChangeUsername func()
+
+	// ChangeAvatar and ChangeBanner ask for a picture and hang it on the account.
+	// The page supplies no path — picking a file needs the window.
+	ChangeAvatar func()
+	ChangeBanner func()
+
+	RemoveAvatar func()
+	RemoveBanner func()
+
+	// SetBio publishes the description on the account's profile, blank removing it.
+	SetBio func(text string)
+
+	// LoadProfile hands back the account's own bio and banner, which are a request
+	// rather than part of the user record — so the rows drawn from them are built
+	// empty and filled through SetProfile. It may answer at once, from what the
+	// controller already holds, and it may never answer at all.
+	LoadProfile func(onLoaded func(profile domain.UserProfile))
 
 	/* Cache */
 
 	CacheDir func() string
-	// ChooseCacheDir asks the user for a directory and reports the one they
-	// picked, or nothing at all if they changed their mind. The page cannot open
-	// the dialog itself: it needs the window.
+	// ChooseCacheDir asks for a directory and reports the one picked, or nothing at
+	// all. The page cannot open the dialog itself: it needs the window.
 	ChooseCacheDir func(onPicked func(path string))
 	CacheStats     func(onDone func(cache.ImageStats))
 	ClearCache     func()
@@ -138,12 +154,10 @@ type SettingsSession struct {
 }
 
 // SettingsPage is the settings surface and its state. The controller keeps one
-// for the life of the process and stacks Layer into the window content, so a
-// rebuild of the client behind it leaves the open section and scroll position
-// alone.
+// for the life of the process, so a rebuild of the client behind it leaves the
+// open section and the scroll position alone.
 type SettingsPage struct {
-	// Layer is the full-window layer to stack over the main row. Hidden until
-	// Open.
+	// Layer is the full-window layer to stack over the main row. Hidden until Open.
 	Layer *fyne.Container
 
 	hooks SettingsHooks
@@ -153,38 +167,40 @@ type SettingsPage struct {
 	pane    *fyne.Container
 	title   *canvas.Text
 
-	// paneScroll is what a rail sub-entry moves and what reports the movement
-	// back, so the entry marked open follows the reader rather than the last tap.
+	// paneScroll is what a rail sub-entry moves and what reports the movement back,
+	// so the entry marked open follows the reader rather than the last tap.
 	paneScroll *ObservableScroll
 
 	// groups are the open section's cards beside their captions — the rail lists
 	// them, and scrolling to one is an offset into pane.
 	groups []settingsGroup
-	// subButtons are the rail's sub-entries, in the same order as groups, kept so
-	// the selection can be repainted without rebuilding the rail.
+	// subButtons are the rail's sub-entries, kept so the selection can be repainted
+	// without rebuilding the rail.
 	subButtons []*settingsRailButton
 	// navGroups indexes groups for each sub-entry. Not every group earns one — a
 	// preview is a card with no caption — so the two do not run in step.
 	navGroups []int
-	// groupOffsets is where each group starts inside the pane, measured once when
-	// the section is built — the scroll path must not walk the pane per event.
+	// groupOffsets is where each group starts inside the pane, measured once per
+	// section: the scroll path must not walk the pane per event.
 	groupOffsets []float32
 	activeNav    int
 
-	// advanced is config's AdvancedMode as the open section was built against.
-	// Rows and whole sections are dropped when it is off, so it is read once per
-	// build rather than per row.
+	// account is the Account section's late arrivals, cleared with every section
+	// change — see accountRows.
+	account accountRows
+
+	// advanced is AdvancedMode as the open section was built against. Rows and whole
+	// sections are dropped when it is off, so it is read once per build.
 	advanced bool
 
 	// popover is the page's own floating slot, for the colour picker. It sits in
-	// Layer above the page rather than on the window's modal layer, which holds
-	// one thing at a time — a picker there would be closed by the first
-	// confirmation the page raised.
+	// Layer rather than on the window's modal layer, which holds one thing at a time
+	// — a picker there would be closed by the first confirmation the page raised.
 	popover *fyne.Container
 
-	// previews are the sample rows the Styles section draws, re-run on every
-	// change so a dragged slider is answered immediately — the client behind the
-	// page is covered, so it is the only thing that can answer.
+	// previews are the samples the Styles section draws, re-run on every change so a
+	// dragged slider is answered at once: the client behind the page is covered, so
+	// they are the only thing that can answer.
 	previews []settingsPreview
 }
 
@@ -195,9 +211,9 @@ type settingsPreview struct {
 }
 
 // settingsGroup is one captioned card kept beside its caption, so the rail can
-// list the open section's groups and scroll to the one that is picked. A group
-// left with no rows — everything in it being advanced — has a nil object and is
-// dropped before it reaches either.
+// list the section's groups and scroll to one. A group left with no rows —
+// everything in it advanced — has a nil object and is dropped before it reaches
+// either.
 type settingsGroup struct {
 	caption string
 	object  fyne.CanvasObject
@@ -210,8 +226,8 @@ func NewSettingsPage(hooks SettingsHooks) *SettingsPage {
 	p.popover = container.NewStack()
 	p.popover.Hide()
 
-	// A layer, not a stack: the page is as wide as its widest card, and a window
-	// narrower than that would be grown to fit it the moment settings opened.
+	// A layer, not a stack: the page is as wide as its widest card, and a narrower
+	// window would be grown to fit it the moment settings opened.
 	p.Layer = NewLayer()
 	p.Layer.Hide()
 
@@ -228,12 +244,13 @@ func (p *SettingsPage) Open() {
 }
 
 // Close hides the page and drops what it built, so nothing it mounted keeps a
-// message widget or an image alive. Call on the UI thread.
+// widget or an image alive. Call on the UI thread.
 func (p *SettingsPage) Close() {
 	p.closePopover()
 	p.Layer.Hide()
 	p.Layer.Objects = nil
 	p.previews = nil
+	p.account = accountRows{}
 	p.groups = nil
 	p.subButtons = nil
 	p.navGroups = nil
@@ -248,6 +265,43 @@ func (p *SettingsPage) Rebuild() {
 	p.advanced = config.Current().Interface.AdvancedMode
 	p.Layer.Objects = []fyne.CanvasObject{p.build(), p.popover}
 	p.Layer.Refresh()
+}
+
+// RefreshAccount rebuilds the Account section when what it says has moved under
+// it — a new picture, a new handle. A rebuild rather than a setter, those two
+// being drawn by three rows between them. Deliberately *not* called for a display
+// name: that field is on this section and Enter leaves the cursor in it, so an
+// echo would rebuild the page under whoever was still typing. UI thread; a no-op
+// while another section is open.
+func (p *SettingsPage) RefreshAccount() {
+	if !p.IsOpen() || p.section != SectionAccount {
+		return
+	}
+
+	p.reload()
+}
+
+// SetProfile fills in the two rows the Account section cannot build from what
+// the store holds: the description, and whether there is a banner to remove.
+// Call on the UI thread; safe when another section is open, or none.
+func (p *SettingsPage) SetProfile(profile domain.UserProfile) {
+	if p.account.bio != nil {
+		p.account.bio.Fill(profile.Bio)
+	}
+
+	if p.account.removeBanner != nil {
+		enableIf(p.account.removeBanner, profile.BackgroundURL != "")
+	}
+}
+
+// enableIf enables or disables a button from a condition.
+func enableIf(button *widget.Button, enabled bool) {
+	if enabled {
+		button.Enable()
+		return
+	}
+
+	button.Disable()
 }
 
 /* The floating slot */
@@ -290,9 +344,7 @@ func (p *SettingsPage) build() fyne.CanvasObject {
 
 	p.rail = container.NewVBox()
 	p.pane = VBoxNoSpacing()
-	p.title = canvas.NewText("", theme.Colors.TextPrimary)
-	p.title.TextSize = theme.Sizes.SettingsHeaderSize
-	p.title.TextStyle = fyne.TextStyle{Bold: true}
+	p.title = newBoldText("", theme.Colors.TextPrimary, theme.Sizes.SettingsHeaderSize)
 
 	p.showSection(p.section)
 
@@ -312,22 +364,21 @@ func (p *SettingsPage) build() fyne.CanvasObject {
 }
 
 // centred caps content at the page width and centres it horizontally. A row is a
-// label at one end and a control at the other; across a maximised window the two
-// lose each other entirely. The header goes through it too, so the title sits
-// over the left edge of the cards rather than out at the window's.
+// label at one end and a control at the other, and across a maximised window the
+// two lose each other. The header goes through it too, so the title sits over the
+// cards' left edge rather than the window's.
 //
-// Horizontally only: container.NewCenter would centre it vertically too, which
-// leaves a short section — Account is one — floating in the middle of the window
-// rather than starting under its own title.
+// Horizontally only: container.NewCenter would centre vertically as well, leaving
+// a short section floating in the middle rather than under its own title.
 func (p *SettingsPage) centred(content fyne.CanvasObject) fyne.CanvasObject {
 	body := NewFixedWidthContainer(theme.Sizes.SettingsPageWidth, content)
 
 	return container.NewHBox(layout.NewSpacer(), body, layout.NewSpacer())
 }
 
-// buildHeader is the pane's title and its close button. The title is centred with
-// the cards; the button is not, and is anchored to the pane's own top right —
-// overlayLayout reports no minimum, so it cannot pull the title off centre.
+// buildHeader is the pane's title and close button. The title is centred with the
+// cards; the button is anchored to the pane's top right through overlayLayout,
+// which reports no minimum and so cannot pull the title off centre.
 func (p *SettingsPage) buildHeader() fyne.CanvasObject {
 	padding := theme.Sizes.SettingsPagePadding
 
@@ -338,16 +389,14 @@ func (p *SettingsPage) buildHeader() fyne.CanvasObject {
 	return container.NewStack(title, dismiss)
 }
 
-// buildRailColumn is the rail, the advanced-mode switch pinned under it, and the
-// seam that separates the column from the pane — the same hairline every other
-// column carries, inside its own fixed width.
+// buildRailColumn is the rail, the advanced-mode switch under it, and the seam
+// separating the column from the pane — every column's hairline, inside its own
+// fixed width.
 func (p *SettingsPage) buildRailColumn() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ChannelListBackground)
 	padding := theme.Sizes.SettingsPagePadding
 
-	caption := canvas.NewText("SETTINGS", theme.Colors.CategoryText)
-	caption.TextSize = theme.Sizes.SettingsCaptionSize
-	caption.TextStyle = fyne.TextStyle{Bold: true}
+	caption := newBoldText("SETTINGS", theme.Colors.CategoryText, theme.Sizes.SettingsCaptionSize)
 
 	content := NewInset(
 		container.NewVBox(caption, p.rail),
@@ -360,12 +409,11 @@ func (p *SettingsPage) buildRailColumn() fyne.CanvasObject {
 		NewFillRow(0, column, NewColumnDivider()))
 }
 
-// buildRailFooter is the advanced-mode switch. It sits at the foot of the rail
-// rather than among the settings because it decides which of them there are —
-// and the rail is where the reader looks when something they remember is missing.
+// buildRailFooter is the advanced-mode switch, at the foot of the rail rather
+// than among the settings because it decides which of them there are — and the
+// rail is where the reader looks when something they remember is missing.
 func (p *SettingsPage) buildRailFooter() fyne.CanvasObject {
-	label := canvas.NewText("Advanced mode", theme.Colors.CategoryText)
-	label.TextSize = theme.Sizes.SettingsRailTextSize
+	label := newText("Advanced mode", theme.Colors.CategoryText, theme.Sizes.SettingsRailTextSize)
 
 	toggle := NewToggle(p.advanced, func(on bool) {
 		p.change(func(s *config.Settings) { s.Interface.AdvancedMode = on })
@@ -384,11 +432,11 @@ func (p *SettingsPage) buildRailFooter() fyne.CanvasObject {
 // buildRail fills the rail with one button per section, and — under the open one
 // — one per group it holds.
 func (p *SettingsPage) buildRail() {
-	p.rail.Objects = nil
 	p.subButtons = nil
 
+	var buttons []fyne.CanvasObject
 	for _, entry := range visibleRailEntries(p.advanced) {
-		p.rail.Add(newSettingsRailButton(entry, entry.section == p.section, func() {
+		buttons = append(buttons, newSettingsRailButton(entry, entry.section == p.section, func() {
 			p.showSection(entry.section)
 			p.pane.Refresh()
 		}))
@@ -409,13 +457,15 @@ func (p *SettingsPage) buildRail() {
 
 			p.subButtons = append(p.subButtons, button)
 			p.navGroups = append(p.navGroups, i)
-			p.rail.Add(button)
+			buttons = append(buttons, button)
 		}
 	}
+
+	p.rail.Objects = buttons
 }
 
-// visibleRailEntries drops the sections advanced mode is hiding. Advanced is the
-// raw size and colour tables, which are the whole reason the mode exists.
+// visibleRailEntries drops the sections advanced mode hides — the raw size and
+// colour tables, which are the whole reason the mode exists.
 func visibleRailEntries(advanced bool) []railEntry {
 	if advanced {
 		return railEntries
@@ -435,6 +485,7 @@ func visibleRailEntries(advanced bool) []railEntry {
 func (p *SettingsPage) showSection(section SettingsSection) {
 	p.closePopover() // its anchor is about to stop existing
 	p.previews = nil
+	p.account = accountRows{} // a profile landing after this has nothing left to fill
 
 	// Advanced mode can be switched off while its own section is open, and
 	// "Reset every setting" switches it off from another one entirely.
@@ -466,10 +517,11 @@ func (p *SettingsPage) showSection(section SettingsSection) {
 	p.navGroups = nil
 	p.activeNav = 0
 
-	p.pane.Objects = nil
-	for _, group := range p.groups {
-		p.pane.Add(group.object)
+	cards := make([]fyne.CanvasObject, len(p.groups))
+	for i, group := range p.groups {
+		cards[i] = group.object
 	}
+	p.pane.Objects = cards
 	p.measureGroups()
 
 	if p.paneScroll != nil {
@@ -483,11 +535,10 @@ func (p *SettingsPage) showSection(section SettingsSection) {
 
 /* Moving between groups */
 
-// measureGroups records where each group starts inside the pane. The offsets are
-// summed from the groups above rather than read from Position(), which is right
-// only while the pane's own top inset stays zero and is not set at all until the
-// first layout — and they are taken once per section rather than per scroll,
-// since a MinSize on a group card is a walk of every row in it.
+// measureGroups records where each group starts inside the pane. Summed from the
+// groups above rather than read from Position(), which is not set until the first
+// layout — and taken once per section rather than per scroll, a MinSize on a
+// group card being a walk of every row in it.
 func (p *SettingsPage) measureGroups() {
 	p.groupOffsets = make([]float32, len(p.groups))
 
@@ -510,7 +561,7 @@ func (p *SettingsPage) navOffset(nav int) float32 {
 
 // scrollToNav brings one group's caption to the top of the pane. The selection is
 // set here rather than left to OnScroll: the scroll clamps at the end of the
-// content, so the last group never reaches the top and would never light up.
+// content, so the last group never reaches the top and would never light.
 func (p *SettingsPage) scrollToNav(nav int) {
 	if p.paneScroll == nil || nav >= len(p.navGroups) {
 		return
@@ -564,9 +615,9 @@ func (p *SettingsPage) change(mutate func(*config.Settings)) {
 	p.hooks.Update(mutate)
 }
 
-// restyle records a setting the theme tables are built from, applies them, and
-// re-runs the previews. The client behind the page is repainted by the
-// controller; the previews are what the user can actually see change.
+// restyle records a setting the theme tables are built from, applies them and
+// re-runs the previews. The controller repaints the client behind the page; the
+// previews are what can actually be seen change.
 func (p *SettingsPage) restyle(mutate func(*config.Settings)) {
 	p.hooks.Update(mutate)
 	p.hooks.Restyle()
@@ -577,10 +628,9 @@ func (p *SettingsPage) restyle(mutate func(*config.Settings)) {
 	}
 }
 
-// reload rebuilds the current section, for a change that alters which rows the
-// section shows rather than only what one of them says. Advanced mode is re-read
-// here rather than per section, since a rail tap cannot change it while the two
-// things that can — the rail's own switch and About's reset — both come through.
+// reload rebuilds the current section, for a change that alters which rows it
+// shows rather than only what one says. Advanced mode is re-read here: a rail tap
+// cannot change it, and both things that can come through this.
 func (p *SettingsPage) reload() {
 	p.advanced = config.Current().Interface.AdvancedMode
 	p.showSection(p.section)
@@ -589,10 +639,9 @@ func (p *SettingsPage) reload() {
 
 /* Rows and groups */
 
-// adv marks a row as one advanced mode reveals: a timing, a cap, a budget —
-// something that tunes the client rather than describing what it does. In basic
-// mode it returns nil, which separateRows drops, and group drops the whole card
-// if nothing else was in it.
+// adv marks a row advanced mode reveals: a timing, a cap, a budget — something
+// tuning the client rather than describing what it does. In basic mode it answers
+// nil, which separateRows drops and group drops the whole card for.
 func (p *SettingsPage) adv(row fyne.CanvasObject) fyne.CanvasObject {
 	if !p.advanced {
 		return nil
@@ -601,9 +650,8 @@ func (p *SettingsPage) adv(row fyne.CanvasObject) fyne.CanvasObject {
 	return row
 }
 
-// group is a captioned card of rows: the inset-list shape, one hairline between
-// each pair of rows and the caption sitting outside the card above it. A card
-// with nothing left in it is no card at all.
+// group is a captioned card of rows: a hairline between each pair, the caption
+// outside the card above it. A card with nothing left in it is no card at all.
 func (p *SettingsPage) group(caption, detail string, rows ...fyne.CanvasObject) settingsGroup {
 	kept := separateRows(rows)
 	if len(kept) == 0 {
@@ -614,18 +662,12 @@ func (p *SettingsPage) group(caption, detail string, rows ...fyne.CanvasObject) 
 }
 
 // groupOf is the same card around a body the caller keeps a handle on, for the
-// one section whose rows are refilled in place rather than rebuilt — the
-// Advanced filter, which must not take the field it is being typed into with it.
+// one section refilled in place rather than rebuilt — the Advanced filter, which
+// must not take the field it is being typed into with it.
 func (p *SettingsPage) groupOf(caption, detail string, body *fyne.Container) settingsGroup {
-	card := canvas.NewRectangle(theme.Colors.SessionCardBg)
-	card.CornerRadius = theme.Sizes.SettingsGroupRadius
-	Outline(card)
-
 	header := []fyne.CanvasObject{VerticalSpacer(theme.Sizes.SettingsGroupGap)}
 	if caption != "" {
-		label := canvas.NewText(strings.ToUpper(caption), theme.Colors.CategoryText)
-		label.TextSize = theme.Sizes.SettingsCaptionSize
-		label.TextStyle = fyne.TextStyle{Bold: true}
+		label := newBoldText(strings.ToUpper(caption), theme.Colors.CategoryText, theme.Sizes.SettingsCaptionSize)
 		header = append(header,
 			NewInset(label, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
@@ -635,15 +677,15 @@ func (p *SettingsPage) groupOf(caption, detail string, body *fyne.Container) set
 			NewInset(note, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
 
-	header = append(header, container.NewStack(card, body))
+	header = append(header, container.NewStack(newSettingsCard(), body))
 
 	return settingsGroup{caption: caption, object: VBoxNoSpacing(header...)}
 }
 
-// separateRows drops the rows that were not built — one a section refused for an
-// unknown field, one advanced mode is hiding — and puts the hairline between each
-// remaining pair. Dropping them here covers every path a row reaches a card by;
-// a nil left in a container panics the layout that walks it.
+// separateRows drops the rows that were not built — one refused for an unknown
+// field, one advanced mode hides — and puts the hairline between each remaining
+// pair. Dropping them here covers every path a row reaches a card by; a nil left
+// in a container panics the layout that walks it.
 func separateRows(rows []fyne.CanvasObject) []fyne.CanvasObject {
 	separated := make([]fyne.CanvasObject, 0, max(len(rows)*2-1, 0))
 	for _, row := range rows {
@@ -659,21 +701,18 @@ func separateRows(rows []fyne.CanvasObject) []fyne.CanvasObject {
 	return separated
 }
 
-// newRowSeparator is the hairline between two rows of a group. It is inset from
-// both ends, so the card's rounded corners are never cut across.
+// newRowSeparator is the hairline between two rows of a group, inset from both
+// ends so the card's rounded corners are never cut across.
 func newRowSeparator() fyne.CanvasObject {
-	line := canvas.NewRectangle(theme.Colors.Outline)
-	line.SetMinSize(fyne.NewSize(0, theme.Sizes.OutlineWidth))
-
 	inset := theme.Sizes.SettingsRowPaddingH
 
-	return NewInset(line, 0, 0, inset, inset)
+	return NewInset(NewRowDivider(), 0, 0, inset, inset)
 }
 
 // cardWidth is the width a group's card gives its rows. The page is centred at a
-// fixed width by construction, so this is known before anything is laid out —
-// which is what lets a row's prose be wrapped where it is built rather than by a
-// layout that would have to be given the width before it could report a height.
+// fixed width, so this is known before anything is laid out — which is what lets
+// a row's prose be wrapped where it is built rather than by a layout that would
+// need the width before it could report a height.
 func cardWidth() float32 {
 	return theme.Sizes.SettingsPageWidth - 2*theme.Sizes.SettingsPagePadding - 2*theme.Sizes.SettingsRowPaddingH
 }
@@ -701,10 +740,9 @@ func (p *SettingsPage) rowWith(label string, detail, control fyne.CanvasObject) 
 	return row
 }
 
-// markedRow is row plus the bar down its left edge, handed back for the caller
-// to fill. Only a toggle has anything to say with it — a row is marked when its
-// setting is on — and the toggle is built a level above this, so the rectangle
-// has to travel rather than the state.
+// markedRow is row plus the bar down its left edge, handed back for the caller to
+// fill. Only a toggle has anything to say with it, and the toggle is built a
+// level above, so the rectangle travels rather than the state.
 func (p *SettingsPage) markedRow(label, detail string, control fyne.CanvasObject) (fyne.CanvasObject, *canvas.Rectangle) {
 	width := rowTextWidth(control)
 
@@ -742,10 +780,10 @@ func rowDetail(detail string, width float32) fyne.CanvasObject {
 	return NewWrappedText(detail, width, theme.Sizes.SettingsDetailSize, theme.Colors.TimestampText)
 }
 
-// stackedRow puts the control on a line of its own under the explanation, which
-// is the only way a slider gets width enough to be aimed with. A row whose
-// control is a switch stays one line — the switch says what it says at any size,
-// and two lines each would double the length of every section.
+// stackedRow puts the control on a line of its own under the explanation, the
+// only way a slider gets width enough to be aimed with. A switch stays on one
+// line — it says what it says at any size, and two lines each would double the
+// length of every section.
 func (p *SettingsPage) stackedRow(label, detail string, control fyne.CanvasObject) fyne.CanvasObject {
 	text := []fyne.CanvasObject{rowLabel(label, cardWidth())}
 	if detail != "" {
@@ -780,8 +818,8 @@ func (p *SettingsPage) block(content fyne.CanvasObject) fyne.CanvasObject {
 }
 
 // vcenter centres obj vertically while letting it fill the width it is given.
-// container.NewCenter would leave it at its minimum in both directions, which
-// pulls a label into the middle of the row and collapses a slider to its thumb.
+// container.NewCenter leaves it at its minimum in both directions, which pulls a
+// label into the middle of the row and collapses a slider to its thumb.
 func vcenter(obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVBox(layout.NewSpacer(), obj, layout.NewSpacer())
 }
@@ -837,8 +875,8 @@ func markRow(marker *canvas.Rectangle, on bool) {
 }
 
 // optionRow is a choice from a short list, shown as the current value and opened
-// as a menu. A menu rather than widget.Select: the client has never mounted one,
-// and AppTheme flattens inputs in ways nobody has looked at.
+// as a menu — rather than widget.Select, which the client has never mounted and
+// which AppTheme flattens in ways nobody has looked at.
 func (p *SettingsPage) optionRow(label, detail, value string, options []settingsOption, set func(*config.Settings, string)) fyne.CanvasObject {
 	var control *optionControl
 	control = newOptionControl(value, options, func(picked string) {
@@ -891,9 +929,9 @@ func (p *SettingsPage) colorRow(label, field string) fyne.CanvasObject {
 	return p.row(label, "", control)
 }
 
-// colorControl is a swatch that opens the palette and a field that takes a hex,
-// in one box. Neither alone is enough: nobody knows a hex by heart, and no set
-// of presets is every colour someone might want.
+// colorControl is a swatch opening the palette and a field taking a hex, in one
+// box. Neither alone is enough: nobody knows a hex by heart, and no set of
+// presets is every colour someone might want.
 func (p *SettingsPage) colorControl(value string, set func(hex string)) fyne.CanvasObject {
 	entry := widget.NewEntry()
 	entry.Text = value
@@ -925,39 +963,54 @@ func (p *SettingsPage) colorControl(value string, set func(hex string)) fyne.Can
 		container.NewStack(newFieldBackground(), NewInset(field, 0, 0, padding, padding)))
 }
 
-// textField is an entry drawn as a control: the same box a dropdown and a colour
-// row sit in, so a row that takes typing reads as one. It takes the object
-// rather than a *widget.Entry so an extended one — commitEntry — mounts as
-// itself and keeps the overrides it was extended for.
+// textField is an entry drawn as a control: the box a dropdown and a colour row
+// sit in, so a row that takes typing reads as one. It takes the object rather
+// than a *widget.Entry so an extended one — commitEntry — keeps its overrides.
 func textField(entry fyne.CanvasObject) fyne.CanvasObject {
+	return fixedControl(theme.Sizes.SettingsControlWidth, fieldSurface(entry))
+}
+
+// wideField is textField for a field on a line of its own, sized by the row
+// rather than by the control slot — prose typed into 190 pixels is read one word
+// at a time.
+func wideField(entry fyne.CanvasObject) fyne.CanvasObject {
+	return fieldSurface(entry)
+}
+
+func fieldSurface(entry fyne.CanvasObject) fyne.CanvasObject {
 	padding := theme.Sizes.SettingsRowPaddingH
 
-	return fixedControl(theme.Sizes.SettingsControlWidth, container.NewStack(
+	return container.NewStack(
 		newFieldBackground(),
 		NewInset(WithCaret(entry), 0, 0, padding, padding),
-	))
+	)
 }
 
 // actionRow is a row whose control does something rather than holding a value.
 func (p *SettingsPage) actionRow(label, detail, action string, tone Tone, onTap func()) fyne.CanvasObject {
-	button := widget.NewButton(action, onTap)
+	return p.row(label, detail, newRowButton(action, tone, onTap))
+}
+
+// newRowButton is one button of a row offering more than one thing. A single
+// button reaches this through actionRow; two have to be centred by the caller, an
+// HBox handing its children its own height.
+func newRowButton(label string, tone Tone, onTap func()) *widget.Button {
+	button := widget.NewButton(label, onTap)
 	button.Importance = tone.importance()
 
-	return p.row(label, detail, button)
+	return button
 }
 
 // readOnlyRow states something the client knows and the user cannot change.
 func (p *SettingsPage) readOnlyRow(label, value string) fyne.CanvasObject {
-	text := canvas.NewText(value, theme.Colors.TimestampText)
-	text.TextSize = theme.Sizes.SettingsLabelSize
+	text := newText(value, theme.Colors.TimestampText, theme.Sizes.SettingsLabelSize)
 
 	return p.row(label, "", text)
 }
 
 // preview mounts a sample of the real widgets under a group and registers it, so
-// every later change re-runs build. It carries no caption: it belongs to the
-// group above it, and the rail lists somewhere to go rather than everything in
-// the pane.
+// every later change re-runs build. No caption: it belongs to the group above,
+// and the rail lists somewhere to go rather than everything in the pane.
 func (p *SettingsPage) preview(build func() fyne.CanvasObject) settingsGroup {
 	host := container.NewStack(build())
 	p.previews = append(p.previews, settingsPreview{host: host, build: build})
@@ -996,9 +1049,9 @@ func setColorOverride(s *config.Settings, field, hex string) {
 	s.Styles.Colors[field] = hex
 }
 
-// sizeBounds are the range a size may be dragged through, derived from its
-// default: nothing in the table means anything at three times its size, and a
-// small one needs headroom a multiplier alone would not give it.
+// sizeBounds is the range a size may be dragged through, from its default:
+// nothing in the table means anything at three times its size, and a small one
+// needs headroom a multiplier alone would not give it.
 func sizeBounds(def float32) (low, high float32) {
 	high = max(def*3, def+24)
 

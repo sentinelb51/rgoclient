@@ -107,6 +107,19 @@ var Colors = struct {
 	EmbedTitle  color.Color
 	EmbedSite   color.Color
 
+	/* Code blocks */
+
+	// The well a fenced block is drawn in, and the highlighter's palette. Each is
+	// reachable as a Fyne colour *name* too (ColorNameCode…), RichText colouring a
+	// segment by name rather than by value.
+	CodeBlockBg color.Color
+	CodeText    color.Color
+	CodeKeyword color.Color
+	CodeString  color.Color
+	CodeComment color.Color
+	CodeNumber  color.Color
+	CodeCall    color.Color
+
 	/* Member list */
 
 	MemberNameOffline color.Color
@@ -337,6 +350,18 @@ var Colors = struct {
 	EmbedTitle:  color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, the mention accent — a title is a link
 	EmbedSite:   color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
+	// A code block is a well, not a card: darker than the message area rather than
+	// lifted off it, so it still reads as inset where a hovered row lightens
+	// everything around it. The token colours sit on that fill, warm ones against
+	// the cool ramp so a string is told from an identifier at a glance.
+	CodeBlockBg: color.RGBA{R: 18, G: 20, B: 27, A: 255},    // #12141B
+	CodeText:    color.RGBA{R: 197, G: 203, B: 218, A: 255}, // #C5CBDA
+	CodeKeyword: color.RGBA{R: 167, G: 139, B: 250, A: 255}, // #A78BFA
+	CodeString:  color.RGBA{R: 224, G: 164, B: 114, A: 255}, // #E0A472
+	CodeComment: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CodeNumber:  color.RGBA{R: 229, G: 192, B: 123, A: 255}, // #E5C07B
+	CodeCall:    color.RGBA{R: 122, G: 162, B: 247, A: 255}, // #7AA2F7
+
 	// An offline name is dimmed rather than hidden, which is what lets one list
 	// hold both halves without reading as two. It has a name of its own rather
 	// than borrowing CategoryText: that is a *header's* colour, and two things
@@ -545,6 +570,13 @@ var Sizes = struct {
 	EmbedTitleTextSize  float32
 	EmbedImageMaxHeight float32
 	EmbedSpacing        float32
+
+	/* Code blocks */
+
+	CodeBlockRadius   float32
+	CodeBlockPaddingV float32
+	CodeBlockPaddingH float32
+	CodeBlockSpacing  float32
 
 	InviteCardWidth   float32
 	InviteIconSize    float32
@@ -901,6 +933,13 @@ var Sizes = struct {
 	EmbedImageMaxHeight: 240,
 	EmbedSpacing:        4,
 
+	// CodeBlockSpacing is the gap to the text on either side of the well, on top of
+	// the padding that text already carries — a couple of units, not a margin.
+	CodeBlockRadius:   6,
+	CodeBlockPaddingV: 10,
+	CodeBlockPaddingH: 12,
+	CodeBlockSpacing:  2,
+
 	// InviteCardWidth is the card's whole width, not a ceiling like
 	// EmbedMaxWidth: an invite mounts empty and is filled in a moment later, so
 	// it has to be the same size before and after.
@@ -1164,9 +1203,33 @@ func (t *AppTheme) Font(style fyne.TextStyle) fyne.Resource {
 	}
 }
 
+// The code highlighter's colours, as names. A RichText segment carries a theme
+// *name* rather than a colour, so a palette it draws from has to be answerable
+// here; the prefix keeps them clear of Fyne's own.
+const (
+	ColorNameCode        fyne.ThemeColorName = "rgoCode"
+	ColorNameCodeKeyword fyne.ThemeColorName = "rgoCodeKeyword"
+	ColorNameCodeString  fyne.ThemeColorName = "rgoCodeString"
+	ColorNameCodeComment fyne.ThemeColorName = "rgoCodeComment"
+	ColorNameCodeNumber  fyne.ThemeColorName = "rgoCodeNumber"
+	ColorNameCodeCall    fyne.ThemeColorName = "rgoCodeCall"
+)
+
 // Color maps Fyne's semantic colour names onto the palette.
 func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) color.Color {
 	switch name {
+	case ColorNameCode:
+		return Colors.CodeText
+	case ColorNameCodeKeyword:
+		return Colors.CodeKeyword
+	case ColorNameCodeString:
+		return Colors.CodeString
+	case ColorNameCodeComment:
+		return Colors.CodeComment
+	case ColorNameCodeNumber:
+		return Colors.CodeNumber
+	case ColorNameCodeCall:
+		return Colors.CodeCall
 	case theme.ColorNameScrollBar:
 		return color.Transparent
 	case theme.ColorNamePrimary, theme.ColorNameFocus:

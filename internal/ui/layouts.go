@@ -63,6 +63,51 @@ func HBoxNoSpacing(objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{horizontal: true, fill: -1}, objects...)
 }
 
+// NewWrapColumn stacks objects top to bottom, each given the column's full width
+// *before* it is measured. A wrapping widget answers MinSize with whatever width
+// it was last laid out at, so a column that measured first — VBoxNoSpacing does —
+// sizes a text row to the many lines it wraps into at no width at all. The body of
+// a message carrying a code block is that column.
+func NewWrapColumn(objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&wrapColumnLayout{}, objects...)
+}
+
+// wrapColumnLayout measures each child at the width it will be drawn at, which
+// takes a resize per child before the heights are known.
+type wrapColumnLayout struct{}
+
+func (l *wrapColumnLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	var y float32
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+
+		child.Resize(fyne.NewSize(size.Width, child.MinSize().Height))
+
+		height := child.MinSize().Height
+		child.Resize(fyne.NewSize(size.Width, height))
+		child.Move(fyne.NewPos(0, y))
+
+		y += height
+	}
+}
+
+func (l *wrapColumnLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var min fyne.Size
+	for _, child := range objects {
+		if !child.Visible() {
+			continue
+		}
+
+		size := child.MinSize()
+		min.Width = max(min.Width, size.Width)
+		min.Height += size.Height
+	}
+
+	return min
+}
+
 // NewFillRow lays objects left to right with no gaps, the child at fillIndex
 // absorbing the leftover width while the rest keep their minimum. It backs the
 // flat server | channel | messages | member row.

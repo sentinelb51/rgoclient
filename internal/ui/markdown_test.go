@@ -39,9 +39,9 @@ func firstDecorated(objs []fyne.CanvasObject) *decoratedText {
 }
 
 // TestUniformBodySelectable verifies that bodies whose whole content shares
-// one style — plain, all-bold, a lone code block, a heading — render as a
-// selectable Label carrying that style, while mixed-style bodies keep the
-// RichText renderer and an empty body stays a zero-height RichText.
+// one style — plain, all-bold, a heading — render as a selectable Label carrying
+// that style, while mixed-style bodies keep the RichText renderer and an empty
+// body stays a zero-height RichText.
 func TestUniformBodySelectable(t *testing.T) {
 	label := func(body string) *widget.Label {
 		t.Helper()
@@ -55,9 +55,6 @@ func TestUniformBodySelectable(t *testing.T) {
 	label("hello world\nsecond line")
 	if l := label("**all bold message**"); !l.TextStyle.Bold {
 		t.Error("all-bold body lost its bold style")
-	}
-	if l := label("```go\nx := 1\n```"); !l.TextStyle.Monospace || l.Text != "x := 1" {
-		t.Errorf("code block label = %+v, want monospace 'x := 1'", l)
 	}
 	if l := label("# Big news"); !l.TextStyle.Bold || l.SizeName == "" {
 		t.Error("heading label lost its bold style or heading size")

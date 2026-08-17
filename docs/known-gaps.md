@@ -151,7 +151,11 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   A quote's bar is drawn at body size whatever the row it opens, there being no way
   to ask a spliced segment what the row around it settled on. A nested list indents
   with spaces in the marker segment, RichText offering nothing else that moves the
-  start of a row. `CodeBlock.Language` is parsed and unused — nothing highlights.
+  start of a row. A **fenced block** is a well of its own with a one-pass
+  highlighter over it — comments, strings, numbers, a language's keywords and an
+  identifier that is called, no more; an unlabelled fence is guessed from a marker
+  and falls back to a generic C-shaped syntax. Being a card, it is never part of a
+  uniform body, so a message carrying one cannot be selected.
   A **relative timestamp is resolved once**, when the row mounts, and nothing
   re-reads it: "in 5 minutes" on a message left on screen stays that until a
   scroll past it remounts the body. Nor is one hoverable — the absolute instant

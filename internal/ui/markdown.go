@@ -35,9 +35,73 @@ import (
 func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	doc := markdown.Parse(text)
 
+	if hasCodeBlock(doc.Blocks) {
+		return renderCodeColumn(deps, doc.Blocks, onMenu)
+	}
+
+	return renderBlocks(deps, doc.Blocks, onMenu)
+}
+
+// hasCodeBlock reports whether a fenced block stands on its own in the body. One
+// inside a quote or a list item stays in the text, drawn monospace: the well is a
+// block-level card and cannot be indented into a row of running text.
+func hasCodeBlock(blocks []markdown.Block) bool {
+	for _, block := range blocks {
+		if _, ok := block.(*markdown.CodeBlock); ok {
+			return true
+		}
+	}
+
+	return false
+}
+
+// renderCodeColumn stacks the body around the wells its fences draw: each run of
+// ordinary blocks rendered exactly as a whole body would be, each fence a card.
+//
+// Every caller wraps the body in newFlushContainer to cancel a RichText's own
+// inner padding, which the text rows want and a card does not — so each card puts
+// that padding back, and the column comes out flush on both counts.
+func renderCodeColumn(deps Deps, blocks []markdown.Block, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+	pad := fynetheme.InnerPadding()
+
+	var rows []fyne.CanvasObject
+	add := func(row fyne.CanvasObject) {
+		if len(rows) > 0 {
+			rows = append(rows, VerticalSpacer(theme.Sizes.CodeBlockSpacing))
+		}
+		rows = append(rows, row)
+	}
+
+	var run []markdown.Block
+	flush := func() {
+		if len(run) == 0 {
+			return
+		}
+		add(renderBlocks(deps, run, onMenu))
+		run = nil
+	}
+
+	for _, block := range blocks {
+		code, ok := block.(*markdown.CodeBlock)
+		if !ok {
+			run = append(run, block)
+			continue
+		}
+
+		flush()
+		add(NewInset(newCodeBlock(code.Language, code.Text), pad, pad, pad, pad))
+	}
+	flush()
+
+	return NewWrapColumn(rows...)
+}
+
+// renderBlocks renders a run of blocks: flattened to a selectable Label where
+// every leaf agrees on a style, RichText otherwise.
+func renderBlocks(deps Deps, blocks []markdown.Block, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	// An empty body keeps the zero-height RichText: a Label would reserve a blank
 	// line above whatever the message does carry.
-	if flat, ok := flattenDocument(doc); ok && flat.text != "" {
+	if flat, ok := flattenBlocks(blocks); ok && flat.text != "" {
 		label := newBodyText(flat.text, onMenu)
 		label.Wrapping = fyne.TextWrapWord
 		label.Selectable = true
@@ -50,7 +114,7 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 	}
 
 	b := &mdBuilder{deps: deps, onMenu: onMenu}
-	for _, block := range doc.Blocks {
+	for _, block := range blocks {
 		b.block(block, widget.RichTextStyle{})
 	}
 
@@ -213,10 +277,10 @@ type flatBody struct {
 	dim   bool               // muted colour (subtext)
 }
 
-// flattenDocument flattens a document into one styled string, reporting false
+// flattenBlocks flattens a run of blocks into one styled string, reporting false
 // when anything mixes styles or needs a custom visual. Blocks join with single
 // newlines, matching the breaks RichText emits.
-func flattenDocument(doc *markdown.Document) (flatBody, bool) {
+func flattenBlocks(blocks []markdown.Block) (flatBody, bool) {
 	var f flatBody
 	var b strings.Builder
 
@@ -231,7 +295,7 @@ func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 		return f.style == style && f.size == size && f.dim == dim
 	}
 
-	for i, block := range doc.Blocks {
+	for i, block := range blocks {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
@@ -243,9 +307,6 @@ func flattenDocument(doc *markdown.Document) (flatBody, bool) {
 			ok = flattenInlines(&b, n.Children, emphasis{bold: true}, headingSize(n.Level), false, merge)
 		case *markdown.Subtext:
 			ok = flattenInlines(&b, n.Children, emphasis{}, fynetheme.SizeNameCaptionText, true, merge)
-		case *markdown.CodeBlock:
-			ok = merge(fyne.TextStyle{Monospace: true}, "", false)
-			b.WriteString(n.Text)
 		case *markdown.List:
 			for j, item := range n.Items {
 				if j > 0 {

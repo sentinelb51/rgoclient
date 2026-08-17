@@ -92,6 +92,15 @@ naming and the test policy.
   between each edge slot and its centre, so nesting them charges a row several
   helpings. Reach for `NewFillRow` / `NewFillColumn` / `HBoxNoSpacing` / `NewInset`
   when the spacing has to be exact.
+- **A wrapping widget answers `MinSize` with the width it was last laid out at**,
+  so a column that measures its children before sizing them stacks a one-line body
+  as the five lines it wrapped into at zero width. `NewWrapColumn` resizes each
+  child to the column's width first and measures after — that is what stacks a
+  message body around the wells its code fences draw. Anything else stacking
+  wrapping rows needs the same order.
+- **A RichText segment carries a colour *name*, not a colour**, so a palette it
+  draws from has to be answerable by `AppTheme.Color` — `theme.ColorNameCode…` are
+  the highlighter's, sitting beside Fyne's own with an `rgo` prefix.
 - **Mixed text sizes on one line** align by being siblings in an HBox — a
   `canvas.Text` centres its glyphs in whatever height it is given. Don't wrap one
   in a spacer to nudge it.

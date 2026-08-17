@@ -137,7 +137,7 @@ internal/
                          settings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, reactions.go, emoji.go, embed.go, invite.go,
-                         markdown.go, attachment.go, input.go, modal.go,
+                         markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, panels.go, notice.go, settings*.go,
                          theme/, titlebar_*.go
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
@@ -198,6 +198,10 @@ Where things live that the filename doesn't tell you:
   repaint. `NewComposerButtonSlot` is beside them — it bottom-anchors the emoji
   button against the growing entry and lifts it by the entry's own `InnerPadding`,
   so it centres on the last *line* rather than on the entry's box.
+- `ui/code.go` is the fenced code block end to end: the well it is drawn in and
+  the one-pass lexer that colours it. A body carrying one is a column
+  (`renderCodeColumn`) rather than a single widget, the card being block-level —
+  which is the only reason `ui/markdown.go` renders *runs* of blocks.
 - `ui/layouts.go` holds every custom layout, `fitWithin` and `Relayout`.
 - `ui/message.go` also owns the system line, the day separator, reply previews and
   `NewChannelNote` — the strip under the header saying what the client cannot do

@@ -89,7 +89,7 @@ func renderCodeColumn(deps Deps, blocks []markdown.Block, onMenu func(*fyne.Poin
 		}
 
 		flush()
-		add(NewInset(newCodeBlock(code.Language, code.Text), pad, pad, pad, pad))
+		add(NewInset(newCodeBlock(code.Language, code.Text, onMenu), pad, pad, pad, pad))
 	}
 	flush()
 

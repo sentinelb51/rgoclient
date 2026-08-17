@@ -198,8 +198,10 @@ Where things live that the filename doesn't tell you:
   repaint. `NewComposerButtonSlot` is beside them — it bottom-anchors the emoji
   button against the growing entry and lifts it by the entry's own `InnerPadding`,
   so it centres on the last *line* rather than on the entry's box.
-- `ui/code.go` is the fenced code block end to end: the well it is drawn in and
-  the one-pass lexer that colours it. A body carrying one is a column
+- `ui/code.go` is the fenced code block end to end: the well it is drawn in, the
+  one-pass lexer that colours it, and `codeCopy`, the chip in its corner — a
+  coloured block is many RichText segments and only a one-segment Label is
+  selectable, so the chip is the only way to get the text out. A body carrying one is a column
   (`renderCodeColumn`) rather than a single widget, the card being block-level —
   which is the only reason `ui/markdown.go` renders *runs* of blocks.
 - `ui/layouts.go` holds every custom layout, `fitWithin` and `Relayout`.

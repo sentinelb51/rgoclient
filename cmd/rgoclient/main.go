@@ -1,3 +1,14 @@
+// RGOClient, a desktop chat client for Revolt/Stoat.
+// Copyright (C) 2026 sentinelb51
+//
+// This program is free software: you can redistribute it and/or modify it under
+// the terms of the GNU General Public License as published by the Free Software
+// Foundation, either version 3 of the License, or (at your option) any later
+// version. It is distributed WITHOUT ANY WARRANTY; see the GNU General Public
+// License in LICENSE, or <https://www.gnu.org/licenses/>, for details.
+//
+// The embedded Montserrat cuts under assets/fonts are not covered by that
+// licence: they stay under the SIL Open Font License 1.1 (assets/fonts/OFL.txt).
 package main
 
 import (

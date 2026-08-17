@@ -6,7 +6,7 @@ is missing by accident.
 
 Simply not built, no constraint behind it: an attach button (files arrive by drag
 or paste), role mentions, a notice history panel,
-code-block highlighting, a hue wheel/alpha/eyedropper in the colour picker,
+a hue wheel/alpha/eyedropper in the colour picker,
 `MessageEmbedSpecial` (YouTube, Spotify, …), creating or renaming a channel
 (`ServerChannelCreate` / `ChannelEdit`), listing or revoking the invites this
 client can now create (`ServerInvites` / `InviteDelete`), and moderation beyond
@@ -155,7 +155,10 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   highlighter over it — comments, strings, numbers, a language's keywords and an
   identifier that is called, no more; an unlabelled fence is guessed from a marker
   and falls back to a generic C-shaped syntax. Being a card, it is never part of a
-  uniform body, so a message carrying one cannot be selected.
+  uniform body, so a message carrying one cannot be selected — and highlighting is
+  what forecloses it either way, a selectable Label being one segment of one style.
+  The chip in the well's corner (`ui.codeCopy`) is what stands in for the drag:
+  it copies the block, without the fences the message menu's copy keeps.
   A **relative timestamp is resolved once**, when the row mounts, and nothing
   re-reads it: "in 5 minutes" on a message left on screen stays that until a
   scroll past it remounts the body. Nor is one hoverable — the absolute instant

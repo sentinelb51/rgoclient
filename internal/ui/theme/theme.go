@@ -578,6 +578,12 @@ var Sizes = struct {
 	CodeBlockPaddingH float32
 	CodeBlockSpacing  float32
 
+	// The chip in a well's corner that copies the block, and how far in from that
+	// corner it sits. It floats over the source rather than reserving a strip, so
+	// a wide first line runs under it.
+	CodeCopySize  float32
+	CodeCopyInset float32
+
 	InviteCardWidth   float32
 	InviteIconSize    float32
 	InviteCaptionSize float32
@@ -939,6 +945,8 @@ var Sizes = struct {
 	CodeBlockPaddingV: 10,
 	CodeBlockPaddingH: 12,
 	CodeBlockSpacing:  2,
+	CodeCopySize:      20,
+	CodeCopyInset:     5,
 
 	// InviteCardWidth is the card's whole width, not a ceiling like
 	// EmbedMaxWidth: an invite mounts empty and is filled in a moment later, so

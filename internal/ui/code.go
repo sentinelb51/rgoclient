@@ -11,19 +11,24 @@ package ui
 
 import (
 	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/ui/theme"
 )
 
 // newCodeBlock draws a fenced block: a well of its own, filled and outlined, with
 // the highlighted source inside it. The card stretches to the body's width — a
 // block sized to its longest line would step in and out as messages arrive.
-func newCodeBlock(language, text string) fyne.CanvasObject {
+//
+// onMenu is the owning message's right-click handler, which the copy chip carries
+// so it is not a hole in the row's own menu.
+func newCodeBlock(language, text string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.CodeBlockBg)
 	background.CornerRadius = theme.Sizes.CodeBlockRadius
 	Outline(background)
@@ -34,8 +39,82 @@ func newCodeBlock(language, text string) fyne.CanvasObject {
 	source.Wrapping = fyne.TextWrapBreak
 
 	padV, padH := theme.Sizes.CodeBlockPaddingV, theme.Sizes.CodeBlockPaddingH
+	inset := theme.Sizes.CodeCopyInset
+	corner := container.New(&overlayLayout{yOffset: inset, rightOffset: inset}, newCodeCopy(text, onMenu))
 
-	return container.NewStack(background, NewInset(newFlushContainer(source), padV, padV, padH, padH))
+	return container.NewStack(background, NewInset(newFlushContainer(source), padV, padV, padH, padH), corner)
+}
+
+/* Copy chip */
+
+// codeCopyRevert is how long the tick stands before the mark goes back to the
+// clipboard glyph — long enough to be read, short of looking like a state.
+const codeCopyRevert = 1500 * time.Millisecond
+
+// codeCopy is the chip in a well's corner that puts the block on the clipboard.
+// It exists because the block cannot be selected at all: highlighting is many
+// RichText segments and Fyne 2.8 makes only a one-segment Label selectable, so
+// there is no drag to copy from.
+//
+// Deliberately not hoverable — innermost wins, and a control inside a message
+// body claiming hover would drop the row's own quick actions — so it rests
+// dimmed and answers the tap instead, swapping the mark for a tick.
+type codeCopy struct {
+	tapBase
+	icon *canvas.Image
+	text string
+
+	// generation guards the revert: a second tap arms a second timer, and the
+	// first must not clear a tick the second put back.
+	generation uint64
+}
+
+var _ fyne.Tappable = (*codeCopy)(nil)
+
+func newCodeCopy(text string, onMenu func(*fyne.PointEvent)) *codeCopy {
+	c := &codeCopy{icon: newScaledIcon(actionMark(assets.ActionCopyIcon), theme.Sizes.CodeCopySize*0.55), text: text}
+	c.icon.Translucency = iconRestTranslucency
+	c.onTap = c.copy
+	c.onSecondaryTap = onMenu
+	c.ExtendBaseWidget(c)
+
+	return c
+}
+
+func (c *codeCopy) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(roundedPanel(), container.NewCenter(c.icon)))
+}
+
+// MinSize squares the chip: overlayLayout sizes it to this and nothing else asks.
+func (c *codeCopy) MinSize() fyne.Size {
+	side := theme.Sizes.CodeCopySize
+
+	return fyne.NewSize(side, side)
+}
+
+func (c *codeCopy) copy() {
+	CopyToClipboard(c.text)
+	c.setCopied(true)
+
+	c.generation++
+	generation := c.generation
+	time.AfterFunc(codeCopyRevert, func() {
+		DoOnUI(func() {
+			if c.generation == generation {
+				c.setCopied(false)
+			}
+		})
+	})
+}
+
+// setCopied swaps the mark for the state it is in. The tick is lit where the
+// clipboard glyph rests dimmed: the confirmation is the whole point of it.
+func (c *codeCopy) setCopied(copied bool) {
+	c.icon.Resource, c.icon.Translucency = actionMark(assets.ActionCopyIcon), iconRestTranslucency
+	if copied {
+		c.icon.Resource, c.icon.Translucency = tintedIcon(assets.ActionSaveIcon, theme.Colors.SwiftActionConfirm), 0
+	}
+	c.icon.Refresh()
 }
 
 // codeSegments renders the highlighted source as RichText segments: every line's

@@ -463,14 +463,51 @@ func (c *ImageCache) chargeLocked(id string, n int64) {
 	}
 }
 
-// imageBytes is what a decoded image costs resident, at four bytes a pixel. That
-// is exact for the RGBA images downscaling and circleClip produce, and an
-// over-estimate for the subsampled or paletted ones that arrive small enough to
-// be kept as decoded — erring high is what keeps the budget a ceiling.
+// imageBytes is what a decoded image costs resident. It measures the pixel buffer
+// rather than deriving it from the bounds: stride padding is part of the
+// allocation, and a 16-bit PNG decodes to eight bytes a pixel, so the flat four
+// this used to charge was half of what those cost and the budget stopped being a
+// ceiling. An unrecognised type is charged that worst case.
 func imageBytes(img image.Image) int64 {
-	bounds := img.Bounds()
+	switch img := img.(type) {
+	case *image.RGBA:
+		return int64(len(img.Pix))
+	case *image.NRGBA:
+		return int64(len(img.Pix))
+	case *image.RGBA64:
+		return int64(len(img.Pix))
+	case *image.NRGBA64:
+		return int64(len(img.Pix))
+	case *image.CMYK:
+		return int64(len(img.Pix))
+	case *image.Gray:
+		return int64(len(img.Pix))
+	case *image.Gray16:
+		return int64(len(img.Pix))
+	case *image.Alpha:
+		return int64(len(img.Pix))
+	case *image.Alpha16:
+		return int64(len(img.Pix))
+	case *image.Paletted:
+		return int64(len(img.Pix) + len(img.Palette)*4)
+	case *image.YCbCr:
+		return int64(len(img.Y) + len(img.Cb) + len(img.Cr))
+	case *image.NYCbCrA:
+		return int64(len(img.Y) + len(img.Cb) + len(img.Cr) + len(img.A))
+	}
 
-	return int64(bounds.Dx()) * int64(bounds.Dy()) * 4
+	// Bounds are not trusted to be finite — image.Uniform's cover the plane, and
+	// the product of those wraps past int64 into a negative charge that would
+	// credit the budget rather than spend it.
+	const maxEdge = 1 << 16
+
+	bounds := img.Bounds()
+	width, height := int64(bounds.Dx()), int64(bounds.Dy())
+	if width <= 0 || height <= 0 || width > maxEdge || height > maxEdge {
+		return 0
+	}
+
+	return width * height * 8
 }
 
 // downscale shrinks img so its longest side is at most edge, returning it

@@ -200,6 +200,20 @@ naming and the test policy.
   Pushing an overlay routes the whole hit test into it, so the hovered widget would
   never see `MouseOut`. Confirmations *are* canvas overlays, on the modal layer
   with the lightbox.
+- **Every text button is `ui.Button`, not Fyne's.** Fyne's is themeable down to
+  `SizeNameButtonRadius`, but its background is a rectangle inside a renderer
+  nothing reaches, so there is no theme name that puts the client's one hairline
+  on it — and an outline is what tells a plain button from the card it sits on,
+  its fill being a shade off that card by design. `ButtonWeight` decides the rest:
+  a plain button wears the hairline, a weighted one drops it and fills with a
+  notice tone (`Tone.weight()` is the bridge, so a confirmation's button and the
+  notice reporting what it did are the same red). A filled button lifts its own
+  colour under the pointer (`theme.Lighten`) rather than taking the plain one's
+  hover fill, and a disabled one carries no tone at all — it is not offering
+  anything. It is **not focusable**, unlike Fyne's: an entry that submits through
+  one does it from `OnSubmitted`, calling `Tap` rather than the action, since the
+  action itself bypasses the disabled check and would send an in-flight request
+  twice.
 - **Fyne's form widgets do not survive `AppTheme`, and a scoped override only buys
   so much.** `AppTheme.Size` zeroes `SizeNameInputBorder`, from which a
   `widget.Slider`'s track thickness is derived (`trackWidth = inputBorder * 2`), and

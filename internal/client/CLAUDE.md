@@ -27,9 +27,21 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   batch simply finds nothing to do.
 - **Missing field:** Revolt carries `slowmode` (seconds) on a text channel and in
   `ChannelUpdate`; revoltgo models neither, so the number never arrives with the
-  channel and nothing announces a change. `Client.FetchSlowmode` is the one action
-  that goes round the typed API — a raw `session.HTTP.Request` for
-  `EndpointChannel` — and records the result for `store.Channel` to hand back.
+  channel and nothing announces a change — including this client's own edit, hence
+  `EditChannel` recording what it just set. `Client.FetchSlowmode` is a raw
+  `session.HTTP.Request` for `EndpointChannel`, and records the result for
+  `store.Channel` to hand back.
+- **`ChannelEditParams` is short of the route** it patches: the spec's
+  `DataEditChannel` also takes `slowmode` (0–21600s) and `voice` (`max_users`),
+  neither of which revoltgo models — so `Client.EditChannel` sends the whole body
+  itself rather than half of it through the typed API and half beside it. Every
+  string there is `omitempty` and a zero is dropped the same way, so **a cleared
+  field is a name in `remove`** (`FieldsChannel`: Description, Icon,
+  DefaultPermissions, Voice, Slowmode), never a blank — `""` is read as "leave it
+  alone". Two rules from `channel_edit.rs` that the spec does not say: only
+  `TextChannel` and `Group` are editable at all (a DM is `InvalidOperation`), and
+  `voice` is what *makes* a channel a voice channel, so it must never be sent to
+  one that is not. `archived` the route ignores entirely.
 - **`ChannelTypeVoice` is a dead constant.** Stoat dropped the `VoiceChannel`
   variant: a voice channel is a **`TextChannel` carrying a `voice` object**, which
   revoltgo does model (`Channel.Voice`). So `toChannelKind` takes the whole

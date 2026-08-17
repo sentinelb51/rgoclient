@@ -84,6 +84,7 @@ var Colors = struct {
 	TypingMark            color.Color
 	MessageStatusMark     color.Color
 	ChannelNoteText       color.Color
+	ChannelTopicText      color.Color
 	ErrorText             color.Color
 
 	/* Reactions */
@@ -126,6 +127,19 @@ var Colors = struct {
 	/* User profiles */
 
 	ProfileBannerBg color.Color
+
+	/* Buttons */
+
+	// A plain button is the outlined surface: a small lift off whatever it is laid
+	// on, carrying the client's one hairline. A weighted one drops the hairline and
+	// fills with its tone, so which button a card is *for* is read off the fill
+	// rather than off the words.
+	ButtonBg           color.Color
+	ButtonHoverBg      color.Color
+	ButtonText         color.Color
+	ButtonFilledText   color.Color
+	ButtonDisabledBg   color.Color
+	ButtonDisabledText color.Color
 
 	/* Chips */
 
@@ -283,6 +297,11 @@ var Colors = struct {
 	// notice, so it must not compete with the messages it sits over.
 	ChannelNoteText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
+	// The topic beside the channel's name. Quieter than the name and quieter than
+	// the note above: it is the one line of somebody else's prose in the chrome,
+	// and it shares its row with the buttons the header is there for.
+	ChannelTopicText: color.RGBA{R: 122, G: 130, B: 148, A: 255}, // #7A8294
+
 	ErrorText: color.RGBA{R: 248, G: 113, B: 113, A: 255}, // #F87171
 
 	// A reaction chip. The one this account is in has to be legible down a whole
@@ -341,6 +360,18 @@ var Colors = struct {
 	// slate the palette already uses rather than the accent, which would make every
 	// user without a coloured role look like the selected server.
 	ProfileBannerBg: color.RGBA{R: 43, G: 49, B: 66, A: 255}, // #2B3142
+
+	// A plain button is a shade off the surfaces it is laid on — the modal card,
+	// a settings group, the member sidebar — so the hairline is what draws it and
+	// the fill only has to keep it from reading as text. Hover lifts it one step
+	// further. Disabled sinks *below* the card instead: a button that cannot be
+	// pressed must not look like one that can, and its edge is all it keeps.
+	ButtonBg:           color.RGBA{R: 35, G: 40, B: 56, A: 255},    // #232838
+	ButtonHoverBg:      color.RGBA{R: 46, G: 53, B: 72, A: 255},    // #2E3548
+	ButtonText:         color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	ButtonFilledText:   color.RGBA{R: 247, G: 248, B: 251, A: 255}, // #F7F8FB, on a tone fill
+	ButtonDisabledBg:   color.RGBA{R: 29, G: 33, B: 44, A: 255},    // #1D212C
+	ButtonDisabledText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 
 	// A chip is a surface in its own right, so it takes the same slate the banner
 	// does and wears the shared hairline: its text is whatever colour the thing it
@@ -483,6 +514,11 @@ var Sizes = struct {
 	ChannelNotePaddingV float32
 	ChannelNotePaddingH float32
 
+	// The topic beside the channel's name, and the rule dividing the two.
+	ChannelTopicSize       float32
+	ChannelTopicGap        float32
+	ChannelTopicRuleHeight float32
+
 	/* Edges */
 
 	OutlineWidth   float32
@@ -574,6 +610,15 @@ var Sizes = struct {
 	ProfileTightGap           float32
 	ProfileCornerRadius       float32
 
+	/* Buttons */
+
+	ButtonRadius    float32
+	ButtonTextSize  float32
+	ButtonPaddingV  float32
+	ButtonPaddingH  float32
+	ButtonMinWidth  float32
+	ButtonMinHeight float32
+
 	/* Chips */
 
 	ChipTextSize float32
@@ -639,6 +684,14 @@ var Sizes = struct {
 	JoinDialogWidth        float32
 	JoinDialogCornerRadius float32
 	JoinDialogTextSize     float32
+
+	/* Channel editor, and the fields any card holds */
+
+	ChannelDialogWidth float32
+	DialogPadding      float32
+	DialogLabelSize    float32
+	DialogLabelGap     float32
+	DialogFieldGap     float32
 
 	/* Friends dialog */
 
@@ -805,6 +858,10 @@ var Sizes = struct {
 	ChannelNotePaddingV: 2,
 	ChannelNotePaddingH: 8,
 
+	ChannelTopicSize:       12,
+	ChannelTopicGap:        10,
+	ChannelTopicRuleHeight: 16,
+
 	// A hairline, everywhere: a card's outline and a column seam are the same
 	// stroke, so a card never reads as more framed than the column beside it.
 	//
@@ -929,6 +986,18 @@ var Sizes = struct {
 	ProfileTightGap:           4,
 	ProfileCornerRadius:       8,
 
+	// The corner follows the height rather than the width — a button is as round as
+	// it is tall, which is what keeps a full-width one from reading as a bar — and
+	// the horizontal padding is twice the vertical, so a short word still sits in a
+	// button rather than in a box around it. The minimums are what stop "Join" and
+	// "Retry" from being smaller targets than the words beside them.
+	ButtonRadius:    9,
+	ButtonTextSize:  13,
+	ButtonPaddingV:  8,
+	ButtonPaddingH:  16,
+	ButtonMinWidth:  76,
+	ButtonMinHeight: 32,
+
 	// The dot is what carries a role's colour once the chip has an edge of its own,
 	// so it is sized against the cap height of the text beside it rather than the
 	// chip: bigger and it reads as a bullet the name hangs off.
@@ -985,6 +1054,12 @@ var Sizes = struct {
 	JoinDialogWidth:        320,
 	JoinDialogCornerRadius: 6,
 	JoinDialogTextSize:     12,
+
+	ChannelDialogWidth: 380,
+	DialogPadding:      14,
+	DialogLabelSize:    11,
+	DialogLabelGap:     5,
+	DialogFieldGap:     14,
 
 	FriendsDialogWidth:   460,
 	FriendsListMaxHeight: 420,
@@ -1144,6 +1219,8 @@ func (t *AppTheme) Size(name fyne.ThemeSizeName) float32 {
 	case theme.SizeNameScrollBar, theme.SizeNameScrollBarSmall,
 		theme.SizeNameInputRadius, theme.SizeNameInputBorder:
 		return 0
+	case theme.SizeNameButtonRadius:
+		return Sizes.ButtonRadius // for anything Fyne still draws a button inside
 	case theme.SizeNameText:
 		if fontSize > 0 {
 			return fontSize

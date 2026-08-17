@@ -364,17 +364,17 @@ func toChannelKind(channel *revoltgo.Channel) domain.ChannelKind {
 // so are named apart.
 func toRelationship(kind revoltgo.UserRelationshipType) domain.Relationship {
 	switch kind {
-	case revoltgo.UserRelationsTypeUser:
+	case revoltgo.UserRelationshipTypeUser:
 		return domain.RelationshipSelf
-	case revoltgo.UserRelationsTypeFriend:
+	case revoltgo.UserRelationshipTypeFriend:
 		return domain.RelationshipFriend
-	case revoltgo.UserRelationsTypeOutgoing:
+	case revoltgo.UserRelationshipTypeOutgoing:
 		return domain.RelationshipOutgoing
-	case revoltgo.UserRelationsTypeIncoming:
+	case revoltgo.UserRelationshipTypeIncoming:
 		return domain.RelationshipIncoming
-	case revoltgo.UserRelationsTypeBlocked:
+	case revoltgo.UserRelationshipTypeBlocked:
 		return domain.RelationshipBlocked
-	case revoltgo.UserRelationsTypeBlockedOther:
+	case revoltgo.UserRelationshipTypeBlockedOther:
 		return domain.RelationshipBlockedBy
 	}
 

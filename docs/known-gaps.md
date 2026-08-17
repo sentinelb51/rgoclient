@@ -125,6 +125,15 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   Nothing in the response can be believed either (see the revoltgo note), so the
   new server appears when the gateway says so rather than when the request
   returns.
+- **A channel is edited for its name, topic, cooldown, user limit and age gate.**
+  Stoat gates the whole edit on one permission (`ManageChannel`), so the card
+  offers everything its kind has or does not open — there is no field to grey out.
+  Two of the route's fields are left: the icon and a group's owner transfer want a
+  file picker and a member picker. `archived` is not a gap — the spec lists it and
+  `channel_edit.rs` reads it nowhere, so no client can set it.
+  The **cooldown is fetched before the card opens** and left out of the edit when
+  that request fails: revoltgo drops the field, so the store's zero would otherwise
+  clear a slowmode on save.
 - **A composed mention** stays a visible `<@id>` until sent — Fyne can't draw a chip
   inside an entry, and mapping names back to IDs at send time breaks on duplicates.
   `markdown.PlainText` has no session, so a reply preview of a message opening with
@@ -222,10 +231,35 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   reports no modifiers at all. So `ui.ShiftHeld` asks Win32 directly and the other
   half of the pair answers false, where every confirmation is asked and the card
   offers no hint that it could be skipped.
+- **A button cannot be tabbed to.** Every text button is `ui.Button`, the client's
+  own — Fyne's carries no edge and no theme name reaches its background — and it
+  is not `fyne.Focusable`, so no button is reached by Tab or pressed with Space. A
+  card that has to be answerable from the keyboard is answered from its *field*
+  instead (`OnSubmitted` → `Button.Tap`); a card with none — a confirmation — is
+  answered with the pointer or dismissed with Escape.
 - **A gradient role colour** spreads across a *name* only; elsewhere it fills as the
   mean of its stops. `parseColor` reads hex stops only, so `rgb()` or a CSS name
   falls back to the default text colour.
 - **The scroll indicator** only reports position — no drag, no track to click.
+- **Every entry leaks fonts, because `ui.WithCaret` has to exist.** A caret is
+  drawn `SizeNameInputBorder` wide in `Primary`, and the focus ring takes
+  `Primary` too — so the only way to have one without the other is a scoped
+  override, which is what `WithCaret` is for. But `cache.OverrideTheme` mints a
+  scope from a counter that never repeats, and `ThemeOverride` calls it from its
+  constructor, `CreateRenderer` **and** `Refresh` — while `painter.CachedFontFace`
+  keys on `{style, scope}` and `loadMeasureFont` has no cache at all. So every
+  refresh that reaches an entry re-parses Montserrat, NotoSans, InterSymbols and
+  Fyne's 4.2 MB `EmojiOneColor.otf`, and files the result in a map nothing evicts:
+  **~6 MB per open/close of a settings number box**, measured on one canvas.
+  `painter.ClearFontCache` cannot release it — it never touches the `fontscan`
+  map — and none of it is reachable from here, `painter` being internal. Nothing
+  above the toolkit fixes this: reusing the entry and its wrapper across edits
+  measured identically (6.048 vs 6.060 MB), since it is `Refresh` that mints, not
+  construction. It needs a patched Fyne — a cache on `loadMeasureFont` keyed by
+  resource, which makes a fresh scope cost a map entry instead of four font
+  parses. Emoji cannot be dropped to dodge it either: `-tags no_emoji` builds and
+  runs, but emoji then render as **nothing** — go-text does not resolve Windows'
+  Segoe UI Emoji through the system fallback, though it does resolve CJK.
 - **Settings** that are read once while the caches are built (cache directory,
   message cache caps, text-preview count, concurrent downloads — the last being a
   channel sized at construction, which `SetLimits` cannot resize under the

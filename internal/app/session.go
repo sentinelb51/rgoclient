@@ -250,8 +250,8 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 	password := widget.NewPasswordEntry()
 	password.SetPlaceHolder("Password")
 
-	var login *widget.Button
-	login = widget.NewButton("Login", func() {
+	var login *ui.Button
+	login = ui.NewWeightedButton("Login", ui.ButtonPrimary, func() {
 		if email.Text == "" || password.Text == "" {
 			a.reportLogin("Enter both an email address and a password.")
 			return
@@ -279,7 +279,7 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 			}, true)
 		}()
 	})
-	password.OnSubmitted = func(string) { login.OnTapped() }
+	password.OnSubmitted = func(string) { login.Tap() }
 
 	return container.NewVBox(
 		widget.NewLabel("Enter credentials"),
@@ -305,8 +305,8 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 
 	a.loginStatus = ui.NewStatusLine()
 
-	var submit *widget.Button
-	submit = widget.NewButton("Verify", func() {
+	var submit *ui.Button
+	submit = ui.NewWeightedButton("Verify", ui.ButtonPrimary, func() {
 		if code.Text == "" {
 			a.reportLogin("Enter the code first.")
 			return
@@ -331,7 +331,7 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 			}, true)
 		}()
 	})
-	code.OnSubmitted = func(string) { submit.OnTapped() }
+	code.OnSubmitted = func(string) { submit.Tap() }
 
 	rows := []fyne.CanvasObject{
 		widget.NewLabelWithStyle("Two-factor authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
@@ -346,7 +346,7 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 		widget.NewLabel(mfaPrompt(method)),
 		ui.WithCaret(code),
 		submit,
-		widget.NewButton("Cancel", a.showLogin),
+		ui.NewButton("Cancel", a.showLogin),
 		a.loginStatus.Content,
 	)
 

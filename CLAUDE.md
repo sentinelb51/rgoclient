@@ -183,7 +183,9 @@ Where things live that the filename doesn't tell you:
   cannot reach one; a zero size is the theme's own) and `newInitial`, the letter a
   server icon falls back to in both the rail and an invite card; `glyphBox` +
   `glyphLine`, the 20-unit grid every drawn mark shares; tapBase widgets and
-  `reportHover`; `Outline`, `hairline` + the two dividers, `Elevate`; Tooltip,
+  `reportHover`; `Outline`, `hairline` + the two dividers, `Elevate`; `Button` —
+  the only text button the client mounts, `ButtonWeight` deciding whether it wears
+  the hairline or a tone fill; Tooltip,
   chips, `NewBotMark`, `StatusLine`, the avatar loader, `ObservableScroll` + its
   indicator, `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here
   rather than beside a caller because the composer's line, a channel row and the

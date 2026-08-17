@@ -196,8 +196,9 @@ DAG and conventions.
     of links would card half of them. `util.MayContainInvite` keeps the parse off
     the mounting path for almost every message.
 11. **Slowmode.** `selectChannel` paints what is known and fires `loadSlowmode`,
-    which re-asks on *every* visit — see the revoltgo note: entering the channel
-    is the only moment the client can learn the number, or that it moved.
+    which re-asks on *every* visit — see the revoltgo note: nothing announces the
+    number, so it is only ever learnt by asking (`editChannel` asks again before
+    raising its card, a zero it did not verify being one that clears a cooldown).
     `App.slowmodeOf` is the cooldown as it applies *to this account*, so
     `BypassSlowmode` collapses it to zero and the badge never appears for a
     moderator. `handleSubmit` refuses while `slowmodeRemaining` is non-zero and

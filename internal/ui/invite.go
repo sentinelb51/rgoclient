@@ -20,7 +20,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/domain"
 	"RGOClient/internal/markdown"
@@ -131,12 +130,12 @@ func (c *InviteCard) SetInvite(invite domain.Invite) {
 	if _, joined := c.deps.Store.Server(invite.ServerID); joined {
 		serverID := invite.ServerID
 		state.caption = inviteCaptionJoined
-		state.action = inviteButton("Go to server", widget.MediumImportance, func() {
+		state.action = inviteButton("Go to server", ButtonPlain, func() {
 			c.deps.Actions.OnServerTapped(serverID)
 		})
 	} else {
 		state.caption = inviteCaptionJoin
-		state.action = inviteButton("Join", widget.HighImportance, func() {
+		state.action = inviteButton("Join", ButtonPrimary, func() {
 			c.deps.Actions.OnJoinInvite(c.code)
 		})
 	}
@@ -216,15 +215,11 @@ func inviteText(name, detail string) fyne.CanvasObject {
 	)
 }
 
-// inviteButton is the card's one action. A Fyne button survives here where the
-// settings page's would not: nothing about it derives from SizeNameInputBorder or
-// ColorNameInputBackground, the two AppTheme zeroes that made a slider unusable.
-// It is also the only thing on the card taking a pointer.
-func inviteButton(label string, importance widget.Importance, onTap func()) fyne.CanvasObject {
-	action := widget.NewButton(label, onTap)
-	action.Importance = importance
-
-	return action
+// inviteButton is the card's one action, and the only thing on it taking a
+// pointer. Joining is what the card is for, so that one is weighted; a server the
+// account is already in offers the plain way into it instead.
+func inviteButton(label string, weight ButtonWeight, onTap func()) fyne.CanvasObject {
+	return NewWeightedButton(label, weight, onTap)
 }
 
 // inviteDetail is the line under the name: how many members, and the channel the

@@ -326,7 +326,7 @@ func (p *SettingsPage) SetProfile(profile domain.UserProfile) {
 }
 
 // enableIf enables or disables a button from a condition.
-func enableIf(button *widget.Button, enabled bool) {
+func enableIf(button *Button, enabled bool) {
 	if enabled {
 		button.Enable()
 		return
@@ -1025,11 +1025,8 @@ func (p *SettingsPage) actionRow(label, detail, action string, tone Tone, onTap 
 // newRowButton is one button of a row offering more than one thing. A single
 // button reaches this through actionRow; two have to be centred by the caller, an
 // HBox handing its children its own height.
-func newRowButton(label string, tone Tone, onTap func()) *widget.Button {
-	button := widget.NewButton(label, onTap)
-	button.Importance = tone.importance()
-
-	return button
+func newRowButton(label string, tone Tone, onTap func()) *Button {
+	return NewWeightedButton(label, tone.weight(), onTap)
 }
 
 // readOnlyRow states something the client knows and the user cannot change.

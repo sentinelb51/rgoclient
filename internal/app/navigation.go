@@ -355,6 +355,13 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		)
 	}
 
+	if a.canEditChannel(channelID) {
+		items = append(items,
+			fyne.NewMenuItemWithIcon("Edit channel", fynetheme.SettingsIcon(),
+				func() { a.editChannel(channelID) }),
+		)
+	}
+
 	// Only a conversation can be closed: a server's channels are not the user's to
 	// remove from their own sidebar.
 	if a.isConversation(channelID) {
@@ -574,6 +581,7 @@ func (a *App) selectChannel(channelID string) {
 	a.currentChannelID = channelID
 
 	a.syncChannelKind()
+	a.syncChannelTopic()
 	if known {
 		a.setHeader(a.channelHeader, channel.Name)
 		if viewable && unread && channel.LastMessageID != "" {
@@ -620,6 +628,7 @@ func (a *App) clearChannelSelection() {
 	a.clearMessages()
 	a.setHeader(a.channelHeader, "")
 	a.syncChannelKind()
+	a.syncChannelTopic()
 	a.syncChannelList()
 	a.refreshSlowmode()
 	a.refreshTyping()

@@ -7,7 +7,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/domain"
 )
@@ -91,10 +90,10 @@ func (r *inviteRecorder) OnJoinInvite(code string) { r.joined = code }
 func (r *inviteRecorder) OnServerTapped(id string) { r.opened = id }
 
 // cardButton returns the card's action button, or nil when it offers none.
-func cardButton(card *InviteCard) *widget.Button {
-	var found *widget.Button
+func cardButton(card *InviteCard) *Button {
+	var found *Button
 	walkTree(card.Content, func(obj fyne.CanvasObject, _ fyne.Position) {
-		if b, ok := obj.(*widget.Button); ok {
+		if b, ok := obj.(*Button); ok {
 			found = b
 		}
 	})
@@ -146,7 +145,7 @@ func TestInviteCardActionFollowsMembership(t *testing.T) {
 	if button == nil {
 		t.Fatal("an invite to a server the account is not in offered no action")
 	}
-	button.OnTapped()
+	button.Tap()
 	if recorder.joined != "aaaaaaaa" {
 		t.Errorf("tapping the action joined %q, want the code aaaaaaaa", recorder.joined)
 	}
@@ -158,7 +157,7 @@ func TestInviteCardActionFollowsMembership(t *testing.T) {
 	if button == nil {
 		t.Fatal("an invite to a server the account is already in offered no action")
 	}
-	button.OnTapped()
+	button.Tap()
 	if recorder.opened != "01JOINED" {
 		t.Errorf("tapping the action opened %q, want the server 01JOINED", recorder.opened)
 	}

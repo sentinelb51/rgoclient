@@ -119,7 +119,8 @@ type App struct {
 	friendsRow      *ui.FriendsRow // the way into the friends list, above the conversations
 	serverHeader    *widget.Label
 	channelHeader   *widget.Label
-	channelGlyph    *fyne.Container // holds the message header's # / @ / group mark
+	channelGlyph    *fyne.Container  // holds the message header's # / @ / group mark
+	channelTopic    *ui.ChannelTopic // what the channel is for, after its name in that row
 
 	/* Modal layer and the settings page */
 
@@ -127,11 +128,12 @@ type App struct {
 	// overlay, so a confirmation — which is one — can still be shown over it.
 	settings *ui.SettingsPage
 
-	overlay    *ui.Overlay          // nil when nothing is showing
-	joinDialog *ui.JoinServerDialog // the invite dialog on the modal layer, if any
-	prompt     *ui.PromptDialog     // the field-and-a-button card on that layer, if any
-	friends    *ui.FriendsDialog    // the friends list on that layer, if any
-	editing    *ui.MessageWidget    // the message being edited in place, if any
+	overlay       *ui.Overlay          // nil when nothing is showing
+	joinDialog    *ui.JoinServerDialog // the invite dialog on the modal layer, if any
+	prompt        *ui.PromptDialog     // the field-and-a-button card on that layer, if any
+	channelDialog *ui.ChannelDialog    // the channel editor on that layer, if any
+	friends       *ui.FriendsDialog    // the friends list on that layer, if any
+	editing       *ui.MessageWidget    // the message being edited in place, if any
 
 	/* What the settings page draws about this account, see settings.go */
 

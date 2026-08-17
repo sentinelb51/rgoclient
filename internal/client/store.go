@@ -469,6 +469,13 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		Slowmode:   s.client.slowmodeOf(channel.ID),
 		Recipients: channel.Recipients,
 		Active:     channel.Active,
+		NSFW:       channel.NSFW,
+	}
+	if channel.Description != nil {
+		out.Description = *channel.Description
+	}
+	if channel.Voice != nil && channel.Voice.MaxUsers != nil {
+		out.UserLimit = *channel.Voice.MaxUsers
 	}
 	if channel.Server != nil {
 		out.ServerID = *channel.Server

@@ -172,7 +172,7 @@ func AccentOverrides(accent string) map[string]string {
 	}
 
 	hex := Hex(base)
-	text := Hex(lighten(base, accentTint))
+	text := Hex(Lighten(base, accentTint))
 
 	return map[string]string{
 		"ServerSelectedBg":    hex,
@@ -240,7 +240,11 @@ func withAlpha(c color.Color, alpha uint8) color.Color {
 	return rgba
 }
 
-func lighten(c color.Color, amount float64) color.Color {
+// Lighten walks a colour amount of the way to white, leaving its alpha alone. It
+// is how a surface already carrying a colour of its own — a button filled with a
+// tone — answers the pointer, there being no palette entry for "that colour, one
+// step up".
+func Lighten(c color.Color, amount float64) color.Color {
 	rgba := toRGBA(c)
 	lift := func(channel uint8) uint8 {
 		return channel + uint8(float64(255-channel)*amount)

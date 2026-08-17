@@ -560,7 +560,7 @@ type memberStatus struct {
 
 	mark  *TypingMark
 	label *canvas.Text
-	retry *widget.Button
+	retry *Button
 
 	shown MemberListStatus
 }
@@ -574,7 +574,7 @@ func newMemberStatus() *memberStatus {
 	s := &memberStatus{
 		mark:  NewTypingMark(theme.Sizes.MemberStatusMarkSize, theme.Colors.MemberStatusText),
 		label: label,
-		retry: widget.NewButton("", nil),
+		retry: NewButton("", nil),
 	}
 
 	s.markBox = VBoxNoSpacing(container.NewCenter(s.mark), VerticalSpacer(gap))
@@ -596,7 +596,7 @@ func newMemberStatus() *memberStatus {
 // it already has cannot express.
 func (s *memberStatus) set(status MemberListStatus) bool {
 	if s.shown.drawnAs(status) {
-		s.retry.OnTapped = status.Retry // the label is the same; the server may not be
+		s.retry.SetAction(status.Retry) // the label is the same; the server may not be
 		return false
 	}
 	s.shown = status
@@ -611,7 +611,7 @@ func (s *memberStatus) set(status MemberListStatus) bool {
 	s.label.Text = status.Text
 	s.mark.SetActive(status.Busy, status.Busy)
 	s.retry.SetText(status.Action)
-	s.retry.OnTapped = status.Retry
+	s.retry.SetAction(status.Retry)
 
 	showIf(s.markBox, status.Busy)
 	showIf(s.retryBox, status.Retry != nil)

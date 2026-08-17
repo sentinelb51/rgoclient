@@ -9,6 +9,7 @@ package app
 import (
 	"errors"
 	"log"
+	"time"
 
 	"fyne.io/fyne/v2"
 
@@ -66,6 +67,7 @@ func (a *App) closeOverlay() {
 	a.overlay = nil
 	a.joinDialog = nil
 	a.prompt = nil
+	a.channelDialog = nil
 	a.closeFriends()
 	a.closePins()
 	a.closeSearch()
@@ -278,4 +280,144 @@ func createServerFailure(err error) string {
 	}
 
 	return "Could not create that server."
+}
+
+/* Editing a channel */
+
+// canEditChannel reports whether the account may change what a channel is. One
+// question answers the menu item and the request alike: Stoat's channel_edit
+// route checks ManageChannel once, for the whole edit, and gates no field behind
+// anything further.
+//
+// A direct message and saved notes are left out by kind rather than by
+// permission — the conversation grant does carry ManageChannel, but their names
+// are the client's own invention (see Store.Channel) and there is nothing on
+// either that an edit could reach.
+func (a *App) canEditChannel(channelID string) bool {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.Kind == domain.ChannelDM || channel.Kind == domain.ChannelSavedMessages {
+		return false
+	}
+
+	return a.store.Permissions(channelID).Has(domain.PermissionManageChannel)
+}
+
+// editChannel raises the card that changes what a channel is.
+//
+// The cooldown is read before the card goes up, and only then: revoltgo drops the
+// field from the channel it caches (see Client.FetchSlowmode), so the store's zero
+// means "none" and "never asked" alike — and a card opened on that zero is one
+// that clears a slowmode the moment it is saved. A channel whose cooldown cannot
+// be read is offered without the row rather than with a wrong one. A group has no
+// cooldown to ask about.
+func (a *App) editChannel(channelID string) {
+	if !a.canEditChannel(channelID) {
+		return
+	}
+
+	channel, _ := a.store.Channel(channelID)
+	if channel.Kind == domain.ChannelGroup {
+		a.showChannelDialog(channelID, nil)
+		return
+	}
+
+	epoch := a.epoch
+	go func() {
+		slowmode, err := a.client.FetchSlowmode(channelID)
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+			if err != nil {
+				log.Printf("fetch slowmode for %s: %v", channelID, err)
+				a.showChannelDialog(channelID, nil)
+				return
+			}
+
+			a.showChannelDialog(channelID, &slowmode)
+		}, false)
+	}()
+}
+
+// showChannelDialog puts the card up on what the channel is now, offering the
+// fields its kind has: the cooldown when one could be read, and the user limit on
+// a voice channel. A nil field is a row the card leaves out and one the request
+// omits — see client.ChannelEdit, where `voice` sent to a channel that is not a
+// voice channel is what would turn it into one.
+//
+// The permission is asked again here rather than trusted from the menu: the menu
+// is built per click, but a role can be taken away while the request above is out.
+// Call on the UI thread.
+func (a *App) showChannelDialog(channelID string, slowmode *time.Duration) {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || !a.canEditChannel(channelID) {
+		return
+	}
+
+	current := ui.ChannelSettings{
+		Name:        channel.Name,
+		Description: channel.Description,
+		Slowmode:    slowmode,
+		NSFW:        channel.NSFW,
+	}
+	if channel.Kind == domain.ChannelVoice {
+		current.UserLimit = &channel.UserLimit
+	}
+
+	dialog := ui.NewChannelDialog(current,
+		func(edited ui.ChannelSettings) { a.submitChannelEdit(channelID, edited) },
+		a.closeOverlay,
+	)
+
+	a.showOverlay(dialog.Content)
+	a.channelDialog = dialog // after showOverlay, which clears the field
+	a.window.Canvas().Focus(dialog.Entry)
+}
+
+// submitChannelEdit sends the edit and leaves the card up until it takes, so a
+// refusal can be corrected in the fields it came from. What took is drawn by the
+// ChannelUpdate the gateway sends back — except the cooldown, which no event
+// carries and the badge is therefore repainted from here.
+func (a *App) submitChannelEdit(channelID string, edited ui.ChannelSettings) {
+	epoch := a.epoch
+
+	go func() {
+		err := a.client.EditChannel(channelID, client.ChannelEdit{
+			Name:        edited.Name,
+			Description: edited.Description,
+			Slowmode:    edited.Slowmode,
+			UserLimit:   edited.UserLimit,
+			NSFW:        edited.NSFW,
+		})
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+			if err == nil {
+				a.closeOverlay()
+				if channelID == a.currentChannelID {
+					a.refreshSlowmode()
+				}
+				return
+			}
+
+			log.Printf("edit channel %s: %v", channelID, err)
+
+			if a.channelDialog != nil {
+				a.channelDialog.Fail(editChannelFailure(err))
+			}
+		}, false)
+	}()
+}
+
+// editChannelFailure is what the card says about a refusal. As with a server, an
+// empty name is the only one the reader can act on.
+func editChannelFailure(err error) string {
+	if errors.Is(err, client.ErrChannelNameEmpty) {
+		return "Give the channel a name."
+	}
+
+	return "Could not save those changes."
 }

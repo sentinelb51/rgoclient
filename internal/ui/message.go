@@ -14,6 +14,7 @@ import (
 
 	"RGOClient/assets"
 	"RGOClient/internal/domain"
+	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
 )
@@ -1015,6 +1016,59 @@ func NewChannelNote(mark fyne.Resource, text string) fyne.CanvasObject {
 	return NewInset(row, padV, padV, padH, padH)
 }
 
+/* Channel topic */
+
+// ChannelTopic is what a channel says it is for, drawn after its name in the
+// message header behind a rule. Shortened rather than wrapped — the header is one
+// line and shares it with the buttons at its other end — so it belongs in a slot
+// that hands it real width, which is that header's centre.
+//
+// Hidden when there is no topic: a rule with nothing after it reads as something
+// that failed to load.
+type ChannelTopic struct {
+	widget.BaseWidget
+
+	text    *canvas.Text
+	box     *fyne.Container // the ellipsis box around text, re-labelled by Set
+	content fyne.CanvasObject
+}
+
+var _ fyne.Widget = (*ChannelTopic)(nil)
+
+// NewChannelTopic builds an empty, hidden topic. Set gives it something to say.
+func NewChannelTopic() *ChannelTopic {
+	w := &ChannelTopic{text: newText("", theme.Colors.ChannelTopicText, theme.Sizes.ChannelTopicSize)}
+	w.box = NewEllipsisText(w.text)
+
+	gap := theme.Sizes.ChannelTopicGap
+	rule := container.NewCenter(hairline(theme.Sizes.OutlineWidth, theme.Sizes.ChannelTopicRuleHeight))
+
+	w.content = NewFillRow(3, HorizontalSpacer(gap), rule, HorizontalSpacer(gap), w.box)
+
+	w.Hide()
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *ChannelTopic) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.content)
+}
+
+// Set says what the channel is for, or hides the strip when it says nothing. The
+// topic is flattened to one line however many were typed into it: a header two
+// rows tall is what a newline would otherwise cost. Call on the UI thread.
+func (w *ChannelTopic) Set(topic string) {
+	topic = strings.Join(strings.Fields(topic), " ")
+	if topic == "" {
+		w.Hide()
+		return
+	}
+
+	SetEllipsisText(w.box, topic)
+	w.Show()
+}
+
 /* Reply previews */
 
 // buildReplyBlock stacks the quoted lines above the message answering them,
@@ -1155,8 +1209,13 @@ func resolveReply(deps Deps, channelID, messageID string) (author, content, avat
 	}
 
 	a := deps.Store.MessageAuthor(message)
+
+	// Flattened rather than shown raw: a quote is one line, and the asterisks and
+	// newlines the source carries would either read literally or break the row.
+	flat := markdown.DocumentText(markdown.Parse(message.Content))
+
 	return util.Truncate(a.Name, maxReplyUsernameLength),
-		util.Truncate(message.Content, maxReplyPreviewLength),
+		util.Truncate(flat, maxReplyPreviewLength),
 		a.AvatarURL, a.Color
 }
 

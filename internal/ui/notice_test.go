@@ -5,7 +5,6 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
-	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/config"
 )
@@ -28,12 +27,12 @@ func walk(obj fyne.CanvasObject, visit func(fyne.CanvasObject)) {
 }
 
 // buttonNamed finds the button labelled text somewhere inside root.
-func buttonNamed(t *testing.T, root fyne.CanvasObject, text string) *widget.Button {
+func buttonNamed(t *testing.T, root fyne.CanvasObject, text string) *Button {
 	t.Helper()
 
-	var found *widget.Button
+	var found *Button
 	walk(root, func(obj fyne.CanvasObject) {
-		if button, ok := obj.(*widget.Button); ok && button.Text == text {
+		if button, ok := obj.(*Button); ok && button.Text() == text {
 			found = button
 		}
 	})
@@ -68,8 +67,8 @@ func TestConfirmDialogActs(t *testing.T) {
 		t.Cleanup(win.Close)
 
 		action := buttonNamed(t, dialog, "Leave")
-		if action.Importance != widget.DangerImportance {
-			t.Errorf("a danger confirmation paints its action %v, want DangerImportance", action.Importance)
+		if action.weight != ButtonDanger {
+			t.Errorf("a danger confirmation paints its action %v, want ButtonDanger", action.weight)
 		}
 
 		test.Tap(action)

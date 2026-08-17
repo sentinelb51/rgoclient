@@ -337,6 +337,13 @@ func TestDocumentText(t *testing.T) {
 	if got := DocumentText(Parse("")); got != "" {
 		t.Errorf("an empty document yielded %q", got)
 	}
+
+	// A fenced block's text is the one thing kept verbatim, so it is the one thing
+	// that can put a newline in a run promised to have none — and the reply preview
+	// it feeds is a canvas.Text, which draws a newline as a missing glyph.
+	if got := DocumentText(Parse("before\n```\none\ntwo\n```")); got != "before one two" {
+		t.Errorf("a fenced block leaked its newlines: %q", got)
+	}
 }
 
 // TestLinks covers what the walk is for: every way of writing a link is found

@@ -31,6 +31,10 @@ const (
 	// iconRestTranslucency dims an icon button at rest, so hovering lights the icon
 	// itself rather than a plate behind it.
 	iconRestTranslucency = 0.45
+
+	// buttonHoverLift is how far towards white a filled button's own tone goes
+	// under the pointer — enough to answer, short of washing the tone out.
+	buttonHoverLift = 0.12
 )
 
 /* Shared plumbing */
@@ -468,6 +472,207 @@ func (h *HoverableStack) setHovered(on bool) {
 }
 
 /* Buttons */
+
+// ButtonWeight is how loud a button is. A plain one is the outlined default; the
+// rest fill with a tone, and only one button in a group ever should — a card
+// whose every button is coloured says nothing about which one it is for.
+type ButtonWeight int
+
+const (
+	ButtonPlain   ButtonWeight = iota // outlined, no fill of its own
+	ButtonPrimary                     // the accent: what the card is for
+	ButtonWarning                     // disruptive, but undone by doing it again
+	ButtonDanger                      // destructive or irreversible
+)
+
+// fill is the tone the weight paints itself with, and whether it has one at all.
+// The colours are the notice tones, so a confirmation's button and the notice
+// reporting what it did are the same red.
+func (w ButtonWeight) fill() (color.Color, bool) {
+	switch w {
+	case ButtonPrimary:
+		return ToneInfo.Color(), true
+	case ButtonWarning:
+		return ToneWarning.Color(), true
+	case ButtonDanger:
+		return ToneDanger.Color(), true
+	}
+
+	return nil, false
+}
+
+// Button is the client's own text button, and the only one the client mounts.
+// Fyne's is themeable down to its corner radius but not its *edge*: the fill of a
+// plain one is a shade off whatever card it sits on, and the hairline is what
+// makes that a button rather than a smudge — there is no theme name for it, the
+// background being a rectangle inside a renderer nothing reaches.
+//
+// Not focusable, unlike Fyne's. A field that submits through one does it from
+// OnSubmitted (see Tap), and nothing here is driven by tabbing onto a button.
+type Button struct {
+	tapBase
+	background *canvas.Rectangle
+	label      *canvas.Text
+
+	weight   ButtonWeight
+	hovered  bool
+	disabled bool
+}
+
+var (
+	_ fyne.Tappable      = (*Button)(nil)
+	_ desktop.Hoverable  = (*Button)(nil)
+	_ desktop.Cursorable = (*Button)(nil)
+)
+
+// NewButton is the plain, outlined button — what a control that is one of
+// several, or the way out of a card, is.
+func NewButton(label string, onTap func()) *Button {
+	return NewWeightedButton(label, ButtonPlain, onTap)
+}
+
+// NewWeightedButton is the same button carrying a tone.
+func NewWeightedButton(label string, weight ButtonWeight, onTap func()) *Button {
+	background := canvas.NewRectangle(color.Transparent)
+	background.CornerRadius = theme.Sizes.ButtonRadius
+
+	b := &Button{
+		background: background,
+		label:      newBoldText(label, theme.Colors.ButtonText, theme.Sizes.ButtonTextSize),
+		weight:     weight,
+	}
+	b.label.Alignment = fyne.TextAlignCenter
+	b.onTap = onTap
+	b.ExtendBaseWidget(b)
+	b.refreshAppearance()
+
+	return b
+}
+
+func (b *Button) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(b.background, container.NewCenter(b.label)))
+}
+
+// MinSize is the label in its padding, floored so a one-word button is still a
+// target: a row of them is read as one set, and "Open" beside "Change…" must not
+// be half the button.
+func (b *Button) MinSize() fyne.Size {
+	label := b.label.MinSize()
+
+	return fyne.NewSize(
+		max(label.Width+theme.Sizes.ButtonPaddingH*2, theme.Sizes.ButtonMinWidth),
+		max(label.Height+theme.Sizes.ButtonPaddingV*2, theme.Sizes.ButtonMinHeight),
+	)
+}
+
+// SetText relabels the button in place — what an action reports itself with
+// while it is in flight ("Logging in...").
+func (b *Button) SetText(text string) {
+	if b.label.Text == text {
+		return
+	}
+
+	b.label.Text = text
+	b.Refresh()
+}
+
+// Text is the button's label.
+func (b *Button) Text() string { return b.label.Text }
+
+// SetAction replaces what the button does, for a button that outlives what it is
+// pointed at — the member strip's Retry is the same button whatever server the
+// sidebar is showing.
+func (b *Button) SetAction(onTap func()) { b.onTap = onTap }
+
+// Tap runs the action as a click would, and refuses while the button is
+// disabled. That is what an entry submitting through one needs: calling the
+// action directly bypasses the disabled state and sends an in-flight request
+// twice.
+func (b *Button) Tap() { b.Tapped(nil) }
+
+func (b *Button) Tapped(e *fyne.PointEvent) {
+	if b.disabled {
+		return
+	}
+
+	b.tapBase.Tapped(e)
+}
+
+// Cursor drops the pointer while disabled — the one thing that says, before the
+// click, that there is nothing to click.
+func (b *Button) Cursor() desktop.Cursor {
+	if b.disabled {
+		return desktop.DefaultCursor
+	}
+
+	return b.tapBase.Cursor()
+}
+
+// Enable and Disable are Fyne's own names for the state, so a caller holding one
+// of these reads the same as a caller holding any other disableable widget.
+func (b *Button) Enable() { b.setDisabled(false) }
+
+func (b *Button) Disable() { b.setDisabled(true) }
+
+func (b *Button) Disabled() bool { return b.disabled }
+
+func (b *Button) setDisabled(disabled bool) {
+	if b.disabled == disabled {
+		return
+	}
+
+	b.disabled = disabled
+	b.refreshAppearance()
+}
+
+func (b *Button) MouseIn(*desktop.MouseEvent) { b.setHovered(true) }
+func (b *Button) MouseOut()                   { b.setHovered(false) }
+
+func (b *Button) setHovered(on bool) {
+	if b.hovered == on {
+		return
+	}
+
+	b.hovered = on
+	b.refreshAppearance()
+}
+
+// refreshAppearance repaints the surface for the state it is now in. Disabled
+// outranks everything, tone outranks hover: a filled button lifts its own colour
+// rather than taking the plain one's hover, there being no palette entry for a
+// tone one step up.
+func (b *Button) refreshAppearance() {
+	tone, tinted := b.weight.fill()
+	tinted = tinted && !b.disabled // a disabled button offers nothing, so it says nothing
+
+	fill, text := theme.Colors.ButtonBg, theme.Colors.ButtonText
+
+	switch {
+	case b.disabled:
+		fill, text = theme.Colors.ButtonDisabledBg, theme.Colors.ButtonDisabledText
+	case tinted:
+		fill, text = tone, theme.Colors.ButtonFilledText
+		if b.hovered {
+			fill = theme.Lighten(tone, buttonHoverLift)
+		}
+	case b.hovered:
+		fill = theme.Colors.ButtonHoverBg
+	}
+
+	// Only an unfilled button wears the hairline: a fill draws its own edge, and an
+	// outline around one is a second shape appearing at its corners.
+	b.background.StrokeWidth = 0
+	if !tinted {
+		Outline(b.background)
+	}
+	b.background.FillColor = fill
+	b.background.Refresh()
+
+	// The two objects rather than the widget: nothing here moves, and a widget-wide
+	// Refresh would build the renderer at construction, before anything is mounted.
+	b.label.Color = solidColor(text)
+	b.label.Refresh()
+}
 
 // IconButton is a flat, icon-only button used for the per-message quick actions
 // and the attachment viewer's header. It draws no background of its own: the

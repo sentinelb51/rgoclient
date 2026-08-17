@@ -3,6 +3,10 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -249,7 +253,7 @@ type JoinServerDialog struct {
 	Entry   fyne.Focusable
 
 	status dialogStatus
-	join   *widget.Button
+	join   *Button
 }
 
 // NewJoinServerDialog builds the dialog. onJoin receives an already-validated
@@ -264,7 +268,7 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 
 	d.status = newDialogStatus()
 
-	d.join = widget.NewButton("Join", func() {
+	d.join = NewWeightedButton("Join", ButtonPrimary, func() {
 		code := util.InviteCode(entry.Text)
 		if code == "" {
 			d.Fail("That doesn't look like an invite code or link.")
@@ -275,13 +279,9 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 		onJoin(code)
 	})
 
-	// Guarded, unlike a click: OnTapped bypasses the button's own disabled check, so
-	// Enter during an in-flight request would send it twice.
-	entry.OnSubmitted = func(string) {
-		if !d.join.Disabled() {
-			d.join.OnTapped()
-		}
-	}
+	// Tap rather than the action itself: calling that bypasses the button's own
+	// disabled check, so Enter during an in-flight request would send it twice.
+	entry.OnSubmitted = func(string) { d.join.Tap() }
 
 	inner := container.NewVBox(
 		dialogHeader("Join a server", onClose),
@@ -292,7 +292,7 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 		d.join,
 		widget.NewSeparator(),
 		widget.NewLabel("Start your own"),
-		widget.NewButton("Create a server", onCreate),
+		NewButton("Create a server", onCreate),
 	)
 	body := NewMinWidthContainer(theme.Sizes.JoinDialogWidth, container.NewPadded(inner))
 
@@ -389,7 +389,7 @@ type PromptDialog struct {
 	Entry   fyne.Focusable
 
 	status dialogStatus
-	action *widget.Button
+	action *Button
 }
 
 // NewPromptDialog builds the card. onClose dismisses the modal layer.
@@ -404,13 +404,9 @@ func NewPromptDialog(prompt Prompt, onClose func()) *PromptDialog {
 		entry.SetPlaceHolder(field.Placeholder)
 		entry.Password = field.Password
 
-		// Guarded, unlike a click: OnTapped bypasses the button's own disabled check,
-		// so Enter during an in-flight request would send it twice.
-		entry.OnSubmitted = func(string) {
-			if !d.action.Disabled() {
-				d.action.OnTapped()
-			}
-		}
+		// Tap rather than the action itself: calling that bypasses the button's own
+		// disabled check, so Enter during an in-flight request would send it twice.
+		entry.OnSubmitted = func(string) { d.action.Tap() }
 
 		entries = append(entries, entry)
 		rows = append(rows, widget.NewLabel(field.Label), WithCaret(entry))
@@ -421,7 +417,7 @@ func NewPromptDialog(prompt Prompt, onClose func()) *PromptDialog {
 
 	d.status = newDialogStatus()
 
-	d.action = widget.NewButton(prompt.Action, func() {
+	d.action = NewWeightedButton(prompt.Action, ButtonPrimary, func() {
 		values := promptValues(entries)
 		if values == nil {
 			return
@@ -463,7 +459,227 @@ func (d *PromptDialog) Fail(message string) {
 	d.action.Enable()
 }
 
-// modalEntry is a single-line field on the modal layer. It handles Escape itself
+/* Channel dialog */
+
+// topicRows is how much of a topic is on screen at once: enough for the sentence
+// most channels have, without the card being mostly one field.
+const topicRows = 3
+
+// ChannelSettings is a channel as the card found it, and as it would leave it.
+//
+// Slowmode and UserLimit are pointers because not every channel has them — a
+// group has no send cooldown, and only a voice channel has a user limit. A nil
+// one is a row the card leaves out and a field the request omits, which is the
+// same rule read twice: what comes back is what may be sent.
+type ChannelSettings struct {
+	Name        string
+	Description string
+
+	Slowmode  *time.Duration
+	UserLimit *int
+
+	NSFW bool
+}
+
+// ChannelDialog edits a channel. Not a Prompt: a prompt asks from empty and
+// refuses a blank field, where this one opens on what the channel already is,
+// takes more than typing, and lets a topic be nothing.
+type ChannelDialog struct {
+	// Content is the card to hand to the modal layer, and Entry the field to focus
+	// once it is up.
+	Content fyne.CanvasObject
+	Entry   fyne.Focusable
+
+	status dialogStatus
+	action *Button
+}
+
+// NewChannelDialog builds the card, opened on current. onSubmit is called on the
+// UI thread with what the fields hold; onClose dismisses the modal layer.
+func NewChannelDialog(current ChannelSettings, onSubmit func(ChannelSettings), onClose func()) *ChannelDialog {
+	d := &ChannelDialog{}
+
+	name := newModalEntry(onClose)
+	name.SetPlaceHolder("general")
+	name.SetText(current.Name)
+
+	// Enter in the name field saves, as it does in a prompt; the topic keeps Enter
+	// for a line break, being the one field with more than one line to give.
+	name.OnSubmitted = func(string) { d.action.Tap() }
+
+	topic := newModalEntry(onClose)
+	topic.MultiLine = true
+	topic.Wrapping = fyne.TextWrapWord
+	topic.SetMinRowsVisible(topicRows)
+	topic.SetPlaceHolder("What this channel is for")
+	topic.SetText(current.Description)
+
+	nsfw := NewToggle(current.NSFW, nil)
+
+	fields := []fyne.CanvasObject{
+		dialogField("Name", fieldSurface(name)),
+		dialogField("Topic", fieldSurface(topic)),
+	}
+
+	var slowmode, limit *choiceField
+	if current.Slowmode != nil {
+		slowmode = newChoiceField(int(*current.Slowmode/time.Second), slowmodeChoices, slowmodeLabel)
+		fields = append(fields, dialogField("Slowmode", slowmode.control))
+	}
+	if current.UserLimit != nil {
+		limit = newChoiceField(*current.UserLimit, userLimitChoices, userLimitLabel)
+		fields = append(fields, dialogField("User limit", limit.control))
+	}
+
+	fields = append(fields, dialogSwitch("Age-restricted", "Hidden until the reader agrees to see it.", nsfw))
+
+	d.status = newDialogStatus()
+	d.action = NewWeightedButton("Save", ButtonPrimary, func() {
+		d.status.set("Saving...", theme.Colors.TimestampText)
+		d.action.Disable()
+
+		edited := ChannelSettings{Name: name.Text, Description: topic.Text, NSFW: nsfw.On()}
+		if slowmode != nil {
+			cooldown := time.Duration(slowmode.value) * time.Second
+			edited.Slowmode = &cooldown
+		}
+		if limit != nil {
+			edited.UserLimit = &limit.value
+		}
+
+		onSubmit(edited)
+	})
+
+	rows := []fyne.CanvasObject{dialogHeader("Edit channel", onClose), widget.NewSeparator()}
+	rows = append(rows, fields...)
+	rows = append(rows, d.status.row(), d.action)
+
+	padding := theme.Sizes.DialogPadding
+	body := NewMinWidthContainer(theme.Sizes.ChannelDialogWidth,
+		NewInset(spacedColumn(theme.Sizes.DialogFieldGap, rows...), padding, padding, padding, padding))
+
+	d.Content = newTapSink(container.NewStack(newDialogCard(), body))
+	d.Entry = name
+
+	return d
+}
+
+// Fail reports a refused edit and re-enables the button, so the fields it came
+// from can be corrected and sent again. Call on the UI thread.
+func (d *ChannelDialog) Fail(message string) {
+	d.status.set(message, theme.Colors.ErrorText)
+	d.action.Enable()
+}
+
+/* The pieces a card's fields are built from */
+
+// dialogField is a labelled control: the label above rather than beside it, a
+// field being as wide as the card and a caption beside one leaving no room for
+// what it names.
+func dialogField(label string, control fyne.CanvasObject) fyne.CanvasObject {
+	return VBoxNoSpacing(
+		newBoldText(strings.ToUpper(label), theme.Colors.CategoryText, theme.Sizes.DialogLabelSize),
+		VerticalSpacer(theme.Sizes.DialogLabelGap),
+		control,
+	)
+}
+
+// dialogSwitch is a boolean: what it is on the left, the switch held to the right
+// at its own size — a row would otherwise stretch the pill to its whole height.
+func dialogSwitch(label, detail string, toggle *Toggle) fyne.CanvasObject {
+	text := VBoxNoSpacing(
+		newText(label, theme.Colors.TextPrimary, 0),
+		VerticalSpacer(theme.Sizes.DialogLabelGap),
+		newText(detail, theme.Colors.TimestampText, theme.Sizes.JoinDialogTextSize),
+	)
+
+	return NewFillRow(0, vcenter(text), HorizontalSpacer(theme.Sizes.DialogFieldGap), vcenter(toggle))
+}
+
+// spacedColumn stacks rows with one gap between each pair. A VBox's own spacing
+// is the theme's padding, which is what a form's fields were reading as: evenly
+// spread, with the label no closer to its field than to the one above.
+func spacedColumn(gap float32, rows ...fyne.CanvasObject) *fyne.Container {
+	stacked := make([]fyne.CanvasObject, 0, 2*len(rows)-1)
+
+	for i, row := range rows {
+		if i > 0 {
+			stacked = append(stacked, VerticalSpacer(gap))
+		}
+		stacked = append(stacked, row)
+	}
+
+	return VBoxNoSpacing(stacked...)
+}
+
+// choiceField is a dropdown holding a number until the card is answered. The
+// settings page's control reports every pick to whoever owns the setting; here
+// nothing is owned until Save, so the value is kept beside the control.
+type choiceField struct {
+	control *optionControl
+	value   int
+}
+
+// newChoiceField builds one over choices, which current joins if it is not
+// already among them — a channel set from another client must not have its
+// setting quietly rounded to the nearest thing this card offers.
+func newChoiceField(current int, choices []int, label func(int) string) *choiceField {
+	f := &choiceField{value: current}
+
+	option := func(value int) settingsOption {
+		return settingsOption{Label: label(value), Value: strconv.Itoa(value)}
+	}
+
+	options := make([]settingsOption, 0, len(choices)+1)
+	listed := slices.Contains(choices, current)
+
+	for _, choice := range choices {
+		if !listed && current < choice {
+			options = append(options, option(current))
+			listed = true
+		}
+		options = append(options, option(choice))
+	}
+	if !listed {
+		options = append(options, option(current))
+	}
+
+	f.control = newOptionControl(strconv.Itoa(current), options, func(picked string) {
+		f.value, _ = strconv.Atoi(picked)
+		f.control.set(picked)
+	})
+
+	return f
+}
+
+// What the two number fields offer. Slowmode is Revolt's own ladder, ending at
+// the route's six-hour ceiling; the user limit is a voice channel's, where the
+// numbers are only ever round.
+var (
+	slowmodeChoices  = []int{0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600}
+	userLimitChoices = []int{0, 2, 5, 10, 15, 25, 50, 100}
+)
+
+func slowmodeLabel(seconds int) string {
+	if seconds <= 0 {
+		return "Off"
+	}
+
+	return util.ShortDuration(time.Duration(seconds) * time.Second)
+}
+
+func userLimitLabel(users int) string {
+	switch {
+	case users <= 0:
+		return "No limit"
+	case users == 1:
+		return "1 user"
+	}
+
+	return strconv.Itoa(users) + " users"
+}
+
+// modalEntry is a text field on the modal layer. It handles Escape itself
 // because a focused entry is the end of the line for key events: Fyne routes them
 // to the focused widget and never reaches the canvas handler the layer dismisses on.
 type modalEntry struct {

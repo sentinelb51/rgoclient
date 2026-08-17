@@ -71,18 +71,18 @@ func (t Tone) title() string {
 	return "Done"
 }
 
-// importance is how a confirming button paints itself. Fyne reads the fill off
-// the theme's error/warning/primary colours, which AppTheme maps to the same
-// tones as Color.
-func (t Tone) importance() widget.Importance {
+// weight is how a button carrying the tone fills itself — the colour Color
+// already returns, a confirming button and the notice reporting what it did
+// being one statement made twice.
+func (t Tone) weight() ButtonWeight {
 	switch t {
 	case ToneWarning:
-		return widget.WarningImportance
+		return ButtonWarning
 	case ToneDanger:
-		return widget.DangerImportance
+		return ButtonDanger
 	}
 
-	return widget.HighImportance
+	return ButtonPrimary
 }
 
 /* Transient notices */
@@ -341,18 +341,17 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 	body := widget.NewLabel(confirm.Body)
 	body.Wrapping = fyne.TextWrapWord
 
-	action := widget.NewButton(confirm.Action, func() {
+	action := NewWeightedButton(confirm.Action, confirm.Tone.weight(), func() {
 		onClose()
 		if confirm.OnConfirm != nil {
 			confirm.OnConfirm()
 		}
 	})
-	action.Importance = confirm.Tone.importance()
 
 	// Two halves of the card, cancel first and plain — full width rather than a pair
 	// in the corner, so the dialog is answered by position rather than by reading a
 	// small label. The weighted one is still the only thing carrying colour.
-	buttons := container.NewGridWithColumns(2, widget.NewButton("Cancel", onClose), action)
+	buttons := container.NewGridWithColumns(2, NewButton("Cancel", onClose), action)
 
 	inner := container.NewVBox(
 		confirmHeader(confirm, onClose),

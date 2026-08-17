@@ -103,7 +103,9 @@ func writeBlocks(b *strings.Builder, blocks []Block) {
 		case *Blockquote:
 			writeBlocks(b, v.Blocks)
 		case *CodeBlock:
-			b.WriteString(v.Text)
+			// The only text kept verbatim by the parser, so the only place a newline
+			// can reach a preview — a canvas.Text draws one as a missing glyph.
+			b.WriteString(strings.ReplaceAll(v.Text, "\n", " "))
 		case *List:
 			for i, item := range v.Items {
 				if i > 0 {

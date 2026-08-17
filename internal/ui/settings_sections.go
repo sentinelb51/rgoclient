@@ -68,7 +68,7 @@ func presenceValue(presence domain.Presence) string {
 // the reader has moved on has nothing left to fill.
 type accountRows struct {
 	bio          *commitEntry
-	removeBanner *widget.Button
+	removeBanner *Button
 }
 
 func (p *SettingsPage) accountSection() []settingsGroup {
@@ -609,8 +609,8 @@ func (p *SettingsPage) soundRow(sound SettingsSound) fyne.CanvasObject {
 
 	label := newText(detail, theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
 
-	play := widget.NewButton("Play", func() { p.hooks.PlaySound(sound.Key) })
-	choose := widget.NewButton("Change…", func() {
+	play := NewButton("Play", func() { p.hooks.PlaySound(sound.Key) })
+	choose := NewButton("Change…", func() {
 		p.hooks.ChooseSound(sound.Key, p.reload)
 	})
 
@@ -618,7 +618,7 @@ func (p *SettingsPage) soundRow(sound SettingsSound) fyne.CanvasObject {
 	if sound.File != "" {
 		// Offered only once there is something to go back from, so a row does not
 		// advertise a built-in nobody has moved away from.
-		reset := widget.NewButton("Built-in", func() {
+		reset := NewButton("Built-in", func() {
 			p.hooks.ResetSound(sound.Key)
 			p.reload()
 		})
@@ -703,20 +703,20 @@ func (p *SettingsPage) cacheSection() []settingsGroup {
 func (p *SettingsPage) locationRow(configured string) fyne.CanvasObject {
 	path := newText(p.hooks.CacheDir(), theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize)
 
-	choose := widget.NewButton("Change…", func() {
+	choose := NewButton("Change…", func() {
 		p.hooks.ChooseCacheDir(func(picked string) {
 			p.change(func(s *config.Settings) { s.Cache.AssetDir = picked })
 			p.reload()
 		})
 	})
 
-	open := widget.NewButton("Open", func() { p.hooks.OpenPath(p.hooks.CacheDir()) })
+	open := NewButton("Open", func() { p.hooks.OpenPath(p.hooks.CacheDir()) })
 
 	controls := []fyne.CanvasObject{choose, HorizontalSpacer(theme.Sizes.ChipSpacing), open}
 	if configured != "" {
 		// Only offered once there is something to go back from, so the row does not
 		// advertise a default nobody has moved away from.
-		reset := widget.NewButton("Default", func() {
+		reset := NewButton("Default", func() {
 			p.change(func(s *config.Settings) { s.Cache.AssetDir = "" })
 			p.reload()
 		})
@@ -972,6 +972,19 @@ var styleGroups = []styleGroup{
 		},
 	},
 	{
+		caption: "Buttons",
+		detail:  "Every button the client draws, from a card's action to a settings row.",
+		fields: []styleField{
+			{"ButtonRadius", "Corner radius"},
+			{"ButtonTextSize", "Label text"},
+			{"ButtonPaddingV", "Padding, vertical"},
+			{"ButtonPaddingH", "Padding, horizontal"},
+			{"ButtonMinWidth", "Narrowest it is drawn"},
+			{"ButtonMinHeight", "Shortest it is drawn"},
+		},
+		preview: func(p *SettingsPage) fyne.CanvasObject { return p.buttonPreview() },
+	},
+	{
 		caption: "Cards and edges",
 		detail:  "Every border the client draws is the same hairline.",
 		fields: []styleField{
@@ -1080,6 +1093,21 @@ func (p *SettingsPage) sidebarPreview() fyne.CanvasObject {
 	)
 
 	return previewFrame(rows)
+}
+
+// buttonPreview draws one of each weight, since what the sizes shape is the box
+// around a word and a filled button proves it against a fill rather than against
+// the hairline alone. Tapping one does nothing: a preview is a picture.
+func (p *SettingsPage) buttonPreview() fyne.CanvasObject {
+	row := HBoxNoSpacing(
+		NewButton("Cancel", nil),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		NewWeightedButton("Join", ButtonPrimary, nil),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		NewWeightedButton("Leave", ButtonDanger, nil),
+	)
+
+	return previewFrame(row)
 }
 
 // previewFrame is the surface a sample sits on: the message area's own

@@ -167,7 +167,14 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	pins := ui.NewIconButton(assets.SystemPinnedIcon, a.showPinnedMessages, nil)
 
 	members := ui.NewIconButton(assets.MembersIcon, a.toggleMemberList, nil)
-	a.messageHeader = container.NewBorder(nil, nil, title, container.NewHBox(a.jumpChip, search, pins, members))
+
+	// The topic takes the row's centre, which is the only slot with width to give:
+	// it is somebody else's prose and shortens to whatever is left between the name
+	// and the buttons.
+	a.channelTopic = ui.NewChannelTopic()
+	a.messageHeader = container.NewBorder(nil, nil, title,
+		container.NewHBox(a.jumpChip, search, pins, members), a.channelTopic)
+	a.syncChannelTopic() // a restyle rebuilds this row under a standing selection
 	header := container.NewPadded(a.messageHeader)
 
 	// The note hangs under the header rather than over the column: it is about the
@@ -611,6 +618,20 @@ func (a *App) syncChannelKind() {
 		a.channelNote.Hide()
 	}
 	ui.Relayout(a.messageColumn)
+}
+
+// syncChannelTopic labels the header with what the open channel says it is for.
+// The header is relaid out rather than refreshed: a topic appearing or going
+// takes room off the name beside it, which a repaint alone would not give back.
+// Call on the UI thread.
+func (a *App) syncChannelTopic() {
+	if a.channelTopic == nil {
+		return
+	}
+
+	channel, _ := a.currentChannel()
+	a.channelTopic.Set(channel.Description)
+	ui.Relayout(a.messageHeader)
 }
 
 /* Loading and rendering */

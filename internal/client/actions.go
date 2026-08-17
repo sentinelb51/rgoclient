@@ -885,6 +885,125 @@ func (c *Client) CloseChannel(channelID string) error {
 	return session.ChannelDelete(channelID)
 }
 
+/* Editing a channel */
+
+// Revolt's ceilings on what a channel edit carries. A name is cut to fit; an
+// empty one has no repair, so it is the one case reported back.
+const (
+	MaxChannelName        = 32
+	MaxChannelDescription = 1024
+	MaxChannelSlowmode    = 6 * time.Hour
+)
+
+// The names a cleared field is removed under. Neither an empty string nor a zero
+// reaches the wire — both are dropped by omitempty and read as "leave it alone" —
+// so clearing anything is a name rather than a blank, as it is for a user edit.
+const (
+	fieldChannelDescription = "Description"
+	fieldChannelSlowmode    = "Slowmode"
+)
+
+var ErrChannelNameEmpty = errors.New("channel name is empty")
+
+// ChannelEdit is a channel as an edit would leave it, not the difference from
+// what it is now: the card is answered whole, and Revolt applies a partial, so
+// sending every field every time costs nothing and needs no diff.
+//
+// A nil Slowmode or UserLimit is a field the channel does not have — a group has
+// no cooldown, a channel that is not a voice channel no user limit — and is left
+// out of the request. For the limit that is not tidiness: `voice` is the field
+// that *makes* a channel a voice channel, so sending it to a text channel would
+// convert it.
+type ChannelEdit struct {
+	Name        string
+	Description string
+
+	Slowmode  *time.Duration
+	UserLimit *int
+
+	NSFW bool
+}
+
+// channelEditBody is the route's DataEditChannel. revoltgo's ChannelEditParams
+// carries neither slowmode nor voice, so the whole edit is sent by hand rather
+// than half of it through the typed API and half beside it.
+type channelEditBody struct {
+	Name        string            `json:"name,omitempty"`
+	Description string            `json:"description,omitempty"`
+	NSFW        *bool             `json:"nsfw,omitempty"`
+	Slowmode    *int              `json:"slowmode,omitempty"`
+	Voice       *channelVoiceEdit `json:"voice,omitempty"`
+	Remove      []string          `json:"remove,omitempty"`
+}
+
+// channelVoiceEdit is VoiceInformation. An absent max_users is Revolt's own way
+// of saying "no cap", so an empty object is how one is taken off.
+type channelVoiceEdit struct {
+	MaxUsers *int `json:"max_users,omitempty"`
+}
+
+// EditChannel changes what a channel is: its name, topic, age gate, send cooldown
+// and — for a voice channel — how many may be in it. All of it rides one
+// permission (see domain.PermissionManageChannel), which the route checks once
+// for the whole edit, so a caller allowed to raise the card may send every field
+// on it.
+//
+// What took comes back as ChannelUpdate on the gateway, which is what repaints
+// the sidebar and the header. The slowmode is the exception: revoltgo drops the
+// field from the channel and from the event alike, so what was just set is
+// recorded here or the store goes on missing it.
+func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	name := trimTo(edit.Name, MaxChannelName)
+	if name == "" {
+		return ErrChannelNameEmpty
+	}
+
+	body := channelEditBody{
+		Name:        name,
+		Description: trimTo(edit.Description, MaxChannelDescription),
+		NSFW:        &edit.NSFW,
+	}
+	if body.Description == "" {
+		body.Remove = append(body.Remove, fieldChannelDescription)
+	}
+
+	var slowmode time.Duration
+	if edit.Slowmode != nil {
+		slowmode = min(max(*edit.Slowmode, 0), MaxChannelSlowmode).Truncate(time.Second)
+
+		seconds := int(slowmode / time.Second)
+		if seconds > 0 {
+			body.Slowmode = &seconds
+		} else {
+			body.Remove = append(body.Remove, fieldChannelSlowmode)
+		}
+	}
+
+	if edit.UserLimit != nil {
+		body.Voice = &channelVoiceEdit{}
+		if limit := *edit.UserLimit; limit > 0 {
+			body.Voice.MaxUsers = &limit
+		}
+	}
+
+	if err := session.HTTP.Request(http.MethodPatch, revoltgo.EndpointChannel(channelID), body, nil); err != nil {
+		return err
+	}
+
+	if edit.Slowmode != nil {
+		c.mu.Lock()
+		c.slowmode[channelID] = slowmode
+		c.mu.Unlock()
+	}
+
+	return nil
+}
+
 /* Servers and members */
 
 // MaxServerName is Revolt's ceiling on a server name; ErrServerNameEmpty is the

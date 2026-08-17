@@ -355,6 +355,10 @@ type Permission int64
 
 // Channel-scoped permissions, asked of Store.Permissions.
 const (
+	// PermissionManageChannel is the whole of what editing a channel takes: Stoat's
+	// channel_edit route checks it once and gates no field behind anything further.
+	PermissionManageChannel Permission = 1 << 0
+
 	PermissionViewChannel        Permission = 1 << 20
 	PermissionReadMessageHistory Permission = 1 << 21
 	PermissionSendMessage        Permission = 1 << 22
@@ -409,12 +413,21 @@ type Channel struct {
 	Name      string
 	AvatarURL string // the conversation's picture; "" for a server channel
 
+	// Description is the channel's topic, drawn beside its name in the header.
+	Description string
+
 	// Slowmode is the wait between messages, 0 for none. Server text channels only.
 	Slowmode time.Duration
+
+	// UserLimit is how many may be in a voice channel at once, 0 for no cap.
+	// Nothing draws it — the call itself is not built — but an edit prefills from
+	// what the channel is now.
+	UserLimit int
 
 	Recipients    []string
 	LastMessageID string
 	Active        bool
+	NSFW          bool
 }
 
 /* Servers */

@@ -782,7 +782,7 @@ func (c *ProfileCard) buttons(actions ProfileActions) fyne.CanvasObject {
 	}
 
 	if actions.OnExpand != nil {
-		buttons = append(buttons, widget.NewButton("Full profile", actions.OnExpand))
+		buttons = append(buttons, NewButton("Full profile", actions.OnExpand))
 	}
 
 	if len(buttons) == 0 {
@@ -795,16 +795,19 @@ func (c *ProfileCard) buttons(actions ProfileActions) fyne.CanvasObject {
 // newProfileButton weights one action. Only the first is filled — a card whose
 // every button is coloured says nothing about which one it is for — with the
 // destructive ones the exception, reading as destructive wherever they land.
-func newProfileButton(action ProfileButton, first bool) *widget.Button {
-	button := widget.NewButton(action.Label, action.Do)
+func newProfileButton(action ProfileButton, first bool) *Button {
+	weight := ButtonPlain
 
 	switch {
-	case action.Do == nil:
-		button.Disable()
 	case action.Danger:
-		button.Importance = widget.DangerImportance
+		weight = ButtonDanger
 	case first:
-		button.Importance = widget.HighImportance
+		weight = ButtonPrimary
+	}
+
+	button := NewWeightedButton(action.Label, weight, action.Do)
+	if action.Do == nil {
+		button.Disable()
 	}
 
 	return button

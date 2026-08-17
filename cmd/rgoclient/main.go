@@ -33,8 +33,9 @@ import (
 const appID = "com.sentinelb51.rgoclient"
 
 // version and build are stamped at link time by CI (-X main.version=...).
-// Versions are calendar-based, YY.M.D with no zero padding, so a version reads as
-// the date it shipped; build is the workflow run number. These defaults are what
+// Versions are calendar-based, YY.M.N with no zero padding, so a version reads as
+// the month it shipped in plus a counter that restarts each month; build is the
+// workflow run number. These defaults are what
 // a plain `go build` produces, marking an unreleased local build.
 var (
 	version = "0.0.0"

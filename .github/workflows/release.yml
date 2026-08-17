@@ -1,8 +1,8 @@
 name: Release
 
-# workflow_dispatch is the normal path: the run derives today's calendar
-# version and creates the tag itself. Pushing a v* tag is the escape hatch —
-# the tag is taken verbatim as the version.
+# workflow_dispatch is the normal path: the run derives this month's version
+# and creates the tag itself. Pushing a v* tag is the escape hatch — the tag is
+# taken verbatim as the version.
 on:
   push:
     tags: [ 'v*' ]
@@ -33,8 +33,9 @@ jobs:
           CGO_ENABLED: 1
         run: go test ./...
 
-      # YY.M.D, UTC, unpadded (26.7.29); a second release on the same day
-      # appends a counter (26.7.29.1) so the tag stays unique.
+      # YY.M.N, UTC, unpadded (26.8.1): the year and month it shipped in, then a
+      # counter that restarts each month. The highest tag already in this month
+      # decides the counter, so a gap in the tags never repeats a version.
       - name: Resolve version
         id: version
         shell: pwsh
@@ -45,15 +46,15 @@ jobs:
           } else {
             git fetch --tags --quiet
             $now = [datetime]::UtcNow
-            $base = "{0}.{1}.{2}" -f ($now.Year % 100), $now.Month, $now.Day
+            $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
 
-            $version = $base
-            $n = 1
-            while (git tag --list "v$version") {
-              $version = "$base.$n"
-              $n++
+            $used = git tag --list "v$base.*" | ForEach-Object {
+              if ($_ -match '\.(\d+)$') { [int]$Matches[1] }
             }
+            $last = ($used | Measure-Object -Maximum).Maximum
+            if (-not $last) { $last = 0 }
 
+            $version = "$base.$($last + 1)"
             $tag = "v$version"
             git tag $tag
             git push origin $tag

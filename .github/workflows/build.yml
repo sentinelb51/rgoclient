@@ -11,8 +11,11 @@ jobs:
   build:
     runs-on: windows-latest
     steps:
+      # The tags are what the version below counts from.
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-tags: true
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -27,15 +30,23 @@ jobs:
           CGO_ENABLED: 1
         run: go test ./...
 
-      # Today's calendar version with a -dev suffix, so a CI artifact can never
-      # be mistaken for the release cut on the same day. No tag is involved.
+      # The version a release cut now would take, with a -dev suffix so a CI
+      # artifact can never be mistaken for that release. No tag is involved, so
+      # the number is a guess: the release that claims it may be a later build.
       - name: Resolve version
         id: version
         shell: pwsh
         run: |
           $now = [datetime]::UtcNow
-          $version = "{0}.{1}.{2}-dev" -f ($now.Year % 100), $now.Month, $now.Day
-          "version=$version" >> $env:GITHUB_OUTPUT
+          $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
+
+          $used = git tag --list "v$base.*" | ForEach-Object {
+            if ($_ -match '\.(\d+)$') { [int]$Matches[1] }
+          }
+          $last = ($used | Measure-Object -Maximum).Maximum
+          if (-not $last) { $last = 0 }
+
+          "version=$base.$($last + 1)-dev" >> $env:GITHUB_OUTPUT
 
       - name: Build
         env:

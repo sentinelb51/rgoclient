@@ -303,10 +303,12 @@ files with LF regardless: what is committed must stay LF.
 
 ## Versioning / CI
 
-Calendar versions: `YY.M.D`, UTC, no zero padding (`26.7.29`); a second release
-the same day appends a counter. CI builds of `main`/PRs use the same date with
-`-dev`. There is no version literal in the source — `main.version` and
-`main.build` are stamped at link time with `-X`.
+Calendar versions: `YY.M.N`, UTC, no zero padding (`26.8.1`) — year and month,
+then a counter that restarts each month, taken from the highest `v26.8.*` tag so
+a deleted tag is never reissued. Three components, so the tag parses as semver.
+CI builds of `main`/PRs use the next number with `-dev`. There is no version
+literal in the source — `main.version` and `main.build` are stamped at link time
+with `-X`.
 
 Two `windows-latest` workflows, both running `go test ./...` and building
 `dist/RGOClient.exe` with `CGO_ENABLED=1 -H windowsgui` (the tests need cgo:
@@ -314,9 +316,9 @@ Two `windows-latest` workflows, both running `go test ./...` and building
 step, so a failing tree can't leave a tag behind. The exe is unsigned.
 
 - `build.yml` — push/PR to `main` + manual. Uploads the exe as an artifact.
-- `release.yml` — `workflow_dispatch` computes today's version, skips past any
-  existing tag, pushes the tag and publishes. Pushing a `v*` tag by hand takes the
-  tag verbatim — the escape hatch for off-calendar versions.
+- `release.yml` — `workflow_dispatch` computes this month's next version, pushes
+  the tag and publishes. Pushing a `v*` tag by hand takes the tag verbatim — the
+  escape hatch for off-calendar versions.
 
 ## Known gaps
 

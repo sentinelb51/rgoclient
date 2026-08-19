@@ -245,6 +245,16 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   cache folder is still choosable there, in a dialog that looks like nothing else
   on the machine. GTK/AppKit or the XDG desktop portal is what the other halves
   would take, each a binding of its own.
+- **CI ships bare binaries, not installable applications.** All three targets
+  build and are attached to a release, but nothing is packaged: macOS gets a
+  Mach-O rather than a signed, notarised `.app`, so Gatekeeper refuses it until
+  the quarantine bit is cleared by hand, and Linux gets an ELF rather than a
+  `.desktop` entry, an AppImage or a package. `fyne package` is what would do it
+  — it wants a `FyneApp.toml` and an icon the client does not currently set — and
+  the signing halves want an Apple developer identity. The Windows exe is
+  unsigned for the same reason. The matrix also builds one architecture each:
+  amd64 on Windows and Linux, arm64 on macOS.
+
 - **A button cannot be tabbed to.** Every text button is `ui.Button`, the client's
   own — Fyne's carries no edge and no theme name reaches its background — and it
   is not `fyne.Focusable`, so no button is reached by Tab or pressed with Space. A

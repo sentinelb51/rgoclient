@@ -112,11 +112,12 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		dockBg.Refresh()
 	}
 
-	// The emoji button rides the entry's last line rather than the middle of it —
-	// see ui.NewComposerButtonSlot, which is what decides where in the row it lands.
+	// The two buttons ride the entry's last line rather than the middle of it — see
+	// ui.NewComposerButtonSlot, which is what decides where in the row they land.
 	entry := ui.NewFillRow(0,
 		ui.WithCaret(a.input),
 		ui.NewComposerButtonSlot(a.input.EmojiButton),
+		ui.NewComposerButtonSlot(a.input.AttachButton),
 	)
 
 	inner := ui.VBoxNoSpacing(
@@ -245,6 +246,13 @@ func (a *App) syncComposer() {
 	default:
 		a.input.SetPlaceHolder(composerNoSending)
 	}
+}
+
+// OnAttachFile asks for a file to hang on the next message. No filter: what a
+// channel takes is the server's call, and a picture is only one of the kinds.
+// Call on the UI thread.
+func (a *App) OnAttachFile(onPicked func(path string)) {
+	a.chooseFile("Choose a file to attach", ui.FileFilter{}, func(path, _ string) { onPicked(path) })
 }
 
 // handleSubmit sends the composed message, its attachments, and its replies. The

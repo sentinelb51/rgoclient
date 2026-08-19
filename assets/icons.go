@@ -143,7 +143,8 @@ var (
 
 	// ActionEmojiIcon opens the emoji picker from the composer. It is in this set
 	// rather than beside the reaction chip's mark because both open the same
-	// picker, and the composer's is the one that needs a face to say so.
+	// picker. Alone among the marks it is a filled silhouette rather than an
+	// outline — a stoat at 20 units has no room for a stroke to describe it.
 	ActionEmojiIcon = actionIcon("action-emoji.svg")
 )
 

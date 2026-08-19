@@ -329,17 +329,30 @@ CI builds of `main`/PRs use the next number with `-dev`. There is no version
 literal in the source — `main.version` and `main.build` are stamped at link time
 with `-X`.
 
-Two `windows-latest` workflows, both running `go test ./...` and building
-`dist/RGOClient.exe` with `CGO_ENABLED=1 -H windowsgui` (the tests need cgo:
-`internal/ui` mounts real widgets). In `release.yml` they run *before* the version
-step, so a failing tree can't leave a tag behind. The exe is unsigned.
+Two workflows, each a matrix over `windows-latest`, `ubuntu-latest` and
+`macos-latest` (arm64), running `go test ./...` and building `./cmd/rgoclient`
+with `CGO_ENABLED=1`. The tests need cgo — `internal/ui` mounts real widgets —
+and they use Fyne's software driver, so no display is involved. Only Windows
+takes `-H windowsgui`; passing it to any other linker is an error, not a no-op.
+Ubuntu installs the cgo headers its image lacks (`libgl1-mesa-dev xorg-dev
+libxkbcommon-dev libasound2-dev` — GL/X11 for GLFW and the clipboard, xkbcommon
+for the keymap, ALSA for oto). Nothing is signed or notarised.
 
-- `build.yml` — push/PR to `main` + manual. Uploads the exe as an artifact.
+Resolving the version is its own job in both, so the three legs stamp one number
+rather than each counting the tags — and in `release.yml`, so they don't race to
+push the tag. Tests there are a job of their own *ahead* of it, so a failing tree
+can't leave a tag behind.
+
+- `build.yml` — push/PR to `main` + manual. One artifact per target.
 - `release.yml` — `workflow_dispatch` computes this month's next version, pushes
   the tag and publishes. The escape hatches take the tag verbatim: a tag pushed
   by hand (`v` optional), and a release drafted in the web UI, which fires
-  `release` rather than reliably firing `push`. That last path attaches the exe
-  and leaves the notes alone — the body is one someone wrote.
+  `release` rather than reliably firing `push`. That last path attaches the
+  binaries and leaves the notes alone — the body is one someone wrote.
+
+Assets are named for their target. The unix ones ship as a `.tar.gz`: a release
+asset is served as-is and an artifact is re-zipped, and neither keeps the execute
+bit. macOS gets a bare binary rather than an `.app` — see `docs/known-gaps.md`.
 
 ## Known gaps
 

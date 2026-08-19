@@ -8,27 +8,18 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    runs-on: windows-latest
+  # One job, so the three builds stamp the same number rather than each
+  # counting the tags for itself.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       # The tags are what the version below counts from.
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-tags: true
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # internal/ui mounts real widgets, so the tests need the same cgo toolchain
-      # the build does; they are not a pure-Go unit suite.
-      - name: Test
-        env:
-          CGO_ENABLED: 1
-        run: go test ./...
 
       # The version a release cut now would take, with a -dev suffix so a CI
       # artifact can never be mistaken for that release. No tag is involved, so
@@ -48,17 +39,72 @@ jobs:
 
           "version=$base.$($last + 1)-dev" >> $env:GITHUB_OUTPUT
 
+  build:
+    needs: version
+    runs-on: ${{ matrix.os }}
+
+    # fail-fast off: one platform breaking is the thing the other two are here
+    # to tell apart from a break everywhere.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-amd64
+            binary: RGOClient.exe
+            # Only the PE linker takes a subsystem, and it is what keeps a
+            # console from opening behind the window. Passing it anywhere else
+            # is a link error, not a no-op.
+            ldflags: -H windowsgui
+          - os: ubuntu-latest
+            target: linux-amd64
+            binary: RGOClient
+            ldflags: ""
+          - os: macos-latest
+            target: macos-arm64
+            binary: RGOClient
+            ldflags: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # cgo headers the module graph needs and the image does not ship: GL and
+      # X11 for Fyne's GLFW and for golang.design/x/clipboard, xkbcommon for the
+      # keymap, ALSA for oto. macOS and Windows have their equivalents in the
+      # toolchain already.
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev xorg-dev libxkbcommon-dev libasound2-dev
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # internal/ui mounts real widgets, so the tests need the same cgo toolchain
+      # the build does; they are not a pure-Go unit suite.
+      - name: Test
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
+
       - name: Build
+        shell: bash
         env:
           CGO_ENABLED: 1
         run: >
           go build
-          -ldflags "-H windowsgui -X main.version=${{ steps.version.outputs.version }} -X main.build=${{ github.run_number }}"
-          -o dist/RGOClient.exe ./cmd/rgoclient
+          -ldflags "${{ matrix.ldflags }} -X main.version=${{ needs.version.outputs.version }} -X main.build=${{ github.run_number }}"
+          -o dist/${{ matrix.binary }} ./cmd/rgoclient
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: RGOClient-windows
-          path: dist/RGOClient.exe
+          name: RGOClient-${{ matrix.target }}
+          path: dist/${{ matrix.binary }}
           if-no-files-found: error

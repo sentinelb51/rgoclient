@@ -83,6 +83,11 @@ type MessageActions interface {
 	// one request where unreacting for everybody is one per person per emoji.
 	OnClearReactions(message *domain.Message)
 
+	// OnAttachFile asks for a file to hang on the next message and reports what was
+	// picked, or nothing. The controller owns the ask because the picker is the OS
+	// one, which needs a window this package is never handed.
+	OnAttachFile(onPicked func(path string))
+
 	// OnPickEmoji opens the emoji picker beside anchor and reports what is chosen.
 	// The controller opens it because what is on offer is a walk of every server the
 	// account is in, ordered around the open one, which no widget knows.

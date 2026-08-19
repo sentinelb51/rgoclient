@@ -598,7 +598,11 @@ func (a *App) chooseFile(title string, filter ui.FileFilter, onPicked func(path,
 		onPicked(uri.Path(), uri.Name())
 	}, a.window)
 
-	picker.SetFilter(storage.NewExtensionFileFilter(filter.Extensions))
+	// An empty filter means every kind — Fyne's extension filter reads it as *no*
+	// kind, so it is left unset rather than handed nothing.
+	if len(filter.Extensions) > 0 {
+		picker.SetFilter(storage.NewExtensionFileFilter(filter.Extensions))
+	}
 	picker.SetTitleText(title)
 	picker.Show()
 }

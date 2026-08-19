@@ -109,7 +109,11 @@ type MessageInput struct {
 	// EmojiButton opens the picker. It belongs to the composer rather than the card
 	// around it so one thing decides whether it is offered: a button that inserts
 	// into a disabled entry has nowhere to put its answer.
-	EmojiButton *IconButton
+	//
+	// AttachButton queues a file the same way a drop does, and is offered on the
+	// upload permission rather than on the send one — the two are given separately.
+	EmojiButton  *IconButton
+	AttachButton *IconButton
 
 	// permissions is what the account may do in the open channel, *pushed* by the
 	// app rather than looked up — the composer has no channel of its own. Zero, the
@@ -136,6 +140,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	}
 	m.Mentions = NewMentionPicker(deps.Images, m.acceptMention)
 	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
+	m.AttachButton = NewIconButton(assets.ActionAddIcon, m.attachFile, nil)
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
 	m.Wrapping = fyne.TextWrapWord
@@ -153,6 +158,18 @@ func (m *MessageInput) pickEmoji() {
 	m.deps.Actions.OnPickEmoji(m.EmojiButton, func(choice EmojiChoice) {
 		m.insert(choice.Token() + " ")
 	})
+}
+
+// attachFile asks the controller for a file and queues what comes back. The
+// permission is checked here as well as in AddAttachment: opening a picker only
+// to refuse what it answers is worse than saying so first.
+func (m *MessageInput) attachFile() {
+	if !m.canUpload() {
+		m.refuse(uploadRefused)
+		return
+	}
+
+	m.deps.Actions.OnAttachFile(func(path string) { m.AddAttachment(path) })
 }
 
 // insert writes text at the caret and leaves the caret after it, taking canvas
@@ -187,9 +204,16 @@ func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
 // Whatever was typed is kept: the channel may hand the permission straight back,
 // and clearing it would destroy the user's work over a state the client does not
 // control. The emoji button goes with the entry, being a control whose one job is
-// to put text into it.
+// to put text into it; the attach button answers the upload permission instead,
+// which a channel can withhold on its own.
 func (m *MessageInput) SetPermissions(permissions domain.Permission) {
 	m.permissions = permissions
+
+	if m.canUpload() {
+		m.AttachButton.Show()
+	} else {
+		m.AttachButton.Hide()
+	}
 
 	if permissions.Has(domain.PermissionSendMessage) {
 		m.Enable()
@@ -199,6 +223,7 @@ func (m *MessageInput) SetPermissions(permissions domain.Permission) {
 
 	m.Disable()
 	m.EmojiButton.Hide()
+	m.AttachButton.Hide()
 }
 
 // refuse reports an input the composer would not take. Silent when nobody is

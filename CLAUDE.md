@@ -195,14 +195,18 @@ Where things live that the filename doesn't tell you:
   indicator, `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here
   rather than beside a caller because the composer's line, a channel row and the
   member sidebar's status all mount one.
-- `ui/input.go` holds the composer, the mention picker, the slowmode chip and the
-  typing line. The last two are one row under one set of rules: a pill of their
-  own (`newDockBadgeSurface`) sized by what it holds rather than by the row,
-  accepting no pointer event so the messages underneath stay hoverable, an
-  `OnResize` hook so the row can be re-laid out, and a change guard before any
-  repaint. `NewComposerButtonSlot` is beside them — it bottom-anchors the emoji
-  button against the growing entry and lifts it by the entry's own `InnerPadding`,
-  so it centres on the last *line* rather than on the entry's box.
+- `ui/input.go` holds the composer, the mention picker, the slowmode chip, the
+  typing line and `JumpBar`. The chip and the line are one row under one set of
+  rules: a pill of their own (`newDockBadgeSurface`) sized by what it holds rather
+  than by the row, accepting no pointer event so the messages underneath stay
+  hoverable, an `OnResize` hook so the row can be re-laid out, and a change guard
+  before any repaint. The bar is the opposite of that pill on every count — it
+  spans the card's width, answers a tap, and says where the *column* is standing
+  rather than something about the channel — but it hangs in the same stack and
+  reports its own appearance the same way. `NewComposerButtonSlot` is beside them
+  — it bottom-anchors the emoji button against the growing entry and lifts it by
+  the entry's own `InnerPadding`, so it centres on the last *line* rather than on
+  the entry's box.
 - `ui/code.go` is the fenced code block end to end: the well it is drawn in, the
   one-pass lexer that colours it, and `codeCopy`, the chip in its corner — a
   coloured block is many RichText segments and only a one-segment Label is
@@ -305,7 +309,7 @@ Fyne is **patched**, and the patched copy is a repository of its own —
 `replace` in `go.mod` and fetched like any other module. Nothing is vendored
 here and there is no checkout step: a fresh clone builds. The fork keeps the
 module path `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside
-it. Its `PATCHES.md` is the list of three, and `./update-fyne.sh vX.Y.Z` there
+it. Its `PATCHES.md` is the list of four, and `./update-fyne.sh vX.Y.Z` there
 carries them onto a new Fyne by rebasing them onto a pristine upstream branch.
 A bare `go get -u` floats what that frozen Fyne compiles against, so everything
 else updates through `scripts/update-deps.sh`.

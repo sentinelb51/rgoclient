@@ -158,12 +158,13 @@ var AccentColors = []string{
 	"NoticeInfo",
 	"ReplyMentionActive",
 	"MentionText",
+	"JumpBarAction",
 	"EmbedTitle",
 }
 
-// AccentOverrides expands an accent into the overrides that carry it. The two
+// AccentOverrides expands an accent into the overrides that carry it. The three
 // text entries are lifted towards white and the reply highlight is dropped to a
-// tint, because those three are drawn against the dark surfaces rather than
+// tint, because those four are drawn against the dark surfaces rather than
 // filling one.
 func AccentOverrides(accent string) map[string]string {
 	base, ok := ParseHex(accent)
@@ -180,6 +181,7 @@ func AccentOverrides(accent string) map[string]string {
 		"NoticeInfo":          hex,
 		"ReplyMentionActive":  Hex(withAlpha(base, 70)),
 		"MentionText":         text,
+		"JumpBarAction":       text,
 		"EmbedTitle":          text,
 	}
 }

@@ -1190,8 +1190,8 @@ const (
 	// The frame rate is floored well above zero: the slider reaches every value
 	// between these two, and the ones near the bottom are indistinguishable from a
 	// client that has stopped responding.
-	minFrameRate = 30
-	maxFrameRate = 360
+	minFrameRate = 15
+	maxFrameRate = 600
 
 	// maxTypingNames is a limit on the sentence, not on the feature: past a few
 	// names the line is wider than it is worth and "and 4 others" says the same

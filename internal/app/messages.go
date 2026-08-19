@@ -28,6 +28,11 @@ const (
 	atBottomTolerance = 100 // px from the bottom still counted as "at bottom"
 	remountThreshold  = 200 // px from the bottom before trimmed newer rows re-mount
 
+	// settleDelay is how long after mounting a channel's tail the scroll to the
+	// bottom is re-issued. A row's height is only final once it has been laid out,
+	// so the first scroll lands short by whatever the column grew by.
+	settleDelay = 120 * time.Millisecond
+
 	// maxUncachedMessages bounds what is held outside the message cache: quoted
 	// messages older than a channel's cached tail, and the window a jump landed
 	// in. Only what reaches further back than the cache lands here, so it is a
@@ -135,10 +140,17 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	badgeRow := ui.NewFillRow(1, a.typingIndicator, ui.HorizontalSpacer(0), a.slowmodeBadge)
 	a.slowmodeBadge.OnResize = func() { ui.Relayout(badgeRow) }
 	a.typingIndicator.OnResize = func() { ui.Relayout(badgeRow) }
-	a.composerDock = ui.VBoxNoSpacing(badgeRow, card)
+
+	// The way back to the live tail is a bar of its own between the two, spanning
+	// the card's width: what it reports is where the whole column is standing,
+	// where the badges beside it report something about the channel.
+	a.jumpBar = ui.NewJumpBar(a.backToPresent)
+	a.jumpBar.OnResize = a.resizeDock
+	a.composerDock = ui.VBoxNoSpacing(badgeRow, a.jumpBar, card)
 
 	a.messageScroll = ui.NewObservableVScroll(ui.NewDockReserve(a.messageList, a.composerDock))
 	a.messageScroll.OnScroll = func(pos fyne.Position) {
+		a.syncJumpBar()
 		if pos.Y <= 0 {
 			a.loadMoreHistory()
 			return
@@ -153,13 +165,6 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.channelGlyph = container.NewStack(ui.ChannelGlyph(a.channelKind()))
 	title := container.NewHBox(a.channelGlyph, a.channelHeader)
 
-	// The way back from a jump goes in the header rather than over the column: the
-	// badge row above the composer is bare text with nothing behind it and nothing
-	// in it accepting a pointer, and this is a button. It also belongs beside the
-	// channel's name, being about which part of that channel is on screen.
-	a.jumpChip = ui.NewTappableChip("Jump to present", theme.Colors.TextPrimary, a.returnToPresent)
-	a.jumpChip.Hide()
-
 	// The ways into the two message panels sit beside the member toggle: all three
 	// are about the channel on screen rather than about anything in the column,
 	// and a pin's own mark is what the message row already carries.
@@ -173,7 +178,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// and the buttons.
 	a.channelTopic = ui.NewChannelTopic()
 	a.messageHeader = container.NewBorder(nil, nil, title,
-		container.NewHBox(a.jumpChip, search, pins, members), a.channelTopic)
+		container.NewHBox(search, pins, members), a.channelTopic)
 	a.syncChannelTopic() // a restyle rebuilds this row under a standing selection
 	header := container.NewPadded(a.messageHeader)
 
@@ -690,7 +695,31 @@ func (a *App) displayMessages(messages []*domain.Message) {
 
 	a.messageList.Objects = a.buildRun(messages, nil, nil)
 	a.remountMessages()
+	a.settleAtBottom()
+}
+
+// settleAtBottom scrolls to the newest message and again once the column has
+// settled, so a switch into a channel lands at the live tail rather than a
+// screen short of it. Call on the UI thread.
+func (a *App) settleAtBottom() {
 	a.scrollToBottom()
+
+	channelID, epoch := a.currentChannelID, a.epoch
+	if a.settleTimer != nil {
+		a.settleTimer.Stop()
+	}
+
+	a.settleTimer = time.AfterFunc(settleDelay, func() {
+		a.doOnUI(func() {
+			// Not if the reader has moved in the meantime: a jump or a scroll up
+			// within the window is a position they chose.
+			if a.stale(epoch) || a.currentChannelID != channelID || a.jumped {
+				return
+			}
+
+			a.scrollToBottom()
+		}, false)
+	})
 }
 
 // buildRun builds the widgets for a contiguous run of messages, oldest first,
@@ -774,6 +803,7 @@ func (a *App) showStatusMark(mark fyne.Resource, text string) {
 		a.messageScroll.ScrollToTop()
 		a.messageScroll.Refresh()
 	}
+	a.syncJumpBar()
 }
 
 // clearMessages empties the message list. Any tooltip goes with it, as the
@@ -964,10 +994,9 @@ func (a *App) returnToPresent() {
 	a.loadChannelMessages(channelID)
 }
 
-// setJumped records whether the column is showing a window a jump landed in, and
-// shows or hides the way back. The header is relaid out rather than refreshed:
-// the chip appearing changes the width the row's trailing slot asks for, which
-// only its own layout can give it. Call on the UI thread.
+// setJumped records whether the column is showing a window a jump landed in.
+// That is one of the two ways of not being at the live tail, so the bar offering
+// the way back is asked again rather than told. Call on the UI thread.
 func (a *App) setJumped(jumped bool) {
 	a.atOldest = false
 	if a.jumped == jumped {
@@ -975,15 +1004,46 @@ func (a *App) setJumped(jumped bool) {
 	}
 	a.jumped = jumped
 
-	if a.jumpChip == nil {
+	a.syncJumpBar()
+}
+
+// viewingOlder reports whether the column is showing anything but the live tail:
+// the window a jump landed in, or scrollback far enough up that a message
+// arriving would land off screen. The same tolerance an append counts as being
+// at the bottom, so the two cannot disagree about where the reader is.
+func (a *App) viewingOlder() bool {
+	if a.jumped {
+		return true
+	}
+	if a.messageScroll == nil {
+		return false
+	}
+
+	return a.contentHeight()-a.messageScroll.Size().Height-a.messageScroll.Offset.Y > atBottomTolerance
+}
+
+// syncJumpBar matches the bar over the composer to that answer. Every path that
+// can move it calls this — the scroll, a jump, a message arriving, a column
+// replaced outright — because the answer is a position and no one of them owns
+// it. Call on the UI thread.
+func (a *App) syncJumpBar() {
+	if a.jumpBar == nil {
 		return
 	}
-	if jumped {
-		a.jumpChip.Show()
-	} else {
-		a.jumpChip.Hide()
+
+	a.jumpBar.Set(a.viewingOlder())
+}
+
+// backToPresent is what tapping that bar does. A jump window is left through the
+// cache; plain scrollback is a scroll, or a re-render when it has trimmed the
+// live tail away.
+func (a *App) backToPresent() {
+	if a.jumped {
+		a.returnToPresent()
+		return
 	}
-	ui.Relayout(a.messageHeader)
+
+	a.jumpToLatest()
 }
 
 // holdUncached files a fetched window where ResolveMessage can find it, beside
@@ -1192,9 +1252,11 @@ func (a *App) appendMessage(message, prev *domain.Message) {
 	a.remountMessages()
 	if atBottom {
 		a.scrollToBottom()
-	} else {
-		a.messageScroll.Refresh()
+		return
 	}
+
+	a.messageScroll.Refresh()
+	a.syncJumpBar() // the column grew under a reader who is not at the bottom of it
 }
 
 // loadMoreHistory mounts older messages when the user scrolls to the top. It is
@@ -1472,6 +1534,7 @@ func (a *App) scrollToBottom() {
 	if a.messageScroll != nil {
 		a.messageScroll.ScrollToBottom()
 	}
+	a.syncJumpBar()
 }
 
 // remountMessages repaints the column after the *set* of mounted widgets changed.

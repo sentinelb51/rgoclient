@@ -106,13 +106,13 @@ type App struct {
 	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
 	messageList     *fyne.Container
 	messageScroll   *ui.ObservableScroll
-	messageHeader   *fyne.Container   // the channel's name row, relaid out when the jump chip appears
-	jumpChip        fyne.CanvasObject // the way back from a jump, in that row
+	messageHeader   *fyne.Container   // the channel's name row
 	messageColumn   *fyne.Container   // header + note + dock; relaid out when the note appears
 	channelNote     fyne.CanvasObject // the standing caption under that header, shown in a voice channel
-	composerDock    *fyne.Container   // slowmode chip + card: what the message column runs under
-	floatingDock    *fyne.Container   // that stack hung over messageScroll; relaid out when the chip appears
+	composerDock    *fyne.Container   // badge row + jump bar + card: what the message column runs under
+	floatingDock    *fyne.Container   // that stack hung over messageScroll; relaid out when either appears
 	input           *ui.MessageInput
+	jumpBar         *ui.JumpBar         // the way back to the live tail, over that card
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
 	homeButton      *ui.SidebarButton
@@ -276,9 +276,14 @@ type App struct {
 	// the channel's tail, which is what offers the way back. atOldest records
 	// that such a window has reached the start of the channel — the cache
 	// answers that for itself, and a jump window is not in the cache.
+	//
+	// settleTimer is the pending re-scroll to the bottom after a channel's tail
+	// is mounted, see settleAtBottom.
 	loadingPage bool
 	jumped      bool
 	atOldest    bool
+
+	settleTimer *time.Timer
 }
 
 var _ ui.MessageActions = (*App)(nil)

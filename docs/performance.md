@@ -9,28 +9,32 @@ the module cache copy (`go list -m -f '{{.Dir}}' fyne.io/fyne/v2`) before acting
 on one — the shape of the claim survives a bump, the line does not.
 
 Fyne is **patched** — [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne),
-`PATCHES.md` there. Three of the levers below are ours now rather than
+`PATCHES.md` there. Five of the levers below are ours now rather than
 upstream's, and are marked where they appear.
 
 ## How Fyne draws
 
 **One goroutine does everything.** `internal/driver/glfw/loop.go` `runGL` is the
-whole client: a `select` over the shutdown channel, the `fyne.Do` func queue and
-a ticker. Per tick: `pollEvents` → mouse/resize fixups → `TickAnimations` →
-`drawSingleFrame`. There is no separate draw thread; `window.RunWithContext`
-(`window.go`) is `MakeContextCurrent(); f(); DetachCurrentContext()` on the
-caller's goroutine.
+whole client. Upstream it is a `select` over the shutdown channel, the `fyne.Do`
+func queue and a ticker; **patched**, it drains the func queue, runs a frame if
+the deadline has passed — `pollEvents` → mouse/resize fixups → `TickAnimations`
+→ `drawSingleFrame` — and then blocks in `glfw.WaitEventsTimeout` until the next
+one. There is no separate draw thread; `window.RunWithContext` (`window.go`) is
+`MakeContextCurrent(); f(); DetachCurrentContext()` on the caller's goroutine.
 
-Upstream that ticker is the literal `time.Second / 60`. **Patched**, it starts at
-`fyne.FrameRate()` and re-reads it each tick, which is what
-`config.Performance.FrameRate` (default 120) sets through `app.applyPacing`.
+The deadline comes from `fyne.FrameRate()` and is re-read each frame, which is
+what `config.Performance.FrameRate` (default 120) sets through
+`app.applyPacing`. Upstream it is the literal `time.Second / 60`.
 
 **The rate is a ceiling, not a rate.** `drawSingleFrame` draws a window only if
-`decideRepaint(visible, frame.ready(), canvas.CheckDirtyAndClear)`. An idle
-client therefore costs one wakeup per tick and zero GL work — the drawn frame
-count at rest is 0. Raising the rate raises the ceiling on animation and scroll
-smoothness; it does nothing at rest, and it is the wakeups it costs, not
-frames.
+`decideRepaint(visible, frame.ready(), canvas.CheckDirtyAndClear)`, so the drawn
+frame count at rest is 0. Waiting on the OS queue rather than polling it also
+takes the rate out of how quickly input is *noticed*: the wait returns on the
+event, and only the drawing it asks for is paced. At rest the loop sleeps at the
+patch's `idleWait` (100ms) instead of at the frame rate — at `FrameRate` 600,
+188ms of CPU per 10s idle before that patch and 31ms after. Raising the rate
+raises the ceiling on animation and scroll smoothness and costs nothing at
+rest.
 
 **Dirty is one bool for the whole window.** `Canvas.dirty`
 (`internal/driver/common/canvas.go:50`), test-and-cleared by
@@ -121,11 +125,13 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-three patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+five patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
-third is the font-parse cache, which is a leak fixed rather than a lever.
+third is the font-parse cache, which is a leak fixed rather than a lever. The
+fifth replaced the driver's poll loop with a wait on the OS event queue, which
+is what makes the frame rate a ceiling on drawing rather than on noticing input.
 
 What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the

@@ -82,6 +82,9 @@ var Colors = struct {
 	SlowmodeWaiting       color.Color
 	TypingText            color.Color
 	TypingMark            color.Color
+	JumpBarBg             color.Color
+	JumpBarHoverBg        color.Color
+	JumpBarAction         color.Color
 	MessageStatusMark     color.Color
 	ChannelNoteText       color.Color
 	ChannelTopicText      color.Color
@@ -299,6 +302,15 @@ var Colors = struct {
 	// composer's own fill rather than a lighter surface, so the two read as part
 	// of the dock below rather than as two more cards over the conversation.
 	DockBadgeBg: color.RGBA{R: 31, G: 35, B: 48, A: 255}, // #1F2330, == ComposerBg
+
+	// The bar over the composer while the column is not showing the live tail. Its
+	// ground is a lifted surface rather than a tint of the accent: the accent is
+	// one knob the Interface section turns, and a bar whose fill did not follow it
+	// would be the one indigo left on screen. What carries the colour is the
+	// action at its trailing end, which is text and lifts with the rest of them.
+	JumpBarBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
+	JumpBarHoverBg: color.RGBA{R: 53, G: 60, B: 80, A: 255},    // #353C50
+	JumpBarAction:  color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for text
 
 	// The mark leading the line an empty column draws. Quieter than the sentence
 	// beside it: it says what the line is about, and a column holding one short
@@ -619,6 +631,11 @@ var Sizes = struct {
 	DockBadgeRadius     float32
 	DockBadgePaddingV   float32
 	DockBadgePaddingH   float32
+	JumpBarRadius       float32
+	JumpBarPaddingV     float32
+	JumpBarPaddingH     float32
+	JumpBarTextSize     float32
+	JumpBarDockGap      float32
 
 	/* User profiles */
 
@@ -1004,6 +1021,12 @@ var Sizes = struct {
 	DockBadgeRadius:   6,
 	DockBadgePaddingV: 3,
 	DockBadgePaddingH: 8,
+
+	JumpBarRadius:   8,
+	JumpBarPaddingV: 6,
+	JumpBarPaddingH: 12,
+	JumpBarTextSize: 13,
+	JumpBarDockGap:  6,
 
 	// The avatar overhangs the banner by half its height, so the banner is sized
 	// against it: too short and the avatar hangs off the card's top edge.

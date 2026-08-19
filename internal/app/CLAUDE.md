@@ -212,8 +212,8 @@ DAG and conventions.
     The badge sits *outside* the card, above its right edge: inside, it was
     furniture the entry had to make room for. Its pill hugs the text rather than
     spanning the row — a surface that wide just above the card reads as a bar
-    growing out of it. `App.composerDock` is that row stacked over the card, and
-    the whole stack floats, so `ui.DockReserve` covers the chip too. Relabelling
+    growing out of it. `App.composerDock` is that row and the jump bar stacked over
+    the card, and the whole stack floats, so `ui.DockReserve` covers both. Relabelling
     moves only where the chip starts (`SlowmodeBadge.OnResize` → `ui.Relayout`);
     appearing or disappearing changes the stack's height, so `refreshSlowmode`
     calls `App.resizeDock` — Fyne reclaims nothing for a shrinking minimum.
@@ -855,11 +855,18 @@ DAG and conventions.
     tail instead. Nothing re-attaches explicitly: a newer page reaching into the
     cached tail leaves the bottom row inside it and the cache tier serves every
     scroll after that, which is also where `setJumped(false)` is reached.
-    `App.jumped` exists only to offer the way back (`returnToPresent`), and
+    `App.jumped` exists only to offer the way back (`backToPresent`), and
     `atOldest` is what the cache's own depleted flag is for a window that is not
-    in it. The chip is in the **header**, not the badge row over the column:
-    nothing in that row accepts a pointer and this is a button — and it is about
-    which part of the channel is on screen, which is what the name beside it says.
+    in it. That way back is `ui.JumpBar`, a bar in the composer dock between the
+    badge row and the card, and it is *not* driven by `jumped` alone:
+    `App.viewingOlder` is that flag **or** a scroll offset further than
+    `atBottomTolerance` from the end — the same tolerance an append reads, so the
+    two cannot disagree about where the reader is. Everything that can move that
+    answer calls `syncJumpBar` (the scroll, `setJumped`, `appendMessage`,
+    `scrollToBottom`, `showStatusMark`); `JumpBar.Set` guards on a change and
+    `App.resizeDock` re-hangs the dock, the bar's height being part of
+    `ui.DockReserve`. Tapping it is `backToPresent`: `returnToPresent` out of a
+    jump window, the cheaper `jumpToLatest` out of plain scrollback.
     `revealMounted` centres the row and `MessageWidget.Flash` marks it. The wash
     is *not* a state the widget holds — `fill()` is untouched, so the row goes on
     answering the pointer and the last tick hands the background back — and it

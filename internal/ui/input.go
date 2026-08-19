@@ -1134,6 +1134,97 @@ func (t *TypingIndicator) resized() {
 	}
 }
 
+/* The jump bar */
+
+// What the bar says. The state and the way out of it in one sentence rather than
+// pinned to opposite ends: the whole bar is the button, so a separate action at
+// the trailing edge only invites the reader to aim at it.
+const jumpBarLabel = "Viewing older messages, tap to jump to present"
+
+// JumpBar spans the dock above the composer while the column is showing anything
+// but the live tail — deep scrollback, or the window a jump landed in — and takes
+// the reader back on a tap.
+//
+// It is a second bar over the card rather than a pill in the badge row beside it:
+// what it reports is a state the whole column is in, and it is the one thing
+// hanging over the messages that answers a pointer, which a chip the width of its
+// own text would not advertise. It takes the card's radius and its gutter, so the
+// two read as one dock rather than as something that landed on it.
+type JumpBar struct {
+	tapBase
+
+	// OnResize fires when the bar appears or disappears, so the dock can be
+	// re-hung. Fyne re-lays out for a growing minimum itself; a shrinking one it
+	// leaves reserved.
+	OnResize func()
+
+	background *canvas.Rectangle
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*JumpBar)(nil)
+	_ desktop.Hoverable = (*JumpBar)(nil)
+)
+
+// NewJumpBar builds the bar, hidden. Set is what puts it up.
+func NewJumpBar(onTap func()) *JumpBar {
+	b := &JumpBar{background: canvas.NewRectangle(theme.Colors.JumpBarBg)}
+	b.background.CornerRadius = theme.Sizes.JumpBarRadius
+	Outline(b.background)
+	b.onTap = onTap
+
+	// The line is drawn in the accent rather than the greys the badges beside it
+	// take: those report and this one is pressed, and centred text on a bar wide
+	// enough to be furniture needs the tone to say which.
+	label := container.NewCenter(newText(jumpBarLabel, theme.Colors.JumpBarAction, theme.Sizes.JumpBarTextSize))
+
+	padV, padH := theme.Sizes.JumpBarPaddingV, theme.Sizes.JumpBarPaddingH
+	surface := container.NewStack(b.background, NewInset(label, padV, padV, padH, padH))
+
+	// The gap to the card belongs to the bar rather than to a spacer in the dock,
+	// which would hold that room open in every channel sitting at the live tail.
+	b.content = NewInset(surface, 0, theme.Sizes.JumpBarDockGap, 0, 0)
+
+	b.Hide()
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+func (b *JumpBar) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+// Set puts the bar up or takes it down, telling the dock when that moved. Only a
+// change is acted on: the answer is a scroll position, so this is asked on every
+// wheel tick and every frame of a pan.
+func (b *JumpBar) Set(showing bool) {
+	if showing == b.Visible() {
+		return
+	}
+
+	if showing {
+		b.Show()
+	} else {
+		b.Hide()
+	}
+
+	if b.OnResize != nil {
+		b.OnResize()
+	}
+}
+
+func (b *JumpBar) MouseIn(*desktop.MouseEvent) {
+	b.background.FillColor = theme.Colors.JumpBarHoverBg
+	b.background.Refresh()
+}
+
+func (b *JumpBar) MouseOut() {
+	b.background.FillColor = theme.Colors.JumpBarBg
+	b.background.Refresh()
+}
+
 /* The mention picker */
 
 const (

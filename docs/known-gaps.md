@@ -238,6 +238,13 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   reports no modifiers at all. So `ui.ShiftHeld` asks Win32 directly and the other
   half of the pair answers false, where every confirmation is asked and the card
   offers no hint that it could be skipped.
+- **The OS file picker is wired up on Windows alone.** Fyne offers only a browser
+  it draws in the canvas, which knows nothing the shell knows, so `ui.PickFile` /
+  `ui.PickFolder` call the Common Item Dialog through COM. The `!windows` half
+  reports false and the caller falls back to Fyne's — a picture, a sound or a
+  cache folder is still choosable there, in a dialog that looks like nothing else
+  on the machine. GTK/AppKit or the XDG desktop portal is what the other halves
+  would take, each a binding of its own.
 - **A button cannot be tabbed to.** Every text button is `ui.Button`, the client's
   own — Fyne's carries no edge and no theme name reaches its background — and it
   is not `fyne.Focusable`, so no button is reached by Tab or pressed with Space. A
@@ -248,25 +255,25 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   mean of its stops. `parseColor` reads hex stops only, so `rgb()` or a CSS name
   falls back to the default text colour.
 - **The scroll indicator** only reports position — no drag, no track to click.
-- **Every entry leaks fonts, because `ui.WithCaret` has to exist.** A caret is
-  drawn `SizeNameInputBorder` wide in `Primary`, and the focus ring takes
+- **Every entry used to leak fonts, and Fyne is patched so it no longer does.** A
+  caret is drawn `SizeNameInputBorder` wide in `Primary`, and the focus ring takes
   `Primary` too — so the only way to have one without the other is a scoped
-  override, which is what `WithCaret` is for. But `cache.OverrideTheme` mints a
+  override, which is what `ui.WithCaret` is for. But `cache.OverrideTheme` mints a
   scope from a counter that never repeats, and `ThemeOverride` calls it from its
   constructor, `CreateRenderer` **and** `Refresh` — while `painter.CachedFontFace`
-  keys on `{style, scope}` and `loadMeasureFont` has no cache at all. So every
-  refresh that reaches an entry re-parses Montserrat, NotoSans, InterSymbols and
-  Fyne's 4.2 MB `EmojiOneColor.otf`, and files the result in a map nothing evicts:
-  **~6 MB per open/close of a settings number box**, measured on one canvas.
-  `painter.ClearFontCache` cannot release it — it never touches the `fontscan`
-  map — and none of it is reachable from here, `painter` being internal. Nothing
-  above the toolkit fixes this: reusing the entry and its wrapper across edits
-  measured identically (6.048 vs 6.060 MB), since it is `Refresh` that mints, not
-  construction. It needs a patched Fyne — a cache on `loadMeasureFont` keyed by
-  resource, which makes a fresh scope cost a map entry instead of four font
-  parses. Emoji cannot be dropped to dodge it either: `-tags no_emoji` builds and
-  runs, but emoji then render as **nothing** — go-text does not resolve Windows'
-  Segoe UI Emoji through the system fallback, though it does resolve CJK.
+  keys on `{style, scope}`. Upstream `loadMeasureFont` has no cache, so every
+  refresh reaching an entry re-parsed Montserrat, NotoSans, InterSymbols and
+  Fyne's 4.2 MB `EmojiOneColor.otf` into a map nothing evicts: **~6 MB per
+  open/close of a settings number box**, measured on one canvas. Nothing above the
+  toolkit fixed it — reusing the entry and its wrapper across edits measured
+  identically (6.048 vs 6.060 MB), since it is `Refresh` that mints, not
+  construction. The patched copy caches the parse per resource instead
+  (`rgoclient-fyne`'s `PATCHES.md`), so a fresh scope costs a map entry. The scopes
+  themselves still accumulate; they are now a map entry each rather than four font
+  parses each. Emoji could not be dropped to dodge it either: `-tags no_emoji`
+  builds and runs, but emoji then render as **nothing** — go-text does not resolve
+  Windows' Segoe UI Emoji through the system fallback, though it does resolve
+  CJK.
 - **Settings** that are read once while the caches are built (cache directory,
   message cache caps, text-preview count, concurrent downloads — the last being a
   channel sized at construction, which `SetLimits` cannot resize under the

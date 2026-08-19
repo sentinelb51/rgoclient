@@ -36,6 +36,7 @@ type Settings struct {
 	Behaviour     Behaviour     `json:"behaviour"`
 	Notifications Notifications `json:"notifications"`
 	Cache         Cache         `json:"cache"`
+	Performance   Performance   `json:"performance"`
 }
 
 // Interface is the friendly layer: choices made in the user's terms, each of
@@ -213,6 +214,25 @@ type Cache struct {
 	CachedChannels     int `json:"cached_channels"`
 }
 
+// Performance is what the client asks of the toolkit rather than of itself: how
+// often the window may draw, and whether it waits for the display before showing
+// what it drew. Stock Fyne draws at 60 and leaves vsync to the driver, with no
+// way to say otherwise, so both of these reach the toolkit only through the
+// patched copy — see github.com/sentinelb51/rgoclient-fyne.
+type Performance struct {
+	// FrameRate is a ceiling rather than a rate. The driver wakes this many times
+	// a second to poll input, advance animations and consider a repaint; a window
+	// with nothing to redraw wakes as often and draws nothing, so what raising it
+	// costs is paid while something is moving.
+	FrameRate int `json:"frame_rate"`
+
+	// VSync waits for the display's next refresh before presenting. On, the rate
+	// above cannot exceed the monitor's and the wait blocks the whole driver loop,
+	// input and queued work included. Off, a frame is shown as soon as it is drawn
+	// and a fast scroll can tear.
+	VSync bool `json:"vsync"`
+}
+
 /* Enumerated values */
 
 // Density presets. Each names a bundle of size overrides the Interface section
@@ -303,6 +323,10 @@ func Default() Settings {
 			TextPreviews:       100,
 			MessagesPerChannel: 500,
 			CachedChannels:     5,
+		},
+		Performance: Performance{
+			FrameRate: 120,
+			VSync:     true,
 		},
 	}
 }
@@ -448,6 +472,10 @@ func (s *Settings) sanitise() {
 	floor(&s.Cache.TextPreviews, 1)
 	floor(&s.Cache.MessagesPerChannel, 1)
 	floor(&s.Cache.CachedChannels, 1)
+
+	// A frame rate of zero is a client that never wakes: the toolkit clamps it to
+	// 1, which is indistinguishable from one that has hung.
+	s.Performance.FrameRate = clamp(s.Performance.FrameRate, 15, 1000)
 
 	if s.Interface.FontSize < 1 {
 		s.Interface.FontSize = Default().Interface.FontSize

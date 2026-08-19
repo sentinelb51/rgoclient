@@ -1,15 +1,23 @@
 name: Release
 
 # workflow_dispatch is the normal path: the run derives this month's version
-# and creates the tag itself. Pushing a v* tag is the escape hatch — the tag is
-# taken verbatim as the version.
+# and creates the tag itself. The other two are escape hatches taking the tag
+# verbatim — a tag pushed by hand, with or without the v, and a release drafted
+# in the web UI, which fires `release` and not always `push`. One release can
+# fire both, so the concurrency group keeps them off each other.
 on:
   push:
-    tags: [ 'v*' ]
+    tags: [ 'v*', '[0-9]*' ]
+  release:
+    types: [ published ]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || github.ref }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -39,30 +47,42 @@ jobs:
       - name: Resolve version
         id: version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          if ($env:GITHUB_REF -like 'refs/tags/*') {
+          # Notes are generated for a release this run brings into being, and
+          # never for one already published with a body someone wrote.
+          if ($env:RELEASE_TAG) {
+            $tag = $env:RELEASE_TAG
+            $notes = $false
+          } elseif ($env:GITHUB_REF -like 'refs/tags/*') {
             $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
-            $version = $tag -replace '^v', ''
+            $notes = $true
           } else {
             git fetch --tags --quiet
             $now = [datetime]::UtcNow
             $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
 
-            $used = git tag --list "v$base.*" | ForEach-Object {
+            # Both spellings: a tag pushed by hand may not carry the v, and it
+            # still occupies that number.
+            $used = git tag --list "$base.*" "v$base.*" | ForEach-Object {
               if ($_ -match '\.(\d+)$') { [int]$Matches[1] }
             }
             $last = ($used | Measure-Object -Maximum).Maximum
             if (-not $last) { $last = 0 }
 
-            $version = "$base.$($last + 1)"
-            $tag = "v$version"
+            $tag = "v$base.$($last + 1)"
+            $notes = $true
             git tag $tag
             git push origin $tag
           }
 
+          $version = $tag -replace '^v', ''
+
           Write-Host "Releasing $tag (version $version, build $env:GITHUB_RUN_NUMBER)"
           "tag=$tag"         >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
+          "notes=$($notes.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
       - name: Build
         env:
@@ -78,4 +98,4 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           name: ${{ steps.version.outputs.version }}
           files: dist/RGOClient.exe
-          generate_release_notes: true
+          generate_release_notes: ${{ steps.version.outputs.notes }}

@@ -38,7 +38,7 @@ var appIconPNG []byte
 // them, and the few it does have are filled where these are stroked, so the rail
 // would read as two icon sets sitting together.
 //
-//go:embed account.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg advanced.svg about.svg
+//go:embed account.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg advanced.svg about.svg
 var settingsIcons embed.FS
 
 // The marks a system message is announced by, one per event Revolt names. They
@@ -97,14 +97,15 @@ var (
 
 // The settings sections, in rail order.
 var (
-	AccountIcon   = settingsIcon("account.svg")
-	InterfaceIcon = settingsIcon("interface.svg")
-	StylesIcon    = settingsIcon("styles.svg")
-	BehaviourIcon = settingsIcon("behaviour.svg")
-	NotifyIcon    = settingsIcon("notify.svg")
-	CacheIcon     = settingsIcon("cache.svg")
-	AdvancedIcon  = settingsIcon("advanced.svg")
-	AboutIcon     = settingsIcon("about.svg")
+	AccountIcon     = settingsIcon("account.svg")
+	InterfaceIcon   = settingsIcon("interface.svg")
+	StylesIcon      = settingsIcon("styles.svg")
+	BehaviourIcon   = settingsIcon("behaviour.svg")
+	NotifyIcon      = settingsIcon("notify.svg")
+	CacheIcon       = settingsIcon("cache.svg")
+	PerformanceIcon = settingsIcon("performance.svg")
+	AdvancedIcon    = settingsIcon("advanced.svg")
+	AboutIcon       = settingsIcon("about.svg")
 )
 
 // The system events, in the order domain names them. SystemEventIcon is what an

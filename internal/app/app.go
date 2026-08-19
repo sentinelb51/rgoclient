@@ -333,6 +333,8 @@ func New(fyneApp fyne.App, info Info) *App {
 // Run shows the login window, starts the event pump, and enters the Fyne event
 // loop.
 func (a *App) Run() {
+	applyPacing()
+
 	go a.pumpEvents()
 
 	a.startAlerts()

@@ -113,6 +113,18 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 	}
 	a.refreshTyping()
 	a.syncChannelList()
+
+	applyPacing()
+}
+
+// applyPacing hands the frame settings to the toolkit. Both are patches to the
+// patched Fyne — stock Fyne has no setting for either — and both are read by the
+// driver on its next tick, so neither needs a restart.
+func applyPacing() {
+	performance := config.Current().Performance
+
+	fyne.SetFrameRate(performance.FrameRate)
+	fyne.SetVSync(performance.VSync)
 }
 
 // applyStyles rebuilds the theme tables from the settings. The client itself is
@@ -542,17 +554,35 @@ func usernameFailure(err error) string {
 
 // choosePicture asks for an image file and reports what was picked, or nothing.
 func (a *App) choosePicture(title string, onPicked func(path, name string)) {
-	a.chooseFile(title, pictureExtensions, onPicked)
+	a.chooseFile(title, pictureFilter, onPicked)
 }
 
 // chooseFile asks for a file of the given kinds and reports what was picked, or
-// nothing. Fyne's picker is a canvas overlay, so it draws *over* the settings
-// layer — as the folder picker below does.
-func (a *App) chooseFile(title string, extensions []string, onPicked func(path, name string)) {
+// nothing. The OS picker is the one worth showing — it is the dialog the reader
+// already knows, and it is a window of its own rather than something drawn over
+// the settings layer. Fyne's is the fallback where there is no native one.
+func (a *App) chooseFile(title string, filter ui.FileFilter, onPicked func(path, name string)) {
+	failed := func(err error) {
+		log.Printf("choose file: %v", err)
+		a.notify(ui.ToneWarning, "Couldn't open the file picker.")
+	}
+
+	if ui.PickFile(a.window, title, filter, func(path string, err error) {
+		switch {
+		case err != nil:
+			failed(err)
+		case path != "":
+			onPicked(path, filepath.Base(path))
+		}
+	}) {
+		return
+	}
+
+	// Fyne's picker is a canvas overlay, so it draws *over* the settings layer —
+	// as the folder one below does.
 	picker := dialog.NewFileOpen(func(file fyne.URIReadCloser, err error) {
 		if err != nil {
-			log.Printf("choose file: %v", err)
-			a.notify(ui.ToneWarning, "Couldn't open the file picker.")
+			failed(err)
 			return
 		}
 		if file == nil {
@@ -568,34 +598,57 @@ func (a *App) chooseFile(title string, extensions []string, onPicked func(path, 
 		onPicked(uri.Path(), uri.Name())
 	}, a.window)
 
-	picker.SetFilter(storage.NewExtensionFileFilter(extensions))
+	picker.SetFilter(storage.NewExtensionFileFilter(filter.Extensions))
 	picker.SetTitleText(title)
 	picker.Show()
 }
 
-// pictureExtensions is what Revolt serves back as a picture. The filter is a
+// pictureFilter is what Revolt serves back as a picture. The filter is a
 // courtesy — the server decides what it will take — so it stays generous.
-var pictureExtensions = []string{".png", ".jpg", ".jpeg", ".gif", ".webp"}
+var pictureFilter = ui.FileFilter{
+	Label:      "Pictures",
+	Extensions: []string{".png", ".jpg", ".jpeg", ".gif", ".webp"},
+}
 
 // chooseCacheDir asks for a directory to keep cached images in; cancelling
-// reports nothing. Call on the UI thread.
+// reports nothing. The OS picker on the same terms as chooseFile above.
+// Call on the UI thread.
 func (a *App) chooseCacheDir(onPicked func(path string)) {
+	failed := func(err error) {
+		log.Printf("choose cache directory: %v", err)
+		a.notify(ui.ToneWarning, "Couldn't open the folder picker.")
+	}
+
+	chosen := func(path string) {
+		onPicked(path)
+		a.notifyNotice(ui.Notice{
+			Tone:  ui.ToneInfo,
+			Title: "Cache location changed",
+			Body:  "Images will be kept in " + path + " from the next start.",
+		})
+	}
+
+	if ui.PickFolder(a.window, "Choose a cache folder", func(path string, err error) {
+		switch {
+		case err != nil:
+			failed(err)
+		case path != "":
+			chosen(path)
+		}
+	}) {
+		return
+	}
+
 	dialog.ShowFolderOpen(func(dir fyne.ListableURI, err error) {
 		if err != nil {
-			log.Printf("choose cache directory: %v", err)
-			a.notify(ui.ToneWarning, "Couldn't open the folder picker.")
+			failed(err)
 			return
 		}
 		if dir == nil {
 			return
 		}
 
-		onPicked(dir.Path())
-		a.notifyNotice(ui.Notice{
-			Tone:  ui.ToneInfo,
-			Title: "Cache location changed",
-			Body:  "Images will be kept in " + dir.Path() + " from the next start.",
-		})
+		chosen(dir.Path())
 	}, a.window)
 }
 

@@ -40,7 +40,7 @@ jobs:
           $now = [datetime]::UtcNow
           $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
 
-          $used = git tag --list "v$base.*" | ForEach-Object {
+          $used = git tag --list "$base.*" "v$base.*" | ForEach-Object {
             if ($_ -match '\.(\d+)$') { [int]$Matches[1] }
           }
           $last = ($used | Measure-Object -Maximum).Maximum

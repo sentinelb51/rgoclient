@@ -42,6 +42,7 @@ const (
 	SectionBehaviour
 	SectionNotifications
 	SectionCache
+	SectionPerformance
 	SectionAdvanced
 	SectionAbout
 )
@@ -60,6 +61,7 @@ var railEntries = []railEntry{
 	{SectionBehaviour, "Behaviour", assets.BehaviourIcon},
 	{SectionNotifications, "Notifications", assets.NotifyIcon},
 	{SectionCache, "Cache", assets.CacheIcon},
+	{SectionPerformance, "Performance", assets.PerformanceIcon},
 	{SectionAdvanced, "Advanced", assets.AdvancedIcon},
 	{SectionAbout, "About", assets.AboutIcon},
 }
@@ -538,6 +540,8 @@ func (p *SettingsPage) showSection(section SettingsSection) {
 		p.groups = p.notificationsSection()
 	case SectionCache:
 		p.groups = p.cacheSection()
+	case SectionPerformance:
+		p.groups = p.performanceSection()
 	case SectionAdvanced:
 		p.groups = p.advancedSection()
 	case SectionAbout:

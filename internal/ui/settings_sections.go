@@ -779,6 +779,29 @@ func fileCount(files int) string {
 	return strconv.Itoa(files) + " files"
 }
 
+/* Performance */
+
+// performanceSection is the two things the client asks of the toolkit rather
+// than of itself. Both take effect on the next frame, so the section is also the
+// only place in the page where a change can be *seen* rather than described —
+// which is why the note under the limit says what it cannot do on its own.
+func (p *SettingsPage) performanceSection() []settingsGroup {
+	settings := config.Current().Performance
+
+	return []settingsGroup{
+		p.group("Drawing", "How the client draws each frame.",
+			p.numberRow("FPS",
+				"The most frames per second the client will try to draw. Higher is smoother to scroll and animate while something moves.",
+				settings.FrameRate, minFrameRate, maxFrameRate, "fps",
+				func(s *config.Settings, v int) { s.Performance.FrameRate = v }),
+			p.toggleRow("V-Sync",
+				"Shows each frame in step with the monitor, so none is ever half-drawn. Off, frames appear as soon as they're ready, which can tear.",
+				settings.VSync, func(s *config.Settings, on bool) { s.Performance.VSync = on }),
+			p.note("With V-Sync on, FPS is capped to your monitor's refresh rate (Hz)."),
+		),
+	}
+}
+
 /* Advanced */
 
 // advancedSection lists what the curated groups did not claim. Long by
@@ -1163,6 +1186,12 @@ const (
 
 	maxRefreshDelay   = 5000
 	maxMemberOverscan = 50
+
+	// The frame rate is floored well above zero: the slider reaches every value
+	// between these two, and the ones near the bottom are indistinguishable from a
+	// client that has stopped responding.
+	minFrameRate = 30
+	maxFrameRate = 360
 
 	// maxTypingNames is a limit on the sentence, not on the feature: past a few
 	// names the line is wider than it is worth and "and 4 others" says the same

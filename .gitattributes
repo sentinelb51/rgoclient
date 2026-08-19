@@ -1,0 +1,2 @@
+# core.autocrlf=true converts on checkout, and bash cannot run a CRLF shebang.
+*.sh text eol=lf

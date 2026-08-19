@@ -244,7 +244,10 @@ DAG and conventions.
     mount/close overlay and open/close settings.
     A change goes `SettingsPage.change` → `App.updateSettings` → `config.Update`,
     which is all a Behaviour flag needs: they are read where they are used
-    (`store.Members`, `continuesGroup`, `messages.go`'s mount caps). A style goes
+    (`store.Members`, `continuesGroup`, `messages.go`'s mount caps). Performance
+    is the one section reaching nothing of ours: `applyPacing` hands the frame
+    rate and vsync to the patched Fyne (`rgoclient-fyne`), which picks
+    both up on its next tick, and `Run` calls it once at startup. A style goes
     through `restyle` → `App.applyStyles`, which rebuilds the theme tables and
     then **defers** the tree rebuild while the page is open — the page covers the
     client, and `SetContent` under a slider mid-drag would take the slider with

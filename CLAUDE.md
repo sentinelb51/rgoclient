@@ -139,11 +139,16 @@ internal/
                          message.go, reactions.go, emoji.go, embed.go, invite.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, panels.go, notice.go, settings*.go,
-                         theme/, titlebar_*.go
+                         theme/, titlebar_*.go, filedialog*.go (the OS picker —
+                         Fyne's is drawn in the canvas and is not used)
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
                          over each block's whole text
   util/                  pure helpers: sizes, IDs, truncation, ULID timestamps
+
+scripts/                 update-deps.sh — every module *except* Fyne and the
+                         versions its go.mod pins, which is why it is not a
+                         `go get -u`
 ```
 
 Where things live that the filename doesn't tell you:
@@ -295,6 +300,16 @@ visual change more expensive. To check appearance, render to a PNG with
 
 `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`.
 
+Fyne is **patched**, and the patched copy is a repository of its own —
+[`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) — reached by a
+`replace` in `go.mod` and fetched like any other module. Nothing is vendored
+here and there is no checkout step: a fresh clone builds. The fork keeps the
+module path `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside
+it. Its `PATCHES.md` is the list of three, and `./update-fyne.sh vX.Y.Z` there
+carries them onto a new Fyne by rebasing them onto a pristine upstream branch.
+A bare `go get -u` floats what that frozen Fyne compiles against, so everything
+else updates through `scripts/update-deps.sh`.
+
 The repository is LF throughout and `core.autocrlf=true` converts on checkout, so
 on Windows `gofmt -l` names every file it has converted — the diff is the line
 endings and nothing else. Read its output as *which* files rather than *whether
@@ -317,8 +332,10 @@ step, so a failing tree can't leave a tag behind. The exe is unsigned.
 
 - `build.yml` — push/PR to `main` + manual. Uploads the exe as an artifact.
 - `release.yml` — `workflow_dispatch` computes this month's next version, pushes
-  the tag and publishes. Pushing a `v*` tag by hand takes the tag verbatim — the
-  escape hatch for off-calendar versions.
+  the tag and publishes. The escape hatches take the tag verbatim: a tag pushed
+  by hand (`v` optional), and a release drafted in the web UI, which fires
+  `release` rather than reliably firing `push`. That last path attaches the exe
+  and leaves the notes alone — the body is one someone wrote.
 
 ## Known gaps
 

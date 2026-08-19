@@ -268,4 +268,17 @@ naming and the test policy.
   forward, and Windows itself no-ops the call for a window that already has
   focus, so no caller checks.
   `fyne.App.SendNotification` is deliberately not used — see the known gap.
+- **Fyne's file picker is drawn inside the canvas, so nothing here opens it
+  first.** `dialog.NewFileOpen` is a browser of Fyne's own: no pinned or recent
+  places, no cloud providers, no shell search, no typed path, and not the dialog
+  the reader opens in every other program on the machine. `ui.PickFile` /
+  `ui.PickFolder` are the shell's Common Item Dialog (`IFileOpenDialog`) over the
+  HWND `driver.NativeWindow` hands back — the same route `FlashTaskbar` takes —
+  run on a locked OS thread in a single-threaded apartment, the dialog pumping
+  messages of its own, so it is a window beside the client rather than a layer
+  over it and the client keeps painting behind it. COM has no binding in the
+  standard library: the vtable indices in `filedialog_windows.go` *are* the
+  interface contract, fixed by inheritance order and discoverable nowhere at
+  runtime, and one wrong number calls a different method. Both report false where
+  there is no native picker, which is what sends the caller to Fyne's.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.

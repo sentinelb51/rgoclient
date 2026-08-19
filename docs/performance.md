@@ -5,23 +5,32 @@ need a fork. Linked from the root `CLAUDE.md`. Companion to `known-gaps.md`:
 that file says what is *missing*, this one says what is *slow* and why.
 
 Line numbers are `fyne.io/fyne/v2@v2.8.0` and will drift. Re-check them against
-the module cache before acting on one — the shape of the claim survives a bump,
-the line does not.
+the module cache copy (`go list -m -f '{{.Dir}}' fyne.io/fyne/v2`) before acting
+on one — the shape of the claim survives a bump, the line does not.
+
+Fyne is **patched** — [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne),
+`PATCHES.md` there. Three of the levers below are ours now rather than
+upstream's, and are marked where they appear.
 
 ## How Fyne draws
 
-**One goroutine does everything.** `internal/driver/glfw/loop.go:104` `runGL` is
-the whole client: a `select` over the shutdown channel, the `fyne.Do` func queue
-and a **60 Hz ticker** (`loop.go:132`, `time.NewTicker(time.Second / 60)`). Per
-tick: `pollEvents` → mouse/resize fixups → `TickAnimations` → `drawSingleFrame`.
-There is no separate draw thread; `window.RunWithContext` (`window.go:917`) is
-`MakeContextCurrent(); f(); DetachCurrentContext()` on the caller's goroutine.
+**One goroutine does everything.** `internal/driver/glfw/loop.go` `runGL` is the
+whole client: a `select` over the shutdown channel, the `fyne.Do` func queue and
+a ticker. Per tick: `pollEvents` → mouse/resize fixups → `TickAnimations` →
+`drawSingleFrame`. There is no separate draw thread; `window.RunWithContext`
+(`window.go`) is `MakeContextCurrent(); f(); DetachCurrentContext()` on the
+caller's goroutine.
 
-**60 is a ceiling, not a rate.** `drawSingleFrame` (`loop.go:63`) draws a window
-only if `decideRepaint(visible, frame.ready(), canvas.CheckDirtyAndClear)`. An
-idle client therefore costs 60 wakeups a second and zero GL work — the drawn
-frame count at rest is 0. Uncapping the ticker raises the ceiling on animation
-and scroll smoothness; it does nothing at rest.
+Upstream that ticker is the literal `time.Second / 60`. **Patched**, it starts at
+`fyne.FrameRate()` and re-reads it each tick, which is what
+`config.Performance.FrameRate` (default 120) sets through `app.applyPacing`.
+
+**The rate is a ceiling, not a rate.** `drawSingleFrame` draws a window only if
+`decideRepaint(visible, frame.ready(), canvas.CheckDirtyAndClear)`. An idle
+client therefore costs one wakeup per tick and zero GL work — the drawn frame
+count at rest is 0. Raising the rate raises the ceiling on animation and scroll
+smoothness; it does nothing at rest, and it is the wakeups it costs, not
+frames.
 
 **Dirty is one bool for the whole window.** `Canvas.dirty`
 (`internal/driver/common/canvas.go:50`), test-and-cleared by
@@ -49,12 +58,19 @@ moves an offset and re-shapes nothing. Both expire at `cache.ValidDuration`,
 **1 minute** of not being walked (`internal/cache/base.go:11`), so a message
 scrolled away and back past that pays to re-raster.
 
-**Vsync is the driver's decision, and it blocks the loop.** Fyne calls
-`glfw.SwapInterval(0)` **only under Wayland** (`window_desktop.go:840`). On
-Windows it never calls `SwapInterval` at all, so the WGL default applies —
-normally interval 1. `SwapBuffers` runs inside `repaintWindow` on the loop
-goroutine, so a vsync wait stalls `pollEvents` and the `fyne.Do` queue too, not
-just drawing.
+**Parsing a font is cached too, now.** `painter.loadMeasureFont` is **patched** to
+memoise per resource. Upstream it parses on every miss of a `{style, scope}` key,
+and the client mints a scope per entry — see `docs/known-gaps.md` on
+`ui.WithCaret`.
+
+**Vsync blocks the loop, and is ours to set.** `SwapBuffers` runs inside
+`repaintWindow` on the loop goroutine, so a vsync wait stalls `pollEvents` and
+the `fyne.Do` queue too, not just drawing. Upstream calls `glfw.SwapInterval(0)`
+**only under Wayland** and leaves the WGL default — interval 1 — everywhere else.
+**Patched**, `repaintWindow` applies `fyne.VSync()` just before `SwapBuffers`,
+that being the one moment the window's GL context is current on our goroutine.
+`config.Performance.VSync` is the setting; Wayland is still left to the
+compositor.
 
 **The present gate is a stub off Wayland.** `presentGate` (`present.go`) is real
 on Wayland via `wl_surface.frame` callbacks and `noGate{}` (always ready)
@@ -102,36 +118,34 @@ Ranked by return.
    `main.go` with `os.Setenv` before the first widget, so it can be a real
    setting. Measure before shipping one — this is a guess until it is not.
 
-## Needs a fork of Fyne
+## Taken by patching Fyne
 
-All four of these are `internal/`, so none is reachable from this module.
+[`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
+three patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+onto a new version. The frame rate and vsync landed
+together on purpose — raising the ceiling while the driver still blocks in
+`SwapBuffers` changes nothing — and both are settings under Performance. The
+third is the font-parse cache, which is a leak fixed rather than a lever.
 
-- **The 60 Hz cap** is the literal `time.Second / 60` at `loop.go:132`. No
-  setting, no env var, no build tag. A fork changing it to a variable is a
-  one-line patch — the cost is owning a fork, not the change.
-- **Vsync off on Windows** needs `glfw.SwapInterval(0)` called with the GL
-  context current. Fyne detaches the context after every draw
-  (`window.go:925`), and the `fyne.Do` queue runs outside `RunWithContext`, so
-  there is no moment in the public API where a context is current on our
-  goroutine. `driver.RunNative` hands over the HWND, which is not enough —
-  `wglSwapIntervalEXT` needs the context, not the window. The non-code
-  workaround is the GPU control panel's per-application vsync override.
+What that costs: a Fyne bump is now a rebase in the fork rather than a bare
+`go get`, and anything read out of `internal/` here has to be read out of the
+fork instead.
+
+## Still needs more than a patch
+
 - **Damage-region redraw** would mean replacing `Canvas.dirty` with a rect list
   and teaching `paint` to scissor. Deep, and it fights the full `Clear()`.
 - **A D3D or Vulkan painter.** `gl.Painter` is a clean, small interface
   (`internal/painter/gl/painter.go:16` — `Init`, `Clear`, `Paint`, `Free`,
   `Capture`, clipping, sizes) and a D3D11 implementation of it is a plausible
   amount of work. But `common.Canvas.SetPainter` takes `gl.Painter` — the
-  concrete package's type, under `internal/` — so an outside implementation
-  cannot be handed in. Plugging one in means forking, not extending.
-
-Uncapping the ticker and disabling vsync are the same fork and should land
-together: raising the ceiling while the driver still blocks in `SwapBuffers`
-changes nothing.
+  concrete package's type — so it is a replacement for Fyne's painter rather
+  than an addition beside it, and every window creation path has to be taught
+  about it. The patched copy makes it possible; it does not make it small.
 
 ## Other toolkits, honestly
 
-Only relevant if the fork above stops being enough.
+Only relevant if the patches above stop being enough.
 
 - **Gio** — Windows backend is Direct3D 11, so a flip-model swapchain and a
   DXGI waitable object are available to it and structurally are not to us. It is
@@ -156,9 +170,11 @@ line clean is the cheapest insurance against needing this section.
 There is no instrumentation in the client yet. Before any of the above is
 called an improvement:
 
-- Frame cost is not observable from inside Fyne's loop without a fork, so
-  measure from outside — a GPU/frame profiler, or wall-clock around
-  `App.doOnUI` work.
+- Frame cost is now observable from inside the loop — the fork is
+  ours to instrument — but nothing there is instrumented, so measure from
+  outside first: a GPU/frame profiler, or wall-clock around `App.doOnUI` work.
+  A timer added to `repaintWindow` is a patch to carry forward; be sure it is
+  worth carrying.
 - `pprof` on the loop goroutine catches layout and measurement cost, which is
   where our own code lives; it will not catch GL or driver time.
 - The thing worth watching during a scroll is **mounted object count**, not FPS.

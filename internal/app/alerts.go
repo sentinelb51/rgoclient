@@ -297,7 +297,7 @@ func settingsSounds() []ui.SettingsSound {
 // row — the file it now names, and the way back to the built-in it did not offer
 // before — and the sound itself is loaded and played by reloadSound.
 func (a *App) chooseSound(key string, onPicked func()) {
-	a.chooseFile("Choose a sound", soundExtensions, func(path, _ string) {
+	a.chooseFile("Choose a sound", soundFilter, func(path, _ string) {
 		a.updateSettings(func(s *config.Settings) {
 			if s.Notifications.SoundFiles == nil {
 				s.Notifications.SoundFiles = make(map[string]string)
@@ -320,10 +320,13 @@ func (a *App) resetSound(key string) {
 	a.reloadSound(key)
 }
 
-// soundExtensions is what the decoder reads. The filter is a courtesy — the file
-// is sniffed by content, not by its name — so a renamed file still works and a
+// soundFilter is what the decoder reads. The filter is a courtesy — the file is
+// sniffed by content, not by its name — so a renamed file still works and a
 // picker that hid it would be the only thing in the way.
-var soundExtensions = []string{".wav", ".mp3"}
+var soundFilter = ui.FileFilter{
+	Label:      "Sounds",
+	Extensions: []string{".wav", ".mp3"},
+}
 
 /* What a message is worth */
 

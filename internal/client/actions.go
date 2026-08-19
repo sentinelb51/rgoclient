@@ -579,8 +579,8 @@ func oldestFirst(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) 
 // resolves the authors it does not already know.
 func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
 	return c.search(channelID, revoltgo.ChannelSearchParams{
-		ChannelMessagesParams: revoltgo.ChannelMessagesParams{Limit: limit},
-		Pinned:                true,
+		Limit:  limit,
+		Pinned: true,
 	})
 }
 
@@ -595,8 +595,8 @@ func (c *Client) SearchMessages(channelID, query string, limit int) ([]*domain.M
 	}
 
 	return c.search(channelID, revoltgo.ChannelSearchParams{
-		ChannelMessagesParams: revoltgo.ChannelMessagesParams{Limit: limit},
-		Query:                 query,
+		Limit: limit,
+		Query: query,
 	})
 }
 

@@ -1055,7 +1055,7 @@ type ObservableScroll struct {
 
 	/* The position indicator */
 
-	indicator  *canvas.Rectangle
+	indicator  *scrollThumb
 	lastOffset fyne.Position
 	linger     *time.Timer
 	fade       *fyne.Animation
@@ -1068,8 +1068,8 @@ var _ fyne.Draggable = (*ObservableScroll)(nil)
 // NewObservableVScroll creates an observable vertical scroll container, drawing
 // the client's own position indicator down its right edge.
 func NewObservableVScroll(content fyne.CanvasObject) *ObservableScroll {
-	s := &ObservableScroll{indicator: canvas.NewRectangle(theme.Colors.ScrollIndicator)}
-	s.indicator.Hide()
+	s := &ObservableScroll{}
+	s.indicator = newScrollThumb(s)
 
 	return s.init(content)
 }
@@ -1176,7 +1176,7 @@ func (s *ObservableScroll) placeIndicator() bool {
 		return false
 	}
 
-	width := theme.Sizes.ScrollIndicatorWidth
+	width := max(theme.Sizes.ScrollIndicatorGrabWidth, theme.Sizes.ScrollIndicatorWidth)
 	inset := theme.Sizes.ScrollIndicatorInset
 	track := view.Height - inset*2
 
@@ -1185,9 +1185,9 @@ func (s *ObservableScroll) placeIndicator() bool {
 	height := min(max(track*view.Height/content, theme.Sizes.ScrollIndicatorMinHeight), track)
 	progress := clamp(s.Offset.Y/(content-view.Height), 0, 1)
 
-	s.indicator.CornerRadius = width / 2
 	s.indicator.Resize(fyne.NewSize(width, height))
 	s.indicator.Move(fyne.NewPos(view.Width-width-inset, inset+progress*(track-height)))
+	s.indicator.Show()
 
 	return true
 }
@@ -1196,9 +1196,9 @@ func (s *ObservableScroll) placeIndicator() bool {
 func (s *ObservableScroll) revealIndicator() {
 	s.stopFade()
 
-	s.indicator.FillColor = theme.Colors.ScrollIndicator
+	s.indicator.bar.FillColor = theme.Colors.ScrollIndicator
 	s.indicator.Show()
-	canvas.Refresh(s.indicator)
+	canvas.Refresh(s.indicator.bar)
 
 	if s.linger == nil {
 		s.linger = time.AfterFunc(scrollIndicatorLinger, func() { DoOnUI(s.fadeIndicator) })
@@ -1213,8 +1213,8 @@ func (s *ObservableScroll) fadeIndicator() {
 	s.stopFade()
 
 	s.fade = fyne.NewAnimation(scrollIndicatorFade, func(done float32) {
-		s.indicator.FillColor = theme.Fade(theme.Colors.ScrollIndicator, 1-done)
-		canvas.Refresh(s.indicator)
+		s.indicator.bar.FillColor = theme.Fade(theme.Colors.ScrollIndicator, 1-done)
+		canvas.Refresh(s.indicator.bar)
 	})
 	s.fade.Start()
 }
@@ -1227,6 +1227,114 @@ func (s *ObservableScroll) stopFade() {
 	s.fade.Stop()
 	s.fade = nil
 }
+
+// dragIndicator scrolls by a movement of the bar rather than of the content: the
+// bar travels the track less its own height, the content everything past the
+// viewport, so one maps onto the other.
+func (s *ObservableScroll) dragIndicator(dy float32) {
+	if s.indicator == nil || s.Content == nil {
+		return
+	}
+
+	view := s.Size()
+	content := s.Content.Size().Height
+	travel := view.Height - theme.Sizes.ScrollIndicatorInset*2 - s.indicator.Size().Height
+	if travel <= 0 || content <= view.Height {
+		return
+	}
+
+	s.ScrollToOffset(fyne.NewPos(s.Offset.X, s.Offset.Y+dy*(content-view.Height)/travel))
+	s.notify()
+}
+
+// scrollThumb is the position indicator, a widget rather than a bare rectangle so
+// that it can be grabbed. It covers only where the bar is drawn — a full-height
+// track would take the hover of every message row down the column's right edge,
+// which is what zeroing Fyne's own scrollbar was for. It is grabbed through
+// ScrollIndicatorGrabWidth and drawn against that area's right edge, so the bar
+// stays as narrow as it looks. It also never hides itself once scrollable: the
+// fade leaves it transparent rather than gone, so an invisible bar is still where
+// the pointer last saw it.
+type scrollThumb struct {
+	widget.BaseWidget
+
+	scroll *ObservableScroll
+	bar    *canvas.Rectangle
+
+	grabbed bool
+}
+
+var (
+	_ desktop.Mouseable = (*scrollThumb)(nil)
+	_ fyne.Draggable    = (*scrollThumb)(nil)
+)
+
+func newScrollThumb(scroll *ObservableScroll) *scrollThumb {
+	// Transparent rather than hidden: a hidden object is skipped by the hit test, so
+	// the bar has to be mounted and invisible to be grabbed before the first scroll.
+	t := &scrollThumb{scroll: scroll, bar: canvas.NewRectangle(theme.Fade(theme.Colors.ScrollIndicator, 0))}
+	t.ExtendBaseWidget(t)
+	t.Hide()
+
+	return t
+}
+
+func (t *scrollThumb) CreateRenderer() fyne.WidgetRenderer {
+	return &scrollThumbRenderer{thumb: t, objects: []fyne.CanvasObject{t.bar}}
+}
+
+// MouseDown grabs the bar, and brings it back: a bar that has faded out still
+// answers where it was last drawn, so the press has to show what it caught.
+func (t *scrollThumb) MouseDown(ev *desktop.MouseEvent) {
+	if ev.Button != desktop.MouseButtonPrimary {
+		return
+	}
+
+	t.grabbed = true
+	t.scroll.revealIndicator()
+}
+
+func (t *scrollThumb) MouseUp(ev *desktop.MouseEvent) {
+	if ev.Button == desktop.MouseButtonPrimary {
+		t.grabbed = false
+	}
+}
+
+// Dragged moves the view by the drag's own delta, not by where the bar now is:
+// the bar is moved under the pointer by the scroll it causes.
+func (t *scrollThumb) Dragged(ev *fyne.DragEvent) {
+	if !t.grabbed {
+		return
+	}
+
+	t.scroll.dragIndicator(ev.Dragged.DY)
+}
+
+func (t *scrollThumb) DragEnd() { t.grabbed = false }
+
+type scrollThumbRenderer struct {
+	thumb   *scrollThumb
+	objects []fyne.CanvasObject
+}
+
+func (r *scrollThumbRenderer) Layout(size fyne.Size) {
+	width := min(theme.Sizes.ScrollIndicatorWidth, size.Width)
+
+	r.thumb.bar.CornerRadius = width / 2
+	r.thumb.bar.Resize(fyne.NewSize(width, size.Height))
+	r.thumb.bar.Move(fyne.NewPos(size.Width-width, 0))
+}
+
+func (r *scrollThumbRenderer) MinSize() fyne.Size { return fyne.Size{} }
+
+func (r *scrollThumbRenderer) Objects() []fyne.CanvasObject { return r.objects }
+
+func (r *scrollThumbRenderer) Refresh() {
+	r.Layout(r.thumb.Size())
+	canvas.Refresh(r.thumb.bar)
+}
+
+func (r *scrollThumbRenderer) Destroy() {}
 
 // Scrolled amplifies the wheel delta and notifies listeners.
 func (s *ObservableScroll) Scrolled(ev *fyne.ScrollEvent) {

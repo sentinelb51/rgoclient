@@ -183,5 +183,8 @@ called an improvement:
   worth carrying.
 - `pprof` on the loop goroutine catches layout and measurement cost, which is
   where our own code lives; it will not catch GL or driver time.
+- `-tags pprof` also serves `/debug/pprof/goroutineleak`. `App.epoch` drops a
+  replaced session's workers rather than joining them, so a leak is possible;
+  each carries a pprof label, so one reads as the action that started it.
 - The thing worth watching during a scroll is **mounted object count**, not FPS.
   Traversal is what grows; fill rate is bounded by the viewport already.

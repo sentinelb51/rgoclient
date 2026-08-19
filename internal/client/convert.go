@@ -271,8 +271,8 @@ func nameFromURL(raw string) string {
 	if query := strings.IndexByte(raw, '?'); query != -1 {
 		raw = raw[:query]
 	}
-	if slash := strings.LastIndexByte(raw, '/'); slash != -1 {
-		raw = raw[slash+1:]
+	if _, after, ok := strings.CutLast(raw, "/"); ok {
+		raw = after
 	}
 
 	return raw

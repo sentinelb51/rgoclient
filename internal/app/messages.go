@@ -1171,8 +1171,7 @@ func (a *App) editLastOwnMessage() {
 	}
 
 	cached := a.client.Messages().Get(a.currentChannelID)
-	for i := len(cached) - 1; i >= 0; i-- {
-		message := cached[i]
+	for _, message := range slices.Backward(cached) {
 		if message.AuthorID == self && message.System == nil && message.Content != "" {
 			a.OnEdit(message)
 			return

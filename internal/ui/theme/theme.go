@@ -566,6 +566,7 @@ var Sizes = struct {
 	ScrollIndicatorWidth     float32
 	ScrollIndicatorInset     float32
 	ScrollIndicatorMinHeight float32
+	ScrollIndicatorGrabWidth float32
 
 	/* Message embeds */
 
@@ -773,37 +774,40 @@ var Sizes = struct {
 
 	/* Settings */
 
-	SettingsRailWidth     float32
-	SettingsRailRowHeight float32
-	SettingsRailTextSize  float32
-	SettingsPageWidth     float32
-	SettingsPagePadding   float32
-	SettingsHeaderSize    float32
-	SettingsCaptionSize   float32
-	SettingsRowHeight     float32
-	SettingsRowPaddingH   float32
-	SettingsRowPaddingV   float32
-	SettingsControlGap    float32
-	SettingsGroupRadius   float32
-	SettingsGroupGap      float32
-	SettingsLabelSize     float32
-	SettingsDetailSize    float32
-	SettingsIconSize      float32
-	SettingsControlWidth  float32
-	SettingsValueWidth    float32
-	SettingsInputHeight   float32
-	SettingsInputRadius   float32
-	SettingsToggleWidth   float32
-	SettingsToggleHeight  float32
-	SettingsToggleInset   float32
-	SettingsSwatchSize    float32
-	SettingsSliderHeight  float32
-	SettingsSliderTrack   float32
-	SettingsSliderKnob    float32
-	SettingsUsageHeight   float32
-	SettingsPaletteSize   float32
-	SettingsPaletteGap    float32
-	SettingsPreviewGap    float32
+	SettingsRailWidth      float32
+	SettingsRailRowHeight  float32
+	SettingsRailTextSize   float32
+	SettingsPageWidth      float32
+	SettingsPagePadding    float32
+	SettingsHeaderSize     float32
+	SettingsCaptionSize    float32
+	SettingsRowHeight      float32
+	SettingsRowPaddingH    float32
+	SettingsRowPaddingV    float32
+	SettingsControlGap     float32
+	SettingsGroupRadius    float32
+	SettingsGroupGap       float32
+	SettingsLabelSize      float32
+	SettingsDetailSize     float32
+	SettingsIconSize       float32
+	SettingsControlWidth   float32
+	SettingsValueWidth     float32
+	SettingsInputHeight    float32
+	SettingsInputRadius    float32
+	SettingsToggleWidth    float32
+	SettingsToggleHeight   float32
+	SettingsToggleInset    float32
+	SettingsSwatchSize     float32
+	SettingsSliderHeight   float32
+	SettingsSliderTrack    float32
+	SettingsSliderKnob     float32
+	SettingsUsageHeight    float32
+	SettingsPaletteSize    float32
+	SettingsPaletteGap     float32
+	SettingsPreviewGap     float32
+	SettingsNoteMarkSize   float32
+	SettingsNoteMarkRadius float32
+	SettingsNoteMarkGap    float32
 }{
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
@@ -937,6 +941,12 @@ var Sizes = struct {
 	ScrollIndicatorWidth:     4,
 	ScrollIndicatorInset:     4,
 	ScrollIndicatorMinHeight: 28,
+
+	// The bar is grabbed through a hit area this wide, drawn against its right edge:
+	// four units is a hard target to hit, and widening the bar itself would put it
+	// over the text. Grab width plus inset is under the same padding the bar is,
+	// since a press this side of the text goes to the bar rather than the row.
+	ScrollIndicatorGrabWidth: 8,
 
 	// EmbedMaxWidth is a ceiling on the text column, not the width every card is
 	// drawn at: an embed is measured against what it says and only capped here, so
@@ -1191,6 +1201,11 @@ var Sizes = struct {
 	SettingsPaletteSize:  22,
 	SettingsPaletteGap:   6,
 	SettingsPreviewGap:   10,
+	// The badge a note is filed under: a box wide enough for a letter, and a
+	// corner just off square, so it reads as a mark rather than as a button.
+	SettingsNoteMarkSize:   16,
+	SettingsNoteMarkRadius: 4,
+	SettingsNoteMarkGap:    6,
 }
 
 // selectionTint is the accent used for text selection, alpha'd so the glyphs

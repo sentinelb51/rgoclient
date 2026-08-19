@@ -152,8 +152,8 @@ func TestSelectableBodyCatchesRightClick(t *testing.T) {
 	// the overlay takes the span's start to be where the pointer came from.
 	catcher.MouseDown(&desktop.MouseEvent{Button: desktop.MouseButtonPrimary})
 	catcher.Dragged(&fyne.DragEvent{
-		PointEvent: fyne.PointEvent{Position: fyne.NewPos(180, 10)},
-		Dragged:    fyne.NewDelta(180, 0),
+		Position: fyne.NewPos(180, 10),
+		Dragged:  fyne.NewDelta(180, 0),
 	})
 	catcher.DragEnd()
 

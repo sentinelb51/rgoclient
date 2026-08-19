@@ -1,6 +1,6 @@
 module RGOClient
 
-go 1.26.4
+go 1.27
 
 require (
 	fyne.io/fyne/v2 v2.8.0

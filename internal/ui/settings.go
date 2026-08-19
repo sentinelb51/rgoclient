@@ -863,10 +863,41 @@ func vcenter(obj fyne.CanvasObject) fyne.CanvasObject {
 // restart, or that a feature has not been built.
 func (p *SettingsPage) note(text string) fyne.CanvasObject {
 	padH, padV := theme.Sizes.SettingsRowPaddingH, theme.Sizes.SettingsPreviewGap
+	gap := theme.Sizes.SettingsNoteMarkGap
 
-	label := rowDetail("ⓘ  "+text, cardWidth()-2*padH)
+	mark := newNoteMark()
+	label := rowDetail(text, cardWidth()-2*padH-theme.Sizes.SettingsNoteMarkSize-gap)
 
-	return NewInset(label, padV, padV, padH, padH)
+	return NewInset(HBoxNoSpacing(mark, HorizontalSpacer(gap), label), padV, padV, padH, padH)
+}
+
+// newNoteMark is the badge a note carries: an "i" plotted on the same 20-unit
+// grid the client's other drawn marks share, inside a box of its own. Drawn
+// rather than set — the bundled font subset has no ⓘ, so the glyph fell to
+// whatever the platform could substitute and landed as tofu on macOS, and a
+// letter centred by its own metrics sits high in a box this small, the line box
+// reserving descent the "i" never uses.
+func newNoteMark() fyne.CanvasObject {
+	side := theme.Sizes.SettingsNoteMarkSize
+	scale := side / 20
+	tint := theme.Colors.TimestampText
+
+	box := canvas.NewRectangle(color.Transparent)
+	box.StrokeColor = tint
+	box.StrokeWidth = theme.Sizes.OutlineWidth
+	box.CornerRadius = theme.Sizes.SettingsNoteMarkRadius
+
+	part := func(y, height float32) *canvas.Rectangle {
+		r := canvas.NewRectangle(tint)
+		r.Move(fyne.NewPos(9*scale, y*scale))
+		r.Resize(fyne.NewSize(2*scale, height*scale))
+
+		return r
+	}
+
+	glyph := container.NewWithoutLayout(part(4.5, 2), part(8.5, 7))
+
+	return container.NewGridWrap(fyne.NewSize(side, side), container.NewStack(box, glyph))
 }
 
 /* Controls */

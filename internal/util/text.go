@@ -81,8 +81,8 @@ func InviteLink(code string) string {
 //	              └returned┘
 func InviteCode(input string) string {
 	code := strings.TrimRight(hostAndPath(input), "/")
-	if slash := strings.LastIndexByte(code, '/'); slash != -1 {
-		code = code[slash+1:]
+	if _, after, ok := strings.CutLast(code, "/"); ok {
+		code = after
 	}
 
 	if code == "" || !isInviteCode(code) {

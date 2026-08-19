@@ -291,14 +291,23 @@ Where things live that the filename doesn't tell you:
 
 ### Tests
 
-Test rules and decisions, not rendering. A test earns its place if it can fail
-for a reason a person wouldn't spot immediately: parsing, ordering, caching,
-conversion, the mention query, a layout that has to *react* (Relayout,
-placeBeside, a card that grows). Do **not** assert that a palette constant is what
-the palette says, that a widget was built out of the objects it was just built out
-of, or that a hand-tuned offset is still that offset — those only make the next
-visual change more expensive. To check appearance, render to a PNG with
-`fyne.io/fyne/v2/driver/software`, look at it, and delete the harness.
+**Do not add a test unless it was asked for.** Finish the change, then ask at the
+end whether one is wanted, in a sentence naming what it would cover and how it
+could fail. A change is done when the code is done; an unrequested test is
+scope nobody asked for, and one written to have written something is worse than
+none — it has to be read, kept current and believed.
+
+When one *is* asked for: test rules and decisions, not rendering. A test earns
+its place if it can fail for a reason a person wouldn't spot immediately:
+parsing, ordering, caching, conversion, the mention query, a layout that has to
+*react* (Relayout, placeBeside, a card that grows). Do **not** assert that a
+palette constant is what the palette says, that a widget was built out of the
+objects it was just built out of, or that a hand-tuned offset is still that
+offset — those only make the next visual change more expensive.
+
+To check appearance, render to a PNG with `fyne.io/fyne/v2/driver/software`,
+look at it, and **delete the harness**. A screenshot test left behind asserts
+nothing and fails on every deliberate change.
 
 ## Build / check
 

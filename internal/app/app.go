@@ -5,8 +5,11 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -358,7 +361,7 @@ func (a *App) doOnUI(fn func(), wait bool) {
 // shape every action here takes: the request goes to the client, a failure comes
 // back as a notice, and the UI is updated by the gateway event that follows.
 func (a *App) background(fn func() error, onFail func(err error)) {
-	a.backgroundThen(fn, onFail, nil)
+	a.run(workLabel(2), fn, onFail, nil)
 }
 
 // backgroundThen is background with somewhere to hear about a success, for the
@@ -366,9 +369,16 @@ func (a *App) background(fn func() error, onFail func(err error)) {
 // and only for a session still current; a failure is reported whatever the
 // epoch, an error being worth saying either way.
 func (a *App) backgroundThen(fn func() error, onFail func(err error), then func()) {
+	a.run(workLabel(2), fn, onFail, then)
+}
+
+// run is the worker both take. The pprof label is what a traceback header and
+// the goroutine-leak profile print, so a worker still blocked names the action
+// that started it rather than naming this one function.
+func (a *App) run(label string, fn func() error, onFail func(err error), then func()) {
 	epoch := a.epoch
 
-	go func() {
+	go pprof.Do(context.Background(), pprof.Labels("work", label), func(context.Context) {
 		err := fn()
 		if err == nil && then == nil {
 			return
@@ -382,7 +392,23 @@ func (a *App) backgroundThen(fn func() error, onFail func(err error), then func(
 				then()
 			}
 		}, false)
-	}()
+	})
+}
+
+// workLabel names the caller skip frames up with its package path trimmed. Read
+// on the UI thread, before the worker it labels exists.
+func workLabel(skip int) string {
+	pc, _, _, ok := runtime.Caller(skip)
+	if !ok {
+		return "background"
+	}
+
+	name := runtime.FuncForPC(pc).Name()
+	if _, after, cut := strings.CutLast(name, "/"); cut {
+		name = after
+	}
+
+	return name
 }
 
 // stale reports whether epoch — captured before a worker left the UI thread — is

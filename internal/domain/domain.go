@@ -97,12 +97,11 @@ const (
 // already lowercase. It classifies a locally picked file; one from Revolt
 // carries the server's own answer, which the conversion prefers.
 func FileKindOf(filename string) FileKind {
-	dot := strings.LastIndexByte(filename, '.')
-	if dot == -1 || dot == len(filename)-1 {
+	_, ext, ok := strings.CutLast(filename, ".")
+	if !ok || ext == "" {
 		return FileUnknown
 	}
 
-	ext := filename[dot+1:]
 	for i := range len(ext) {
 		if c := ext[i]; c >= 'A' && c <= 'Z' {
 			ext = strings.ToLower(ext)

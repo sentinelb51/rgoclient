@@ -187,20 +187,27 @@ naming and the test policy.
   innermost wins, so it stole the message row's. `AppTheme.Size` zeroes *both*
   `SizeNameScrollBar` and `SizeNameScrollBarSmall` (zeroing only the large one left
   an invisible strip still eating hover). What replaces it is `ObservableScroll`'s
-  indicator: a `canvas.Rectangle` appended to Fyne's renderer objects (set once at
-  construction and never replaced, so composing the slice once holds), accepting
-  nothing because it is not a widget. It is placed from `Content.Size()` — never
+  indicator: a `scrollThumb` appended to Fyne's renderer objects (set once at
+  construction and never replaced, so composing the slice once holds). Being last
+  in that list it is the topmost hit, so it takes the press and the drag that scroll
+  by it — but it covers only the bar's own extent, never the whole track, and it is
+  not `Hoverable`: either would put a strip back between the pointer and the message
+  row. It is grabbed through `ScrollIndicatorGrabWidth`, the bar drawn against that
+  area's right edge, and the fade leaves it transparent rather than hidden — a bar
+  nobody can see is still where the pointer last saw it, and a press brings it back.
+  It is placed from `Content.Size()` — never
   `MinSize` — and revealed from the *renderer's* `Refresh` by comparing the offset,
   since every offset change ends there whoever caused it while an unrelated repaint
   must not flash it. It fades through a `fyne.Animation` the renderer's `Destroy`
   stops, so a restyle's rebuild doesn't leave one ticking.
   `ScrollIndicatorWidth + ScrollIndicatorInset` must stay under
-  `MessageHorizontalPadding` or the bar draws over the text; a width of zero turns
-  it off. Only the message column has one — elsewhere the right edge carries rows
+  `MessageHorizontalPadding` or the bar draws over the text, and
+  `ScrollIndicatorGrabWidth + ScrollIndicatorInset` with it, or a press beside the
+  text is taken by the bar rather than the row; a width of zero turns it off. Only the message column has one — elsewhere the right edge carries rows
   and controls a strip would obstruct, which is what `NewPlainVScroll` is for: the
   settings pane centres its cards, so an indicator pinned to the pane's edge lands
   on one whenever the window is narrow enough for the two to meet. It leaves
-  `indicator` nil, so `CreateRenderer` must not append it — a typed-nil rectangle in
+  `indicator` nil, so `CreateRenderer` must not append it — a typed-nil thumb in
   the renderer's object list is dereferenced by the painter.
   Neither `Scrolled` nor `Dragged` may write `Offset` and call `Refresh`:
   `Scroll.Refresh` walks and repaints every descendant, which for a pan is the whole

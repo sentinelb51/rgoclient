@@ -15,6 +15,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -117,18 +118,34 @@ func (s *tapSink) Cursor() desktop.Cursor { return desktop.DefaultCursor }
 
 /* Attachment viewer */
 
-// NewAttachmentViewer is the card inside the attachment lightbox: a slim header
-// over the attachment, sized to fit bounds. An image is scaled to fit, a text
-// file gets its whole contents in a selectable monospace pane, anything else a
-// card offering the browser. The chrome is the card's own — there is no native
-// window here to recolour.
-func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, onClose func()) fyne.CanvasObject {
+// AttachmentViewer is the card inside the attachment lightbox: the attachment
+// over a metadata bar naming it, sized to fit bounds. An image is scaled to fit,
+// a text file gets its whole contents in a selectable monospace pane, anything
+// else a card offering the browser. The chrome is the card's own — there is no
+// native window here to recolour.
+type AttachmentViewer struct {
+	// Content is the card to hand to the modal layer.
+	Content fyne.CanvasObject
+
+	deps       Deps
+	attachment *domain.File
+
+	// tip names the bar's buttons. The card's own rather than the app's: the app's
+	// is a layer in the window's content and this card is a canvas overlay over all
+	// of it, so a label mounted there would be covered by the button naming it.
+	tip *Tooltip
+}
+
+// NewAttachmentViewer builds the card. onClose dismisses the modal layer.
+func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, onClose func()) *AttachmentViewer {
+	v := &AttachmentViewer{deps: deps, attachment: attachment, tip: NewTooltip()}
+
 	// What is left of bounds once the chrome is paid for: NewPadded insets all four
-	// sides, and the Border puts one more gap between the header and the body.
+	// sides, and the bar sits flush under the body.
 	pad := fynetheme.Padding()
 	body := fyne.NewSize(
 		bounds.Width-2*pad,
-		bounds.Height-theme.Sizes.ViewerHeaderHeight-3*pad,
+		bounds.Height-theme.Sizes.ViewerBarHeight-2*pad,
 	)
 
 	var (
@@ -150,42 +167,111 @@ func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, o
 	well := canvas.NewRectangle(theme.Colors.ViewerBodyBg)
 	well.CornerRadius = theme.Sizes.ViewerCornerRadius
 
-	header := viewerHeader(attachment, detail, onClose)
-	inner := container.NewBorder(header, nil, nil, nil, container.NewStack(well, content))
+	inner := VBoxNoSpacing(container.NewStack(well, content), v.bar(detail, onClose))
+	sink := newTapSink(container.NewStack(card, container.NewPadded(inner), v.tip.Layer))
+	sink.onSecondaryTap = func(event *fyne.PointEvent) {
+		ShowContextMenu(sink, v.menuItems(), event.AbsolutePosition)
+	}
 
-	return newTapSink(container.NewStack(card, container.NewPadded(inner)))
+	v.Content = sink
+
+	return v
 }
 
-// viewerHeader is the card's title strip: filename on the left, then the file
-// size (and, for images, their pixel dimensions), a browser button, and close.
-func viewerHeader(attachment *domain.File, detail string, onClose func()) fyne.CanvasObject {
-	name := newBoldText(attachment.Name, theme.Colors.TextPrimary, theme.Sizes.ViewerTitleSize)
+// bar is the strip under the attachment: what it is called and how large it is on
+// the left, the two ways out of the card on the right. The same strip a message
+// attachment wears, in the same fill — a picture reads the same in both places.
+func (v *AttachmentViewer) bar(detail string, onClose func()) fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 
-	// An embed's picture is not an upload and carries no byte count, so the size is
-	// left out rather than reported as nothing.
-	meta := detail
-	if attachment.Size > 0 {
-		meta = util.FormatFileSize(attachment.Size)
-		if detail != "" {
-			meta = detail + "  ·  " + meta
-		}
+	name := newBoldText(v.attachment.Name, theme.Colors.TextPrimary, theme.Sizes.ViewerTitleSize)
+	meta := newText(viewerMeta(v.attachment, detail), theme.Colors.TimestampText, theme.Sizes.ViewerTitleSize)
+
+	gap := theme.Sizes.ViewerPadding
+	left := HBoxNoSpacing(HorizontalSpacer(gap), vcenter(name), HorizontalSpacer(gap), vcenter(meta))
+
+	// Centred rather than left to the row: a box layout stretches a child to the
+	// strip's height, which would draw the two buttons as tall rectangles of
+	// different widths rather than as the one square each.
+	buttons := HBoxNoSpacing()
+	if link := v.attachment.URL; link != "" {
+		browse := NewGlyphButton(fynetheme.ComputerIcon(), func() { openURL(link) })
+		buttons.Add(vcenter(browse.saying(v.tip, "Open in browser")))
 	}
-	info := newText(meta, theme.Colors.TimestampText, theme.Sizes.ViewerTitleSize)
+	buttons.Add(vcenter(NewCloseButton(onClose)))
+	buttons.Add(HorizontalSpacer(gap))
 
-	actions := container.NewHBox(info, HorizontalSpacer(theme.Sizes.ViewerPadding))
-	if link := attachment.URL; link != "" {
-		actions.Add(NewIconButton(fynetheme.ComputerIcon(), func() { openURL(link) }, nil))
+	strip := container.NewBorder(nil, nil, left, buttons)
+
+	return NewMinHeightContainer(theme.Sizes.ViewerBarHeight, container.NewStack(background, strip))
+}
+
+// viewerMeta is what the bar says about the file beside its name: for an image
+// its pixel dimensions, then its size on disk. An embed's picture is not an
+// upload and carries no byte count, so that half is left out rather than reported
+// as nothing.
+func viewerMeta(attachment *domain.File, detail string) string {
+	if attachment.Size <= 0 {
+		return detail
 	}
-	actions.Add(NewCloseButton(onClose))
 
-	strip := container.NewBorder(nil, nil,
-		container.NewHBox(HorizontalSpacer(theme.Sizes.ViewerPadding), name), actions)
+	size := util.FormatFileSize(attachment.Size)
+	if detail == "" {
+		return size
+	}
 
-	return NewMinHeightContainer(theme.Sizes.ViewerHeaderHeight, strip)
+	return detail + "  ·  " + size
+}
+
+// menuItems is what right-clicking the card offers: the ways to take the
+// attachment with you, and the browser.
+func (v *AttachmentViewer) menuItems() []*fyne.MenuItem {
+	var items []*fyne.MenuItem
+
+	if v.attachment.Kind == domain.FileImage && v.attachment.URL != "" {
+		items = append(items, fyne.NewMenuItemWithIcon("Copy image",
+			actionMark(assets.ActionCopyIcon), v.copyImage))
+	}
+
+	if link := v.attachment.URL; link != "" {
+		items = append(items,
+			fyne.NewMenuItemWithIcon("Copy link", actionMark(assets.ActionCopyIcon),
+				func() { CopyToClipboard(link) }),
+			fyne.NewMenuItemWithIcon("Open in browser", fynetheme.ComputerIcon(),
+				func() { openURL(link) }),
+		)
+	}
+
+	return items
+}
+
+// Copy is what Ctrl+C over the card does: an image goes on the clipboard as a
+// picture, anything else as its link — there being nothing else a zip or a
+// half-read text file could usefully become. Call on the UI thread.
+func (v *AttachmentViewer) Copy() {
+	if v.attachment.Kind == domain.FileImage {
+		v.copyImage()
+		return
+	}
+
+	if link := v.attachment.URL; link != "" {
+		CopyToClipboard(link)
+	}
+}
+
+// copyImage copies the picture the card is showing — the cache's own decode of
+// it, so the copy is capped by the decode the way the one on screen is.
+func (v *AttachmentViewer) copyImage() {
+	link := v.attachment.URL
+	if link == "" {
+		return
+	}
+
+	v.deps.Images.LoadAsync(imageCacheID(link), link, false, CopyImageToClipboard)
 }
 
 // viewerImage renders the attachment scaled to fit within bounds and reports its
-// real pixel dimensions for the header.
+// real pixel dimensions for the bar.
 func viewerImage(deps Deps, attachment *domain.File, bounds fyne.Size) (fyne.CanvasObject, string) {
 	pixelWidth, pixelHeight := attachment.Width, attachment.Height
 

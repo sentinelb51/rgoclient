@@ -69,7 +69,7 @@ func TestAttachmentViewerFits(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			card := NewAttachmentViewer(testDeps(), tc.file, bounds, func() {})
+			card := NewAttachmentViewer(testDeps(), tc.file, bounds, func() {}).Content
 
 			win := test.NewWindow(card)
 			t.Cleanup(win.Close)

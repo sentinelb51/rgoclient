@@ -759,7 +759,7 @@ func (m *MessageInput) attachmentCard(attachment domain.Attachment) fyne.CanvasO
 
 	path := attachment.Path
 	bar := attachmentBar(attachment.Name, size, func() { m.RemoveAttachment(path) })
-	card := container.NewBorder(nil, bar, nil, nil, attachmentPreview(path))
+	card := VBoxNoSpacing(attachmentPreview(path), bar)
 
 	// The preview sits inside the card's padding, so the outline goes on the
 	// background rather than over the content the way a message attachment's does.

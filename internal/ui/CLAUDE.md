@@ -215,7 +215,14 @@ naming and the test policy.
 - **Tooltips and notices are layers over the main row, not canvas overlays.**
   Pushing an overlay routes the whole hit test into it, so the hovered widget would
   never see `MouseOut`. Confirmations *are* canvas overlays, on the modal layer
-  with the lightbox.
+  with the lightbox — and a card *on* that layer draws over the app's tooltip, so
+  one that hovers anything mounts a `NewTooltip` of its own in its own stack. The
+  emoji picker and the attachment viewer each carry one.
+- **A box layout stretches every child across the row.** `container.NewHBox` hands
+  each object its minimum *width* and the row's full height, so an icon button in a
+  strip taller than itself is drawn as a tall rectangle — and two buttons of
+  different minimum widths as two different rectangles. `vcenter` keeps one at its
+  own square.
 - **Every text button is `ui.Button`, not Fyne's.** Fyne's is themeable down to
   `SizeNameButtonRadius`, but its background is a rectangle inside a renderer
   nothing reaches, so there is no theme name that puts the client's one hairline

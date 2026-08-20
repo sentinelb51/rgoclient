@@ -63,6 +63,7 @@ func (a *App) closeOverlay() {
 	}
 
 	a.window.Canvas().Overlays().Remove(a.overlay)
+	a.window.Canvas().RemoveShortcut(copyShortcut)
 
 	a.overlay = nil
 	a.joinDialog = nil
@@ -83,9 +84,20 @@ func (a *App) closeOverlay() {
 /* Attachment viewer */
 
 // showAttachmentViewer opens an attachment in the modal lightbox.
+//
+// Ctrl+C is bound on the canvas rather than by the card: a shortcut reaches a
+// focused widget first, and the card focuses nothing — except the text pane,
+// which keeps the copy for its own selection. closeOverlay unbinds it.
 func (a *App) showAttachmentViewer(attachment *domain.File) {
-	a.showOverlay(ui.NewAttachmentViewer(a.deps(), attachment, a.viewerBounds(), a.closeOverlay))
+	viewer := ui.NewAttachmentViewer(a.deps(), attachment, a.viewerBounds(), a.closeOverlay)
+
+	a.showOverlay(viewer.Content)
+	a.window.Canvas().AddShortcut(copyShortcut, func(fyne.Shortcut) { viewer.Copy() })
 }
+
+// copyShortcut is the binding the lightbox takes while it is up. Shortcuts are
+// keyed by name, so the same value adds and removes it.
+var copyShortcut = &fyne.ShortcutCopy{}
 
 // viewerBounds is the largest card the viewer may build: the window minus a
 // margin, capped so the modal still reads as a card on a maximised window.

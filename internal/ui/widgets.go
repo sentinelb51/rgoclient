@@ -810,6 +810,11 @@ type GlyphButton struct {
 	tapBase
 	background *canvas.Rectangle
 	icon       *canvas.Image
+
+	// tip is what the button says about itself while hovered; empty for a mark
+	// that needs no explaining.
+	tooltip *Tooltip
+	tip     string
 }
 
 var (
@@ -843,14 +848,32 @@ func (b *GlyphButton) MinSize() fyne.Size {
 	return fyne.NewSize(glyphButtonSize, glyphButtonSize)
 }
 
+// saying gives the button a label to show while hovered. An icon-only control
+// says nothing about itself, and a mark that is not the close cross has to.
+func (b *GlyphButton) saying(tooltip *Tooltip, tip string) *GlyphButton {
+	b.tooltip, b.tip = tooltip, tip
+
+	return b
+}
+
 func (b *GlyphButton) MouseIn(*desktop.MouseEvent) {
 	b.background.FillColor = theme.Colors.SwiftActionHoverBg
 	b.background.Refresh()
+
+	// Above rather than beside: the button is chrome at a card's right edge, where
+	// a label past it would hang off the card.
+	if b.tip != "" {
+		b.tooltip.ShowAbove(b.tip, b)
+	}
 }
 
 func (b *GlyphButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
+
+	if b.tip != "" {
+		b.tooltip.Hide()
+	}
 }
 
 /* Tooltips */

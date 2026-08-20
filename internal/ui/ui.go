@@ -5,7 +5,9 @@ package ui
 
 import (
 	"bytes"
+	"image"
 	"image/color"
+	"image/png"
 	"log"
 	"net/url"
 
@@ -14,6 +16,7 @@ import (
 	"fyne.io/fyne/v2/container"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
+	"golang.design/x/clipboard"
 
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
@@ -277,6 +280,33 @@ func showMenuHook(anchor fyne.CanvasObject, hook func() []*fyne.MenuItem, event 
 // CopyToClipboard puts text on the system clipboard.
 func CopyToClipboard(text string) {
 	fyne.CurrentApp().Clipboard().SetContent(text)
+}
+
+// CopyImageToClipboard puts a picture on the system clipboard. The PNG is
+// encoded here from the decoded raster rather than passed through from what was
+// downloaded, so only pixels can reach the clipboard: a file served as an image
+// and carrying something else has already been through a decoder by the time it
+// gets here, and what that decoder refused never arrives at all. Encoding a
+// full-size picture is not free, so it runs off the UI thread.
+func CopyImageToClipboard(img image.Image) {
+	if img == nil {
+		return
+	}
+
+	go func() {
+		var encoded bytes.Buffer
+		if err := png.Encode(&encoded, img); err != nil {
+			log.Printf("copy image: encode: %v", err)
+			return
+		}
+
+		if err := clipboard.Init(); err != nil {
+			log.Printf("copy image: clipboard unavailable: %v", err)
+			return
+		}
+
+		clipboard.Write(clipboard.FmtImage, encoded.Bytes())
+	}()
 }
 
 /* Links */

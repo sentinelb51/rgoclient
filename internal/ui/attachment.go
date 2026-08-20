@@ -98,7 +98,7 @@ func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar
 		images.LoadIntoContainer(imageCacheID(url), url, size, image, false, nil)
 	}
 
-	return container.NewBorder(nil, bar, nil, nil, image)
+	return VBoxNoSpacing(image, bar)
 }
 
 func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
@@ -111,7 +111,7 @@ func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fy
 	content := container.NewStack(background, container.NewPadded(preview))
 	go fetchTextPreview(texts, attachment.URL, preview)
 
-	return container.NewBorder(nil, bar, nil, nil, content)
+	return VBoxNoSpacing(content, bar)
 }
 
 func buildGenericAttachment(bar fyne.CanvasObject) *fyne.Container {
@@ -119,8 +119,7 @@ func buildGenericAttachment(bar fyne.CanvasObject) *fyne.Container {
 	placeholder.SetMinSize(fyne.NewSize(attachmentCardWidth, attachmentFileHeight))
 
 	icon := newScaledIcon(fynetheme.FileIcon(), attachmentFileIcon)
-	return container.NewBorder(nil, bar, nil, nil,
-		container.NewStack(placeholder, container.NewCenter(icon)))
+	return VBoxNoSpacing(container.NewStack(placeholder, container.NewCenter(icon)), bar)
 }
 
 // attachmentBar renders a name/size strip. A non-nil onRemove also shows a close

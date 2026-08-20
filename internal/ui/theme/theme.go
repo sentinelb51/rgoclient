@@ -740,7 +740,7 @@ var Sizes = struct {
 	ViewerMinWidth     float32
 	ViewerMinHeight    float32
 	ViewerMargin       float32
-	ViewerHeaderHeight float32
+	ViewerBarHeight    float32
 	ViewerPadding      float32
 	ViewerCornerRadius float32
 	ViewerTitleSize    float32
@@ -1139,7 +1139,7 @@ var Sizes = struct {
 	ViewerMinWidth:     360,
 	ViewerMinHeight:    240,
 	ViewerMargin:       48,
-	ViewerHeaderHeight: 38,
+	ViewerBarHeight:    38,
 	ViewerPadding:      10,
 	ViewerCornerRadius: 6,
 	ViewerTitleSize:    13,

@@ -125,11 +125,14 @@ func (a *App) refreshAuthorMessages(userIDs ...string) {
 		return
 	}
 
-	for _, obj := range a.messageList.Objects {
-		if w, ok := obj.(*ui.MessageWidget); ok && authors[w.Author()] {
+	if a.messages == nil {
+		return
+	}
+	a.messages.EachMounted(func(w *ui.MessageWidget) {
+		if authors[w.Author()] {
 			w.RefreshAuthor()
 		}
-	}
+	})
 }
 
 /* Member sidebar */

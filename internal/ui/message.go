@@ -188,6 +188,10 @@ func (w *MessageWidget) CreateRenderer() fyne.WidgetRenderer {
 // Message returns the message this widget renders.
 func (w *MessageWidget) Message() *domain.Message { return w.message }
 
+// Editing reports whether the body has been swapped for an editor. The list
+// keeps such a row mounted wherever it scrolls: the draft lives in the widget.
+func (w *MessageWidget) Editing() bool { return w.editing }
+
 // Author is the user this row names — the message's author, or for a system event
 // whoever it is about, that being what a lazy fetch has to bring back. An event
 // about a *message* names nobody and answers "": its target is a message ID, and

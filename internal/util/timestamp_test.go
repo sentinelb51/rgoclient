@@ -69,11 +69,13 @@ func TestShortDuration(t *testing.T) {
 	}
 }
 
-// TestRelativeTime covers the boundaries, which is where a coarsening span reads
+// TestRelativeSpan covers the boundaries, which is where a coarsening span reads
 // wrongly: the unit has to change before its count would, and it has to answer
 // forwards as well as back — a timestamp in a body is as often a deadline as a
-// record.
-func TestRelativeTime(t *testing.T) {
+// record. It asks about a distance rather than about now plus one: the clock
+// moves between the two calls, and truncation turns that sliver into a lost
+// unit on any platform whose clock is finer than the gap.
+func TestRelativeSpan(t *testing.T) {
 	cases := []struct {
 		name string
 		d    time.Duration
@@ -92,9 +94,15 @@ func TestRelativeTime(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		if got := RelativeTime(time.Now().Add(c.d)); got != c.want {
-			t.Errorf("RelativeTime(now%+v) = %q, want %q [%s]", c.d, got, c.want, c.name)
+		if got := relativeSpan(c.d); got != c.want {
+			t.Errorf("relativeSpan(%v) = %q, want %q [%s]", c.d, got, c.want, c.name)
 		}
+	}
+
+	// Off a boundary, so the clock is free to move: that RelativeTime signs the
+	// distance the right way round is the half the table cannot see.
+	if got, want := RelativeTime(time.Now().Add(-90*time.Minute)), "1 hour ago"; got != want {
+		t.Errorf("RelativeTime(90m ago) = %q, want %q", got, want)
 	}
 }
 

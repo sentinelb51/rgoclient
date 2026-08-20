@@ -146,6 +146,8 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 func (a *App) refreshChannelList() {
 	a.releaseChannelRows()
 
+	animate := config.Current().Behaviour.TypingAnimation
+
 	// Written once at the end rather than through Container.Add, which refreshes
 	// the whole column per child.
 	var rows []fyne.CanvasObject
@@ -165,7 +167,7 @@ func (a *App) refreshChannelList() {
 		// nothing at all.
 		group := []fyne.CanvasObject{a.friendsRow}
 		saved := a.savedNotesID()
-		if w := a.newChannelRow(saved); w != nil {
+		if w := a.newChannelRow(saved, animate); w != nil {
 			group = append(group, w)
 		}
 		a.setChannelGroup(group)
@@ -174,7 +176,7 @@ func (a *App) refreshChannelList() {
 			if channelID == saved {
 				continue
 			}
-			if w := a.newChannelRow(channelID); w != nil {
+			if w := a.newChannelRow(channelID, animate); w != nil {
 				rows = append(rows, w)
 			}
 		}
@@ -209,7 +211,7 @@ func (a *App) refreshChannelList() {
 		if categorized[channelID] {
 			continue
 		}
-		if w := a.newChannelRow(channelID); w != nil {
+		if w := a.newChannelRow(channelID, animate); w != nil {
 			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 			rows = append(rows, w)
 		}
@@ -224,7 +226,7 @@ func (a *App) refreshChannelList() {
 
 		var under []fyne.CanvasObject
 		for _, channelID := range category.Channels {
-			if w := a.newChannelRow(channelID); w != nil {
+			if w := a.newChannelRow(channelID, animate); w != nil {
 				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 				under = append(under, w)
 			}
@@ -247,14 +249,17 @@ func (a *App) refreshChannelList() {
 // not know the channel or the account cannot see it. Hidden this way is hidden
 // everywhere at once: this walk also feeds the composer its #mention candidates,
 // so one that never becomes a row is never a candidate either.
-func (a *App) newChannelRow(channelID string) *ui.ChannelWidget {
+//
+// animate is passed rather than read, as applyChannelState's is and for the same
+// reason: one rebuild reads the setting once for every row it makes.
+func (a *App) newChannelRow(channelID string, animate bool) *ui.ChannelWidget {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canViewChannel(channel) {
 		return nil
 	}
 
 	w := ui.NewChannelWidget(a.deps(), channel, func() { a.selectChannel(channelID) })
-	a.applyChannelState(w, config.Current().Behaviour.TypingAnimation)
+	a.applyChannelState(w, animate)
 	w.Menu = func() []*fyne.MenuItem { return a.channelMenu(channelID) }
 
 	return w

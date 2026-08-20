@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -102,8 +103,8 @@ func newText(text string, fill color.Color, size float32) *canvas.Text {
 // both. Empty where there is nothing to stand for.
 func newInitial(name string) *canvas.Text {
 	letter := ""
-	if name != "" {
-		letter = strings.ToUpper(string([]rune(name)[0]))
+	if _, size := utf8.DecodeRuneInString(name); size > 0 {
+		letter = strings.ToUpper(name[:size])
 	}
 
 	initial := newBoldText(letter, theme.Colors.TextPrimary, 0)
@@ -1169,18 +1170,19 @@ func (r *scrollRenderer) Destroy() {
 	r.WidgetRenderer.Destroy()
 }
 
-// SyncContent resizes the content to what it now measures. Fyne does this from
-// its renderer's Layout, which runs on a Refresh — and refreshing a mounted
-// message column re-wraps every body, which is why nothing here refreshes after a
-// mount. Without it ScrollToOffset clamps against the pre-mount size, so a column
-// grown to a page of history scrolls as though it still fitted the viewport. Only
-// a caller that mounts and scrolls in one pass needs it.
+// SyncContent resizes the content to what it now measures and re-places it at
+// the offset, through the renderer alone. Scroll.Refresh does the same and then
+// refreshes the content — which for a message column re-wraps every mounted body
+// — and ScrollToOffset does nothing at all for an offset already written. A
+// caller that has changed the content's height, or written Offset directly,
+// calls this.
 func (s *ObservableScroll) SyncContent() {
 	if s.Content == nil {
 		return
 	}
 
 	s.Content.Resize(s.Content.MinSize().Max(s.Size()))
+	s.Base.Refresh()
 }
 
 // placeIndicator sizes the bar to the fraction of content in view and moves it to

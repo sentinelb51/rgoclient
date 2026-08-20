@@ -38,15 +38,8 @@ const (
 // afterwards, so the panel goes up saying it is loading rather than the click
 // doing nothing until the request lands.
 func (a *App) showPinnedMessages() {
-	channelID := a.currentChannelID
-	if channelID == "" {
-		return
-	}
-
-	// The search is refused without this, and a panel that could only report that
-	// refusal is worse than the notice saying it before anything opens.
-	if !a.store.Permissions(channelID).Has(domain.PermissionReadMessageHistory) {
-		a.notify(ui.ToneWarning, "You can't read this channel's history.")
+	channelID, ok := a.searchableChannel()
+	if !ok {
 		return
 	}
 
@@ -58,6 +51,25 @@ func (a *App) showPinnedMessages() {
 	a.pinned = nil
 
 	a.loadPinned(channelID)
+}
+
+// searchableChannel is the open channel, or false when there is none or the
+// account may not read its history. Both panels are one search of that history,
+// so both open on this: the request would be refused, and a panel that could only
+// report the refusal is worse than a notice saying it before anything opens. Call
+// on the UI thread.
+func (a *App) searchableChannel() (string, bool) {
+	channelID := a.currentChannelID
+	if channelID == "" {
+		return "", false
+	}
+	if !a.store.Permissions(channelID).Has(domain.PermissionReadMessageHistory) {
+		a.notify(ui.ToneWarning, "You can't read this channel's history.")
+
+		return "", false
+	}
+
+	return channelID, true
 }
 
 // closePins forgets the panel. Only closeOverlay calls it — the layer holds one

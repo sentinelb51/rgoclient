@@ -37,7 +37,7 @@ func TestWindowMinimumIgnoresContent(t *testing.T) {
 		{"a message wider than the column", func() {
 			message := &domain.Message{ID: "01TESTMESSAGE00000000000M1", ChannelID: "01CH", AuthorID: "01AUTHOR"}
 			message.Attachments = []*domain.File{{ID: "01F", Name: long + ".txt", Kind: domain.FileText, Size: 4096}}
-			a.messageList.Add(ui.NewMessageWidget(a.deps(), message, "", false, false))
+			a.messages.SetMessages([]*domain.Message{message})
 		}},
 		{"a stack of notices", func() {
 			for range 5 {

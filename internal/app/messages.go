@@ -19,7 +19,6 @@ import (
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
-	"RGOClient/internal/util"
 )
 
 const (
@@ -29,8 +28,9 @@ const (
 	remountThreshold  = 200 // px from the bottom before trimmed newer rows re-mount
 
 	// settleDelay is how long after mounting a channel's tail the scroll to the
-	// bottom is re-issued. A row's height is only final once it has been laid out,
-	// so the first scroll lands short by whatever the column grew by.
+	// bottom is re-issued. The column keeps its bottom as rows are measured, but
+	// nothing is measured until the window has given it a width, which on a first
+	// layout is a frame away.
 	settleDelay = 120 * time.Millisecond
 
 	// editMarkTick is how often a mounted message's "edited N ago" span is
@@ -53,25 +53,19 @@ const (
 // cache, per scroll-up.
 func historyPageSize() int { return config.Current().Behaviour.HistoryPageSize }
 
-// initialMountCount is how many messages a channel switch mounts. Far fewer than
-// the cache holds: only ~20 fit on screen, scrollback re-mounts the rest from
-// cache instantly, and every mounted widget is real work — rapid channel
-// switching churns widgets the renderer cache then holds for up to a minute, so
-// this directly bounds how fast memory can ratchet up.
+// initialMountCount is how many messages a channel switch puts in the window.
+// The column builds widgets only for what is on screen, so this bounds what is
+// indexed rather than the work of a switch; scrollback takes the rest from cache.
 func initialMountCount() int { return config.Current().Behaviour.InitialMountCount }
 
-// mountedCap is the ceiling on mounted widgets during scrollback: prepends past
-// it trim widgets off the bottom and vice versa, so scrolling through any amount
-// of history keeps a constant number mounted.
+// mountedCap is the ceiling on the window during scrollback: prepends past it
+// trim rows off the bottom and vice versa, so scrolling through any amount of
+// history keeps a constant number held.
 func mountedCap() int { return config.Current().Behaviour.MountedCap }
 
 // renderedCap is the same ceiling for live appends, one page lower so a channel
 // that is being talked in does not sit permanently at the trim threshold.
 func renderedCap() int { return max(mountedCap()-historyPageSize(), 1) }
-
-// messageGroupWindow is the largest gap a message may follow the previous one by
-// and still group under it.
-func messageGroupWindow() time.Duration { return config.Current().Behaviour.GroupWindow() }
 
 /* The message area */
 
@@ -158,14 +152,17 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.jumpBar.OnResize = a.resizeDock
 	a.composerDock = ui.VBoxNoSpacing(badgeRow, a.jumpBar, card)
 
-	a.messageScroll = ui.NewObservableVScroll(ui.NewDockReserve(a.messageList, a.composerDock))
-	a.messageScroll.OnScroll = func(pos fyne.Position) {
+	// The column is virtualised — see ui.MessageList: the window is data, and only
+	// what is on screen has a widget. OnMount is where a row's lazy lookups go.
+	a.messages = ui.NewMessageList(a.deps(), a.composerDock)
+	a.messages.OnMount = a.onMessageMounted
+	a.messages.OnScroll = func() {
 		a.syncJumpBar()
-		if pos.Y <= 0 {
+		if a.messages.AtTop() {
 			a.loadMoreHistory()
 			return
 		}
-		if a.contentHeight()-a.messageScroll.Size().Height-pos.Y <= remountThreshold {
+		if a.messages.FromBottom() <= remountThreshold {
 			a.mountNewerFromCache()
 		}
 	}
@@ -204,7 +201,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		a.channelNote.Hide()
 	}
 
-	a.floatingDock = ui.NewFloatingDock(a.messageScroll, a.composerDock)
+	a.floatingDock = ui.NewFloatingDock(a.messages, a.composerDock)
 	a.messageColumn = ui.NewFillColumn(2, header, a.channelNote, a.floatingDock)
 
 	floor := fyne.NewSize(theme.Sizes.MessageAreaMinWidth, theme.Sizes.MessageAreaMinHeight)
@@ -215,11 +212,11 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 // disappeared. Fyne re-lays out for a growing minimum but leaves a shrinking one
 // reserved, and the stack stands on its own height twice over: the card is placed
 // from the bottom up, and ui.DockReserve is what it costs the message column. The
-// scroll is refreshed because that room is part of the height it scrolls through.
+// column re-reads that room, it being part of the height it scrolls through.
 // Call on the UI thread.
 func (a *App) resizeDock() {
 	ui.Relayout(a.floatingDock)
-	a.messageScroll.Refresh()
+	a.messages.Relayout()
 }
 
 /* Composing */
@@ -451,35 +448,34 @@ func toReplies(pending []ui.Reply) []domain.Reply {
 	return replies
 }
 
-/* Widget construction */
+/* Mounting a row */
 
-// newMessageWidget builds a message widget, drawing curr as a grouped
-// continuation of prev when they belong together, tightening its bottom margin
-// when next continues it, and heading it with a day separator on a new day.
-//
-// Every mount path funnels through here, so this is also where an unresolved
-// author is chased down — ensureAuthor is a no-op once State knows the user, so
-// it costs two map lookups per widget in the common case.
+// onMessageMounted runs as the column builds a row's widget — every time, a row
+// scrolled out of the overscan being rebuilt on its way back. It is where an
+// unresolved author is chased down: ensureAuthor is a no-op once State knows the
+// user, so it costs two map lookups per row in the common case.
 //
 // A system event names whoever it is about rather than an author, so it is the
 // *target* that gets chased, and ui.MessageWidget.Author answers with it — which
 // lets one refresh pass cover both. Only where the target is somebody: see
-// domain.SystemMessage.TargetsUser.
-func (a *App) newMessageWidget(prev, curr, next *domain.Message) *ui.MessageWidget {
+// domain.SystemMessage.TargetsUser. A grouped continuation draws no quotes, so
+// nothing is queued for one; an edited row needs the clock that rewrites its mark.
+func (a *App) onMessageMounted(message *domain.Message, grouped bool) {
 	switch {
-	case curr.System != nil:
-		if curr.System.TargetsUser() {
-			a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.System.Target)
+	case message.System != nil:
+		if message.System.TargetsUser() {
+			a.ensureAuthor(a.channelServerID(message.ChannelID), message.System.Target)
 		}
-	case curr.Webhook == nil:
-		a.ensureAuthor(a.channelServerID(curr.ChannelID), curr.AuthorID)
-	}
-	if !continuesGroup(prev, curr) {
-		a.ensureReplies(curr)
+	case message.Webhook == nil:
+		a.ensureAuthor(a.channelServerID(message.ChannelID), message.AuthorID)
 	}
 
-	return ui.NewMessageWidget(a.deps(), curr, dayLabel(prev, curr),
-		continuesGroup(prev, curr), continuesGroup(curr, next))
+	if !grouped {
+		a.ensureReplies(message)
+	}
+	if message.Edited != nil {
+		a.armEditMarks()
+	}
 }
 
 /* Lazy reply resolution */
@@ -556,68 +552,11 @@ func (a *App) flushReplies() {
 				}
 			}
 
-			for _, obj := range a.messageList.Objects {
-				if w, ok := obj.(*ui.MessageWidget); ok {
-					w.RefreshReplies(resolved)
-				}
+			if a.messages != nil {
+				a.messages.EachMounted(func(w *ui.MessageWidget) { w.RefreshReplies(resolved) })
 			}
 		}, false)
 	}()
-}
-
-// dayLabel returns the day separator label for curr — "" when it belongs to the
-// same calendar day as the message above it. A message with no predecessor is
-// treated as opening its day, so loaded history always starts with a date;
-// prepending older messages rebuilds that row, dropping the label if the day
-// continues.
-func dayLabel(prev, curr *domain.Message) string {
-	ct, err := util.Timestamp(curr.ID)
-	if err != nil {
-		return ""
-	}
-
-	if prev != nil {
-		if pt, err := util.Timestamp(prev.ID); err == nil && util.SameDay(pt, ct) {
-			return ""
-		}
-	}
-
-	return util.DayLabel(ct)
-}
-
-// continuesGroup reports whether curr should render as a continuation of prev:
-// same author, neither system, webhook nor masqueraded, same calendar day, and
-// within messageGroupWindow. A reply starts a fresh group, and so does a message
-// across a day separator — a pair minutes apart over midnight must not render as
-// one headerless block.
-//
-// A pinned message starts one too: its mark rides the name line, the one thing a
-// continuation does not draw, so grouping it would be the way to pin a message
-// and see nothing happen.
-func continuesGroup(prev, curr *domain.Message) bool {
-	if !config.Current().Interface.GroupMessages {
-		return false
-	}
-	if prev == nil || curr == nil || curr.AuthorID == "" || prev.AuthorID != curr.AuthorID {
-		return false
-	}
-	if curr.System != nil || prev.System != nil ||
-		curr.Webhook != nil || prev.Webhook != nil ||
-		curr.Masquerade || prev.Masquerade {
-		return false
-	}
-	if len(curr.Replies) > 0 || curr.Pinned {
-		return false
-	}
-
-	pt, errPrev := util.Timestamp(prev.ID)
-	ct, errCurr := util.Timestamp(curr.ID)
-	if errPrev != nil || errCurr != nil || !util.SameDay(pt, ct) {
-		return false
-	}
-
-	gap := ct.Sub(pt)
-	return gap >= 0 && gap <= messageGroupWindow()
 }
 
 // channelKind is the open channel's type, or the zero value — which draws the
@@ -723,8 +662,7 @@ func (a *App) displayMessages(messages []*domain.Message) {
 		messages = messages[len(messages)-mount:]
 	}
 
-	a.messageList.Objects = a.buildRun(messages, nil, nil)
-	a.remountMessages()
+	a.messages.SetMessages(messages)
 	a.settleAtBottom()
 }
 
@@ -752,49 +690,6 @@ func (a *App) settleAtBottom() {
 	})
 }
 
-// buildRun builds the widgets for a contiguous run of messages, oldest first,
-// each seeing its true neighbours. before and after are what the column already
-// holds either side of the run, so the seams group correctly; nil makes an end
-// render as one nothing joins.
-func (a *App) buildRun(messages []*domain.Message, before, after *domain.Message) []fyne.CanvasObject {
-	widgets := make([]fyne.CanvasObject, len(messages))
-	for i, message := range messages {
-		prev, next := before, after
-		if i > 0 {
-			prev = messages[i-1]
-		}
-		if i+1 < len(messages) {
-			next = messages[i+1]
-		}
-		widgets[i] = a.newMessageWidget(prev, message, next)
-	}
-
-	return widgets
-}
-
-// setFollowedByGroup tightens or releases the bottom margin of the widget at i.
-// That margin belongs to the message above a seam rather than below it, so every
-// re-grouping touches the predecessor through here.
-func (a *App) setFollowedByGroup(i int, grouped bool) {
-	if i < 0 || i >= len(a.messageList.Objects) {
-		return
-	}
-
-	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
-		w.SetFollowedByGroup(grouped)
-	}
-}
-
-// rebuildAt replaces the widget at i with one built from message, and re-derives
-// the grouping of the row above. The row below needs nothing — what decides its
-// grouping is read off itself. Call on the UI thread.
-func (a *App) rebuildAt(i int, message *domain.Message) {
-	prev := a.mountedMessage(i - 1)
-	a.messageList.Objects[i] = a.newMessageWidget(prev, message, a.mountedMessage(i+1))
-
-	a.setFollowedByGroup(i-1, continuesGroup(prev, message))
-}
-
 // logPageError reports a page request's failure, ignoring the one that only says
 // a request for the same channel was already out.
 func logPageError(what string, err error) {
@@ -813,25 +708,8 @@ func (a *App) showStatus(text string) { a.showStatusMark(nil, text) }
 func (a *App) showStatusMark(mark fyne.Resource, text string) {
 	a.cancelActiveEdit()
 	a.setJumped(false)
-	line := ui.NewMessageStatus(mark, text)
-
-	// Centred on what can be seen, so the room held for the dock doesn't push the
-	// line low and leave the column scrollable by exactly that much.
-	height := float32(400)
-	if a.messageScroll != nil {
-		if h := a.messageScroll.Size().Height - ui.DockReserve(a.composerDock) - 5; h > 100 {
-			height = h
-		}
-	}
-
-	a.messageList.Objects = []fyne.CanvasObject{ui.NewMinHeightContainer(height, line)}
-	a.messageList.Refresh()
-
-	// The inner list refresh alone doesn't repaint the scroll viewport until an
-	// event forces relayout, so the status would only appear after a scroll.
-	if a.messageScroll != nil {
-		a.messageScroll.ScrollToTop()
-		a.messageScroll.Refresh()
+	if a.messages != nil {
+		a.messages.ShowStatus(ui.NewMessageStatus(mark, text))
 	}
 	a.syncJumpBar()
 }
@@ -843,16 +721,17 @@ func (a *App) clearMessages() {
 	a.cancelActiveEdit()
 	a.setJumped(false)
 	a.tooltip.Hide()
-	a.messageList.Objects = nil
-	a.messageList.Refresh()
-	a.scrollToBottom()
+	if a.messages != nil {
+		a.messages.Clear()
+	}
+	a.syncJumpBar()
 }
 
 // jumpToLatest brings the view back to the newest message: a plain scroll when
 // the live tail is mounted, a re-render when scrollback has trimmed it away.
 func (a *App) jumpToLatest() {
 	cached := a.client.Messages().Get(a.currentChannelID)
-	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	bottom := a.messages.Message(a.messages.Len() - 1)
 
 	if len(cached) == 0 || (bottom != nil && bottom.ID == cached[len(cached)-1].ID) {
 		a.scrollToBottom()
@@ -865,8 +744,8 @@ func (a *App) jumpToLatest() {
 /* Jumping to a message */
 
 // OnJumpToMessage brings a quoted message into view. Three answers, cheapest
-// first: it may already be mounted, it may be in the channel's cached tail, and
-// otherwise it is somewhere further back and the page around it is a request.
+// first: it may already be in the window, it may be in the channel's cached tail,
+// and otherwise it is somewhere further back and the page around it is a request.
 //
 // Only the open channel is ever asked about. A reply names a message in the
 // channel it was written in, so the two are the same by construction — and a
@@ -876,22 +755,26 @@ func (a *App) OnJumpToMessage(channelID, messageID string) {
 	if channelID != a.currentChannelID || messageID == "" {
 		return
 	}
-	if a.scrollToMounted(messageID) || a.jumpWithinCache(messageID) {
+	if a.revealMessage(messageID) || a.jumpWithinCache(messageID) {
 		return
 	}
 
 	a.loadJumpWindow(channelID, messageID)
 }
 
-// scrollToMounted reveals a message that already has a widget, reporting whether
-// it had one. Call on the UI thread.
-func (a *App) scrollToMounted(messageID string) bool {
-	i := a.messageWidgetIndex(messageID)
-	if i == -1 {
+// revealMessage centres a message the window already holds and flashes it,
+// reporting whether it was there. Call on the UI thread.
+func (a *App) revealMessage(messageID string) bool {
+	if !a.messages.Reveal(messageID) {
 		return false
 	}
 
-	a.revealMounted(i)
+	// The row is on screen now, so it has a widget to wash. Hovering stops it, the
+	// pointer arriving being the reader having found the row.
+	if w := a.messages.Mounted(messageID); w != nil {
+		w.Flash()
+	}
+
 	return true
 }
 
@@ -968,41 +851,8 @@ func (a *App) mountJumpWindow(messages []*domain.Message, targetID string) {
 	// it.
 	a.setJumped(true)
 
-	a.messageList.Objects = a.buildRun(messages, nil, nil)
-	a.remountMessages()
-
-	// The column has grown under a scroller that has not been laid out since, and
-	// an offset is clamped against the size the content was last given.
-	a.messageScroll.SyncContent()
-	a.revealMounted(a.messageWidgetIndex(targetID))
-}
-
-// revealMounted scrolls the widget at i to the middle of the viewport and
-// flashes it. The offset is a walk of what is above it — affordable here because
-// it is once per jump, where the same measurement on the scroll path would be
-// once per frame.
-func (a *App) revealMounted(i int) {
-	objects := a.messageList.Objects
-	if i < 0 || i >= len(objects) || a.messageScroll == nil {
-		return
-	}
-
-	var top float32
-	for _, obj := range objects[:i] {
-		top += obj.MinSize().Height
-	}
-
-	// Centred rather than pinned to the top: a message is read with what was said
-	// around it, and what was said before it is half of that. The room held for
-	// the composer dock is not viewport, so it does not count towards the middle.
-	view := a.messageScroll.Size().Height - ui.DockReserve(a.composerDock)
-	top -= max(view-objects[i].MinSize().Height, 0) / 2
-
-	a.messageScroll.ScrollToOffset(fyne.NewPos(0, max(top, 0)))
-
-	if w, ok := objects[i].(*ui.MessageWidget); ok {
-		w.Flash()
-	}
+	a.messages.SetMessages(messages)
+	a.revealMessage(targetID)
 }
 
 // returnToPresent leaves a jump window for the live tail. The cache is where it
@@ -1045,11 +895,11 @@ func (a *App) viewingOlder() bool {
 	if a.jumped {
 		return true
 	}
-	if a.messageScroll == nil {
+	if a.messages == nil {
 		return false
 	}
 
-	return a.contentHeight()-a.messageScroll.Size().Height-a.messageScroll.Offset.Y > atBottomTolerance
+	return a.messages.FromBottom() > atBottomTolerance
 }
 
 // syncJumpBar matches the bar over the composer to that answer. Every path that
@@ -1102,10 +952,10 @@ func (a *App) holdUncached(messages []*domain.Message) {
 	}
 }
 
-// removeMessages unmounts deleted messages in one pass, re-evaluating grouping at
-// every seam a removal leaves behind — a continuation whose group head was
-// deleted regains its header. A moderation sweep deletes a whole run at once, and
-// doing that one ID at a time would rescan the mounted list and relayout the
+// removeMessages takes deleted messages out of the window in one pass. The
+// column re-derives the grouping at every seam a removal leaves, so a
+// continuation whose group head was deleted regains its header. A moderation
+// sweep deletes a whole run at once, and one ID at a time would relayout the
 // column once per message. Call on the UI thread.
 func (a *App) removeMessages(channelID string, messageIDs []string) {
 	if channelID != a.currentChannelID || len(messageIDs) == 0 {
@@ -1117,54 +967,10 @@ func (a *App) removeMessages(channelID string, messageIDs []string) {
 		doomed[id] = true
 	}
 
-	// seams records, in the surviving list, where each removal happened: the row
-	// that moves up into that slot has a new predecessor above it.
-	objects := a.messageList.Objects
-	kept, seams := objects[:0], []int(nil)
-	for _, obj := range objects {
-		w, ok := obj.(*ui.MessageWidget)
-		if !ok || !doomed[w.Message().ID] {
-			kept = append(kept, obj)
-			continue
-		}
-
-		if a.editing != nil && a.editing.Message().ID == w.Message().ID {
-			a.editing = nil // the editor unmounts with its widget
-		}
-		seams = append(seams, len(kept))
+	if a.editing != nil && doomed[a.editing.Message().ID] {
+		a.editing = nil // the editor goes with its row
 	}
-	if len(seams) == 0 {
-		return
-	}
-
-	clear(objects[len(kept):]) // the unmounted widgets still sit in the shared array
-	a.messageList.Objects = kept
-
-	a.rebuildSeams(seams)
-	a.remountMessages()
-}
-
-// rebuildSeams re-derives the grouping either side of each index a removal left
-// behind: the row that moved up sees a new message above it, and the row above it
-// a new one below. Indices are into the surviving list, ascending, and repeat
-// where a run was deleted — each is applied once.
-func (a *App) rebuildSeams(seams []int) {
-	last := -1
-	for _, i := range seams {
-		if i == last {
-			continue
-		}
-		last = i
-
-		if moved := a.mountedMessage(i); moved != nil {
-			a.rebuildAt(i, moved)
-			continue
-		}
-
-		// The run reached the end of the list, so nothing moved up into the seam and
-		// the row above it simply stops continuing.
-		a.setFollowedByGroup(i-1, false)
-	}
+	a.messages.Remove(doomed)
 }
 
 // refreshMessage rebuilds an updated message's widget in place from its cache
@@ -1179,7 +985,7 @@ func (a *App) refreshMessage(channelID, messageID string) {
 		return
 	}
 
-	i := a.messageWidgetIndex(messageID)
+	i := a.messages.Index(messageID)
 	if i == -1 {
 		return
 	}
@@ -1189,16 +995,15 @@ func (a *App) refreshMessage(channelID, messageID string) {
 		return
 	}
 
-	// Read off the widget's own copy before it is replaced: an update is delivered
+	// Read off the window's own copy before it is replaced: an update is delivered
 	// as "this message changed", and only the stamp says which of the things that
 	// can change did. A reaction or an unfurled embed must not flash the row.
-	edited := newlyEdited(a.mountedMessage(i), message)
+	edited := newlyEdited(a.messages.Message(i), message)
 
-	a.rebuildAt(i, message)
-	a.remountMessages()
+	a.messages.Replace(message)
 
-	if edited && a.messageInView(i) {
-		if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+	if edited && a.messages.InView(messageID) {
+		if w := a.messages.Mounted(messageID); w != nil {
 			w.FlashEdit()
 		}
 	}
@@ -1213,28 +1018,6 @@ func newlyEdited(previous, next *domain.Message) bool {
 	}
 
 	return previous.Edited == nil || !previous.Edited.Equal(*next.Edited)
-}
-
-// messageInView reports whether the widget at i overlaps the part of the viewport
-// the reader can actually see. The offset is a walk of what is above it, as
-// revealMounted's is — affordable for the same reason, this being once per edit
-// rather than once per frame. Call on the UI thread.
-func (a *App) messageInView(i int) bool {
-	objects := a.messageList.Objects
-	if i < 0 || i >= len(objects) || a.messageScroll == nil {
-		return false
-	}
-
-	var top float32
-	for _, obj := range objects[:i] {
-		top += obj.MinSize().Height
-	}
-	bottom := top + objects[i].MinSize().Height
-
-	// The composer dock floats over the bottom of the scroller, so what it covers
-	// is not seen however much of the viewport it stands in.
-	view := a.messageScroll.Offset.Y
-	return bottom > view && top < view+a.messageScroll.Size().Height-ui.DockReserve(a.composerDock)
 }
 
 // editLastOwnMessage opens the in-place editor on the user's newest editable
@@ -1256,43 +1039,19 @@ func (a *App) editLastOwnMessage() {
 	}
 }
 
-/* The mounted window */
+/* The window */
 
-// Which slice of a channel's cached messages currently has live widgets, and how
-// that window slides as the user scrolls. displayMessages opens it at the live
-// tail; everything below moves it.
+// Which slice of a channel's cached messages the column holds, and how that
+// window slides as the user scrolls. displayMessages opens it at the live tail;
+// everything below moves it. Holding is not drawing: ui.MessageList builds
+// widgets only for the rows on screen, so the cap bounds what is indexed, and a
+// dirty frame costs the viewport whatever the cap is.
 //
 // Invariants:
-//   - Widgets are mounted oldest-first, matching the cache's own order.
-//   - The window never exceeds mountedCap widgets, in either scroll direction.
+//   - The window is oldest-first, matching the cache's own order.
+//   - The window never exceeds mountedCap messages, in either scroll direction.
 //   - Scrolling down never needs the network: trimming only ever drops a
 //     channel's oldest messages, so everything below the window is still cached.
-
-// mountedMessage returns the message rendered by the widget at index i, or nil
-// when i is out of range or not a message widget (the list also holds status
-// lines).
-func (a *App) mountedMessage(i int) *domain.Message {
-	if i < 0 || i >= len(a.messageList.Objects) {
-		return nil
-	}
-	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
-		return w.Message()
-	}
-
-	return nil
-}
-
-// messageWidgetIndex returns the index of the mounted widget rendering messageID,
-// or -1.
-func (a *App) messageWidgetIndex(messageID string) int {
-	for i, obj := range a.messageList.Objects {
-		if w, ok := obj.(*ui.MessageWidget); ok && w.Message().ID == messageID {
-			return i
-		}
-	}
-
-	return -1
-}
 
 // appendMessage adds a freshly received message, trimming the oldest widget when
 // over the render cap and keeping the scroll position stable. prev is the
@@ -1302,44 +1061,28 @@ func (a *App) appendMessage(message, prev *domain.Message) {
 		return
 	}
 
-	// A status line may be showing; the first real message replaces it.
-	if len(a.messageList.Objects) == 1 && a.mountedMessage(0) == nil {
-		a.messageList.Objects = nil
-	}
-
-	// When scrollback has trimmed the newest widgets the view is detached from the
-	// live tail: don't mount, since the predecessor isn't on screen and the row
-	// would render against the wrong neighbour. The message is cached and mounts
-	// via mountNewerFromCache on the way back down.
-	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	// When scrollback has trimmed the newest rows the view is detached from the
+	// live tail: don't mount, since the predecessor isn't in the window and the
+	// row would render against the wrong neighbour. The message is cached and
+	// mounts via mountNewerFromCache on the way back down. A status line may be
+	// showing instead, which the first real message replaces.
+	bottom := a.messages.Message(a.messages.Len() - 1)
 	if bottom != nil && prev != nil && bottom.ID != prev.ID {
 		return
 	}
 
-	contentHeight := a.contentHeight()
-	viewHeight := a.messageScroll.Size().Height
-	atBottom := contentHeight-viewHeight-a.messageScroll.Offset.Y < atBottomTolerance
+	atBottom := a.messages.AtBottom(atBottomTolerance)
 
-	// When this message continues the one above it, tighten that message's bottom
-	// margin so the group reads as a block.
-	if continuesGroup(prev, message) {
-		a.tightenBottomWidget()
-	}
-	// Appended rather than added: Container.Add refreshes the whole column, and
-	// remountMessages below is what actually lays the new row out.
-	a.messageList.Objects = append(a.messageList.Objects, a.newMessageWidget(prev, message, nil))
-
-	if over := len(a.messageList.Objects) - renderedCap(); over > 0 {
-		a.trimMountedTop(over, atBottom)
+	a.messages.Append([]*domain.Message{message})
+	if over := a.messages.Len() - renderedCap(); over > 0 {
+		a.messages.TrimTop(over)
 	}
 
-	a.remountMessages()
 	if atBottom {
 		a.scrollToBottom()
 		return
 	}
 
-	a.messageScroll.Refresh()
 	a.syncJumpBar() // the column grew under a reader who is not at the bottom of it
 }
 
@@ -1363,7 +1106,7 @@ func (a *App) loadMoreHistory() {
 		return
 	}
 
-	top := a.mountedMessage(0)
+	top := a.messages.Message(0)
 	if top == nil {
 		return
 	}
@@ -1394,7 +1137,7 @@ func (a *App) loadMoreHistory() {
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID == channelID && a.mountedMessage(0) == top {
+			if a.currentChannelID == channelID && a.messages.Message(0) == top {
 				a.prependMessages(older)
 			}
 		}, true)
@@ -1421,7 +1164,7 @@ func (a *App) loadOlderPage(channelID string, top *domain.Message) {
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID != channelID || a.mountedMessage(0) != top {
+			if a.currentChannelID != channelID || a.messages.Message(0) != top {
 				return
 			}
 			if len(older) == 0 {
@@ -1442,30 +1185,7 @@ func (a *App) prependMessages(older []*domain.Message) {
 		return
 	}
 
-	// The one place that genuinely needs the *minimum* rather than the laid-out
-	// height: the offset correction below is measured across the mutation, and the
-	// scroller has not re-laid the content out by then. It is two measurements per
-	// scrolled-to page, not per frame.
-	oldHeight := a.messageList.MinSize().Height
-
-	// The newest prepended message lands directly above the previously topmost
-	// message, so that existing row is the run's neighbour at the seam.
-	topMessage, topNext := a.mountedMessage(0), a.mountedMessage(1)
-	widgets := a.buildRun(older, nil, topMessage)
-
-	// That row now has a predecessor above it, so re-evaluate its grouping; its
-	// successor is unchanged.
-	if topMessage != nil {
-		a.messageList.Objects[0] = a.newMessageWidget(older[len(older)-1], topMessage, topNext)
-	}
-
-	a.messageList.Objects = append(widgets, a.messageList.Objects...)
-	a.remountMessages()
-
-	if diff := a.messageList.MinSize().Height - oldHeight; diff > 0 {
-		a.messageScroll.Offset.Y += diff
-		a.messageScroll.Refresh()
-	}
+	a.messages.Prepend(older)
 	a.trimMountedBottom()
 }
 
@@ -1480,7 +1200,7 @@ func (a *App) mountNewerFromCache() {
 		return
 	}
 
-	bottom := a.mountedMessage(len(a.messageList.Objects) - 1)
+	bottom := a.messages.Message(a.messages.Len() - 1)
 	if bottom == nil {
 		return
 	}
@@ -1498,7 +1218,7 @@ func (a *App) mountNewerFromCache() {
 		return
 	}
 
-	a.appendMessages(cached[i+1:min(i+1+historyPageSize(), len(cached))], bottom)
+	a.appendMessages(cached[i+1 : min(i+1+historyPageSize(), len(cached))])
 }
 
 // loadNewerPage extends a window that stands outside the cache downwards. It
@@ -1518,8 +1238,7 @@ func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
 		}
 
 		a.doOnUI(func() {
-			last := len(a.messageList.Objects) - 1
-			if a.currentChannelID != channelID || a.mountedMessage(last) != bottom {
+			if a.currentChannelID != channelID || a.messages.Message(a.messages.Len()-1) != bottom {
 				return
 			}
 			if len(newer) == 0 {
@@ -1531,112 +1250,56 @@ func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
 			// tail leaves the bottom row inside it, and the tier above serves every
 			// scroll after that.
 			a.holdUncached(newer)
-			a.appendMessages(newer, bottom)
+			a.appendMessages(newer)
 		}, true)
 	}()
 }
 
 // appendMessages mounts newer messages below the current view, preserving the
 // scroll position and trimming the top past mountedCap.
-func (a *App) appendMessages(page []*domain.Message, bottom *domain.Message) {
+func (a *App) appendMessages(page []*domain.Message) {
 	if len(page) == 0 {
 		return
 	}
 
-	// Tighten the old bottom widget's margin when the first new message continues
-	// its group.
-	if continuesGroup(bottom, page[0]) {
-		a.tightenBottomWidget()
-	}
-
-	// Appended in one go rather than through Container.Add, which refreshes the
-	// whole column per child.
-	a.messageList.Objects = append(a.messageList.Objects, a.buildRun(page, bottom, nil)...)
-
-	if over := len(a.messageList.Objects) - mountedCap(); over > 0 {
-		a.trimMountedTop(over, false)
-	}
-
-	a.remountMessages()
-	a.messageScroll.Refresh()
-}
-
-// trimMountedTop unmounts the oldest n widgets, keeping the scroll position
-// stable unless the view is pinned to the bottom anyway, where the caller's
-// scrollToBottom makes the adjustment moot.
-func (a *App) trimMountedTop(n int, atBottom bool) {
-	objects := a.messageList.Objects
-
-	var removed float32
-	if !atBottom {
-		for _, obj := range objects[:n] {
-			removed += obj.MinSize().Height
-		}
-	}
-
-	a.messageList.Objects = objects[n:]
-	clear(objects[:n]) // release the trimmed widgets; the retained slice shares this array
-
-	if !atBottom {
-		a.messageScroll.Offset.Y = max(a.messageScroll.Offset.Y-removed, 0)
+	a.messages.Append(page)
+	if over := a.messages.Len() - mountedCap(); over > 0 {
+		a.messages.TrimTop(over)
 	}
 }
 
-// trimMountedBottom unmounts widgets far below the viewport after a prepend; they
+// trimMountedBottom drops rows far below the viewport after a prepend; they
 // re-mount via mountNewerFromCache on the way back down. It stops when the
 // would-be bottom row is no longer cached: the cache window ends at the live tail,
 // so once scrollback runs past its cap the downward remount could not re-serve
 // trimmed rows, and the window is allowed to grow instead.
 func (a *App) trimMountedBottom() {
-	over := len(a.messageList.Objects) - mountedCap()
+	over := a.messages.Len() - mountedCap()
 	if over <= 0 {
 		return
 	}
 
-	objects := a.messageList.Objects
-	keep := len(objects) - over
-
-	newBottom := a.mountedMessage(keep - 1)
+	newBottom := a.messages.Message(a.messages.Len() - over - 1)
 	if newBottom == nil || a.client.Messages().Find(a.currentChannelID, newBottom.ID) == nil {
 		return
 	}
 
-	a.messageList.Objects = objects[:keep]
-	clear(objects[keep:])
-	a.remountMessages()
-}
-
-// tightenBottomWidget closes the gap under the bottom-most mounted message,
-// marking it as the head of a group that continues into the row about to be
-// appended.
-func (a *App) tightenBottomWidget() {
-	a.setFollowedByGroup(len(a.messageList.Objects)-1, true)
+	a.messages.TrimBottom(over)
 }
 
 // scrollToBottom scrolls the message view to the newest message.
 func (a *App) scrollToBottom() {
-	if a.messageScroll != nil {
-		a.messageScroll.ScrollToBottom()
+	if a.messages != nil {
+		a.messages.ScrollToBottom()
 	}
 	a.syncJumpBar()
-}
-
-// remountMessages repaints the column after the *set* of mounted widgets changed.
-//
-// Container.Refresh would refresh every child, and widget.RichText's Refresh
-// re-wraps its text — so announcing one arrival re-flowed every mounted body.
-// Only the container's geometry changed, which is what ui.Relayout does.
-func (a *App) remountMessages() {
-	ui.Relayout(a.messageList)
-	a.armEditMarks()
 }
 
 /* The edit marks' clock */
 
 // armEditMarks starts the clock rewriting the mounted rows' "edited N ago" spans
-// if it is not already running. Called from every path that changes the mounted
-// set, so a row carrying a mark can never be mounted without one. Call on the UI
-// thread.
+// if it is not already running. Called as a row carrying a mark is mounted, so
+// one can never be on screen without it. Call on the UI thread.
 func (a *App) armEditMarks() {
 	if a.editMarkTimer == nil {
 		a.refreshEditMarks()
@@ -1651,10 +1314,12 @@ func (a *App) refreshEditMarks() {
 	a.editMarkTimer = nil
 
 	var marked bool
-	for _, obj := range a.messageList.Objects {
-		if w, ok := obj.(*ui.MessageWidget); ok && w.RefreshEditMark() {
-			marked = true
-		}
+	if a.messages != nil {
+		a.messages.EachMounted(func(w *ui.MessageWidget) {
+			if w.RefreshEditMark() {
+				marked = true
+			}
+		})
 	}
 
 	if !marked {
@@ -1664,17 +1329,4 @@ func (a *App) refreshEditMarks() {
 	a.editMarkTimer = time.AfterFunc(editMarkTick, func() {
 		a.doOnUI(a.refreshEditMarks, false)
 	})
-}
-
-// contentHeight is the laid-out height of the mounted column. It reads the size
-// the scroller already gave the content rather than asking the list for its
-// minimum: fyne's BaseWidget.MinSize is not memoised, so MinSize here walks every
-// mounted widget's renderer — which on the scroll path means once per wheel tick
-// and once per pan frame.
-func (a *App) contentHeight() float32 {
-	if a.messageScroll == nil || a.messageScroll.Content == nil {
-		return 0
-	}
-
-	return a.messageScroll.Content.Size().Height
 }

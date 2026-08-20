@@ -56,14 +56,15 @@ naming and the test policy.
   composer float — the message column being *taller than the card* is. A column
   that stops above a card stops at a hard cut through whatever glyph the viewport
   landed on, and that cut is what reads as the top edge of a separate bar.
-  `ui.NewFloatingDock` hangs the card over a full-height `messageScroll` so the cut
-  lands behind it, a corner radius short of the card's bottom edge (the rounded
-  corners would otherwise expose it in the two notches). Nothing shows beside the
-  card because `MessageHorizontalPadding` is wider than `ComposerDockMargin` — that
-  ordering is load-bearing. `ui.NewDockReserve` wraps the scroll's *content* (so
-  `messageList.Objects` keeps 1:1 indexing) and reports `ui.DockReserve` of extra
-  height. It measures the card on demand, so a reply preview, attachment row or
-  mention picker growing the dock is accounted for without anything noticing.
+  `ui.NewFloatingDock` hangs the card over the full-height `MessageList` so the
+  cut lands behind it, a corner radius short of the card's bottom edge (the
+  rounded corners would otherwise expose it in the two notches). Nothing shows
+  beside the card because `MessageHorizontalPadding` is wider than
+  `ComposerDockMargin` — that ordering is load-bearing. `ui.NewDockReserve` wraps
+  the scroll's *content* — inside `MessageList`, around the rows — and reports
+  `ui.DockReserve` of extra height. It measures the card on demand, so a reply
+  preview, attachment row or mention picker growing the dock is accounted for
+  without anything noticing; `MessageList.Relayout` is what re-reads it.
 - **Sidebar widths.** The three side columns are pinned by
   `ui.NewFixedWidthContainer`, not by a minimum-size rectangle: a minimum is a
   *floor*, and `container.NewVScroll` reports its content's minimum width as its
@@ -153,20 +154,40 @@ naming and the test policy.
   stays one — its `Cursor` is conditional (a struck word is not a spoiler and must
   not read as clickable), which `tapBase`'s fixed pointer would flatten.
 - **Repainting the message column.** `Container.Refresh` refreshes every child and
-  `RichText.Refresh` re-wraps its text, so `messageList.Refresh()` re-flowed every
-  mounted body on every gateway message. Every mutation of the mounted window goes
-  through `App.remountMessages` (`ui.Relayout`: re-run this one layout, don't walk
-  the children). Use `Refresh` only when what a *mounted* widget says has changed.
-  For the same reason nothing on the scroll path may call `MinSize` on the list —
-  `BaseWidget.MinSize` is not memoised. A virtualised list's own layout must
-  therefore report its height from a **field**, never from a walk
-  (`memberListLayout.MinSize`): `container.Scroll` asks its content for a minimum
-  on every offset write. `Container.Add` is the same trap one child at a time — it
+  `RichText.Refresh` re-wraps its text, so refreshing the column re-flows every
+  mounted body — and `Scroll.Refresh` does exactly that to its content.
+  `MessageList` therefore never calls it: every mutation ends in `ui.Relayout` of
+  its own container (re-run this one layout, don't walk the children) and
+  `ObservableScroll.SyncContent`, which resizes the content and re-places it
+  through the scroll's renderer alone. Use `Refresh` only when what a *mounted*
+  widget says has changed. For the same reason nothing on the scroll path may call
+  `MinSize` on the list — `BaseWidget.MinSize` is not memoised. A virtualised
+  list's own layout must therefore report its height from a **field**, never from
+  a walk (`memberListLayout.MinSize`, `messageListLayout.MinSize`):
+  `container.Scroll` asks its content for a minimum on every offset write.
+  `Container.Add` is the same trap one child at a time — it
   refreshes the whole container per call — so a list is built into a slice and
   written to `Objects` once. Nothing in this repo fills a container in a loop.
   One level below all of that, `Canvas.dirty` is a single bool: **any** `Refresh`
   anywhere repaints the whole window, framebuffer clear included. There is no
   such thing as a cheap one — see `docs/performance.md`.
+- **The message column measures in its layout.** Rows are variable-height, so
+  `MessageList` places a row by an estimate until its widget has been laid out at
+  the column's width, and the only place that width is certain is
+  `messageListLayout.Layout`. It is also the one hook Fyne offers for a row that
+  grows after mounting — an editor opening, an invite card resolving: the driver's
+  `EnsureMinSize` re-runs a parent's layout when a child's minimum moves and
+  carries the container's new minimum up to the scroller in the same pass. So the
+  layout may write `Scroll.Offset` and must not call anything that refreshes the
+  scroller. A height moving wholly above the viewport shifts the offset with it,
+  and a column at its bottom (within half a pixel) is kept there; `Resize` keeps
+  the bottom too, `Scroll.Resize` zeroing an offset while the content is still
+  unsized, which is every first layout. A widget is dropped once its row leaves
+  the overscan and rebuilt on the way back — except the one being edited
+  (`MessageWidget.Editing`), which holds the draft. A row's `grouped`, `followed`
+  and `dayLabel` are derived from its neighbours in the model (`rederive`), so a
+  prepend, trim or delete re-decides only the rows at the seam, and a mounted row
+  whose header came or went is rebuilt rather than patched.
 - **A recycled widget must own nothing it captured.** `ui.MemberRow` is reused for
   a different person as the list scrolls, so every callback on it reads the field
   it needs at the moment it fires rather than closing over a value — a menu that

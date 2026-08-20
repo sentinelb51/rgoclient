@@ -151,8 +151,13 @@ const relativeNow = 45 * time.Second
 // says something: "5 minutes ago", "in 2 days". Unlike NiceTime it reads
 // forwards too — a timestamp in a body is as often a deadline as a record.
 func RelativeTime(t time.Time) string {
-	distance := time.Until(t)
+	return relativeSpan(time.Until(t))
+}
 
+// relativeSpan is that naming taken as a signed distance rather than read off
+// the clock — an exact boundary only survives being passed one, since between
+// building an instant and asking the clock about it a whole unit is lost.
+func relativeSpan(distance time.Duration) string {
 	ahead := distance > 0
 	if !ahead {
 		distance = -distance

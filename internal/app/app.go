@@ -105,15 +105,14 @@ type App struct {
 	channelColumn   *fyne.Container // header + pinned group over the list; relaid out when the group changes
 	channelTop      *fyne.Container // that group: what is pinned above the channels, full column width
 	channelList     *fyne.Container
-	memberList      *ui.MemberList  // virtualised: it mounts only the rows on screen
-	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
-	messageList     *fyne.Container
-	messageScroll   *ui.ObservableScroll
+	memberList      *ui.MemberList    // virtualised: it mounts only the rows on screen
+	memberSidebar   *fyne.Container   // the member column itself, hidden by its header toggle
+	messages        *ui.MessageList   // virtualised: the window is data, only what is on screen has a widget
 	messageHeader   *fyne.Container   // the channel's name row
 	messageColumn   *fyne.Container   // header + note + dock; relaid out when the note appears
 	channelNote     fyne.CanvasObject // the standing caption under that header, shown in a voice channel
 	composerDock    *fyne.Container   // badge row + jump bar + card: what the message column runs under
-	floatingDock    *fyne.Container   // that stack hung over messageScroll; relaid out when either appears
+	floatingDock    *fyne.Container   // that stack hung over messages; relaid out when either appears
 	input           *ui.MessageInput
 	composerEntry   *fyne.Container     // the entry row, hidden where the account may not write
 	composerNotice  *ui.ComposerNotice  // what stands in its place then
@@ -323,7 +322,6 @@ func New(fyneApp fyne.App, info Info) *App {
 		serverList:          container.NewGridWrap(fyne.NewSize(theme.Sizes.ServerSidebarWidth, theme.Sizes.ServerItemHeight)),
 		channelTop:          ui.VBoxNoSpacing(),
 		channelList:         container.NewVBox(),
-		messageList:         ui.VBoxNoSpacing(),
 		tooltip:             ui.NewTooltip(),
 		notices:             ui.NewNoticeStack(),
 		collapsedCategories: make(map[string]bool),
@@ -657,11 +655,16 @@ func (a *App) OnEdit(message *domain.Message) {
 		return
 	}
 
-	i := a.messageWidgetIndex(message.ID)
-	if i == -1 {
-		return
+	// The row need not be on screen — Up in an empty composer edits the newest own
+	// message wherever the reader has scrolled to — so it is brought in first.
+	w := a.messages.Mounted(message.ID)
+	if w == nil {
+		if !a.messages.Reveal(message.ID) {
+			return
+		}
+		w = a.messages.Mounted(message.ID)
 	}
-	if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+	if w != nil {
 		a.startEditing(w)
 	}
 }

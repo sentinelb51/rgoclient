@@ -25,15 +25,8 @@ const searchLimit = 100
 // focused: a search that has to be clicked into first is a click nobody meant to
 // spend.
 func (a *App) showChannelSearch() {
-	channelID := a.currentChannelID
-	if channelID == "" {
-		return
-	}
-
-	// The search is refused without this, and a panel that could only report the
-	// refusal is worse than a notice saying it before anything opens.
-	if !a.store.Permissions(channelID).Has(domain.PermissionReadMessageHistory) {
-		a.notify(ui.ToneWarning, "You can't read this channel's history.")
+	channelID, ok := a.searchableChannel()
+	if !ok {
 		return
 	}
 

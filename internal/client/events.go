@@ -222,6 +222,17 @@ func (TypingChanged) isEvent()       {}
 // each closure so an event produced by a session that has since been replaced is
 // dropped rather than delivered — see Client.emit.
 func (c *Client) register(session *revoltgo.Session, epoch uint64) {
+	c.registerSession(session, epoch)
+	c.registerMessages(session, epoch)
+	c.registerServers(session, epoch)
+	c.registerChannels(session, epoch)
+	c.registerMembers(session, epoch)
+	c.registerUsers(session, epoch)
+}
+
+// registerSession wires what the connection itself reports: the opening
+// snapshot, and the two ways a session ends under it.
+func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventReady) {
 		log.Printf("ready: %d user(s), %d server(s)", len(event.Users), len(event.Servers))
 
@@ -251,6 +262,19 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, Disconnected{Fatal: true})
 	})
 
+	// A session revoked from elsewhere — the session manager on another client, or
+	// a password change. The token is dead, so this is the same fatal drop a
+	// rejected authentication is.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, _ *revoltgo.EventLogout) {
+		log.Print("session revoked")
+
+		c.emit(epoch, Disconnected{Fatal: true})
+	})
+}
+
+// registerMessages wires the conversation itself. These are the only handlers
+// that write to the message cache; the rest emit and nothing more.
+func (c *Client) registerMessages(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessage) {
 		message := toMessage(&event.Message)
 		previous := c.messages.Append(event.Channel, message)
@@ -339,7 +363,10 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 			c.emit(epoch, MessageUpdated{ChannelID: event.ChannelID, MessageID: event.ID})
 		}
 	})
+}
 
+// registerServers wires a server's own details and its roles.
+func (c *Client) registerServers(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerCreate) {
 		log.Printf("joined server %s", event.ID)
 
@@ -370,7 +397,11 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerRoleRanksUpdate) {
 		c.emit(epoch, RolesChanged{ServerID: event.ID})
 	})
+}
 
+// registerChannels wires a channel's existence, its read mark and who is
+// composing in it — everything about a channel that is not a message in one.
+func (c *Client) registerChannels(session *revoltgo.Session, epoch uint64) {
 	// The channel is promoted into the event rather than named by it, so unlike
 	// every other create this one arrives with everything about it — and revoltgo's
 	// own handler has already filed it in State by the time this runs.
@@ -403,15 +434,22 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.emit(epoch, ChannelRead{ChannelID: event.ID})
 	})
 
-	// A session revoked from elsewhere — the session manager on another client, or
-	// a password change. The token is dead, so this is the same fatal drop a
-	// rejected authentication is.
-	revoltgo.AddHandler(session, func(_ *revoltgo.Session, _ *revoltgo.EventLogout) {
-		log.Print("session revoked")
-
-		c.emit(epoch, Disconnected{Fatal: true})
+	// Both halves again — EventChannelStopTyping embeds the start event — and the
+	// ID is the channel's. Neither is gated on the setting that draws them:
+	// registering nothing would be cheaper, but there is no way to unregister and
+	// the setting has to change without a reconnect.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStartTyping) {
+		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User, Typing: true})
 	})
 
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStopTyping) {
+		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User})
+	})
+}
+
+// registerMembers wires who belongs where: a server's membership, and a group's
+// participants — the two lists the client draws people out of.
+func (c *Client) registerMembers(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerMemberJoin) {
 		c.emit(epoch, MembersChanged{ServerID: event.ID, UserID: event.User})
 	})
@@ -434,7 +472,11 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelGroupLeave) {
 		c.emit(epoch, RecipientsChanged{ChannelID: event.ID, UserID: event.User})
 	})
+}
 
+// registerUsers wires the accounts behind those lists: a change to one, and how
+// this account stands with it.
+func (c *Client) registerUsers(session *revoltgo.Session, epoch uint64) {
 	// An account removed from the platform outright. revoltgo's own handler has
 	// already dropped the user, their conversations, groups and memberships, so
 	// this only names who it was.
@@ -467,18 +509,6 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 		c.setRelationship(event.User.ID, toRelationship(event.User.Relationship))
 
 		c.emit(epoch, RelationshipChanged{UserID: event.User.ID})
-	})
-
-	// Both halves again — EventChannelStopTyping embeds the start event — and the
-	// ID is the channel's. Neither is gated on the setting that draws them:
-	// registering nothing would be cheaper, but there is no way to unregister and
-	// the setting has to change without a reconnect.
-	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStartTyping) {
-		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User, Typing: true})
-	})
-
-	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStopTyping) {
-		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User})
 	})
 }
 

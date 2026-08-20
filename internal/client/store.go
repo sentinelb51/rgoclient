@@ -125,6 +125,13 @@ func (s *store) toUser(user *revoltgo.User) (domain.User, bool) {
 		return domain.User{}, false
 	}
 
+	return resolveUser(user, s.client.relationshipWith(user)), true
+}
+
+// resolveUser is toUser with the relationship already in hand, for the walk that
+// has to ask about it before deciding whether the account is worth resolving at
+// all — see Relationships.
+func resolveUser(user *revoltgo.User, relationship domain.Relationship) domain.User {
 	out := domain.User{
 		ID:           user.ID,
 		Name:         displayName(user),
@@ -133,7 +140,7 @@ func (s *store) toUser(user *revoltgo.User) (domain.User, bool) {
 		AvatarURL:    user.AvatarURL(avatarSize),
 		Presence:     toPresence(user),
 		Badges:       toBadges(user),
-		Relationship: s.client.relationshipWith(user),
+		Relationship: relationship,
 		Online:       user.Online,
 		Bot:          user.Bot != nil,
 	}
@@ -144,7 +151,7 @@ func (s *store) toUser(user *revoltgo.User) (domain.User, bool) {
 		out.StatusText = user.Status.Text
 	}
 
-	return out, true
+	return out
 }
 
 // displayName is a user's chosen name, falling back to the username.
@@ -202,16 +209,22 @@ func (s *store) Relationships() []domain.User {
 
 	// The relationship is asked *before* the account is resolved: this walks every
 	// cached user, most of whom are members of a server and nothing more, and
-	// toUser builds a handle, an avatar URL and a badge list per call.
+	// resolving one builds a handle, an avatar URL and a badge list. The answer is
+	// then carried into the resolution rather than asked for again — each ask takes
+	// the client's lock, and on a large server this loop runs thousands of times.
 	var related []keyed[domain.User]
 	for _, raw := range state.Users() {
-		if raw.ID == selfID || !s.client.relationshipWith(raw).Known() {
+		if raw == nil || raw.ID == selfID {
 			continue
 		}
 
-		if user, ok := s.toUser(raw); ok {
-			related = append(related, keyed[domain.User]{user, strings.ToLower(user.Name), user.ID})
+		relationship := s.client.relationshipWith(raw)
+		if !relationship.Known() {
+			continue
 		}
+
+		user := resolveUser(raw, relationship)
+		related = append(related, keyed[domain.User]{user, strings.ToLower(user.Name), user.ID})
 	}
 
 	return sortedByName(related)
@@ -621,8 +634,10 @@ func (s *store) Emojis() []domain.Emoji {
 // member — nickname, server avatar, role colour — and falling back to the raw
 // user.
 func (s *store) MessageAuthor(message *domain.Message) domain.Author {
+	state := s.state()
+
 	switch {
-	case s.state() == nil:
+	case state == nil:
 		return domain.Author{Name: "Unknown user (no session)"}
 	case message.System != nil:
 		return domain.Author{Name: "System"}
@@ -634,8 +649,14 @@ func (s *store) MessageAuthor(message *domain.Message) domain.Author {
 		return domain.Author{Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color}
 	}
 
-	if user, ok := s.User(message.AuthorID); ok {
-		return domain.Author{Name: user.Name, AvatarURL: user.AvatarURL}
+	// Read through to the raw account rather than going via User, which would build
+	// a handle, a badge list and a relationship no author line draws — the same
+	// reason UserName does. This is the path every message in a conversation takes,
+	// a DM having no membership to prefer.
+	if message.AuthorID != "" {
+		if user := state.User(message.AuthorID); user != nil {
+			return domain.Author{Name: displayName(user), AvatarURL: user.AvatarURL(avatarSize)}
+		}
 	}
 
 	return domain.Author{Name: "Message author: " + message.AuthorID}

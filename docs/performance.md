@@ -82,17 +82,53 @@ everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
 
 ## What the client already does
 
-- **Bounded mounted set.** `app/messages.go` trims to `mountedCap()` /
-  `renderedCap()`, which is what keeps the traversal above from growing with
-  history length.
+- **A virtualised message column.** `ui/messagelist.go`: the window
+  `app/messages.go` keeps — bounded at `mountedCap()` / `renderedCap()` — is
+  data, and only the rows the viewport touches plus `MessageOverscan` either side
+  have widgets. The content's height is a field, so the scroller's per-offset
+  `MinSize` and the driver's per-frame walk both stop scaling with the window.
+  Rows are variable-height, so a row is placed by an estimate until its widget
+  has been laid out at the column's width; measuring happens in the layout, and
+  a height moving above the viewport shifts the offset with it. Measured with
+  `internal/app/virtual_bench_test.go` (1400×900 window, 250-message cache,
+  software driver, Ryzen 9 9950X3D), flat column → virtual:
+
+  | | window of 50 | window of 250 |
+  |---|---|---|
+  | objects in the tree | 1,921 → 952 | 7,721 → 1,388 |
+  | frame min-size walk | 345 µs → 88 µs | 1.84 ms → 136 µs |
+  | wheel tick, up and back | 235 µs → 54 µs | 1.47 ms → 103 µs |
+  | live heap of the mount | 342 KiB → 137 KiB | 1.67 MB → 355 KiB |
+  | build + mount | 0.95 ms → 0.47 ms | 4.5 ms → 1.29 ms |
+
+  A page of history prepended at the top went from 2.19 ms to 234 µs (it used to
+  `Scroll.Refresh`, re-wrapping every mounted body) and a live message landing
+  from 1.0 ms to 123 µs. What it costs: a row scrolled out past the overscan is
+  rebuilt on its way back — the rebuild a trimmed row always paid, at a tighter
+  margin — and the scroll indicator stands on estimates until the rows it covers
+  have been seen.
 - **Measurement memoisation of our own layouts**: `ui.lineHeights`
   (`ui/input.go:229`), `ui.spaceWidths` (`ui/markdown.go:1030`). UI-thread only,
   which is why they can be plain maps.
 - **Virtualised, recycled member list** — `ui/members.go` (`NewMemberModel`,
-  `visibleRange`, recycled `MemberRow`). The pattern the message list does not
-  yet use.
+  `visibleRange`, recycled `MemberRow`). Fixed-height rows, so nothing is
+  measured; the message column shares the mounting and not the recycling, a
+  message row being too many shapes to redraw in place.
 - **Off-thread preparation.** `Store.Members` resolves and sorts on a worker;
   the model is pure and theme-free so it can be built off the UI thread.
+- **The model is counted, not bucketed.** `memberModel` files each member under a
+  bucket index and counts it, then writes straight into an exactly-sized slice. A
+  `domain.Member` is ~128 bytes, so materialising a slice per section and copying
+  it out again cost more than the walk did. Measured over 3000 members with three
+  hoisted roles: **188 µs / 1.72 MB / 41 allocations → 71 µs / 0.53 MB / 11**.
+  This runs on every presence change, which is what makes it worth the second
+  pass.
+- **Nothing is resolved twice on a walk.** `Store.Relationships` carries the
+  relationship it filtered on into the resolution rather than asking again, and
+  `refreshFriends` counts incoming requests instead of building four sections of
+  rows when the dialog is down. Both walk every cached account and both run off
+  `flushAuthors`, once per batch of resolved authors — the shape worth looking for
+  is a guard that resolves, then resolves again.
 
 ## Reachable without touching Fyne
 
@@ -111,11 +147,7 @@ Ranked by return.
    same as a resize. Refresh the narrowest object that changed, and prefer *not
    dirtying at all* when the change is invisible (the change guards already used
    by the slowmode chip and the typing line are the pattern).
-3. **Virtualise and recycle the message list**, the way `ui/members.go` already
-   does. Cuts traversal per dirty frame and shrinks the texture cache's working
-   set at once. Harder than the member list because rows are variable-height and
-   grouped, so `memberOffsets` does not transfer directly.
-4. **`FYNE_CACHE`.** `internal/cache/base.go:22` reads it as a `time.Duration` in
+3. **`FYNE_CACHE`.** `internal/cache/base.go:22` reads it as a `time.Duration` in
    `init()` and it is the only Fyne env knob that touches performance. Raising it
    past a minute keeps glyph textures alive across a scroll-away-and-back at the
    cost of VRAM; lowering it trades redraws for memory. Settable from
@@ -173,8 +205,11 @@ line clean is the cheapest insurance against needing this section.
 
 ## Measuring
 
-There is no instrumentation in the client yet. Before any of the above is
-called an improvement:
+The client itself is not instrumented. `internal/app/virtual_bench_test.go`
+drives the message column through the App's own entry points under the software
+driver — open, wheel tick, a page of history, a live message, the per-frame
+min-size walk and the live heap of a mount — and is where the numbers above come
+from; run it before and after touching the column. Beyond that:
 
 - Frame cost is now observable from inside the loop — the fork is
   ours to instrument — but nothing there is instrumented, so measure from

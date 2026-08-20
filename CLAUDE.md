@@ -136,7 +136,8 @@ internal/
                          pins.go, search.go, emoji.go, notify.go, alerts.go,
                          settings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
-                         message.go, reactions.go, emoji.go, embed.go, invite.go,
+                         message.go, messagelist.go, reactions.go, emoji.go,
+                         embed.go, invite.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, panels.go, notice.go, settings*.go,
                          theme/, titlebar_*.go, filedialog*.go (the OS picker —
@@ -157,7 +158,8 @@ Where things live that the filename doesn't tell you:
   a rebuild is what most of those handlers do, so hiding the queue elsewhere
   would put it half a file from the thing it is about.
 - `app/messages.go` is the message area end to end — composer dock, submit,
-  slowmode, widget construction, load/render and the mounted window.
+  slowmode, the window and what mounting a row asks for (`onMessageMounted`),
+  load/render, jumps and paging.
 - `app/navigation.go` holds `buildUI` (the 4-column fill row), both sidebars,
   selection, sidebar context menus and the home/DM view. The `#mention`
   candidates come off the channel sidebar's own walk, as the `@` ones come off
@@ -183,6 +185,12 @@ Where things live that the filename doesn't tell you:
   / `MemberSectionRow`. The model is pure and theme-free so `App` can build it
   off the UI thread. `memberStatus` — the strip above the list — is here too,
   being what speaks for the rows when there are none.
+- `ui/messagelist.go` is the message column, the other virtualised list: the
+  window's rows as data (`windowRow`, with the grouping rules `continuesGroup` /
+  `dayLabel` that derive one from its neighbours), the estimate a row is placed
+  by before it has been measured, and `MessageList`, which owns the scroller and
+  mounts only the rows on screen. Variable-height, so unlike the member list it
+  measures in its layout and moves the offset as heights settle.
 - `ui/widgets.go` is the shared vocabulary: `newText` / `newBoldText` (how every
   `canvas.Text` in the package is built — they flatten the fill, so a gradient
   cannot reach one; a zero size is the theme's own) and `newInitial`, the letter a

@@ -46,15 +46,19 @@ DAG and conventions.
 4. **Mounting a channel.** `selectChannel` → cached messages, else
    `Client.LatestMessages` (deduped per channel); ack unread. Callers render from
    the *cache* (`displayCached`), never from a page captured off-thread.
-   `displayMessages` mounts only the newest `initialMountCount`.
-   `loadMoreHistory` is three-tier: unmounted cache synchronously, then
+   `displayMessages` holds only the newest `initialMountCount`.
+   `loadMoreHistory` is three-tier: unheld cache synchronously, then
    `HistoryBefore`, then `MessagesBefore` for a window not in the cache at all
-   (which writes nothing to it). The window is bounded at `mountedCap` and trims
-   `clear()` vacated slots so widgets are released.
-   All construction goes through `App.newMessageWidget(prev, curr, next)` — hence
-   also where `ensureAuthor` runs and where grouping (`continuesGroup`, within
-   `messageGroupWindow`) and the day separator are decided. The separator belongs
-   to the widget, not a list entry of its own, so the window stays one object per
+   (which writes nothing to it). The window is bounded at `mountedCap`.
+   The window is `ui.MessageList`, which is virtualised: the App addresses it by
+   message (`Message(i)`, `Index`, `Mounted`) and only the rows on screen have
+   widgets, so the cap bounds what is indexed rather than what a frame costs. The
+   list derives grouping (`continuesGroup`, within `messageGroupWindow`) and the
+   day separator from a row's neighbours itself and builds the widget; every build
+   reports through `OnMount` → `App.onMessageMounted`, which is where
+   `ensureAuthor` and `ensureReplies` run — again for a row scrolled out past the
+   overscan and back, its widget having been dropped in between. The separator
+   belongs to the widget, not a row of its own, so the window stays one row per
    message.
    A column with nothing to draw says so on one line (`App.showStatus` →
    `ui.NewMessageStatus`). `showStatusMark` is that line led by a mark, and only
@@ -113,16 +117,15 @@ DAG and conventions.
    **An edit is announced twice over**: the row trails a pencil and how long ago
    (`MessageWidget.buildEditMark`), and `refreshMessage` flashes it as it lands.
    An update arrives as "this message changed", so `newlyEdited` compares the
-   mounted copy's `Edited` stamp with the new one — a reaction or an unfurled
-   embed must not flash. Only if `messageInView` says the row overlaps what the
-   dock does not cover; that is a walk of the mounted heights, affordable once
-   per edit for the reason `revealMounted`'s is once per jump.
+   held copy's `Edited` stamp with the new one — a reaction or an unfurled embed
+   must not flash. Only if `MessageList.InView` says the row overlaps what the
+   dock does not cover, and only a row on screen has a widget to wash.
    The optimistic copy carries no stamp, so the author's own edit flashes once,
    off the gateway echo, rather than twice.
    The span goes stale on a row nothing else redraws, so `refreshEditMarks` walks
    the mounted widgets every `editMarkTick` and re-arms only while one carries a
-   mark; `remountMessages` arms it, that being what every path changing the
-   mounted set already calls.
+   mark; `onMessageMounted` arms it for a row that has one, rows mounting on
+   every scroll now.
 8. **Mentions.** `@` or `#` at the start or after a space opens the picker, which
    gets first refusal on Up/Down/Enter/Tab/Esc. The marker decides which of the
    two pools is filtered and what the span is rewritten as — Revolt's `<@id>` or
@@ -837,6 +840,11 @@ DAG and conventions.
     server. The row is rebuilt with the sidebar — those objects are replaced
     wholesale — and marks itself the way an unread channel does when requests are
     waiting, that being the one part of the list that arrives unasked.
+    With the dialog **down**, that mark is all `refreshFriends` is for, and it
+    takes `awaitingAnswer` rather than the sections: `flushAuthors` calls it once
+    per batch of resolved authors, and building four sections of rows and their
+    buttons to ask whether one of them is empty is the whole list's cost for one
+    boolean.
     The dialog **refills in place** (`SetSections`) rather than closing: accepting
     a request is an action whose entire result is the list changing, and every
     other answer is still up. That is what `App.relationshipButtons` is for — the
@@ -850,8 +858,8 @@ DAG and conventions.
     `EventUserRelationship` carries the account and nothing files it — so
     `friendsChanged` queues them through `ensureAuthor`, and `flushAuthors` refills.
 28. **Jumping to a message.** Tapping a quoted line is `Actions.OnJumpToMessage` →
-    `App.OnJumpToMessage`, three answers cheapest first: already mounted
-    (`scrollToMounted`), in the channel's cached tail (`jumpWithinCache`), or a
+    `App.OnJumpToMessage`, three answers cheapest first: already in the window
+    (`revealMessage`), in the channel's cached tail (`jumpWithinCache`), or a
     request for the page around it (`loadJumpWindow` → `Client.MessagesAround`,
     Revolt's `nearby`). Only the **open** channel is asked about — a reply names a
     message in the channel it was written in, so the two are the same by
@@ -883,12 +891,10 @@ DAG and conventions.
     `App.resizeDock` re-hangs the dock, the bar's height being part of
     `ui.DockReserve`. Tapping it is `backToPresent`: `returnToPresent` out of a
     jump window, the cheaper `jumpToLatest` out of plain scrollback.
-    `revealMounted` centres the row and `MessageWidget.Flash` marks it — see the
+    `MessageList.Reveal` centres the row — twice, the rows around it being
+    measured by the first placing — and `MessageWidget.Flash` marks it; see the
     ui note on why a wash is an animation and not state. Hovering stops it, the
     pointer arriving being the reader having found the row.
-    `ObservableScroll.SyncContent` is what makes the scroll land: an offset is
-    clamped against the size the content was last *laid out* at, and only a
-    `Scroll.Refresh` updates that — which would re-wrap every mounted body.
 29. **Channel search** is the pins panel with a query, and `search.go` is what is
     left once that is said: the same `ChannelSearch` route (`Client.SearchMessages`,
     the two being mutually exclusive on the wire — Revolt refuses `query` and

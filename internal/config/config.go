@@ -116,6 +116,7 @@ type Behaviour struct {
 	InitialMountCount  int `json:"initial_mount_count"`
 	MountedCap         int `json:"mounted_cap"`
 	HistoryPageSize    int `json:"history_page_size"`
+	MessageOverscan    int `json:"message_overscan"`
 
 	/* Timing */
 
@@ -282,6 +283,7 @@ func Default() Settings {
 			InitialMountCount:  50,
 			MountedCap:         250,
 			HistoryPageSize:    50,
+			MessageOverscan:    8,
 			AuthorFetchDelayMS: 50,
 			AckDelayMS:         1000,
 			RefreshDelayMS:     250,
@@ -451,6 +453,7 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.InitialMountCount, 1)
 	floor(&s.Behaviour.HistoryPageSize, 1)
 	floor(&s.Behaviour.MountedCap, s.Behaviour.InitialMountCount)
+	floor(&s.Behaviour.MessageOverscan, 0)
 	floor(&s.Behaviour.AuthorFetchDelayMS, 0)
 	floor(&s.Behaviour.AckDelayMS, 0)
 	floor(&s.Behaviour.RefreshDelayMS, 0)

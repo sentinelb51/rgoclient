@@ -107,42 +107,80 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 	titles, index := memberSections(hoisted, opts)
 	online, offline := len(titles)-2, len(titles)-1
 
-	buckets := make([][]domain.Member, len(titles))
+	// Counted first, then written straight into the finished slice. The buckets are
+	// never materialised: a member is 128 bytes and a large server holds thousands,
+	// so filing each into a slice of its own and copying it out again is a megabyte
+	// of churn per presence change — which is the event this runs on.
+	filed := make([]int, len(members))
+	counts := make([]int, len(titles))
+	size := 0
+
 	for i := range members {
 		if opts.hides(members[i]) {
-			continue
-		}
-		if !members[i].Presence.IsOnline() {
-			buckets[offline] = append(buckets[offline], members[i])
+			filed[i] = hiddenMember
 			continue
 		}
 
-		at, hoistedRole := index[members[i].HoistRoleID]
-		if !hoistedRole {
-			at = online
+		bucket := offline
+		if members[i].Presence.IsOnline() {
+			at, known := index[members[i].HoistRoleID]
+			bucket = online
+			if known {
+				bucket = at
+			}
 		}
-		buckets[at] = append(buckets[at], members[i])
+
+		filed[i] = bucket
+		counts[bucket]++
+
+		// An empty bucket emits nothing, header included: a server with no moderator
+		// online has no Moderators section, not an empty one. So a bucket's header is
+		// counted by whoever lands in it first.
+		size++
+		if counts[bucket] == 1 {
+			size++
+		}
+	}
+	if size == 0 {
+		return nil
 	}
 
-	entries := make([]MemberEntry, 0, len(members)+len(titles))
-	for i, rows := range buckets {
-		// An empty bucket emits nothing, header included: a server with no moderator
-		// online has no Moderators section, not an empty one.
-		if len(rows) == 0 {
+	// cursors is where each bucket's next row goes, so the second pass can place a
+	// member without knowing what is filed either side of it. Walking members in
+	// their given order is what keeps Store.Members' ordering inside a bucket.
+	entries := make([]MemberEntry, size)
+	cursors := make([]int, len(titles))
+	at := 0
+
+	for i, count := range counts {
+		if count == 0 {
 			continue
 		}
 
-		entries = append(entries, MemberEntry{
+		entries[at] = MemberEntry{
 			Kind:  MemberEntrySection,
-			Title: titles[i] + " — " + strconv.Itoa(len(rows)),
-		})
-		for j := range rows {
-			entries = append(entries, MemberEntry{Kind: MemberEntryRow, Member: rows[j]})
+			Title: titles[i] + " — " + strconv.Itoa(count),
 		}
+		at++
+		cursors[i] = at
+		at += count
+	}
+
+	for i := range members {
+		bucket := filed[i]
+		if bucket == hiddenMember {
+			continue
+		}
+
+		entries[cursors[bucket]] = MemberEntry{Kind: MemberEntryRow, Member: members[i]}
+		cursors[bucket]++
 	}
 
 	return entries
 }
+
+// hiddenMember marks a member the settings leave out, filed under no bucket.
+const hiddenMember = -1
 
 // hides is whether a member is left out altogether, asked before anything decides
 // where they would have gone. Both branches of the model ask it, so the two

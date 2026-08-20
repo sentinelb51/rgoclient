@@ -31,13 +31,22 @@ func (a *App) showFriends() {
 // dialog is down — the row still has to follow, an incoming request being the one
 // thing here that arrives unasked. Call on the UI thread.
 func (a *App) refreshFriends() {
-	sections := a.friendSections()
+	// With the dialog down the row's mark is the whole of what is at stake, and
+	// every path that can change a relationship reaches here — flushAuthors among
+	// them, once per batch of resolved authors. Building four sections of rows and
+	// their buttons to ask whether one of them is empty is the whole list's cost
+	// for one boolean.
+	if a.friends == nil {
+		if a.friendsRow != nil {
+			a.friendsRow.SetPending(a.awaitingAnswer())
+		}
 
+		return
+	}
+
+	sections := a.friendSections()
 	if a.friendsRow != nil {
 		a.friendsRow.SetPending(len(sections.incoming) > 0)
-	}
-	if a.friends == nil {
-		return
 	}
 
 	a.friends.SetSections([]ui.FriendSection{
@@ -50,6 +59,18 @@ func (a *App) refreshFriends() {
 	// The card is centred and sized from its own minimum, which a section gained or
 	// lost changes; neither re-runs on its own.
 	a.repositionOverlay()
+}
+
+// awaitingAnswer reports whether anybody is waiting on this account to answer a
+// friend request, which is all the sidebar row draws.
+func (a *App) awaitingAnswer() bool {
+	for _, user := range a.store.Relationships() {
+		if user.Relationship == domain.RelationshipIncoming {
+			return true
+		}
+	}
+
+	return false
 }
 
 // closeFriends forgets the dialog. Only closeOverlay calls it — the layer holds

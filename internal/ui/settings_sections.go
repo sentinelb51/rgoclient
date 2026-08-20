@@ -453,18 +453,22 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				"The longest gap between two messages that still appear under one name.",
 				settings.GroupWindowSeconds, 0, maxGroupWindow, "s",
 				func(s *config.Settings, v int) { s.Behaviour.GroupWindowSeconds = v })),
-			p.adv(p.numberRow("Messages shown on open",
-				"Fewer makes switching channels faster. Older messages fill in as you scroll.",
+			p.adv(p.numberRow("Messages held on open",
+				"How far back a channel reaches when opened. Only what is on screen is drawn; older messages fill in as you scroll.",
 				settings.InitialMountCount, 5, maxMountedCap, "",
 				func(s *config.Settings, v int) { s.Behaviour.InitialMountCount = v })),
-			p.adv(p.numberRow("Maximum messages shown",
-				"The limit while scrolling back. Higher uses more memory.",
+			p.adv(p.numberRow("Maximum messages held",
+				"The limit while scrolling back. Only what is on screen is drawn whatever this is.",
 				settings.MountedCap, 20, maxMountedCap, "",
 				func(s *config.Settings, v int) { s.Behaviour.MountedCap = max(v, s.Behaviour.InitialMountCount) })),
 			p.adv(p.numberRow("Messages loaded per scroll",
 				"How many older messages to fetch each time you reach the top.",
 				settings.HistoryPageSize, 5, maxHistoryPage, "",
 				func(s *config.Settings, v int) { s.Behaviour.HistoryPageSize = v })),
+			p.adv(p.numberRow("Extra messages drawn",
+				"How far past the visible area to draw. Higher is smoother to scroll and uses more memory.",
+				settings.MessageOverscan, 0, maxMessageOverscan, "",
+				func(s *config.Settings, v int) { s.Behaviour.MessageOverscan = v })),
 		),
 		p.group("Timing", "",
 			p.adv(p.numberRow("Author lookup delay",
@@ -1184,8 +1188,9 @@ const (
 	maxDelayMS     = 2000
 	maxScrollSpeed = 12
 
-	maxRefreshDelay   = 5000
-	maxMemberOverscan = 50
+	maxRefreshDelay    = 5000
+	maxMemberOverscan  = 50
+	maxMessageOverscan = 50
 
 	// The frame rate is floored well above zero: the slider reaches every value
 	// between these two, and the ones near the bottom are indistinguishable from a

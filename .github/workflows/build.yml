@@ -17,7 +17,7 @@ jobs:
     steps:
       # The tags are what the version below counts from.
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-tags: true
 
@@ -67,7 +67,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # cgo headers the module graph needs and the image does not ship: GL for
       # Fyne's GLFW, X11 and Wayland for both its display backends (glfw v3.4
@@ -82,7 +82,7 @@ jobs:
             libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libasound2-dev
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -104,7 +104,7 @@ jobs:
           -o dist/${{ matrix.binary }} ./cmd/rgoclient
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RGOClient-${{ matrix.target }}
           path: dist/${{ matrix.binary }}

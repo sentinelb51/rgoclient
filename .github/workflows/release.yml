@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
@@ -41,7 +41,7 @@ jobs:
             libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libasound2-dev
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -64,7 +64,7 @@ jobs:
       notes: ${{ steps.version.outputs.notes }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -137,7 +137,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # cgo headers the module graph needs and the image does not ship: GL for
       # Fyne's GLFW, X11 and Wayland for both its display backends (glfw v3.4
@@ -152,7 +152,7 @@ jobs:
             libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libasound2-dev
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
           go-version-file: go.mod
           cache: true
@@ -183,7 +183,7 @@ jobs:
           rm dist/RGOClient
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: RGOClient-${{ matrix.target }}
           path: dist/*
@@ -194,14 +194,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Collect assets
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: RGOClient-*
           merge-multiple: true
           path: dist
 
       - name: Publish release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.version }}

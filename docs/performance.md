@@ -76,9 +76,14 @@ that being the one moment the window's GL context is current on our goroutine.
 `config.Performance.VSync` is the setting; Wayland is still left to the
 compositor.
 
-**The present gate is a stub off Wayland.** `presentGate` (`present.go`) is real
-on Wayland via `wl_surface.frame` callbacks and `noGate{}` (always ready)
-everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
+**The present gate is filled on Wayland and Windows.** `presentGate`
+(`present.go`) is upstream's, real on Wayland via `wl_surface.frame` callbacks
+and `noGate{}` (always ready) everywhere else; **patched**, Windows takes
+`vblankGate` (`present_windows.go`), which waits on the adapter's vertical blank
+on a goroutine of its own. With vsync off the driver otherwise presented on
+every tick it had something to draw and DWM discarded everything past one per
+blank — 1000 presents/sec at `FrameRate` 1000 on a 540Hz panel, 540 after. It
+paces to the primary display only, and stands down while vsync is on.
 
 ## What the client already does
 
@@ -161,13 +166,122 @@ five patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
-third is the font-parse cache, which is a leak fixed rather than a lever. The
-fifth replaced the driver's poll loop with a wait on the OS event queue, which
-is what makes the frame rate a ceiling on drawing rather than on noticing input.
+third is the font-parse cache, which is a leak fixed rather than a lever; the
+fourth is the Windows present gate above. The fifth replaced the driver's poll
+loop with a wait on the OS event queue, which is what makes the frame rate a
+ceiling on drawing rather than on noticing input.
 
 What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the
 fork instead.
+
+## Three more patches, measured
+
+Found by profiling the client's own bench through the fork
+(`go work` over a local checkout). Numbers here are a 4-core Xeon VM, **not** the
+Ryzen the table above was taken on — read the ratios, not the microseconds.
+Medians of five, `-benchtime 400x`. All three together:
+
+| | before | after |
+|---|---|---|
+| frame walk, window of 50 | 271 µs | 131 µs |
+| frame walk, window of 250 | 431 µs | 233 µs |
+| wheel tick, window of 50 | 159 µs | 103 µs |
+| bytes per frame walk, window of 250 | 33.7 KB | 12.5 KB |
+
+### 1. `canvas.Image.MinSize` re-parses its SVG on every call
+
+`canvas/image.go`:
+
+```go
+if i.Image == nil || i.aspect == 0 {   // i.Image stays nil for a resource-backed SVG
+    if i.File != "" || i.Resource != nil {
+        i.Refresh()                    // -> svg.Colorize + a full oksvg XML parse
+    }
+}
+```
+
+A resource-backed image never fills `i.Image` — the raster lives in
+`cache.svgs` — so the first clause is permanently true and every `MinSize()`
+re-runs `updateReader` and `svg.NewDecoder` to re-learn an aspect that cannot
+have changed. `MinSize` is called per object per frame, so each mounted SVG
+re-parses its XML once a frame forever: **counted at exactly 2 per steady-state
+frame walk here, 24.6% of everything the walk allocates.** The fix is to drop
+the first clause — `if i.aspect == 0 { if i.File != "" || i.Resource != nil ||
+i.Image != nil {` — after which the count is 0. Alone it takes the frame walk's
+bytes from 33.7 KB to 12.5 KB and its allocations from 1,614 to 1,348.
+
+Upstream's bug, not the fork's, and worth reporting there. The behaviour it
+gives up: an `i.Image` swapped without a `Refresh` keeps its old aspect, which
+is already true of every other field.
+
+### 2. Age the caches by a counter, not by a wall clock
+
+`internal/cache/base.go` — `expiringCache.setAlive()` is `timeNow().Add(...)`,
+and **every cache hit calls it**: each text measurement, each text texture, each
+`cache.Renderer` lookup, several times per object per frame. `time.Now()` is
+43 ns here, against 42 ns for the map lookup it is attached to. Stamping a
+`uint64` bumped once per `Clean` sweep instead — `expires < tick` — costs a load
+and a store:
+
+| lookup | wall clock | counter |
+|---|---|---|
+| `GetFontMetrics` | 192 ns | 70 ns |
+| `GetTextTexture` | 217 ns | 65 ns |
+| `CachedRenderer` | 82 ns | 22 ns |
+
+Worth its own line because `BaseWidget.MinSize` is not memoised: a min-size pass
+re-measures the whole tree through `cache.Renderer` at every node, so this is
+the per-node constant. Alone it is −26% on the frame walk and −30% on a wheel
+tick, and it needs no build-tag change. `ValidDuration` becomes a count of
+sweeps rather than a duration, which is the only externally visible change —
+`FYNE_CACHE` would have to be reinterpreted or dropped.
+
+### 3. `-tags migrated_fynedo`, and a typed map behind it
+
+`fyne build` adds this tag when the metadata declares the fyneDo migration; a
+plain `go build` — which is what CI runs — does not, so the client sets the
+metadata and gets none of the compile-time half. What the tag swaps in:
+`async.Map` without `sync.Map`, and a single-threaded ring buffer for the
+refresh queue.
+
+**As shipped the tag is worth nothing measurable** (within noise on every bench),
+because its `Map` is still `map[any]V` — the interface hash costs about what
+`sync.Map`'s read path did. The comment says to use `map[K]V` "once Go 1.20 is
+our minimum"; the fork already requires 1.22, so:
+
+```go
+type Map[K comparable, V any] struct { m map[K]V }
+```
+
+compiles as-is — interfaces satisfy `comparable` since 1.20, and every key type
+in use is comparable. With that, the tag is worth a further ~10-15% on the frame
+walk on top of patch 2.
+
+What it costs: the tag makes those caches non-concurrent, so an off-thread
+`Refresh` or `MeasureText` becomes a concurrent map write rather than a race
+nobody sees. That is arguably the point, but it is a behaviour change, and the
+test driver's own concurrency (`known-gaps.md`) makes `go test` the risky half —
+apply it to the build first.
+
+### Looked at and not taken
+
+- **A8 text textures.** Every text run is uploaded as RGBA (`newGlTextTexture`
+  -> `image.NewRGBA`) though the glyphs are one colour: alpha-only coverage with
+  the colour as a shader uniform is 4× less VRAM and upload, and drops `Color`
+  from `FontCacheEntry` so a word shares one texture across every role colour it
+  is drawn in. Wants a text shader, an alpha texture path, and a fallback for
+  colour emoji fonts, which is what stops it being small.
+- **A glyph atlas.** What Gio does, and the reason its frame is one op list
+  rather than a bind and a draw call per run. Needs per-glyph shaping output
+  through the painter — a rewrite of the text path, not a patch.
+- **Memoising `BaseWidget.MinSize`.** The largest lever here by far and the
+  riskiest: the invalidation is every `Refresh`, `Resize`, theme change and
+  renderer swap, and getting it wrong is a stale layout rather than a slow one.
+  Patch 2 is the safe subset — it makes the un-memoised path cheap per node.
+- **`labelRenderer.Objects` allocating a fresh slice per call**, on every walk
+  including every mouse move. Real, one line, and only 2.6% of the walk's
+  allocations. The client's own `ui.bodyRenderer.Objects` does the same thing.
 
 ## Still needs more than a patch
 

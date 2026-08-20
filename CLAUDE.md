@@ -196,7 +196,8 @@ Where things live that the filename doesn't tell you:
   rather than beside a caller because the composer's line, a channel row and the
   member sidebar's status all mount one.
 - `ui/input.go` holds the composer, the mention picker, the slowmode chip, the
-  typing line and `JumpBar`. The chip and the line are one row under one set of
+  typing line, `ComposerNotice` — what stands where the entry is hidden — and
+  `JumpBar`. The chip and the line are one row under one set of
   rules: a pill of their own (`newDockBadgeSurface`) sized by what it holds rather
   than by the row, accepting no pointer event so the messages underneath stay
   hoverable, an `OnResize` hook so the row can be re-laid out, and a change guard

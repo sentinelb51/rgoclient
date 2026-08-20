@@ -439,9 +439,12 @@ DAG and conventions.
     checks pay for themselves — a channel it cannot see returns before
     `loadSlowmode` and `loadChannelMessages`, and `ReadMessageHistory` gates the
     page on its own, so neither request is sent to be refused.
-    `SendMessage` **disables** the composer (`MessageInput.SetPermissions`), which
-    is why the placeholder carries the reason: it is then the only thing left in
-    the card. Typed text is kept. `UploadFiles` is checked in `AddAttachment`,
+    `SendMessage` **disables** the composer (`MessageInput.SetPermissions`) and
+    `syncComposer` hides the entry row for `ui.ComposerNotice`, which carries the
+    reason behind a mark — a disabled `widget.Entry` draws its border in
+    `ColorNameDisabled`, which no scoped theme can flatten without taking the
+    placeholder with it, so the box read as a stray outline inside the card's own.
+    Typed text is kept. `UploadFiles` is checked in `AddAttachment`,
     where a drop and a paste both land, and reported through `OnRefused` — nothing
     else would happen, and nothing happening reads as a bug. A drop checks once
     for the whole batch, not per file.

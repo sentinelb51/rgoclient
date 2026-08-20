@@ -614,6 +614,8 @@ var Sizes = struct {
 	ComposerButtonSize  float32
 	ComposerIconSize    float32
 	ComposerMaxLines    float32 // lines the entry grows to before it scrolls
+	ComposerNoticeMark  float32
+	ComposerNoticeGap   float32
 	MentionRowHeight    float32
 	MentionAvatarSize   float32
 	MentionNameSize     float32
@@ -1001,6 +1003,8 @@ var Sizes = struct {
 	ComposerGutterWidth: 30,
 	ComposerButtonSize:  24,
 	ComposerIconSize:    18,
+	ComposerNoticeMark:  14,
+	ComposerNoticeGap:   6,
 	MentionRowHeight:    30,
 	MentionAvatarSize:   20,
 	MentionNameSize:     13,

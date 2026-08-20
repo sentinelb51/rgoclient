@@ -31,6 +31,9 @@ var voiceSVG []byte
 //go:embed search.svg
 var searchSVG []byte
 
+//go:embed forbidden.svg
+var forbiddenSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
@@ -90,6 +93,10 @@ var (
 
 	// SearchIcon opens the channel-search panel from the message header.
 	SearchIcon fyne.Resource = fyne.NewStaticResource("search.svg", searchSVG)
+
+	// ForbiddenIcon leads the line the composer draws in place of its entry where
+	// the account may not write.
+	ForbiddenIcon fyne.Resource = fyne.NewStaticResource("forbidden.svg", forbiddenSVG)
 
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)

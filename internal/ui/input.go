@@ -234,6 +234,63 @@ func (m *MessageInput) refuse(reason string) {
 	}
 }
 
+/* The notice that stands in for the entry */
+
+// ComposerNotice is what the card carries where the account may not write. A
+// disabled widget.Entry draws its border in ColorNameDisabled, which the scoped
+// theme flattening every other input cannot reach without taking the placeholder
+// with it — a stray box inside the card's own outline. Nothing is typed into a
+// channel that will not take it, so the entry is hidden and this stands where it
+// was, saying the same thing behind a mark.
+type ComposerNotice struct {
+	widget.BaseWidget
+
+	box     *fyne.Container // the ellipsis box around the reason, re-labelled by Set
+	content fyne.CanvasObject
+}
+
+var _ fyne.Widget = (*ComposerNotice)(nil)
+
+// NewComposerNotice builds an empty, hidden notice. Set gives it something to
+// say. The text is the placeholder's own colour and size: it stands in the same
+// place and is read the same way.
+func NewComposerNotice() *ComposerNotice {
+	w := &ComposerNotice{}
+	w.box = NewEllipsisText(newText("", theme.Colors.TimestampText, 0))
+
+	side := theme.Sizes.ComposerNoticeMark
+	mark := newScaledIcon(tintedIcon(assets.ForbiddenIcon, theme.Colors.TimestampText), side)
+	markBox := container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side), mark))
+
+	row := NewFillRow(2, markBox, HorizontalSpacer(theme.Sizes.ComposerNoticeGap), w.box)
+
+	// The same InnerPadding the entry pays above and below its text, so the card
+	// keeps its height when the entry goes.
+	pad := fyne.CurrentApp().Settings().Theme().Size(fynetheme.SizeNameInnerPadding)
+	w.content = NewInset(row, pad, pad, pad, pad)
+
+	w.Hide()
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *ComposerNotice) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.content)
+}
+
+// Set says why the channel will not take a message, or hides the notice when
+// there is nothing to say. Call on the UI thread.
+func (w *ComposerNotice) Set(reason string) {
+	if reason == "" {
+		w.Hide()
+		return
+	}
+
+	SetEllipsisText(w.box, reason)
+	w.Show()
+}
+
 // composerMinSize sizes a growing entry: one line per newline up to
 // ComposerMaxLines, plus InnerPadding above and below and nothing else. The input
 // border is *not* added on top — entryRenderer.Layout pays for that inset out of

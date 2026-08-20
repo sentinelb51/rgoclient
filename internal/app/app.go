@@ -115,6 +115,8 @@ type App struct {
 	composerDock    *fyne.Container   // badge row + jump bar + card: what the message column runs under
 	floatingDock    *fyne.Container   // that stack hung over messageScroll; relaid out when either appears
 	input           *ui.MessageInput
+	composerEntry   *fyne.Container     // the entry row, hidden where the account may not write
+	composerNotice  *ui.ComposerNotice  // what stands in its place then
 	jumpBar         *ui.JumpBar         // the way back to the live tail, over that card
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row

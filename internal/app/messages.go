@@ -114,17 +114,21 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 
 	// The two buttons ride the entry's last line rather than the middle of it — see
 	// ui.NewComposerButtonSlot, which is what decides where in the row they land.
-	entry := ui.NewFillRow(0,
+	a.composerEntry = ui.NewFillRow(0,
 		ui.WithCaret(a.input),
 		ui.NewComposerButtonSlot(a.input.EmojiButton),
 		ui.NewComposerButtonSlot(a.input.AttachButton),
 	)
 
+	// The notice replaces the row rather than joining it — see ui.ComposerNotice.
+	a.composerNotice = ui.NewComposerNotice()
+
 	inner := ui.VBoxNoSpacing(
 		a.input.Mentions,
 		a.input.ReplyContainer,
 		a.input.AttachmentContainer,
-		entry,
+		a.composerEntry,
+		a.composerNotice,
 	)
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
 	card := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
@@ -215,9 +219,9 @@ func (a *App) resizeDock() {
 
 /* Composing */
 
-// The composer's placeholder, which is where a channel that will not take a
-// message says so: without SendMessage the entry is disabled, so the placeholder
-// is the only thing left in the card to carry the reason.
+// The composer's placeholder, and the two reasons a channel gives for taking no
+// message. Without SendMessage the entry is hidden outright and ui.ComposerNotice
+// carries the reason in its place.
 const (
 	composerPlaceholder = "Send a message..."
 	composerNoAccess    = "You don't have access to this channel"
@@ -238,14 +242,27 @@ func (a *App) syncComposer() {
 	permissions := a.store.Permissions(a.currentChannelID)
 	a.input.SetPermissions(permissions)
 
+	reason := ""
 	switch {
 	case !known || permissions.Has(domain.PermissionSendMessage):
 		a.input.SetPlaceHolder(composerPlaceholder)
 	case !a.canViewChannel(channel):
-		a.input.SetPlaceHolder(composerNoAccess)
+		reason = composerNoAccess
 	default:
-		a.input.SetPlaceHolder(composerNoSending)
+		reason = composerNoSending
 	}
+
+	if a.composerNotice == nil || a.composerEntry == nil {
+		return
+	}
+
+	a.composerNotice.Set(reason)
+	if reason == "" {
+		a.composerEntry.Show()
+	} else {
+		a.composerEntry.Hide()
+	}
+	a.resizeDock()
 }
 
 // OnAttachFile asks for a file to hang on the next message. No filter: what a

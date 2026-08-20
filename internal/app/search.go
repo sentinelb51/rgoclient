@@ -48,10 +48,9 @@ func (a *App) closeSearch() {
 
 /* Asking */
 
-// searchMessages runs one query and fills the panel. Authors are resolved in the
-// same worker for the reason loadPinned gives: the search route cannot be asked
-// for the users, so every query would draw a column of raw IDs filling in a
-// moment later. The query is recorded rather than counted, so an answer to a
+// searchMessages runs one query and fills the panel. Whatever authors the answer
+// does not carry are resolved in the same worker, for the reason loadPinned
+// gives. The query is recorded rather than counted, so an answer to a
 // superseded one is dropped — a second Enter mid-flight is the ordinary case, and
 // the two can come back in either order.
 func (a *App) searchMessages(query string) {

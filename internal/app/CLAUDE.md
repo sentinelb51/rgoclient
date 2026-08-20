@@ -217,11 +217,10 @@ DAG and conventions.
     reads a code out of any last path segment, which pointed at a channel's worth
     of links would card half of them. `util.MayContainInvite` keeps the parse off
     the mounting path for almost every message.
-11. **Slowmode.** `selectChannel` paints what is known and fires `loadSlowmode`,
-    which re-asks on *every* visit — see the revoltgo note: nothing announces the
-    number, so it is only ever learnt by asking (`editChannel` asks again before
-    raising its card, a zero it did not verify being one that clears a cooldown).
-    `App.slowmodeOf` is the cooldown as it applies *to this account*, so
+11. **Slowmode.** The number rides on the channel and `ChannelUpdate` announces a
+    change, so `selectChannel` and `editChannel` both read `store.Channel` and
+    nothing asks the network. `App.slowmodeOf` is the cooldown as it applies
+    *to this account*, so
     `BypassSlowmode` collapses it to zero and the badge never appears for a
     moderator. `handleSubmit` refuses while `slowmodeRemaining` is non-zero and
     keeps what was typed, saying nothing: the badge counting down is the answer,
@@ -459,8 +458,8 @@ DAG and conventions.
     server decides it: `App.canViewChannel` exempts conversations, which are in
     the user's own list because they are in them. `selectChannel` is where the
     checks pay for themselves — a channel it cannot see returns before
-    `loadSlowmode` and `loadChannelMessages`, and `ReadMessageHistory` gates the
-    page on its own, so neither request is sent to be refused.
+    `loadChannelMessages`, and `ReadMessageHistory` gates the page on its own, so
+    the request is never sent to be refused.
     `SendMessage` **disables** the composer (`MessageInput.SetPermissions`) and
     `syncComposer` hides the entry row for `ui.ComposerNotice`, which carries the
     reason behind a mark — a disabled `widget.Entry` draws its border in
@@ -654,10 +653,10 @@ DAG and conventions.
     the only route that enumerates them). What comes back stays out of the message
     cache for the reason item 5 keeps a quote out of it, and out of `a.uncached`
     too — a row is a flattened summary, not a mounted message, so nothing here
-    resolves a quote. Authors are resolved in the same worker rather than through
-    `ensureAuthor`'s queue: the search route cannot be asked for the users (see the
-    revoltgo note), and the alternative is a column of raw IDs filling in a moment
-    later on every open.
+    resolves a quote. The search carries its own users, so the leftovers are
+    resolved in the same worker rather than through `ensureAuthor`'s queue: a
+    webhook or somebody departed would otherwise be a raw ID filling in a moment
+    later.
     The panel is a **snapshot** — `App.pinned` for as long as it is up — so a pin
     made anywhere while it is open does not reflect. `App.pinsChannelID` is what
     drops an answer that lands after the reader has moved on. A row leads to its
@@ -813,11 +812,11 @@ DAG and conventions.
     somebody, and `Client.relations` is what keeps it true. Ready fills
     `revoltgo.User.Relationship` for everybody it names and **nothing keeps it
     current after that** — see the `EventUserRelationship` note. `relations` is
-    the overlay that answers instead, the same shape `slowmode` is: read first,
-    falling back to `State`, written by the gateway handler and by each action
-    once the server has agreed, cleared with the session.
-    `AddFriend` is the second action to go round revoltgo's typed API, and unlike
-    `FetchSlowmode` it is a missing *route* rather than a missing field: Revolt
+    the overlay that answers instead: read first, falling back to `State`, written
+    by the gateway handler and by each action once the server has agreed, cleared
+    with the session.
+    `AddFriend` goes round revoltgo's typed API, it being a missing *route*
+    rather than a missing field: Revolt
     takes a **sent** request at `POST /users/friend` naming the person by handle,
     while `PUT /users/{id}/friend` — revoltgo's `FriendAdd`, here `AcceptFriend` —
     accepts one that has already arrived. The two are not interchangeable and the
@@ -916,8 +915,8 @@ DAG and conventions.
     neither.
 30. **Creating a server** is `ui.PromptDialog` — one field, because a name is all
     Revolt takes at creation — and it *replaces* the join dialog rather than
-    stacking on it, the modal layer holding one card. Nothing in the response can
-    be believed (see the revoltgo note), so the created server arrives exactly as
+    stacking on it, the modal layer holding one card. The response is ignored (see
+    the revoltgo note), so the created server arrives exactly as
     a joined one does: `pendingJoin` marks the request and `onServerJoined`
     selects what the gateway brings.
 31. **What a reaction chip says on hover** is who is in it, `domain.Reaction.Users`

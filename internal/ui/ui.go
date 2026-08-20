@@ -160,6 +160,18 @@ func tintedIcon(res fyne.Resource, c color.Color) fyne.Resource {
 	return tinted
 }
 
+// CautionMark tints a mark for a menu item whose effect can be undone by doing
+// the opposite. A fyne.MenuItem carries no colour of its own, so its icon is the
+// only thing that can say what sort of item it is.
+func CautionMark(res fyne.Resource) fyne.Resource {
+	return tintedIcon(res, theme.Colors.SwiftActionCaution)
+}
+
+// DangerMark tints a mark for a menu item that takes something away for good.
+func DangerMark(res fyne.Resource) fyne.Resource {
+	return tintedIcon(res, theme.Colors.SwiftActionDanger)
+}
+
 /* Context menus */
 
 // ShowContextMenu pops a menu up at pos (canvas coordinates) on the canvas that

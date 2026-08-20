@@ -479,13 +479,15 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		ID:         channel.ID,
 		Kind:       toChannelKind(channel),
 		Name:       channel.Name,
-		Slowmode:   s.client.slowmodeOf(channel.ID),
 		Recipients: channel.Recipients,
 		Active:     channel.Active,
 		NSFW:       channel.NSFW,
 	}
 	if channel.Description != nil {
 		out.Description = *channel.Description
+	}
+	if channel.Slowmode != nil {
+		out.Slowmode = time.Duration(*channel.Slowmode) * time.Second
 	}
 	if channel.Voice != nil && channel.Voice.MaxUsers != nil {
 		out.UserLimit = *channel.Voice.MaxUsers
@@ -684,8 +686,9 @@ const (
 // "assume nothing is allowed".
 //
 // The whole calculation is done here rather than through revoltgo's
-// State.ChannelPermissions, whose five mistakes all land on exactly what this is
-// for — see internal/client/CLAUDE.md.
+// State.ChannelPermissions, which agrees with the backend now but pays for its DM
+// branch by walking every cached membership and group, and answers nothing at all
+// for a membership State has not caught up with — see internal/client/CLAUDE.md.
 //
 // The State lookups happen here and the arithmetic in the resolvers below, which
 // take plain values: State's caches are unexported, so nothing reaching through
@@ -701,7 +704,8 @@ func (s *store) Permissions(channelID string) domain.Permission {
 		return 0
 	}
 
-	if channel.ChannelType != revoltgo.ChannelTypeText && channel.ChannelType != revoltgo.ChannelTypeVoice {
+	// A voice channel is a TextChannel carrying a voice object, so this covers both.
+	if channel.ChannelType != revoltgo.ChannelTypeText {
 		other := state.User(recipientID(state, channel))
 
 		return conversationPermissions(channel, s.client.relationshipWith(other), self.ID)
@@ -729,8 +733,10 @@ func conversationPermissions(channel *revoltgo.Channel, other domain.Relationshi
 		if channel.Owner == userID {
 			return permissionGrantAll
 		}
+		// A group's own permissions are an allow-only overwrite over the view-only
+		// floor: whoever set them cannot take away seeing the group at all.
 		if channel.Permissions != nil {
-			return domain.Permission(*channel.Permissions)
+			return permissionViewOnly | domain.Permission(*channel.Permissions)
 		}
 
 		return permissionInConversation
@@ -765,10 +771,12 @@ func (s *store) ServerPermissions(serverID string) domain.Permission {
 }
 
 // channelPermissions resolves what a member may do in one of a server's
-// channels: the server's own grant, then the channel's default overwrite, then
-// the channel's overwrites for the roles the member holds — most senior last, so
-// it has the last word. The timeout clamp comes after all of it, so no overwrite
-// can hand back what a timeout took.
+// channels, in Revolt's own order: the server's grant, the channel's default
+// overwrite, the member's roles, then the channel's overwrites for those same
+// roles — most senior last in both passes, so it has the last word. The channel's
+// default comes *before* the roles, which is what lets a role be handed back a
+// channel denied to everyone. The timeout clamp comes after all of it, so no
+// overwrite can return what a timeout took.
 func channelPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, channel *revoltgo.Channel, userID string) domain.Permission {
 	if server.Owner == userID {
 		return permissionGrantAll
@@ -777,10 +785,13 @@ func channelPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, 
 	// One ranking of the member's roles serves both passes: the server's grant, and
 	// this channel's overwrites keyed by the same roles in the same order.
 	roles := rankRoles(server, member)
-	permissions := grantedBy(server, roles)
+	permissions := domain.Permission(server.DefaultPermissions)
 
 	if channel.DefaultPermissions != nil {
 		permissions = applyOverwrite(permissions, *channel.DefaultPermissions)
+	}
+	for _, role := range roles {
+		permissions = applyOverwrite(permissions, role.overwrite)
 	}
 	for _, role := range roles {
 		if overwrite, ok := channel.RolePermissions[role.id]; ok {
@@ -788,7 +799,14 @@ func channelPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, 
 		}
 	}
 
-	return clampTimeout(permissions, member)
+	permissions = clampTimeout(permissions, member)
+
+	// Losing sight of the channel loses everything with it.
+	if !permissions.Has(domain.PermissionViewChannel) {
+		return 0
+	}
+
+	return permissions
 }
 
 // serverPermissions resolves what a member may do across a server, which is

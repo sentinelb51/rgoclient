@@ -16,7 +16,6 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 
 	"github.com/oklog/ulid/v2"
 
@@ -86,7 +85,7 @@ func (p *SettingsPage) accountSection() []settingsGroup {
 		})
 
 		control := HBoxNoSpacing(
-			container.NewCenter(newSwatchlessAvatar(p.hooks.Deps, session.AvatarURL)),
+			container.NewCenter(p.swatchlessAvatar(session.AvatarURL)),
 			HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
 			container.NewCenter(forget),
 		)
@@ -133,7 +132,7 @@ func (p *SettingsPage) identityRow() fyne.CanvasObject {
 		return p.readOnlyRow("Account", "Not signed in")
 	}
 
-	return p.row(self.Name, self.Handle, newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL))
+	return p.row(self.Name, self.Handle, p.swatchlessAvatar(self.AvatarURL))
 }
 
 // displayNameRow is the name shown wherever the account is named. The field holds
@@ -188,7 +187,7 @@ func (p *SettingsPage) pictureRow(self domain.User) fyne.CanvasObject {
 	enableIf(remove, self.AvatarURL != "")
 
 	control := HBoxNoSpacing(
-		container.NewCenter(newSwatchlessAvatar(p.hooks.Deps, self.AvatarURL)),
+		container.NewCenter(p.swatchlessAvatar(self.AvatarURL)),
 		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
 		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeAvatar)),
 		HorizontalSpacer(theme.Sizes.ChipSpacing),
@@ -258,11 +257,17 @@ func (p *SettingsPage) statusRow() fyne.CanvasObject {
 	return p.row("Status", "The line beside your name. Clear it to remove it.", textField(entry))
 }
 
-// newSwatchlessAvatar is the round face a row shows on its trailing edge.
-func newSwatchlessAvatar(deps Deps, url string) fyne.CanvasObject {
+// swatchlessAvatar is the round face a row shows on its trailing edge. Nothing is
+// asked for while the page is being indexed: an avatar is a picture to fetch, and
+// the index pass wants the row's name and nothing else.
+func (p *SettingsPage) swatchlessAvatar(url string) fyne.CanvasObject {
+	if p.indexing {
+		return HorizontalSpacer(0)
+	}
+
 	side := theme.Sizes.SessionCardAvatarSize
 
-	return circularAvatar(deps.Images, url, fyne.NewSize(side, side))
+	return circularAvatar(p.hooks.Deps.Images, url, fyne.NewSize(side, side))
 }
 
 /* Interface */
@@ -809,58 +814,65 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 /* Advanced */
 
 // advancedSection lists what the curated groups did not claim. Long by
-// construction — the point is that nothing is unreachable — so it opens with a
-// filter, which is what keeps the friendly sections short without hiding
-// anything. The lists are refilled in place rather than through reload: a rebuild
-// would replace the field being typed into on the first keystroke.
+// construction — the point is that nothing is unreachable — and narrowed by the
+// rail's search box, which is why it carries no field of its own: a size or a
+// colour typed there is answered in the results, and what lands here is whatever
+// was still being looked for on the way in.
 func (p *SettingsPage) advancedSection() []settingsGroup {
-	sizes, colors := VBoxNoSpacing(), VBoxNoSpacing()
-
-	// Both lists are fixed for the life of the section; only the filter moves.
 	sizeFields, colorFields := uncuratedSizeFields(), theme.ColorFields()
 
-	fill := func(query string) {
-		query = strings.ToLower(strings.TrimSpace(query))
-
-		// Matched before it is built. A row here is a slider, a field and a swatch,
-		// and there are hundreds — building every one per keystroke only to throw
-		// most away is the work the filter exists to avoid.
-		var sizeRows, colorRows []fyne.CanvasObject
-		for _, field := range sizeFields {
-			if !matchesField(field, query) {
-				continue
-			}
-			if row := p.sizeRow(field, field); row != nil {
-				sizeRows = append(sizeRows, row)
-			}
+	if p.indexing {
+		return []settingsGroup{
+			p.recordFields("Every other size", sizeFields, false),
+			p.recordFields("Palette", colorFields, true),
 		}
-		for _, field := range colorFields {
-			if !matchesField(field, query) {
-				continue
-			}
-			if row := p.colorRow(field, field); row != nil {
-				colorRows = append(colorRows, row)
-			}
-		}
-
-		sizes.Objects = separateRows(sizeRows)
-		colors.Objects = separateRows(colorRows)
-		sizes.Refresh()
-		colors.Refresh()
 	}
-	fill("")
 
-	filter := widget.NewEntry()
-	filter.PlaceHolder = "Padding, Radius…"
-	filter.OnChanged = fill
+	query := strings.ToLower(p.query)
+
+	// Matched before it is built. A row here is a slider, a field and a swatch, and
+	// there are hundreds — building every one only to throw most away is the work
+	// the query exists to avoid.
+	var sizeRows, colorRows []fyne.CanvasObject
+	for _, field := range sizeFields {
+		if !matchesField(field, query) {
+			continue
+		}
+		if row := p.sizeRow(field, field); row != nil {
+			sizeRows = append(sizeRows, row)
+		}
+	}
+	for _, field := range colorFields {
+		if !matchesField(field, query) {
+			continue
+		}
+		if row := p.colorRow(field, field); row != nil {
+			colorRows = append(colorRows, row)
+		}
+	}
+
+	if len(sizeRows) == 0 && len(colorRows) == 0 {
+		return []settingsGroup{p.group("", "",
+			p.note("No size or colour is named that. Empty the search box for the whole list."))}
+	}
 
 	return []settingsGroup{
-		p.group("Find", "", p.row("Filter by name", "", textField(filter))),
-		p.groupOf("Every other size",
+		p.group("Every other size", narrowed(
 			"Named exactly as the client names them. The Styles section covers the rest.",
-			sizes),
-		p.groupOf("Palette", "Every colour the client draws with.", colors),
+			query), sizeRows...),
+		p.group("Palette", narrowed("Every colour the client draws with.", query), colorRows...),
 	}
+}
+
+// narrowed says a list is showing part of itself. The search box is a column away
+// from the card and holds what was typed several sections ago, so a list two rows
+// long has to account for itself.
+func narrowed(detail, query string) string {
+	if query == "" {
+		return detail
+	}
+
+	return detail + " Showing only what the search box matches."
 }
 
 // matchesField is the filter: a substring of the field's own name, which is what

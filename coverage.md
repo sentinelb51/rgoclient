@@ -4,9 +4,9 @@
 
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` (module cache:
-`revoltgo@v0.0.0-20260810192541-889490ef5cb5/session.go`) exposes ~110 REST methods plus the
-socket pair. The client calls **39** of them, and registers **31** of revoltgo's 49 gateway
-event types. Six routes are reached without revoltgo's types at all, because revoltgo
+`revoltgo@v0.0.0-20260820200553-51930346333a/session.go`) exposes ~110 REST methods plus the
+socket pair. The client calls **40** of them, and registers **31** of revoltgo's 49 gateway
+event types. Five routes are reached without revoltgo's types at all, because revoltgo
 cannot express them — see *Round the typed API* below.
 
 `ChannelMessages` counts once but is now asked four ways: the newest page, `Before` into
@@ -45,6 +45,7 @@ is built and working, not merely planned.
 | Read state | `MessageAck`, `ServerAck` | `AckMessage`, `AckServer` |
 | Typing | `ChannelBeginTyping`, `ChannelEndTyping` | `BeginTyping`, `EndTyping` |
 | Channels | `Channel` | `OpenConversation` (State backfill) |
+| | `ChannelEdit` | `EditChannel` (name, topic, cooldown, user limit, age gate) |
 | | `ChannelDelete` | `CloseChannel` |
 | Conversations | `DirectMessages`, `DirectMessageCreate` | `Conversations`, `OpenConversation` |
 | Users | `User`, `ServerMember` | `ResolveAuthors`, `resolveRecipients` |
@@ -60,7 +61,6 @@ is built and working, not merely planned.
 | | `ChannelInviteCreate` | `CreateInvite` |
 | Raw | `HTTP.Request` → `EndpointAutumn(bucket)` | `uploadFile` — attachments, avatars and banners alike |
 | | `HTTP.Request` → `EndpointUser` (`profile`) | `SetBio`, `SetBanner`, `RemoveBanner` |
-| | `HTTP.Request` → `EndpointChannel` | `FetchSlowmode` (revoltgo models no `slowmode`) |
 | | `HTTP.Request` → `EndpointAuthSession("login")` | `Client.Login`, `Client.AnswerMFA` |
 | | `HTTP.Request` → `EndpointUserFriend("")` | `Client.AddFriend` (revoltgo has no *send* route) |
 | | `HTTP.Request` → `EndpointUserMutual` | `Client.Mutual` (revoltgo's decodes into the wrong shape) |
@@ -76,7 +76,7 @@ answer. `NewWithLogin` and `Session.Login` are no longer called either — see b
 
 ### Round the typed API
 
-Six things the client needs are not reachable through revoltgo's types, and all go
+Five things the client needs are not reachable through revoltgo's types, and all go
 through `Session.HTTP.Request`, which takes any struct and any result.
 
 **An upload names its bucket.** `Session.AttachmentUpload` posts to Autumn's *attachments*
@@ -91,10 +91,6 @@ whose `Background` is a `*File` — the shape a profile is *read* in — where t
 an attachment ID. `Client.editProfile` sends its own body, and the bio rides along in it
 rather than being sent the one way the typed API can express: one field pair sent two
 different ways is worth less than the one shape.
-
-**`slowmode`** is a field revoltgo models neither on `Channel` nor on `PartialChannel`, so
-the number never arrives with the channel and nothing announces a change. `FetchSlowmode`
-asks for the raw channel, and re-asks on every visit for want of the event carrying it.
 
 **An MFA login** cannot be expressed at all. `LoginResponse` carries neither the ticket nor
 `allowed_methods`, so the challenge is invisible; `LoginParams` carries no `mfa_ticket`, so
@@ -133,11 +129,11 @@ Pinning needs `ManageMessages` even over your own message — a pin is a change 
 not to the message — which is why `canPin` does not fall back to authorship the way `canDelete`
 does.
 
-**Creating a server** is the one action whose response says nothing. `/servers/create`
-answers with the server *and* its default channels, while `Session.ServerCreate` decodes
-into a bare `Server` — every field arrives zero, the ID included — so `Client.CreateServer`
-reports only the error and the server itself arrives as `ServerCreate` on the gateway. That
-is the path a *join* already takes for the same class of reason, so both mark `App.pendingJoin`
+**Creating a server** is the one action whose response is thrown away. `/servers/create`
+answers with the server *and* its default channels — `Session.ServerCreate` decodes both —
+but `Client.CreateServer` reports only the error and the server itself arrives as
+`ServerCreate` on the gateway. That
+is the path a *join* already takes, so both mark `App.pendingJoin`
 and let `onServerJoined` select what turns up. A name is all Revolt takes at creation: no
 icon, no description, which is why the card is one field.
 
@@ -147,10 +143,10 @@ icon, no description, which is why the card is one field.
 Listing the pins has to be a search at all because Revolt publishes no collection of them,
 the pin being a flag on the message. `Sort` is named in the shared half because the route's
 default is `Relevance`, which with nothing to be relevant to is an order nobody chose, and
-which for a list read as a channel's history is not the one wanted either. Neither may ask
-for the users: `include_users` turns the response from an array into an object and revoltgo's
-method decodes only the array, so both hand back author IDs and `app/pins.go` /
-`app/search.go` resolve what the store cannot name, in the worker that fetched them.
+which for a list read as a channel's history is not the one wanted either. Both ask for
+the users — `include_users` turns the response from an array into an object, which
+`ChannelSearch` now normalises either way — so `app/pins.go` / `app/search.go` are left
+resolving only what no response carries, in the worker that fetched it.
 Nothing is cached — either panel is a snapshot for as long as it is up — and taking a pin off
 from one goes through `App.setPinned`, `OnPin` with a hook, the message being one the column
 need not be holding at all. A query is 1–64 characters, past which the route refuses rather
@@ -262,7 +258,7 @@ client writes should say what the platform is called now. `text_test.go` asserts
 `revoltgo.User.Relationship` for everybody it names and nothing keeps it current afterwards:
 revoltgo registers no default handler for `EventUserRelationship`, `State`'s caches are
 unexported, and `PartialUser`-shaped `updateUser` is the only writer there is. So
-`Client.relations` is an overlay — the same shape `slowmode` is, read first and falling back
+`Client.relations` is an overlay — read first, falling back
 to `State` — written by the gateway handler and by each of the four actions once the server
 has agreed, and cleared with the session. There is no collection to fetch either: Revolt
 files each relationship on the account it is with, so `Store.Relationships` is a **walk** of
@@ -284,7 +280,7 @@ users are a member of some server and nothing more.
 | Call(s) | Feature |
 |---|---|
 | `AuthMFA*` (8 calls) | **Managing** a second factor — enabling or disabling TOTP, generating and listing recovery codes. Signing *in* with one is built (see above); configuring one is not, so an account can be reached but not secured from here. |
-| `ServerChannelCreate`, `ChannelEdit` | Channel create and rename. `EventChannelCreate`/`Update` are handled, so the results would already reflect. |
+| `ServerChannelCreate` | Creating a channel. `EventChannelCreate` is handled, so the result would already reflect. Editing one is built (`ChannelEdit`). |
 | `ServerInvites`, `InviteDelete` | Listing and revoking a server's invites. Creating one is built; nothing can see or withdraw them afterwards, and Revolt offers no expiry or use limit to set at creation either. |
 | `GroupCreate`, `GroupMemberAdd` / `Delete`, `GroupMembers` | Group DMs beyond viewing one. |
 | `SyncUnreads` | Refreshing unread state after a resume; only Ready carries it now. |
@@ -360,10 +356,6 @@ the third such pair in the file, so both must be registered.
   nothing left for one to do.
 - `EventUserSettingsUpdate` — revoltgo flags its msgp tuples as undecodable (Tier 4).
 - `EventReportCreate`, `EventWebhook*` and the six voice events belong to Tier 4.
-
-Note that `EventChannelUpdate` still does **not** carry slowmode: revoltgo models the field
-neither on `Channel` nor on `PartialChannel`, which is why `FetchSlowmode` re-asks on every
-channel visit rather than trusting the event now that the event is listened to.
 
 ---
 

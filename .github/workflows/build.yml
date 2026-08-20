@@ -69,16 +69,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # cgo headers the module graph needs and the image does not ship: GL and
-      # X11 for Fyne's GLFW and for golang.design/x/clipboard, xkbcommon for the
-      # keymap, ALSA for oto. macOS and Windows have their equivalents in the
-      # toolchain already.
+      # cgo headers the module graph needs and the image does not ship: GL for
+      # Fyne's GLFW, X11 and Wayland for both its display backends (glfw v3.4
+      # compiles both unless -tags x11) and for golang.design/x/clipboard,
+      # xkbcommon for the keymap, ALSA for oto. macOS and Windows have their
+      # equivalents in the toolchain already.
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            libgl1-mesa-dev xorg-dev libxkbcommon-dev libasound2-dev
+            libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libasound2-dev
 
       - name: Set up Go
         uses: actions/setup-go@v5

@@ -372,7 +372,18 @@ func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
 // find by trying. Drawn only where the key can be read (see ShiftHeld) and only
 // on a question that does something, an acknowledgement having nothing to skip.
 func confirmHint(confirm Confirm) fyne.CanvasObject {
-	if !shiftSkippable || confirm.OnConfirm == nil {
+	if confirm.OnConfirm == nil {
+		return nil
+	}
+
+	return shiftSkipHint()
+}
+
+// shiftSkipHint is that line, for every card the key skips — the ban card asks
+// for more than a yes and is skipped by the same hold. Nil where the key cannot
+// be read (see ShiftHeld), so nothing offers a way out that would never work.
+func shiftSkipHint() fyne.CanvasObject {
+	if !shiftSkippable {
 		return nil
 	}
 

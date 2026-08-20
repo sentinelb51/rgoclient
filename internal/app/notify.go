@@ -10,6 +10,7 @@ import (
 	"log"
 
 	"RGOClient/internal/audio"
+	"RGOClient/internal/client"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/util"
@@ -300,20 +301,17 @@ func (a *App) confirmBlockUser(userID, name string) {
 
 /* Removing a member */
 
-// confirmKickMember asks before removing someone from the open server.
+// confirmKickMember asks before kicking someone out of the open server. A
+// warning rather than a danger: a kick takes away nothing a new invite would not
+// give back.
 func (a *App) confirmKickMember(serverID, userID string) {
-	// The member record carries the nickname the sidebar shows them under, which is
-	// the name to ask about; the raw user is the fallback.
-	name := a.store.UserName(userID)
-	if member, ok := a.store.Member(serverID, userID); ok {
-		name = member.Name
-	}
+	name := a.memberName(serverID, userID)
 
 	a.confirm(ui.Confirm{
-		Title:  "Remove member",
+		Title:  "Kick member",
 		Body:   fmt.Sprintf("%s will be removed from the server. They can rejoin with a new invite.", name),
-		Action: "Remove",
-		Tone:   ui.ToneDanger,
+		Action: "Kick",
+		Tone:   ui.ToneWarning,
 		OnConfirm: func() {
 			a.kickMember(serverID, userID, name)
 		},
@@ -329,9 +327,64 @@ func (a *App) kickMember(serverID, userID, name string) {
 	)
 }
 
+// promptBanMember raises the card asking for a ban's terms — the route takes a
+// reason and a window of the member's recent messages, so the question is a card
+// rather than a confirmation. Shift skips it as it skips one, for the plain ban
+// an untouched card would send. Call on the UI thread.
+func (a *App) promptBanMember(serverID, userID string) {
+	name := a.memberName(serverID, userID)
+
+	if ui.ShiftHeld() {
+		a.banMember(serverID, userID, name, client.BanOptions{})
+		return
+	}
+
+	dialog := ui.NewBanDialog(name, func(request ui.BanRequest) {
+		a.closeOverlay()
+		a.banMember(serverID, userID, name, client.BanOptions{
+			Reason:         request.Reason,
+			DeleteMessages: request.DeleteMessages,
+		})
+	}, a.closeOverlay)
+
+	a.showOverlay(dialog.Content)
+	a.window.Canvas().Focus(dialog.Entry)
+}
+
+// banMember bans a member. As with a kick, the departure is drawn by
+// MembersChanged and the outcome said either way.
+func (a *App) banMember(serverID, userID, name string, options client.BanOptions) {
+	a.reportAction(
+		func() error { return a.client.BanMember(serverID, userID, options) },
+		"ban member "+userID+" from server "+serverID, "Could not ban %s.", "%s was banned.", name,
+	)
+}
+
+// memberName is what to ask about: the member record carries the nickname the
+// sidebar shows them under, and the raw user is the fallback.
+func (a *App) memberName(serverID, userID string) string {
+	if member, ok := a.store.Member(serverID, userID); ok {
+		return member.Name
+	}
+
+	return a.store.UserName(userID)
+}
+
 // canKickMember: permission to kick, and a target who is neither the user
 // themselves nor the owner, whom the server refuses to remove anyway.
 func (a *App) canKickMember(serverID, userID string) bool {
+	return a.canRemoveMember(serverID, userID, domain.PermissionKickMembers)
+}
+
+// canBanMember is the same question about the other permission — Revolt gates
+// the two separately, so a moderator may hold either without the other.
+func (a *App) canBanMember(serverID, userID string) bool {
+	return a.canRemoveMember(serverID, userID, domain.PermissionBanMembers)
+}
+
+// canRemoveMember: the named permission, and a target who is neither the user
+// themselves nor the owner, whom the server refuses to remove anyway.
+func (a *App) canRemoveMember(serverID, userID string, permission domain.Permission) bool {
 	server, ok := a.store.Server(serverID)
 	if !ok || server.OwnerID == userID {
 		return false
@@ -342,5 +395,5 @@ func (a *App) canKickMember(serverID, userID string) bool {
 		return false
 	}
 
-	return a.store.ServerPermissions(serverID).Has(domain.PermissionKickMembers)
+	return a.store.ServerPermissions(serverID).Has(permission)
 }

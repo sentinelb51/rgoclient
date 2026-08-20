@@ -9,7 +9,6 @@ package app
 import (
 	"errors"
 	"log"
-	"time"
 
 	"fyne.io/fyne/v2"
 
@@ -315,54 +314,12 @@ func (a *App) canEditChannel(channelID string) bool {
 	return a.store.Permissions(channelID).Has(domain.PermissionManageChannel)
 }
 
-// editChannel raises the card that changes what a channel is.
-//
-// The cooldown is read before the card goes up, and only then: revoltgo drops the
-// field from the channel it caches (see Client.FetchSlowmode), so the store's zero
-// means "none" and "never asked" alike — and a card opened on that zero is one
-// that clears a slowmode the moment it is saved. A channel whose cooldown cannot
-// be read is offered without the row rather than with a wrong one. A group has no
-// cooldown to ask about.
+// editChannel raises the card that changes what a channel is, on what the channel
+// is now: the cooldown for everything but a group, which has none, and the user
+// limit on a voice channel. A nil field is a row the card leaves out and one the
+// request omits — see client.ChannelEdit, where `voice` sent to a channel that is
+// not a voice channel is what would turn it into one. Call on the UI thread.
 func (a *App) editChannel(channelID string) {
-	if !a.canEditChannel(channelID) {
-		return
-	}
-
-	channel, _ := a.store.Channel(channelID)
-	if channel.Kind == domain.ChannelGroup {
-		a.showChannelDialog(channelID, nil)
-		return
-	}
-
-	epoch := a.epoch
-	go func() {
-		slowmode, err := a.client.FetchSlowmode(channelID)
-
-		a.doOnUI(func() {
-			if a.stale(epoch) {
-				return
-			}
-			if err != nil {
-				log.Printf("fetch slowmode for %s: %v", channelID, err)
-				a.showChannelDialog(channelID, nil)
-				return
-			}
-
-			a.showChannelDialog(channelID, &slowmode)
-		}, false)
-	}()
-}
-
-// showChannelDialog puts the card up on what the channel is now, offering the
-// fields its kind has: the cooldown when one could be read, and the user limit on
-// a voice channel. A nil field is a row the card leaves out and one the request
-// omits — see client.ChannelEdit, where `voice` sent to a channel that is not a
-// voice channel is what would turn it into one.
-//
-// The permission is asked again here rather than trusted from the menu: the menu
-// is built per click, but a role can be taken away while the request above is out.
-// Call on the UI thread.
-func (a *App) showChannelDialog(channelID string, slowmode *time.Duration) {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canEditChannel(channelID) {
 		return
@@ -371,8 +328,10 @@ func (a *App) showChannelDialog(channelID string, slowmode *time.Duration) {
 	current := ui.ChannelSettings{
 		Name:        channel.Name,
 		Description: channel.Description,
-		Slowmode:    slowmode,
 		NSFW:        channel.NSFW,
+	}
+	if channel.Kind != domain.ChannelGroup {
+		current.Slowmode = &channel.Slowmode
 	}
 	if channel.Kind == domain.ChannelVoice {
 		current.UserLimit = &channel.UserLimit

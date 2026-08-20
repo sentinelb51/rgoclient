@@ -80,10 +80,11 @@ func (a *App) closePins() {
 	a.pinned = nil
 }
 
-// loadPinned fetches the list and fills the panel. Authors are resolved in the
-// same worker rather than through ensureAuthor's queue: the search route cannot
-// be asked for the users (see Client.PinnedMessages), so the panel would mount a
-// column of raw IDs and fill them in a moment later, on every open.
+// loadPinned fetches the list and fills the panel. The search carries its own
+// users, so what is left to resolve is usually nothing — but it is resolved in
+// the same worker rather than through ensureAuthor's queue: a webhook or somebody
+// departed would otherwise be a raw ID the panel mounts and fills in a moment
+// later.
 func (a *App) loadPinned(channelID string) {
 	serverID := a.channelServerID(channelID)
 	epoch := a.epoch

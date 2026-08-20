@@ -29,7 +29,6 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -67,9 +66,8 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
-	mu       sync.Mutex               // guards the four maps below
-	fetching map[string]bool          // channelID -> a page request is already in flight
-	slowmode map[string]time.Duration // channelID -> its send cooldown, once asked for
+	mu       sync.Mutex      // guards the three maps below
+	fetching map[string]bool // channelID -> a page request is already in flight
 
 	// fetchingMembers is fetching's counterpart for FetchMembers. A map of its own
 	// rather than a shared one because the key spaces are different — these are
@@ -81,8 +79,7 @@ type Client struct {
 	// Ready fills User.Relationship for everybody it names, but nothing keeps it
 	// current afterwards: revoltgo registers no default handler for
 	// EventUserRelationship and State's caches are unexported, so there is no way
-	// to write the change back where the store would read it. This is that write,
-	// the same shape slowmode is and for the same reason.
+	// to write the change back where the store would read it. This is that write.
 	relations map[string]domain.Relationship
 }
 
@@ -100,7 +97,6 @@ func New() *Client {
 		events:          make(chan Event, eventBuffer),
 		done:            make(chan struct{}),
 		fetching:        make(map[string]bool),
-		slowmode:        make(map[string]time.Duration),
 		fetchingMembers: make(map[string]bool),
 		relations:       make(map[string]domain.Relationship),
 	}
@@ -203,7 +199,6 @@ func (c *Client) Close() {
 
 	c.mu.Lock()
 	clear(c.fetching)
-	clear(c.slowmode)
 	clear(c.fetchingMembers)
 	clear(c.relations)
 	c.mu.Unlock()

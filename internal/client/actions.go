@@ -403,42 +403,6 @@ func (c *Client) EndTyping(channelID string) error {
 	return session.ChannelEndTyping(channelID)
 }
 
-/* Slowmode */
-
-// FetchSlowmode reads a channel's send cooldown and records it, so the store can
-// answer for it without going back to the network. revoltgo models neither the
-// field nor its ChannelUpdate, so asking for the raw channel is the only route
-// to it; when it grows the field this becomes a line in store.go.
-func (c *Client) FetchSlowmode(channelID string) (time.Duration, error) {
-	session := c.session.Load()
-	if session == nil {
-		return 0, ErrNoSession
-	}
-
-	var channel struct {
-		Slowmode int `json:"slowmode"`
-	}
-	if err := session.HTTP.Request(http.MethodGet, revoltgo.EndpointChannel(channelID), nil, &channel); err != nil {
-		return 0, err
-	}
-	slowmode := time.Duration(channel.Slowmode) * time.Second
-
-	c.mu.Lock()
-	c.slowmode[channelID] = slowmode
-	c.mu.Unlock()
-
-	return slowmode, nil
-}
-
-// slowmodeOf is a channel's recorded cooldown, or 0 when it has none or has not
-// been asked about. Safe from any goroutine — the store reads it.
-func (c *Client) slowmodeOf(channelID string) time.Duration {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	return c.slowmode[channelID]
-}
-
 /* History */
 
 // LatestMessages fetches the newest page of a channel into the cache and reports
@@ -573,10 +537,7 @@ func oldestFirst(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) 
 // flag on the message and Revolt publishes no collection of them, so the search
 // route asked with pinned and no query is the only enumeration there is.
 //
-// Nothing is written to the message cache, for the reason messagePage gives, and
-// nothing may ask for the users: with include_users the route answers with an
-// object rather than an array, a shape ChannelSearch cannot decode. The caller
-// resolves the authors it does not already know.
+// Nothing is written to the message cache, for the reason messagePage gives.
 func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
 	return c.search(channelID, revoltgo.ChannelSearchParams{
 		Limit:  limit,
@@ -602,7 +563,10 @@ func (c *Client) SearchMessages(channelID, query string, limit int) ([]*domain.M
 
 // search is the request both share, newest first. Sort is named here because the
 // route's default is Relevance, which for a list read as a channel's history —
-// and with no query, relevant to nothing — is an order nobody chose.
+// and with no query, relevant to nothing — is an order nobody chose. IncludeUsers
+// is named here for the same reason it is on a history page: the users come back
+// with the messages and land in State, so the caller's author resolution is left
+// with only what no response carries.
 //
 // Unguarded by c.fetching: a search comes from a keystroke rather than a scroll,
 // and writes nothing two answers could interleave in.
@@ -612,13 +576,14 @@ func (c *Client) search(channelID string, params revoltgo.ChannelSearchParams) (
 		return nil, ErrNoSession
 	}
 	params.Sort = revoltgo.ChannelMessagesParamsSortTypeLatest
+	params.IncludeUsers = true
 
 	page, err := session.ChannelSearch(channelID, params)
 	if err != nil {
 		return nil, err
 	}
 
-	messages := toMessages(page)
+	messages := toMessages(page.Messages)
 	slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
 
 	return messages, nil
@@ -897,7 +862,7 @@ const (
 )
 
 // The names a cleared field is removed under. Neither an empty string nor a zero
-// reaches the wire — both are dropped by omitempty and read as "leave it alone" —
+// reaches the wire — both are dropped by omitzero and read as "leave it alone" —
 // so clearing anything is a name rather than a blank, as it is for a user edit.
 const (
 	fieldChannelDescription = "Description"
@@ -925,24 +890,6 @@ type ChannelEdit struct {
 	NSFW bool
 }
 
-// channelEditBody is the route's DataEditChannel. revoltgo's ChannelEditParams
-// carries neither slowmode nor voice, so the whole edit is sent by hand rather
-// than half of it through the typed API and half beside it.
-type channelEditBody struct {
-	Name        string            `json:"name,omitempty"`
-	Description string            `json:"description,omitempty"`
-	NSFW        *bool             `json:"nsfw,omitempty"`
-	Slowmode    *int              `json:"slowmode,omitempty"`
-	Voice       *channelVoiceEdit `json:"voice,omitempty"`
-	Remove      []string          `json:"remove,omitempty"`
-}
-
-// channelVoiceEdit is VoiceInformation. An absent max_users is Revolt's own way
-// of saying "no cap", so an empty object is how one is taken off.
-type channelVoiceEdit struct {
-	MaxUsers *int `json:"max_users,omitempty"`
-}
-
 // EditChannel changes what a channel is: its name, topic, age gate, send cooldown
 // and — for a voice channel — how many may be in it. All of it rides one
 // permission (see domain.PermissionManageChannel), which the route checks once
@@ -950,9 +897,7 @@ type channelVoiceEdit struct {
 // on it.
 //
 // What took comes back as ChannelUpdate on the gateway, which is what repaints
-// the sidebar and the header. The slowmode is the exception: revoltgo drops the
-// field from the channel and from the event alike, so what was just set is
-// recorded here or the store goes on missing it.
+// the sidebar and the header.
 func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 	session := c.session.Load()
 	if session == nil {
@@ -964,45 +909,38 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 		return ErrChannelNameEmpty
 	}
 
-	body := channelEditBody{
+	params := revoltgo.ChannelEditParams{
 		Name:        name,
 		Description: trimTo(edit.Description, MaxChannelDescription),
 		NSFW:        &edit.NSFW,
 	}
-	if body.Description == "" {
-		body.Remove = append(body.Remove, fieldChannelDescription)
+	if params.Description == "" {
+		params.Remove = append(params.Remove, fieldChannelDescription)
 	}
 
-	var slowmode time.Duration
 	if edit.Slowmode != nil {
-		slowmode = min(max(*edit.Slowmode, 0), MaxChannelSlowmode).Truncate(time.Second)
+		slowmode := min(max(*edit.Slowmode, 0), MaxChannelSlowmode).Truncate(time.Second)
 
 		seconds := int(slowmode / time.Second)
 		if seconds > 0 {
-			body.Slowmode = &seconds
+			params.Slowmode = &seconds
 		} else {
-			body.Remove = append(body.Remove, fieldChannelSlowmode)
+			params.Remove = append(params.Remove, fieldChannelSlowmode)
 		}
 	}
 
+	// An absent max_users is Revolt's own way of saying "no cap", so an empty
+	// object is how one is taken off.
 	if edit.UserLimit != nil {
-		body.Voice = &channelVoiceEdit{}
+		params.Voice = &revoltgo.ChannelVoiceInformation{}
 		if limit := *edit.UserLimit; limit > 0 {
-			body.Voice.MaxUsers = &limit
+			params.Voice.MaxUsers = &limit
 		}
 	}
 
-	if err := session.HTTP.Request(http.MethodPatch, revoltgo.EndpointChannel(channelID), body, nil); err != nil {
-		return err
-	}
+	_, err := session.ChannelEdit(channelID, params)
 
-	if edit.Slowmode != nil {
-		c.mu.Lock()
-		c.slowmode[channelID] = slowmode
-		c.mu.Unlock()
-	}
-
-	return nil
+	return err
 }
 
 /* Servers and members */
@@ -1016,9 +954,9 @@ var ErrServerNameEmpty = errors.New("server name is empty")
 // CreateServer makes a server owned by this account. A long name is cut rather
 // than refused; an empty one has no repair, so it is the one case reported back.
 //
-// Nothing comes back that can be believed — revoltgo decodes the response into a
-// bare Server no field of which matches — so the created server reaches the
-// client the way a joined one does, as ServerCreate on the gateway.
+// The response carries the server and its default channels, but the created
+// server reaches the client the way a joined one does, as ServerCreate on the
+// gateway: one path into the sidebar rather than two.
 func (c *Client) CreateServer(name string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -1103,8 +1041,8 @@ func (c *Client) CreateInvite(channelID string) (code string, err error) {
 }
 
 // JoinInvite redeems an invite code. The joined server reaches the caller
-// through ServerJoined rather than this response, whose ServerID revoltgo reads
-// off a "server_id" field the join payload never sets.
+// through ServerJoined rather than this response, the same one path CreateServer
+// takes.
 func (c *Client) JoinInvite(code string) error {
 	session := c.session.Load()
 	if session == nil {
@@ -1137,6 +1075,35 @@ func (c *Client) KickMember(serverID, userID string) error {
 	}
 
 	return session.ServerMemberDelete(serverID, userID)
+}
+
+// BanOptions is everything a ban takes beyond the two IDs, all of it optional: a
+// reason kept with the ban, and how much of what the member said recently goes
+// with them. Zero values are a plain ban.
+type BanOptions struct {
+	Reason         string
+	DeleteMessages time.Duration
+}
+
+// What the ban route will take. Revolt refuses anything past either outright, so
+// both are clamped rather than spending a round trip finding out.
+const (
+	MaxBanReason         = 1024
+	MaxBanDeleteMessages = 7 * 24 * time.Hour
+)
+
+// BanMember bans a user from a server. As with a kick, the departure arrives as
+// MembersChanged.
+func (c *Client) BanMember(serverID, userID string, options BanOptions) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ServerMemberBan(serverID, userID, revoltgo.ServerMemberBanParams{
+		Reason:               trimTo(options.Reason, MaxBanReason),
+		DeleteMessageSeconds: int64(max(min(options.DeleteMessages, MaxBanDeleteMessages), 0) / time.Second),
+	})
 }
 
 /* This account */

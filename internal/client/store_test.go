@@ -139,14 +139,14 @@ func TestServerRolesOrdersBySeniority(t *testing.T) {
 /* Permissions */
 
 // permissionFixture is the shape every case below varies: a server whose default
-// role sees nothing, one senior role and one junior one, and a text channel in
-// it. The defaults deny ViewChannel outright, which is how a private channel is
-// actually built — everything here is about who gets it back.
+// role may see and read, one senior role and one junior one, and a text channel
+// in it. ViewChannel is in the server's grant because losing it zeroes everything
+// else, so a case that is not about visibility has to keep it.
 func permissionFixture() (*revoltgo.Server, *revoltgo.Channel) {
 	server := &revoltgo.Server{
 		ID:                 "server",
 		Owner:              "owner",
-		DefaultPermissions: int64(domain.PermissionReadMessageHistory),
+		DefaultPermissions: int64(domain.PermissionViewChannel | domain.PermissionReadMessageHistory),
 		Roles: map[string]*revoltgo.ServerRole{
 			// Revolt ranks the most senior lowest, so "senior" outranks "junior".
 			"senior": {Rank: 1},
@@ -170,9 +170,8 @@ func member(roles ...string) *revoltgo.ServerMember {
 }
 
 // A channel denied to everyone and handed back to one role is how Revolt hides a
-// channel, and reading Channel.RolePermissions is the only thing that sees it —
-// revoltgo's own ChannelPermissions does not, which is why the calculation is
-// ours.
+// channel: the channel's default overwrite has to be applied before the roles, or
+// the denial has the last word and the role that holds the channel cannot see it.
 func TestChannelPermissionsAppliesRoleOverwrites(t *testing.T) {
 	server, channel := permissionFixture()
 	channel.DefaultPermissions = &revoltgo.PermissionOverwrite{Deny: int64(domain.PermissionViewChannel)}
@@ -185,6 +184,23 @@ func TestChannelPermissionsAppliesRoleOverwrites(t *testing.T) {
 	}
 	if got := channelPermissions(server, member("junior"), channel, "self"); got.Has(domain.PermissionViewChannel) {
 		t.Error("a role the channel says nothing about can see a channel denied to everyone")
+	}
+}
+
+// The same denial handed back by a *server* role rather than a channel overwrite,
+// which is the ordering the channel's default overwrite coming first is for: apply
+// it after the roles and the denial wins, and the role that holds the channel
+// cannot see it.
+func TestChannelPermissionsServerRoleOutlastsChannelDefault(t *testing.T) {
+	server, channel := permissionFixture()
+	server.Roles["senior"].Permissions = revoltgo.PermissionOverwrite{Allow: int64(domain.PermissionViewChannel)}
+	channel.DefaultPermissions = &revoltgo.PermissionOverwrite{Deny: int64(domain.PermissionViewChannel)}
+
+	if got := channelPermissions(server, member("senior"), channel, "self"); !got.Has(domain.PermissionViewChannel) {
+		t.Error("a server role granting ViewChannel cannot see a channel denied to everyone")
+	}
+	if got := channelPermissions(server, member("junior"), channel, "self"); got.Has(domain.PermissionViewChannel) {
+		t.Error("a role granting nothing can see a channel denied to everyone")
 	}
 }
 
@@ -255,9 +271,9 @@ func TestChannelPermissionsOwnerAndUnknownMember(t *testing.T) {
 	}
 }
 
-// A DM carries no permissions field — Revolt only sends one on a group — so
-// reading it the way revoltgo's ChannelPermissions does answers view-only for
-// every direct message there is, which would disable the composer in all of them.
+// A DM carries no permissions field — Revolt only sends one on a group — so it is
+// the relationship that decides whether the composer is live. A group's field is
+// an allow-only overwrite over the view-only floor, never the whole answer.
 func TestConversationPermissions(t *testing.T) {
 	dm := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeDM, Recipients: []string{"self", "them"}}
 	group := &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeGroup, Owner: "them"}

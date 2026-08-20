@@ -12,6 +12,7 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
@@ -394,9 +395,12 @@ func (a *App) closeChannelLabel(channelID string) string {
 	return "Close conversation"
 }
 
-// memberMenu builds the items a member row offers on right-click. Removal is
-// offered only where it can actually be done (canKickMember), so the menu never
-// presents an action the server will refuse.
+// memberMenu builds the items a member row offers on right-click. Each way out
+// of the server is offered only where it can actually be taken (canKickMember,
+// canBanMember), so the menu never presents an action the server will refuse.
+//
+// A menu item carries no colour of its own, so the mark is what separates the
+// two: a kick is undone by a new invite, a ban until it is lifted is not.
 func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItemWithIcon("Copy user ID", fynetheme.ContentCopyIcon(), func() {
@@ -404,12 +408,17 @@ func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 		}),
 	}
 
-	if a.canKickMember(serverID, userID) {
-		items = append(items,
-			fyne.NewMenuItemSeparator(),
-			fyne.NewMenuItemWithIcon("Remove from server", fynetheme.ContentRemoveIcon(),
-				func() { a.confirmKickMember(serverID, userID) }),
-		)
+	kick, ban := a.canKickMember(serverID, userID), a.canBanMember(serverID, userID)
+	if kick || ban {
+		items = append(items, fyne.NewMenuItemSeparator())
+	}
+	if kick {
+		items = append(items, fyne.NewMenuItemWithIcon("Kick", ui.CautionMark(assets.SystemKickedIcon),
+			func() { a.confirmKickMember(serverID, userID) }))
+	}
+	if ban {
+		items = append(items, fyne.NewMenuItemWithIcon("Ban", ui.DangerMark(assets.SystemBannedIcon),
+			func() { a.promptBanMember(serverID, userID) }))
 	}
 
 	return items
@@ -607,15 +616,14 @@ func (a *App) selectChannel(channelID string) {
 	a.syncChannelList()
 	a.refreshMentionCandidates()
 	a.syncComposer()
-	a.refreshSlowmode() // what is already known, before any request below lands
-	a.refreshTyping()   // whoever was typing here while the channel was in the background
+	a.refreshSlowmode()
+	a.refreshTyping() // whoever was typing here while the channel was in the background
 
 	if !viewable {
 		a.showStatus("You don't have access to this channel")
 		return
 	}
 
-	a.loadSlowmode(channelID)
 	a.focusInput() // so the user can type straight away
 
 	// Seeing a channel and reading what was said in it are separate permissions: an

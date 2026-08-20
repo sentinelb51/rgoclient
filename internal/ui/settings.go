@@ -200,6 +200,30 @@ type SettingsPage struct {
 	pane    *fyne.Container
 	title   *canvas.Text
 
+	/* Search */
+
+	// query is what the field at the head of the rail holds. It outlives the results
+	// view — a section reached from a result keeps it, which is what filters the
+	// Advanced lists down to what was being looked for.
+	query string
+
+	// searching says the pane is showing results rather than a section. Separate
+	// from a non-empty query for the same reason: leaving the results view does not
+	// empty the field.
+	searching bool
+
+	// index is every setting the search can find, built once per open and lazily —
+	// most opens never search. See settings_search.go.
+	index []settingsHit
+
+	// indexing marks the throwaway pass that walks the sections for their names:
+	// a row answers with what it is called rather than with anything to draw.
+	indexing bool
+
+	// flash is the wash marking the group a jump landed on. One at a time — a
+	// second jump hands the first one's card back before starting its own.
+	flash *fyne.Animation
+
 	// paneScroll is what a rail sub-entry moves and what reports the movement back,
 	// so the entry marked open follows the reader rather than the last tap.
 	paneScroll *ObservableScroll
@@ -250,6 +274,10 @@ type settingsPreview struct {
 type settingsGroup struct {
 	caption string
 	object  fyne.CanvasObject
+
+	// card is the surface behind the rows, kept so a jump can wash it — the flash
+	// is what says which of several cards the rail just moved to.
+	card *canvas.Rectangle
 }
 
 // NewSettingsPage builds the page, hidden.
@@ -280,6 +308,7 @@ func (p *SettingsPage) Open() {
 // widget or an image alive. Call on the UI thread.
 func (p *SettingsPage) Close() {
 	p.closePopover()
+	p.stopFlash()
 	p.Layer.Hide()
 	p.Layer.Objects = nil
 	p.previews = nil
@@ -288,6 +317,9 @@ func (p *SettingsPage) Close() {
 	p.subButtons = nil
 	p.navGroups = nil
 	p.paneScroll = nil
+	p.query = ""
+	p.searching = false
+	p.index = nil
 }
 
 // Rebuild constructs the page from the theme tables as they now stand. Called on
@@ -379,7 +411,11 @@ func (p *SettingsPage) build() fyne.CanvasObject {
 	p.pane = VBoxNoSpacing()
 	p.title = newBoldText("", theme.Colors.TextPrimary, theme.Sizes.SettingsHeaderSize)
 
-	p.showSection(p.section)
+	if p.searching {
+		p.showResults()
+	} else {
+		p.showSection(p.section)
+	}
 
 	padding := theme.Sizes.SettingsPagePadding
 
@@ -430,13 +466,18 @@ func (p *SettingsPage) buildRailColumn() fyne.CanvasObject {
 	padding := theme.Sizes.SettingsPagePadding
 
 	caption := newBoldText("SETTINGS", theme.Colors.CategoryText, theme.Sizes.SettingsCaptionSize)
+	padH := theme.Sizes.SettingsRowPaddingH
 
-	content := NewInset(
-		container.NewVBox(caption, p.rail),
-		padding, padding, theme.Sizes.SettingsRowPaddingH, theme.Sizes.SettingsRowPaddingH,
+	// The field is pinned above the scroll rather than listed in it: it is what the
+	// rail below is showing, and a search box that scrolls away is one nobody finds.
+	head := NewInset(
+		VBoxNoSpacing(caption, VerticalSpacer(theme.Sizes.SettingsPreviewGap), p.buildSearchField()),
+		padding, theme.Sizes.SettingsPreviewGap, padH, padH,
 	)
 
-	column := NewFillColumn(0, container.NewVScroll(content), p.buildRailFooter())
+	content := NewInset(p.rail, 0, padding, padH, padH)
+
+	column := NewFillColumn(1, head, container.NewVScroll(content), p.buildRailFooter())
 
 	return NewFixedWidthContainer(theme.Sizes.SettingsRailWidth, background,
 		NewFillRow(0, column, NewColumnDivider()))
@@ -469,12 +510,15 @@ func (p *SettingsPage) buildRail() {
 
 	var buttons []fyne.CanvasObject
 	for _, entry := range visibleRailEntries(p.advanced) {
-		buttons = append(buttons, newSettingsRailButton(entry, entry.section == p.section, func() {
+		// Nothing is open while results are showing, so nothing is marked: the rail
+		// is the way out of them rather than a record of where they came from.
+		open := !p.searching && entry.section == p.section
+
+		buttons = append(buttons, newSettingsRailButton(entry, open, func() {
 			p.showSection(entry.section)
-			p.pane.Refresh()
 		}))
 
-		if entry.section != p.section {
+		if !open {
 			continue
 		}
 
@@ -495,6 +539,7 @@ func (p *SettingsPage) buildRail() {
 	}
 
 	p.rail.Objects = buttons
+	p.rail.Refresh() // a container re-lays out only when it is told its children moved
 }
 
 // visibleRailEntries drops the sections advanced mode hides — the raw size and
@@ -514,41 +559,56 @@ func visibleRailEntries(advanced bool) []railEntry {
 	return visible
 }
 
-// showSection swaps the pane to one section's groups.
+// showSection swaps the pane to one section's groups, leaving the results view if
+// that is what was showing.
 func (p *SettingsPage) showSection(section SettingsSection) {
-	p.closePopover() // its anchor is about to stop existing
-	p.previews = nil
-	p.account = accountRows{} // a profile landing after this has nothing left to fill
-
 	// Advanced mode can be switched off while its own section is open, and
 	// "Reset every setting" switches it off from another one entirely.
 	if section == SectionAdvanced && !p.advanced {
 		section = SectionInterface
 	}
-	p.section = section
 
+	p.section = section
+	p.searching = false
+	p.mount(p.sectionGroups(section), railTitle(section))
+}
+
+// sectionGroups builds one section. Split from showSection because the index pass
+// walks every section without mounting any of them.
+func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 	switch section {
 	case SectionAccount:
-		p.groups = p.accountSection()
+		return p.accountSection()
 	case SectionInterface:
-		p.groups = p.interfaceSection()
+		return p.interfaceSection()
 	case SectionStyles:
-		p.groups = p.stylesSection()
+		return p.stylesSection()
 	case SectionBehaviour:
-		p.groups = p.behaviourSection()
+		return p.behaviourSection()
 	case SectionNotifications:
-		p.groups = p.notificationsSection()
+		return p.notificationsSection()
 	case SectionCache:
-		p.groups = p.cacheSection()
+		return p.cacheSection()
 	case SectionPerformance:
-		p.groups = p.performanceSection()
+		return p.performanceSection()
 	case SectionAdvanced:
-		p.groups = p.advancedSection()
+		return p.advancedSection()
 	case SectionAbout:
-		p.groups = p.aboutSection()
+		return p.aboutSection()
 	}
 
-	p.groups = slices.DeleteFunc(p.groups, func(g settingsGroup) bool { return g.object == nil })
+	return nil
+}
+
+// mount puts one set of groups in the pane and re-heads the rail from it. The one
+// path a section and a page of results both arrive by.
+func (p *SettingsPage) mount(groups []settingsGroup, title string) {
+	p.closePopover() // its anchor is about to stop existing
+	p.stopFlash()    // as is the card it was washing
+	p.previews = nil
+	p.account = accountRows{} // a profile landing after this has nothing left to fill
+
+	p.groups = slices.DeleteFunc(groups, func(g settingsGroup) bool { return g.object == nil })
 	p.navGroups = nil
 	p.activeNav = 0
 
@@ -557,13 +617,17 @@ func (p *SettingsPage) showSection(section SettingsSection) {
 		cards[i] = group.object
 	}
 	p.pane.Objects = cards
+	p.pane.Refresh() // a container re-lays out only when it is told its children moved
 	p.measureGroups()
 
 	if p.paneScroll != nil {
+		// The content is a different height now, and the scroll clamps an offset
+		// against what it last measured — including the one a jump is about to write.
+		p.paneScroll.SyncContent()
 		p.paneScroll.ScrollToOffset(fyne.Position{})
 	}
 
-	p.title.Text = railTitle(section)
+	p.title.Text = title
 	p.title.Refresh()
 	p.buildRail()
 }
@@ -605,6 +669,52 @@ func (p *SettingsPage) scrollToNav(nav int) {
 	// The caption sits below the gap every group leads with.
 	p.paneScroll.ScrollToOffset(fyne.NewPos(0, p.navOffset(nav)+theme.Sizes.SettingsGroupGap))
 	p.markNav(nav)
+	p.flashGroup(p.navGroups[nav])
+}
+
+// flashGroup washes one group's card and lets go again. A section is several
+// cards of similar rows and the scroll lands mid-page, so the entry lighting up
+// in the rail says where the reader is but not what they were brought to.
+func (p *SettingsPage) flashGroup(group int) {
+	p.stopFlash()
+
+	if group >= len(p.groups) || p.groups[group].card == nil {
+		return
+	}
+
+	card := p.groups[group].card
+	rest := theme.Colors.SessionCardBg
+
+	p.flash = fyne.NewAnimation(flashDuration, func(done float32) {
+		if done >= 1 {
+			card.FillColor = rest
+		} else {
+			card.FillColor = mixColor(rest, theme.Colors.SettingsJumpBackground, 1-done)
+		}
+		canvas.Refresh(card)
+	})
+
+	p.flash.Curve = fyne.AnimationEaseIn
+	p.flash.Start()
+}
+
+// stopFlash ends the wash where it stands. The card is handed back its rest
+// colour here rather than left mid-fade: a rebuild drops the rectangle, but a
+// jump to another group in the same section does not.
+func (p *SettingsPage) stopFlash() {
+	if p.flash == nil {
+		return
+	}
+
+	p.flash.Stop()
+	p.flash = nil
+
+	for _, group := range p.groups {
+		if group.card != nil {
+			group.card.FillColor = theme.Colors.SessionCardBg
+			canvas.Refresh(group.card)
+		}
+	}
 }
 
 // markGroupAt follows the reader: the entry marked is the last one whose group
@@ -668,8 +778,13 @@ func (p *SettingsPage) restyle(mutate func(*config.Settings)) {
 // cannot change it, and both things that can come through this.
 func (p *SettingsPage) reload() {
 	p.advanced = config.Current().Interface.AdvancedMode
-	p.showSection(p.section)
-	p.pane.Refresh()
+	p.index = nil // what a section holds has just moved under it
+
+	if p.searching {
+		p.showResults()
+	} else {
+		p.showSection(p.section)
+	}
 }
 
 /* Rows and groups */
@@ -693,6 +808,10 @@ func (p *SettingsPage) group(caption, detail string, rows ...fyne.CanvasObject) 
 		return settingsGroup{}
 	}
 
+	if p.indexing {
+		return p.recordGroup(caption, kept)
+	}
+
 	return p.groupOf(caption, detail, VBoxNoSpacing(kept...))
 }
 
@@ -700,6 +819,10 @@ func (p *SettingsPage) group(caption, detail string, rows ...fyne.CanvasObject) 
 // one section refilled in place rather than rebuilt — the Advanced filter, which
 // must not take the field it is being typed into with it.
 func (p *SettingsPage) groupOf(caption, detail string, body *fyne.Container) settingsGroup {
+	if p.indexing {
+		return p.recordGroup(caption, body.Objects)
+	}
+
 	header := []fyne.CanvasObject{VerticalSpacer(theme.Sizes.SettingsGroupGap)}
 	if caption != "" {
 		label := newBoldText(strings.ToUpper(caption), theme.Colors.CategoryText, theme.Sizes.SettingsCaptionSize)
@@ -712,9 +835,10 @@ func (p *SettingsPage) groupOf(caption, detail string, body *fyne.Container) set
 			NewInset(note, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
 
-	header = append(header, container.NewStack(newSettingsCard(), body))
+	card := newSettingsCard()
+	header = append(header, container.NewStack(card, body))
 
-	return settingsGroup{caption: caption, object: VBoxNoSpacing(header...)}
+	return settingsGroup{caption: caption, object: VBoxNoSpacing(header...), card: card}
 }
 
 // separateRows drops the rows that were not built — one refused for an unknown
@@ -770,6 +894,10 @@ func (p *SettingsPage) row(label, detail string, control fyne.CanvasObject) fyne
 // rowWith is row for an explanation that has to be a widget rather than a line
 // of prose — a path shortened to whatever width the row has to give it.
 func (p *SettingsPage) rowWith(label string, detail, control fyne.CanvasObject) fyne.CanvasObject {
+	if p.indexing {
+		return newIndexRow(label)
+	}
+
 	row, _ := p.rowOf(rowLabel(label, rowTextWidth(control)), detail, control)
 
 	return row
@@ -779,6 +907,10 @@ func (p *SettingsPage) rowWith(label string, detail, control fyne.CanvasObject) 
 // fill. Only a toggle has anything to say with it, and the toggle is built a
 // level above, so the rectangle travels rather than the state.
 func (p *SettingsPage) markedRow(label, detail string, control fyne.CanvasObject) (fyne.CanvasObject, *canvas.Rectangle) {
+	if p.indexing {
+		return newIndexRow(label), canvas.NewRectangle(color.Transparent)
+	}
+
 	width := rowTextWidth(control)
 
 	var note fyne.CanvasObject
@@ -820,6 +952,10 @@ func rowDetail(detail string, width float32) fyne.CanvasObject {
 // line — it says what it says at any size, and two lines each would double the
 // length of every section.
 func (p *SettingsPage) stackedRow(label, detail string, control fyne.CanvasObject) fyne.CanvasObject {
+	if p.indexing {
+		return newIndexRow(label)
+	}
+
 	text := []fyne.CanvasObject{rowLabel(label, cardWidth())}
 	if detail != "" {
 		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), rowDetail(detail, cardWidth()))
@@ -1075,6 +1211,10 @@ func (p *SettingsPage) readOnlyRow(label, value string) fyne.CanvasObject {
 // every later change re-runs build. No caption: it belongs to the group above,
 // and the rail lists somewhere to go rather than everything in the pane.
 func (p *SettingsPage) preview(build func() fyne.CanvasObject) settingsGroup {
+	if p.indexing {
+		return settingsGroup{} // nothing named, and mounting real widgets to find that out
+	}
+
 	host := container.NewStack(build())
 	p.previews = append(p.previews, settingsPreview{host: host, build: build})
 

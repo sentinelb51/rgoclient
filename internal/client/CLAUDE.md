@@ -21,52 +21,46 @@ dependency DAG and the client's contract; this file is the wire-level notes.
 - `ServerRole` carries `Hoist` and `Rank`; `PartialUser` makes every field nilable
   and keeps `Online` separate from `Status`, which is what lets `userUpdateKinds`
   tell a presence change from a rename without diffing against State.
-- `Session.ChannelMessages(..., IncludeUsers: true)` does feed Users/Members
-  into State (gated on `TrackBulkAPICalls`), so a history page resolves its own
-  authors. The batched `ensureAuthor` path covers what no page carries — a
-  webhook, somebody departed, a search or pin result — and finds nothing to do
-  otherwise.
-- **Missing field:** Revolt carries `slowmode` (seconds) on a text channel and in
-  `ChannelUpdate`; revoltgo models neither, so the number never arrives with the
-  channel and nothing announces a change — including this client's own edit, hence
-  `EditChannel` recording what it just set. `Client.FetchSlowmode` is a raw
-  `session.HTTP.Request` for `EndpointChannel`, and records the result for
-  `store.Channel` to hand back.
-- **`ChannelEditParams` is short of the route** it patches: the spec's
-  `DataEditChannel` also takes `slowmode` (0–21600s) and `voice` (`max_users`),
-  neither of which revoltgo models — so `Client.EditChannel` sends the whole body
-  itself rather than half of it through the typed API and half beside it. Every
-  string there is `omitempty` and a zero is dropped the same way, so **a cleared
-  field is a name in `remove`** (`FieldsChannel`: Description, Icon,
-  DefaultPermissions, Voice, Slowmode), never a blank — `""` is read as "leave it
-  alone". Two rules from `channel_edit.rs` that the spec does not say: only
-  `TextChannel` and `Group` are editable at all (a DM is `InvalidOperation`), and
-  `voice` is what *makes* a channel a voice channel, so it must never be sent to
-  one that is not. `archived` the route ignores entirely.
-- **`ChannelTypeVoice` is a dead constant.** Stoat dropped the `VoiceChannel`
-  variant: a voice channel is a **`TextChannel` carrying a `voice` object**, which
-  revoltgo does model (`Channel.Voice`). So `toChannelKind` takes the whole
-  channel — reading `channel_type` alone files every voice channel under text,
-  and nothing looks wrong, the glyph is simply the other one. The constant is
-  kept in the switch for a server old enough to still send it. Note the reverse
-  is unreachable: `Voice` is a removable field (`FieldsChannel`) and
-  `Channel.clear` handles only Icon and Description, so a channel that *stops*
-  being voice keeps its mark until the client restarts.
-- **Known bug:** `State.ChannelPermissions`/`ServerPermissions` are unused and
-  `client/store.go` does the whole calculation itself, because all three of their
-  mistakes land on exactly what it is for. They ignore `Channel.RolePermissions`
-  (a channel denied to everyone and handed back to one role — how a private
-  channel is actually built — reads as invisible to the role that holds it), they
-  apply a member's roles in carry order rather than by rank, and they clamp a
-  timed-out member *before* the channel's overwrites, so an overwrite can hand
-  back what the timeout took. They also error for a server the account has no
-  cached membership of, a state the client is routinely in, and they decide a
-  **DM** from `Channel.Permissions` — a field Revolt only sends on a *group*, so
-  every DM came back view-only and would have disabled the composer in all of
-  them. Revolt decides a DM from the relationship instead, which is
-  `User.Relationship` (`client.blocked`). `BypassSlowmode` (`1 << 39`) is missing
-  from the permission constants too, hence `domain.Permission` naming every bit
-  itself.
+- `IncludeUsers: true` feeds Users/Members into State (gated on
+  `TrackBulkAPICalls`) on both `Session.ChannelMessages` and `Session.ChannelSearch`,
+  so a history page, a pin list and a search result all resolve their own authors.
+  The batched `ensureAuthor` path covers what no response carries — a webhook,
+  somebody departed — and finds nothing to do otherwise.
+- `slowmode` (seconds) arrives on `Channel` and in `PartialChannel`, and
+  `Channel.clear` handles it, so `store.Channel` reads the field and
+  `EventChannelUpdate` announces a change. `ChannelEditParams` carries it and
+  `voice` (`max_users`) too, so `Client.EditChannel` is the typed call.
+- **A cleared field is a name in `remove`** (`FieldsChannel`: Description, Icon,
+  DefaultPermissions, Voice, Slowmode), never a blank: every string in
+  `ChannelEditParams` is `omitzero` and a zero is dropped the same way, so `""` is
+  read as "leave it alone". Two rules from `channel_edit.rs` that the spec does not
+  say: only `TextChannel` and `Group` are editable at all (a DM is
+  `InvalidOperation`), and `voice` is what *makes* a channel a voice channel, so it
+  must never be sent to one that is not. `archived` the route ignores entirely.
+- **A voice channel does not say so in its type.** Stoat dropped the
+  `VoiceChannel` variant and revoltgo no longer defines the constant: a voice
+  channel is a **`TextChannel` carrying a `voice` object** (`Channel.Voice`). So
+  `toChannelKind` takes the whole channel — reading `channel_type` alone files
+  every voice channel under text, and nothing looks wrong, the glyph is simply the
+  other one — and every text-channel test elsewhere (`store.Permissions`) covers
+  voice by saying nothing about it.
+- **`State.ChannelPermissions`/`ServerPermissions`/`UserPermissions` agree with
+  the backend now** — rewritten against `calculate_*_permissions` in
+  `core/permissions/src/impl.rs` — and `client/store.go` still does the whole
+  calculation itself for two reasons that are not bugs. Their DM branch resolves
+  the relationship through `UserPermissions`, which walks every cached membership
+  *and* every group to decide a mutual connection, where `store.Permissions` is
+  asked once per message row and once per sidebar channel; and a server channel
+  answers 0 for a membership State has not caught up with, which would empty a
+  server the account had just joined (`rankRoles` reads a nil member as one
+  holding only the default role instead). The arithmetic here tracks that
+  reference otherwise — the channel's default overwrite *before* the roles, the
+  view-only floor under a group's own permissions, the timeout clamp last, and no
+  `ViewChannel` meaning nothing at all — except for the server mute/deafen revoke
+  (`ServerMember.CanPublish`/`CanReceive`), which only touches voice bits
+  `domain.Permission` does not name. Revolt decides a **DM** from the relationship
+  (`User.Relationship`, `client.blocked`), never from `Channel.Permissions`: that
+  field is sent on a *group* only.
 - **Known bug:** `MessageFlags` is a bitfield and revoltgo numbers it 1, 2, 3 —
   positions, not bits — so its `MentionsOnline` collides with
   `SuppressNotifications|MentionsEveryone` and can never be read for what it is.
@@ -90,24 +84,18 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   edit carries — hence `Client.ClearReactions` writing the cache itself, and a
   clear made elsewhere never landing. `EventMessageRemoveReaction` is a *single*
   emoji taken off wholesale and is unaffected.
-- **`Session.ChannelSearch` must not be asked for users.** `include_users` changes
-  the response from an array of messages to an object carrying messages, users
-  and members — `BulkMessageResponse` is an `anyOf` — and the method decodes into
-  `[]*Message` only, so setting it fails on shape. `ChannelMessages` handles both
-  and this does not. `Client.PinnedMessages` therefore comes back with author IDs
-  and nothing behind them, and the caller resolves what it cannot name. The route
-  takes `pinned` and `query` as **alternatives** — Revolt refuses them together —
-  so the two callers share `Client.search` and differ in which one they fill; a
-  query is 1–64 characters, past which the request is refused rather than cut,
-  hence `maxSearchQuery`.
-- **Known bug: `Session.ServerCreate` can decode nothing.** `/servers/create`
-  answers with an object carrying the server *and* its default channels, while the
-  method decodes into a bare `Server` — no field matches, so it succeeds and hands
-  back a zero value with an empty ID. `Client.CreateServer` therefore reports only
-  the error: the created server arrives as `EventServerCreate`, which revoltgo does
-  file into `State`. `Session.InviteJoin` has the same shape of problem for the
-  same reason (`Invite.ServerID` is never populated), so both go through the
-  gateway rather than through their own response.
+- **`Session.ChannelSearch` returns `ChannelMessages`**, normalising both shapes
+  the route answers in — `BulkMessageResponse` is an `anyOf`, an array without
+  `include_users` and an object with it — so `Client.search` asks for the users and
+  reads `page.Messages`. The route takes `pinned` and `query` as **alternatives** —
+  Revolt refuses them together — so the two callers share `Client.search` and
+  differ in which one they fill; a query is 1–64 characters, past which the request
+  is refused rather than cut, hence `maxSearchQuery`.
+- `Session.ServerCreate` and `Session.InviteJoin` decode their own responses now
+  (`ServerCreateResponse`, `InviteJoin` — server plus default channels either way),
+  but `Client.CreateServer` and `Client.JoinInvite` still ignore them and wait for
+  `EventServerCreate`, which revoltgo files into `State`: one path into the sidebar
+  rather than two, and `App.pendingJoin` already selects what turns up.
 - **A system message's `id` is not always a user.** `MessageSystem` models one
   `ID` for every kind, and for `message_pinned`/`message_unpinned` it is the
   *message* that moved — so resolving it as an author is a fetch the server can
@@ -148,6 +136,11 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   and conversations both are in. `Client.Mutual` therefore sends its own — the
   fourth thing to go round the typed API, and the only one that is a plain
   mis-declaration rather than a missing field or route.
+- **Missing body:** `Session.ServerMemberBan` sends the ban with **no body**, where
+  `ban_create`'s `DataBanCreate` is required — so `reason` (1024 characters) and
+  `delete_message_seconds` (up to 7 days) are out of reach through it entirely.
+  `Client.BanMember` therefore sends its own. Kicking is unaffected:
+  `ServerMemberDelete` takes nothing beyond the two IDs.
 - **`Session.WS` is nilable and unguarded.** `ChannelBeginTyping`/`ChannelEndTyping`
   are websocket writes rather than requests — no rate limiter, nothing to wait
   for — but they reach `s.WS.WriteMessage` without a check, and `WS` is nil until

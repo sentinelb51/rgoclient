@@ -414,29 +414,6 @@ func (a *App) refreshSlowmode() {
 	})
 }
 
-// loadSlowmode re-reads a channel's cooldown in the background and repaints the
-// badge if it is still the open one. It asks on every visit: revoltgo models
-// neither the field nor its ChannelUpdate, so opening the channel is the only
-// moment the client can learn the number, or learn that it moved.
-func (a *App) loadSlowmode(channelID string) {
-	epoch := a.epoch
-
-	go func() {
-		if _, err := a.client.FetchSlowmode(channelID); err != nil {
-			if !errors.Is(err, client.ErrNoSession) {
-				log.Printf("fetch slowmode for %s: %v", channelID, err)
-			}
-			return
-		}
-
-		a.doOnUI(func() {
-			if !a.stale(epoch) && a.currentChannelID == channelID {
-				a.refreshSlowmode()
-			}
-		}, false)
-	}()
-}
-
 // toReplies drops the composer's own bookkeeping — which channel each quoted
 // message lives in, needed only to draw its preview — leaving what is sent.
 func toReplies(pending []ui.Reply) []domain.Reply {

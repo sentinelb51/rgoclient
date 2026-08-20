@@ -9,9 +9,11 @@ or paste), role mentions, a notice history panel,
 a hue wheel/alpha/eyedropper in the colour picker,
 `MessageEmbedSpecial` (YouTube, Spotify, …), creating or renaming a channel
 (`ServerChannelCreate` / `ChannelEdit`), listing or revoking the invites this
-client can now create (`ServerInvites` / `InviteDelete`), and moderation beyond
-the three destructive sidebar items (banning, role edits, nicknames, channel
-deletion are one call away but deliberately not offered).
+client can now create (`ServerInvites` / `InviteDelete`), the ban list and with it
+any way to lift a ban this client can now place (`ServerBans` /
+`ServerMemberUnban`), and moderation beyond the destructive sidebar items (role
+edits, nicknames, channel deletion are one call away but deliberately not
+offered).
 
 The gateway events still unregistered are the ones nothing here has to do about:
 `EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
@@ -102,9 +104,7 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   Revolt publishes no collection of them, so the panel is one `ChannelSearch`
   made when it opens and nothing keeps it current: a pin made from another client
   — or by this account, from a message the panel is covering — appears only when
-  it is reopened. The search route also cannot be asked for the users
-  (`include_users` changes the response shape past what revoltgo decodes), so the
-  authors are a second round of requests before the list can be drawn. It is
+  it is reopened. It is
   capped at the hundred newest pins, Revolt's own ceiling on a search, with no way
   to page past it, and a row is a flattened one-line summary — a body with no text
   says what it carries instead of quoting nothing.
@@ -131,9 +131,6 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   Two of the route's fields are left: the icon and a group's owner transfer want a
   file picker and a member picker. `archived` is not a gap — the spec lists it and
   `channel_edit.rs` reads it nowhere, so no client can set it.
-  The **cooldown is fetched before the card opens** and left out of the edit when
-  that request fails: revoltgo drops the field, so the store's zero would otherwise
-  clear a slowmode on save.
 - **A composed mention** stays a visible `<@id>` until sent — Fyne can't draw a chip
   inside an entry, and mapping names back to IDs at send time breaks on duplicates.
   `markdown.PlainText` has no session, so a reply preview of a message opening with

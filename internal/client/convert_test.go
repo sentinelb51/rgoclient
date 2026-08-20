@@ -233,7 +233,6 @@ func TestToChannelKindReadsVoiceOffTheChannel(t *testing.T) {
 			ChannelType: revoltgo.ChannelTypeText,
 			Voice:       &revoltgo.ChannelVoiceInformation{},
 		}, domain.ChannelVoice},
-		{"voice by type", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeVoice}, domain.ChannelVoice},
 		{"dm", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeDM}, domain.ChannelDM},
 		{"group", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeGroup}, domain.ChannelGroup},
 		{"notes", &revoltgo.Channel{ChannelType: revoltgo.ChannelTypeSavedMessages}, domain.ChannelSavedMessages},

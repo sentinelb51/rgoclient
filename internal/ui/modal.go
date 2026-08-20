@@ -709,6 +709,76 @@ func (d *ChannelDialog) Fail(message string) {
 	d.action.Enable()
 }
 
+/* Ban dialog */
+
+// BanRequest is what a ban card is answered with. Both are optional: an empty
+// reason and a zero window are the plain ban that holding Shift sends.
+type BanRequest struct {
+	Reason         string
+	DeleteMessages time.Duration
+}
+
+// BanDialog asks for a ban's terms. Not a Confirm, which is answered yes or no:
+// the route takes a reason and a window of the member's recent messages, and
+// neither is worth a second card.
+type BanDialog struct {
+	// Content is the card to hand to the modal layer, and Entry the field to focus
+	// once it is up.
+	Content fyne.CanvasObject
+	Entry   fyne.Focusable
+
+	action *Button
+}
+
+// NewBanDialog builds the card for banning name. onSubmit is called on the UI
+// thread with what the fields hold; onClose dismisses the modal layer, and
+// closing after a submit is the caller's — the outcome is a notice, as a kick's
+// is, rather than a line on a card left standing.
+func NewBanDialog(name string, onSubmit func(BanRequest), onClose func()) *BanDialog {
+	d := &BanDialog{}
+
+	reason := newModalEntry(onClose)
+	reason.SetPlaceHolder("Optional, kept with the ban")
+	reason.OnSubmitted = func(string) { d.action.Tap() }
+
+	deletion := newChoiceField(0, banDeleteChoices, banDeleteLabel)
+
+	note := widget.NewLabel(fmt.Sprintf("%s will be banned and cannot come back until the ban is lifted.", name))
+	note.Wrapping = fyne.TextWrapWord
+
+	d.action = NewWeightedButton("Ban", ButtonDanger, func() {
+		onSubmit(BanRequest{
+			Reason:         reason.Text,
+			DeleteMessages: time.Duration(deletion.value) * time.Second,
+		})
+	})
+
+	// Cancel first and full width, as a confirmation's buttons are: a card this one
+	// is answered by position rather than by reading a small label.
+	buttons := container.NewGridWithColumns(2, NewButton("Cancel", onClose), d.action)
+
+	rows := []fyne.CanvasObject{
+		dialogHeader("Ban member", onClose),
+		widget.NewSeparator(),
+		note,
+		dialogField("Reason", fieldSurface(reason)),
+		dialogField("Delete recent messages", deletion.control),
+		buttons,
+	}
+	if hint := shiftSkipHint(); hint != nil {
+		rows = append(rows, hint)
+	}
+
+	padding := theme.Sizes.DialogPadding
+	card := NewMinWidthContainer(theme.Sizes.ChannelDialogWidth,
+		NewInset(spacedColumn(theme.Sizes.DialogFieldGap, rows...), padding, padding, padding, padding))
+
+	d.Content = newTapSink(container.NewStack(newDialogCard(), card))
+	d.Entry = reason
+
+	return d
+}
+
 /* The pieces a card's fields are built from */
 
 // dialogField is a labelled control: the label above rather than beside it, a
@@ -815,6 +885,27 @@ func userLimitLabel(users int) string {
 	}
 
 	return strconv.Itoa(users) + " users"
+}
+
+// banDeleteChoices is how much of a banned member's recent history may go with
+// them, up to the route's seven-day ceiling.
+var banDeleteChoices = []int{0, 3600, 21600, 86400, 259200, 604800}
+
+// banDeleteLabel names one of those windows. Not util.ShortDuration, which has
+// no unit above the hour: seven days reads as "168h".
+func banDeleteLabel(seconds int) string {
+	const day = int(24 * time.Hour / time.Second)
+
+	switch {
+	case seconds <= 0:
+		return "Keep them"
+	case seconds < day:
+		return "Last " + util.ShortDuration(time.Duration(seconds)*time.Second)
+	case seconds < 2*day:
+		return "Last day"
+	}
+
+	return "Last " + strconv.Itoa(seconds/day) + " days"
 }
 
 // modalEntry is a text field on the modal layer. It handles Escape itself

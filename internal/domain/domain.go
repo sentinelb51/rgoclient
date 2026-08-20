@@ -365,15 +365,13 @@ const (
 	PermissionInviteOthers       Permission = 1 << 25
 	PermissionUploadFiles        Permission = 1 << 27
 	PermissionReact              Permission = 1 << 29
-
-	// PermissionBypassSlowmode is missing from revoltgo's constants, which stop at
-	// MentionRoles — the reason every bit is named here rather than imported.
-	PermissionBypassSlowmode Permission = 1 << 39
+	PermissionBypassSlowmode     Permission = 1 << 39
 )
 
 // Server-scoped permissions, asked of Store.ServerPermissions.
 const (
 	PermissionKickMembers Permission = 1 << 6
+	PermissionBanMembers  Permission = 1 << 7
 )
 
 // Has reports whether every permission in want is held. Zero — which is what an

@@ -39,6 +39,7 @@ var Colors = struct {
 	SwiftActionBg          color.Color
 	SwiftActionHoverBg     color.Color
 	SessionCardBg          color.Color
+	SettingsJumpBackground color.Color
 	TooltipBg              color.Color
 	NoticeBg               color.Color
 	OverlayBackdrop        color.Color
@@ -74,6 +75,7 @@ var Colors = struct {
 	SystemMessageCall     color.Color
 	SwiftActionIcon       color.Color
 	SwiftActionConfirm    color.Color
+	SwiftActionCaution    color.Color
 	SwiftActionDanger     color.Color
 	ReplyLine             color.Color
 	ReplyMentionActive    color.Color
@@ -139,8 +141,10 @@ var Colors = struct {
 
 	/* Invite cards */
 
-	InviteCaption color.Color
-	InviteDetail  color.Color
+	InviteCaption       color.Color
+	InviteDetail        color.Color
+	InviteFailedText    color.Color
+	InviteFailedOutline color.Color
 
 	/* User profiles */
 
@@ -221,11 +225,15 @@ var Colors = struct {
 	SwiftActionBg:          color.RGBA{R: 35, G: 40, B: 56, A: 255},   // #232838
 	SwiftActionHoverBg:     color.RGBA{R: 46, G: 53, B: 72, A: 255},   // #2E3548
 	SessionCardBg:          color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
-	TooltipBg:              color.RGBA{R: 8, G: 9, B: 12, A: 240},     // darker than any column it floats over
-	NoticeBg:               color.RGBA{R: 43, G: 49, B: 66, A: 250},   // #2B3142, lifted off whatever it floats over
-	OverlayBackdrop:        color.RGBA{R: 8, G: 9, B: 12, A: 200},     // dim behind a modal
-	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, the modal card
-	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},   // #13151C, inset well
+	// What a jump from the rail or the search washes the group card it landed on
+	// with. The accent again, as a message jump takes it, and against a lighter
+	// surface than a message row — a card the same colour as the wash says nothing.
+	SettingsJumpBackground: color.RGBA{R: 48, G: 60, B: 100, A: 255}, // #303C64
+	TooltipBg:              color.RGBA{R: 8, G: 9, B: 12, A: 240},    // darker than any column it floats over
+	NoticeBg:               color.RGBA{R: 43, G: 49, B: 66, A: 250},  // #2B3142, lifted off whatever it floats over
+	OverlayBackdrop:        color.RGBA{R: 8, G: 9, B: 12, A: 200},    // dim behind a modal
+	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},  // #1F2330, the modal card
+	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},  // #13151C, inset well
 
 	// The composer card fills with the entry's own input background so the entry's
 	// box disappears into it; the outline draws the boundary instead, and lights up
@@ -284,6 +292,7 @@ var Colors = struct {
 	// the one button in the row that cannot be taken back.
 	SwiftActionIcon:    color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	SwiftActionConfirm: color.RGBA{R: 58, G: 191, B: 126, A: 255},  // #3ABF7E, save an edit
+	SwiftActionCaution: color.RGBA{R: 217, G: 164, B: 65, A: 255},  // #D9A441, undone by asking again
 	SwiftActionDanger:  color.RGBA{R: 217, G: 92, B: 92, A: 255},   // #D95C5C, delete
 
 	ReplyLine:          color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274, reads over the hover fill too
@@ -399,6 +408,14 @@ var Colors = struct {
 
 	InviteCaption: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	InviteDetail:  color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
+	// A code that never resolved. Both are muted against the reds a confirmation
+	// uses: nothing was destroyed and nobody has to act, so the card reads as a
+	// dead end at a glance without pulling the eye off the messages around it. The
+	// edge is opaque rather than a tint, the palette writing straight alpha into
+	// color.RGBA (see Fade).
+	InviteFailedText:    color.RGBA{R: 214, G: 122, B: 122, A: 255}, // #D67A7A
+	InviteFailedOutline: color.RGBA{R: 92, G: 45, B: 51, A: 255},    // #5C2D33
 
 	// The banner is the profile card's one block of colour, so it falls back to a
 	// slate the palette already uses rather than the accent, which would make every
@@ -612,6 +629,7 @@ var Sizes = struct {
 	InviteNameSize    float32
 	InviteDetailSize  float32
 	InviteTextGap     float32
+	InviteFailedMark  float32
 
 	/* Composer and its mention picker */
 
@@ -997,6 +1015,10 @@ var Sizes = struct {
 	InviteNameSize:    15,
 	InviteDetailSize:  12,
 	InviteTextGap:     2,
+
+	// The mark a failed card draws where a picture would be, kept well inside the
+	// slot: it stands for nothing, so it must not carry an icon's weight.
+	InviteFailedMark: 22,
 
 	// The dock's margin is the gap it floats in, not what does the floating — the
 	// messages running under it are. It also has to stay under the message row's

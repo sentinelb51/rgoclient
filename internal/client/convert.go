@@ -346,8 +346,6 @@ func toChannelKind(channel *revoltgo.Channel) domain.ChannelKind {
 		return domain.ChannelGroup
 	case revoltgo.ChannelTypeSavedMessages:
 		return domain.ChannelSavedMessages
-	case revoltgo.ChannelTypeVoice:
-		return domain.ChannelVoice
 	}
 
 	if channel.Voice != nil {

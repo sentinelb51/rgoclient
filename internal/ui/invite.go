@@ -21,6 +21,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 
+	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
@@ -49,6 +50,9 @@ type InviteCard struct {
 	// state, and the picture outlives the state that brought it.
 	iconURL string
 	caption *canvas.Text
+
+	// background is held for its stroke alone — a failed card reddens its edge.
+	background *canvas.Rectangle
 
 	// body is everything below the caption, replaced whole per state rather than
 	// edited: an ellipsis text fixes the string it shortens when it is built, and
@@ -88,9 +92,9 @@ func newInviteCard(deps Deps, code string) *InviteCard {
 
 	// The card surface an embed is drawn on, wearing the hairline on its own
 	// background — everything inside sits within the padding.
-	background := canvas.NewRectangle(theme.Colors.EmbedBg)
-	background.CornerRadius = theme.Sizes.EmbedRadius
-	Outline(background)
+	c.background = canvas.NewRectangle(theme.Colors.EmbedBg)
+	c.background.CornerRadius = theme.Sizes.EmbedRadius
+	Outline(c.background)
 
 	// Not an ellipsis text, unlike the name below it: one fixes the string it
 	// shortens at construction, and this is the one line rewritten in place. The
@@ -102,7 +106,7 @@ func newInviteCard(deps Deps, code string) *InviteCard {
 	)
 
 	padV, padH := theme.Sizes.EmbedPaddingV, theme.Sizes.EmbedPaddingH
-	card := container.NewStack(background, NewInset(column, padV, padV, padH, padH))
+	card := container.NewStack(c.background, NewInset(column, padV, padV, padH, padH))
 
 	c.Content = NewFixedWidthContainer(theme.Sizes.InviteCardWidth, card)
 	c.setBody(inviteState{caption: inviteCaptionLoading, title: "Resolving invite…"})
@@ -147,7 +151,7 @@ func (c *InviteCard) SetInvite(invite domain.Invite) {
 // that has expired, been revoked or never existed the same way, so the card says
 // the one thing true of all three rather than guessing which it was.
 func (c *InviteCard) Fail() {
-	c.setBody(inviteState{caption: inviteCaptionFailed, title: "Invite expired or invalid"})
+	c.setBody(inviteState{caption: inviteCaptionFailed, title: "Invite expired or invalid", failed: true})
 }
 
 // inviteState is everything one of the card's three states says — a value rather
@@ -160,6 +164,8 @@ type inviteState struct {
 	detail  string
 	initial string
 	action  fyne.CanvasObject
+
+	failed bool
 }
 
 // setBody swaps the card into a state. The row's height is the icon's in every
@@ -168,11 +174,26 @@ func (c *InviteCard) setBody(state inviteState) {
 	c.caption.Text = state.caption
 	c.caption.Refresh()
 
-	side := theme.Sizes.InviteIconSize
+	// The edge is the half of the failure nobody has to read — a card carrying one
+	// line where a server would be is otherwise the same shape as one still
+	// resolving.
+	c.background.StrokeColor = theme.Colors.Outline
+	if state.failed {
+		c.background.StrokeColor = theme.Colors.InviteFailedOutline
+	}
+	c.background.Refresh()
+
+	side := fyne.NewSize(theme.Sizes.InviteIconSize, theme.Sizes.InviteIconSize)
+
+	slot := c.icon(state.initial, side)
+	if state.failed {
+		slot = inviteFailedMark(side)
+	}
+
 	row := []fyne.CanvasObject{
-		c.icon(state.initial, fyne.NewSize(side, side)),
+		slot,
 		HorizontalSpacer(theme.Sizes.EmbedAccentGap),
-		inviteText(state.title, state.detail),
+		inviteText(state),
 	}
 	if state.action != nil {
 		row = append(row, HorizontalSpacer(theme.Sizes.EmbedAccentGap), container.NewCenter(state.action))
@@ -183,9 +204,8 @@ func (c *InviteCard) setBody(state inviteState) {
 }
 
 // icon is the server's picture over the initial it falls back to. A card with no
-// server yet, or one whose invite never resolved, passes no initial and keeps the
-// empty circle — a letter taken from "Invite expired" would name a server that
-// does not exist.
+// server yet passes no initial and keeps the empty circle — a letter taken from
+// "Resolving invite" would name a server that does not exist.
 func (c *InviteCard) icon(initial string, size fyne.Size) fyne.CanvasObject {
 	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
 	slot := container.NewStack(background, container.NewCenter(newInitial(initial)))
@@ -196,17 +216,35 @@ func (c *InviteCard) icon(initial string, size fyne.Size) fyne.CanvasObject {
 	return container.NewGridWrap(size, slot)
 }
 
+// inviteFailedMark stands where the picture would on a card that never resolved.
+// It keeps the icon's slot, so the row is the same height it was while loading
+// and the message under it does not move — but it is drawn small and inside that
+// slot: it stands for no server, and the empty circle it replaces reads as one
+// still on its way.
+func inviteFailedMark(size fyne.Size) fyne.CanvasObject {
+	mark := newScaledIcon(tintedIcon(assets.ForbiddenIcon, theme.Colors.InviteFailedText), theme.Sizes.InviteFailedMark)
+
+	return container.NewGridWrap(size, container.NewCenter(mark))
+}
+
 // inviteText is the two lines beside the icon: what the server is called, and
 // what is known about it. Both shorten rather than wrap — a card is a summary,
 // and the name is the only part of it somebody reads twice.
-func inviteText(name, detail string) fyne.CanvasObject {
-	title := newBoldText(name, theme.Colors.TextPrimary, theme.Sizes.InviteNameSize)
+func inviteText(state inviteState) fyne.CanvasObject {
+	title := newBoldText(state.title, theme.Colors.TextPrimary, theme.Sizes.InviteNameSize)
 
-	if detail == "" {
+	// A failed card has a sentence where the name would be. Bold is the weight a
+	// name is read at, and a sentence wearing it reads as an alarm rather than as
+	// the one thing that is left to say about the code.
+	if state.failed {
+		title = newText(state.title, theme.Colors.InviteFailedText, theme.Sizes.InviteNameSize)
+	}
+
+	if state.detail == "" {
 		return NewFillRow(0, NewEllipsisText(title))
 	}
 
-	subtitle := newText(detail, theme.Colors.InviteDetail, theme.Sizes.InviteDetailSize)
+	subtitle := newText(state.detail, theme.Colors.InviteDetail, theme.Sizes.InviteDetailSize)
 
 	return VBoxNoSpacing(
 		NewFillRow(0, NewEllipsisText(title)),

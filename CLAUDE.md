@@ -246,9 +246,18 @@ Where things live that the filename doesn't tell you:
   only in what fills it. `ui/modal.go` holds the cards that are not lists: the
   attachment viewer, the join dialog, `PromptDialog` (a field per answer and one
   button — a name is all Revolt takes to create a server, where changing a
-  username is that name *and* the account password) and the `dialogHeader` all of
-  them wear.
+  username is that name *and* the account password), `BanDialog` — a confirmation
+  that has to ask for more than a yes, the route taking a reason and a window of
+  the member's recent messages — and the `dialogHeader` all of them wear.
 - `ui/settings_controls.go` holds the controls, none of them a Fyne form widget.
+- `ui/settings_search.go` is the box at the head of the rail and the page of
+  results it puts in the pane. Its index is taken by *building every section
+  twice* — once as each mode lists them — with the rows answering with their names
+  instead of drawing anything (`indexRow`), so a section that gains a row gains a
+  result and there is no second list of names to keep in step. What only the
+  advanced pass saw is what that mode reveals. An Advanced hit renders its real
+  control rather than a link, those rows being a line of table each, which is why
+  the section no longer carries a filter of its own.
 - `ui/theme/overrides.go` holds `Apply` — reflection over the two tables, against
   a defaults snapshot taken at init.
 - `cache/message.go`: entries *and* published slices are immutable, so a UI-thread
@@ -360,8 +369,10 @@ with `CGO_ENABLED=1`. The tests need cgo — `internal/ui` mounts real widgets �
 and they use Fyne's software driver, so no display is involved. Only Windows
 takes `-H windowsgui`; passing it to any other linker is an error, not a no-op.
 Ubuntu installs the cgo headers its image lacks (`libgl1-mesa-dev xorg-dev
-libxkbcommon-dev libasound2-dev` — GL/X11 for GLFW and the clipboard, xkbcommon
-for the keymap, ALSA for oto). Nothing is signed or notarised.
+libwayland-dev libxkbcommon-dev libasound2-dev` — GL/X11 for GLFW and the
+clipboard, xkbcommon for the keymap, ALSA for oto, and Wayland because glfw v3.4
+compiles *both* display backends unless built with `-tags x11`, as does Fyne's
+driver). Nothing is signed or notarised.
 
 Resolving the version is its own job in both, so the three legs stamp one number
 rather than each counting the tags — and in `release.yml`, so they don't race to

@@ -186,10 +186,12 @@ fork instead.
 Only relevant if the patches above stop being enough.
 
 - **Gio** — Windows backend is Direct3D 11, so a flip-model swapchain and a
-  DXGI waitable object are available to it and structurally are not to us. It is
-  also immediate-mode with no widget library worth the name: this client's
-  sidebars, member list, markdown renderer, settings page and theme system are
-  all Fyne-shaped and none of it ports. A rewrite, not a migration.
+  DXGI waitable object are available to it and structurally are not to us.
+  Against that it is a rewrite of ~27,000 lines rather than a migration, its
+  event routing has been broken twice since 2023, and its text renders lighter
+  and softer than Fyne's on the low-DPI displays this client is read on.
+  Costed in full in `gio.md`, including the two cheaper moves that point the
+  same way.
 - **Ebitengine** — has DirectX backends on Windows and shares oto's authors, so
   `internal/audio` would carry straight over. It is a game framework; there is no
   text input, no selection, no accessibility. Worse fit than Gio for a chat

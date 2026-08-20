@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
@@ -85,9 +86,14 @@ func (c *codeCopy) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(container.NewStack(roundedPanel(), container.NewCenter(c.icon)))
 }
 
-// MinSize squares the chip: overlayLayout sizes it to this and nothing else asks.
+// MinSize squares the chip to the row a code line occupies — one monospace line
+// plus the well's padding, less the inset the chip floats in by — so it stands
+// the height of the line beside it at any configured font size rather than being
+// a small mark in a taller well. overlayLayout sizes it to this and nothing else
+// asks.
 func (c *codeCopy) MinSize() fyne.Size {
-	side := theme.Sizes.CodeCopySize
+	line := fyne.MeasureText("M", c.Theme().Size(fynetheme.SizeNameText), fyne.TextStyle{Monospace: true}).Height
+	side := line + 2*(theme.Sizes.CodeBlockPaddingV-theme.Sizes.CodeCopyInset)
 
 	return fyne.NewSize(side, side)
 }

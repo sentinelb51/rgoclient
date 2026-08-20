@@ -263,7 +263,7 @@ func TestNoGradientReachesATextObject(t *testing.T) {
 	})
 	dialog.SetProfile(domain.UserProfile{Bio: "a bio of no particular length"})
 
-	picker := NewMentionPicker(testDeps().Images, func(MentionCandidate) {})
+	picker := NewMentionPicker(testDeps(), func(MentionCandidate) {})
 	picker.SetCandidates(MentionUser, []MentionCandidate{NewMentionCandidate("01U", "Amelia", "amelia", "", stops)})
 	if !picker.Update(MentionUser, "am") {
 		t.Fatal("the picker matched nobody, so no row was ever filled in")

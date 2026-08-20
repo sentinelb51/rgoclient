@@ -90,15 +90,15 @@ jobs:
             $now = [datetime]::UtcNow
             $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
 
-            # Both spellings: a tag pushed by hand may not carry the v, and it
-            # still occupies that number.
+            # Both spellings: the tags predating this scheme carry a v, and a
+            # hand-pushed one still might. Either way it occupies that number.
             $used = git tag --list "$base.*" "v$base.*" | ForEach-Object {
               if ($_ -match '\.(\d+)$') { [int]$Matches[1] }
             }
             $last = ($used | Measure-Object -Maximum).Maximum
             if (-not $last) { $last = 0 }
 
-            $tag = "v$base.$($last + 1)"
+            $tag = "$base.$($last + 1)"
             $notes = $true
             git tag $tag
             git push origin $tag

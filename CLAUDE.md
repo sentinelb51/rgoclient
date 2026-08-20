@@ -202,7 +202,10 @@ Where things live that the filename doesn't tell you:
   chips, `NewBotMark`, `StatusLine`, the avatar loader, `ObservableScroll` + its
   indicator, `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here
   rather than beside a caller because the composer's line, a channel row and the
-  member sidebar's status all mount one.
+  member sidebar's status all mount one. `imageCacheID` and `imageFrame` are here
+  too: Revolt's file dimensions are optional, so the box a picture is drawn in is
+  re-fitted from the decode where there were none, and the key a picture is
+  cached under names its rendition as well as its file.
 - `ui/input.go` holds the composer, the mention picker, the slowmode chip, the
   typing line, `ComposerNotice` — what stands where the entry is hidden — and
   `JumpBar`. The chip and the line are one row under one set of
@@ -233,7 +236,9 @@ Where things live that the filename doesn't tell you:
 - `ui/emoji.go` is that picker: what can be picked (`EmojiChoice`, and `Value` /
   `Token`, the two things one is worth), the pop-up, and the cell. `app/emoji.go`
   is the other half — which emoji are on offer and in what order, that being a
-  walk of every server the account is in and no widget knows them.
+  walk of every server the account is in and no widget knows them. That one walk
+  also feeds the composer's `:` autocomplete, so the pop-up and the typed list
+  cannot disagree.
 - `ui/invite.go` holds the invite card *and* `inviteCodesIn`, the scan that
   decides a message has one — the card is mounted from what that scan finds.
 - `ui/panels.go` holds both message panels — the pins list and channel search —
@@ -341,8 +346,10 @@ files with LF regardless: what is committed must stay LF.
 ## Versioning / CI
 
 Calendar versions: `YY.M.N`, UTC, no zero padding (`26.8.1`) — year and month,
-then a counter that restarts each month, taken from the highest `v26.8.*` tag so
+then a counter that restarts each month, taken from the highest `26.8.*` tag so
 a deleted tag is never reissued. Three components, so the tag parses as semver.
+Tags are never `v`-prefixed: the ones predating this scheme are, and the counter
+reads both spellings, but nothing new mints one.
 CI builds of `main`/PRs use the next number with `-dev`. There is no version
 literal in the source — `main.version` and `main.build` are stamped at link time
 with `-X`.

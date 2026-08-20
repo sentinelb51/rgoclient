@@ -19,9 +19,9 @@ import (
 )
 
 // avatarSize is the rendition asked for of every avatar and icon the client
-// draws. One size for all of them, because the image cache is keyed by file ID
-// alone: asking for a small one somewhere would decide what every larger
-// requester got.
+// draws. One size for all of them, so the same person in a message, the member
+// list and a profile card costs one download and one decode — the cache keys a
+// rendition separately from the file it is cut from.
 const avatarSize = "256"
 
 // iconSize is the rendition asked for of a server icon, which is never drawn

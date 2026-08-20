@@ -443,7 +443,51 @@ func (c *ProfileCard) avatar(profile domain.Profile, side float32) fyne.CanvasOb
 	}
 	layers = append(layers, container.NewCenter(avatar))
 
-	return container.NewGridWrap(fyne.NewSize(outer, outer), container.NewStack(layers...))
+	picture := container.NewGridWrap(fyne.NewSize(outer, outer), container.NewStack(layers...))
+
+	// Nothing to open where the URL names no Autumn file: a user without an avatar
+	// is served a generated default, of which there is no larger copy to see.
+	if util.IDFromAttachmentURL(profile.AvatarURL) == "" {
+		return picture
+	}
+
+	return newAvatarTap(picture, func() {
+		c.deps.Actions.OnAttachmentTapped(avatarFile(profile))
+	})
+}
+
+// avatarFile is the picture behind an avatar as the viewer takes one: the file
+// as uploaded rather than the 256-pixel rendition the card is drawn from, the
+// viewer's card being many times that wide. Its dimensions are not known here —
+// the bar fills them in once the image lands.
+func avatarFile(profile domain.Profile) *domain.File {
+	return &domain.File{
+		Name: profile.Name + "'s avatar",
+		URL:  fullSizeURL(profile.AvatarURL),
+		Kind: domain.FileImage,
+	}
+}
+
+// avatarTap is that picture, answering a click by opening it. A widget of its
+// own rather than an Avatar: that one is the message column's size, and the tap
+// here has to cover the presence ring around the picture as well.
+type avatarTap struct {
+	tapBase
+	content fyne.CanvasObject
+}
+
+var _ fyne.Tappable = (*avatarTap)(nil)
+
+func newAvatarTap(content fyne.CanvasObject, onTap func()) *avatarTap {
+	a := &avatarTap{content: content}
+	a.onTap = onTap
+	a.ExtendBaseWidget(a)
+
+	return a
+}
+
+func (a *avatarTap) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(a.content)
 }
 
 // presenceRing is the band the avatar sits in. Offline gets nothing rather than a

@@ -180,19 +180,15 @@ func (l *embedLink) CreateRenderer() fyne.WidgetRenderer {
 // attachment does. width is the column it fits inside; a smaller picture is never
 // enlarged to fill it.
 func buildEmbedImage(deps Deps, file *domain.File, width float32, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	size := fitWithin(file.Width, file.Height, width, theme.Sizes.EmbedImageMaxHeight)
-	if size.Width == 0 || size.Height == 0 {
-		// Revolt carries no dimensions for a bare image embed: reserve a wide
-		// half-height box and let the row settle once the picture arrives.
-		size = fyne.NewSize(width, theme.Sizes.EmbedImageMaxHeight/2)
-	}
+	bounds := fyne.NewSize(width, theme.Sizes.EmbedImageMaxHeight)
 
-	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-	placeholder.SetMinSize(size)
-	image := container.NewStack(placeholder)
-	deps.Images.LoadIntoContainer(imageCacheID(file.URL), file.URL, size, image, false, nil)
+	// Revolt carries no dimensions for a bare image embed: reserve a wide
+	// half-height box and let the row settle once the picture arrives.
+	reserve := fyne.NewSize(width, theme.Sizes.EmbedImageMaxHeight/2)
 
-	stack := NewHoverableStack(image, func() { deps.Actions.OnAttachmentTapped(file) }, nil)
+	picture := imageFrame(deps.Images, file, bounds, reserve, theme.Colors.ServerDefaultBg, nil)
+
+	stack := NewHoverableStack(picture, func() { deps.Actions.OnAttachmentTapped(file) }, nil)
 	stack.onSecondaryTap = onMenu
 
 	return stack

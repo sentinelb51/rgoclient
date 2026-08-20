@@ -59,5 +59,12 @@ func IDFromAttachmentURL(url string) string {
 		id = id[:query]
 	}
 
+	// An Autumn path ends at the ID, so a remaining "/" means this is some other
+	// route — the API's /users/<id>/default_avatar among them. The ID becomes a
+	// cache filename, which a slash would send to a directory that isn't there.
+	if strings.IndexByte(id, '/') != -1 {
+		return ""
+	}
+
 	return id
 }

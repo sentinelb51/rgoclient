@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"image"
 	"image/color"
 	"slices"
 	"strconv"
@@ -12,6 +13,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/layout"
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
@@ -127,8 +129,21 @@ type AttachmentViewer struct {
 	// Content is the card to hand to the modal layer.
 	Content fyne.CanvasObject
 
+	// OnResize re-places the card after it changed size, which it does when a
+	// picture Revolt gave no dimensions for is decoded. The layer is the
+	// controller's, so re-placing it is too.
+	OnResize func()
+
 	deps       Deps
 	attachment *domain.File
+
+	// pixels is what the picture measures, from the file where it says and from
+	// the decode where it does not. Zero for anything that is not one.
+	pixels image.Point
+
+	// meta is the bar's second label, which those dimensions are written into once
+	// they are known.
+	meta *canvas.Text
 
 	// tip names the bar's buttons. The card's own rather than the app's: the app's
 	// is a layer in the window's content and this card is a canvas overlay over all
@@ -138,7 +153,12 @@ type AttachmentViewer struct {
 
 // NewAttachmentViewer builds the card. onClose dismisses the modal layer.
 func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, onClose func()) *AttachmentViewer {
-	v := &AttachmentViewer{deps: deps, attachment: attachment, tip: NewTooltip()}
+	v := &AttachmentViewer{
+		deps:       deps,
+		attachment: attachment,
+		pixels:     image.Pt(attachment.Width, attachment.Height),
+		tip:        NewTooltip(),
+	}
 
 	// What is left of bounds once the chrome is paid for: NewPadded insets all four
 	// sides, and the bar sits flush under the body.
@@ -148,13 +168,10 @@ func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, o
 		bounds.Height-theme.Sizes.ViewerBarHeight-2*pad,
 	)
 
-	var (
-		content fyne.CanvasObject
-		detail  string
-	)
+	var content fyne.CanvasObject
 	switch {
 	case attachment.Kind == domain.FileImage:
-		content, detail = viewerImage(deps, attachment, body)
+		content = v.image(body)
 	case attachment.Kind == domain.FileText:
 		content = viewerText(attachment, body)
 	default:
@@ -167,7 +184,7 @@ func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, o
 	well := canvas.NewRectangle(theme.Colors.ViewerBodyBg)
 	well.CornerRadius = theme.Sizes.ViewerCornerRadius
 
-	inner := VBoxNoSpacing(container.NewStack(well, content), v.bar(detail, onClose))
+	inner := VBoxNoSpacing(container.NewStack(well, content), v.bar(onClose))
 	sink := newTapSink(container.NewStack(card, container.NewPadded(inner), v.tip.Layer))
 	sink.onSecondaryTap = func(event *fyne.PointEvent) {
 		ShowContextMenu(sink, v.menuItems(), event.AbsolutePosition)
@@ -181,11 +198,12 @@ func NewAttachmentViewer(deps Deps, attachment *domain.File, bounds fyne.Size, o
 // bar is the strip under the attachment: what it is called and how large it is on
 // the left, the two ways out of the card on the right. The same strip a message
 // attachment wears, in the same fill — a picture reads the same in both places.
-func (v *AttachmentViewer) bar(detail string, onClose func()) fyne.CanvasObject {
+func (v *AttachmentViewer) bar(onClose func()) fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 
 	name := newBoldText(v.attachment.Name, theme.Colors.TextPrimary, theme.Sizes.ViewerTitleSize)
-	meta := newText(viewerMeta(v.attachment, detail), theme.Colors.TimestampText, theme.Sizes.ViewerTitleSize)
+	meta := newText(viewerMeta(v.attachment, v.detail()), theme.Colors.TimestampText, theme.Sizes.ViewerTitleSize)
+	v.meta = meta
 
 	gap := theme.Sizes.ViewerPadding
 	left := HBoxNoSpacing(HorizontalSpacer(gap), vcenter(name), HorizontalSpacer(gap), vcenter(meta))
@@ -270,28 +288,62 @@ func (v *AttachmentViewer) copyImage() {
 	v.deps.Images.LoadAsync(imageCacheID(link), link, false, CopyImageToClipboard)
 }
 
-// viewerImage renders the attachment scaled to fit within bounds and reports its
-// real pixel dimensions for the bar.
-func viewerImage(deps Deps, attachment *domain.File, bounds fyne.Size) (fyne.CanvasObject, string) {
-	pixelWidth, pixelHeight := attachment.Width, attachment.Height
-
-	size := fitWithin(pixelWidth, pixelHeight, bounds.Width, bounds.Height)
+// image renders the attachment scaled to fit within bounds, in the box that
+// decides how wide the card is. Where Revolt carried no dimensions — an avatar,
+// a bare embed picture — the card opens at the whole of bounds and settles onto
+// the picture's own shape once it is decoded; see refit.
+func (v *AttachmentViewer) image(bounds fyne.Size) fyne.CanvasObject {
+	size := fitWithin(v.pixels.X, v.pixels.Y, bounds.Width, bounds.Height)
 	if size.IsZero() {
-		size = bounds // no usable metadata: let the image scale itself once it arrives
-	}
-	size = fyne.NewSize(max(size.Width, theme.Sizes.ViewerMinWidth), max(size.Height, theme.Sizes.ViewerMinHeight))
-
-	frame := container.NewStack()
-	if link := attachment.URL; link != "" {
-		deps.Images.LoadIntoContainer(imageCacheID(link), link, size, frame, false, nil)
+		size = bounds
 	}
 
-	detail := ""
-	if pixelWidth > 0 && pixelHeight > 0 {
-		detail = fmt.Sprintf("%d × %d", pixelWidth, pixelHeight)
+	// Built before the picture is asked for: a cached one is delivered on this
+	// thread, and refit has a box to re-lay out either way.
+	box := container.NewGridWrap(viewerBox(size))
+	box.Add(imageFrame(v.deps.Images, v.attachment, bounds, size, color.Transparent,
+		func(pixels image.Point, fitted fyne.Size) { v.refit(pixels, fitted, box) }))
+
+	return box
+}
+
+// viewerBox is the card the viewer draws a picture in: the picture's own shape,
+// but never so small that the bar's name and buttons have nowhere to sit. A
+// picture narrower than that is letterboxed inside it.
+func viewerBox(size fyne.Size) fyne.Size {
+	return fyne.NewSize(
+		max(size.Width, theme.Sizes.ViewerMinWidth),
+		max(size.Height, theme.Sizes.ViewerMinHeight),
+	)
+}
+
+// refit takes the card down to the shape of a picture only its own decode could
+// measure, and tells the bar what it measured. Both the bar and the layer the
+// card sits on may be missing: a cached picture arrives during the build, before
+// there is either — and the card is then placed at its final size anyway.
+func (v *AttachmentViewer) refit(pixels image.Point, fitted fyne.Size, box *fyne.Container) {
+	v.pixels = pixels
+
+	box.Layout = layout.NewGridWrapLayout(viewerBox(fitted))
+	Relayout(box)
+
+	if v.meta != nil {
+		v.meta.Text = viewerMeta(v.attachment, v.detail())
+		v.meta.Refresh()
+	}
+	if v.OnResize != nil {
+		v.OnResize()
+	}
+}
+
+// detail is what the bar says about a picture beside its name, once something
+// knows: an attachment says so itself, anything else only after it is decoded.
+func (v *AttachmentViewer) detail() string {
+	if v.pixels.X <= 0 || v.pixels.Y <= 0 {
+		return ""
 	}
 
-	return container.NewGridWrap(size, frame), detail
+	return fmt.Sprintf("%d × %d", v.pixels.X, v.pixels.Y)
 }
 
 // viewerText shows a text attachment in full — the message preview only pulls

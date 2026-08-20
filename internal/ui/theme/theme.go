@@ -599,9 +599,10 @@ var Sizes = struct {
 	CodeBlockPaddingH float32
 	CodeBlockSpacing  float32
 
-	// The chip in a well's corner that copies the block, and how far in from that
-	// corner it sits. It floats over the source rather than reserving a strip, so
-	// a wide first line runs under it.
+	// The mark on the chip in a well's corner that copies the block, and how far in
+	// from that corner the chip sits — the chip itself is as tall as a code line's
+	// row, so it follows the font size. It floats over the source rather than
+	// reserving a strip, so a wide first line runs under it.
 	CodeCopySize  float32
 	CodeCopyInset float32
 
@@ -628,6 +629,7 @@ var Sizes = struct {
 	MentionAvatarSize   float32
 	MentionNameSize     float32
 	MentionHandleSize   float32
+	MentionEmojiSize    float32 // a unicode emoji leading a row, drawn as text
 	SlowmodeGlyphSize   float32
 	SlowmodeTextSize    float32
 	SlowmodeGap         float32
@@ -1018,6 +1020,7 @@ var Sizes = struct {
 	MentionAvatarSize:   20,
 	MentionNameSize:     13,
 	MentionHandleSize:   11,
+	MentionEmojiSize:    16,
 
 	// The inset keeps the chip off the card's rounded top-right corner, which it
 	// would otherwise sit against.

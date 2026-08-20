@@ -126,17 +126,23 @@ DAG and conventions.
    the mounted widgets every `editMarkTick` and re-arms only while one carries a
    mark; `onMessageMounted` arms it for a row that has one, rows mounting on
    every scroll now.
-8. **Mentions.** `@` or `#` at the start or after a space opens the picker, which
-   gets first refusal on Up/Down/Enter/Tab/Esc. The marker decides which of the
-   two pools is filtered and what the span is rewritten as — Revolt's `<@id>` or
-   `<#id>`, which `ui/markdown.go` renders back as `@Name` and `#channel`.
-   `MentionKind.marker`/`markerKind` are the only place the two characters are
-   named. A heading's `# ` opens the channel list for the one keystroke before the
-   space closes it; refusing the picker at the start of a line would cost every
-   mention typed there.
+8. **Mentions.** `@`, `#` or `:` at the start or after a space opens the picker,
+   which gets first refusal on Up/Down/Enter/Tab/Esc. The marker decides which of
+   the three pools is filtered and what the span is rewritten as — Revolt's
+   `<@id>` or `<#id>`, which `ui/markdown.go` renders back as `@Name` and
+   `#channel`, or an emoji's `:id:` / character, exactly what the pop-up picker's
+   button inserts. `MentionKind.marker`/`markerKind` are the only place the three
+   characters are named. A heading's `# ` opens the channel list for the one
+   keystroke before the space closes it; refusing the picker at the start of a
+   line would cost every mention typed there. `:` is the one marker that does not
+   open on itself — `emojiQueryMin` characters have to follow it, colons being
+   ordinary punctuation and `:)` not a search.
    Candidates are **pushed** — `refreshMemberList` and `refreshChannelList` build
    rows and candidates from one walk — so a keystroke is two string comparisons
-   per candidate, nothing allocated. A **server's** people therefore arrive only
+   per candidate, nothing allocated. Emoji come from `refreshEmojiCandidates`,
+   which flattens the same groups the pop-up picker draws, called from
+   `refreshServerList` (the set) and `enterServer` (the open server's first). A
+   **server's** people therefore arrive only
    from `refreshMemberList`, which makes that walk off the UI thread;
    `refreshMentionCandidates` covers the conversation case alone
    (`recipientCandidates`, bounded by the channel's recipient list) and returns at

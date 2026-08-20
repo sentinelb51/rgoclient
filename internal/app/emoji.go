@@ -21,6 +21,31 @@ func (a *App) OnPickEmoji(anchor fyne.CanvasObject, onPick func(ui.EmojiChoice))
 	ui.ShowEmojiPicker(a.deps(), anchor, a.emojiGroups(), onPick)
 }
 
+// refreshEmojiCandidates hands the composer what a typed ":" completes against —
+// the same groups the pop-up draws, flattened, so the two cannot offer different
+// things in different orders. Called where either changes: the set when a server
+// is joined or left, the order when one is entered.
+//
+// Cheap enough for the UI thread: Store.Emojis is a walk of what State already
+// holds and no request backs it, which is the same walk opening the picker makes.
+func (a *App) refreshEmojiCandidates() {
+	groups := a.emojiGroups()
+
+	total := 0
+	for _, group := range groups {
+		total += len(group.Choices)
+	}
+
+	candidates := make([]ui.MentionCandidate, 0, total)
+	for _, group := range groups {
+		for _, choice := range group.Choices {
+			candidates = append(candidates, ui.NewEmojiCandidate(choice))
+		}
+	}
+
+	a.setMentionCandidates(ui.MentionEmoji, candidates)
+}
+
 // emojiGroups is what the picker draws: one group per server that defines any,
 // the open server first and the unicode set last. Every server is offered rather
 // than only the open one — Revolt lets an emoji be used wherever the account can

@@ -142,7 +142,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 		AttachmentContainer: container.NewHBox(),
 		ReplyContainer:      container.NewVBox(),
 	}
-	m.Mentions = NewMentionPicker(deps.Images, m.acceptMention)
+	m.Mentions = NewMentionPicker(deps, m.acceptMention)
 	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
 	m.AttachButton = NewIconButton(assets.ActionAddIcon, m.attachFile, nil)
 	m.ExtendBaseWidget(m)
@@ -554,6 +554,10 @@ func (m *MessageInput) hideMentions() {
 // of the message or after whitespace, so "foo@bar" in running text summons
 // nothing. A heading's "# " opens the channel list for the one keystroke before
 // the space — refusing at the start of a line would cost every mention typed there.
+//
+// The emoji marker is the one that has to earn its list: ':' is punctuation
+// people type on purpose, so it opens nothing until emojiQueryMin characters
+// follow it, which also leaves an emoticon like ":)" alone.
 func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string, ok bool) {
 	cursor := m.cursorOffset()
 
@@ -576,7 +580,12 @@ func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string
 			return 0, 0, "", false
 		}
 
-		return i, marked, m.Text[i+1 : cursor], true
+		typed := m.Text[i+1 : cursor]
+		if marked == MentionEmoji && utf8.RuneCountInString(typed) < emojiQueryMin {
+			return 0, 0, "", false
+		}
+
+		return i, marked, typed, true
 	}
 
 	return 0, 0, "", false
@@ -1328,52 +1337,63 @@ const (
 	// against the way a sidebar row has.
 	mentionNameMaxRunes = 32
 
+	// emojiQueryMin is how much has to follow a ':' before the emoji list opens.
+	// The other two markers open on the marker alone; a colon is ordinary
+	// punctuation, and a list under every one of them would be in the way.
+	emojiQueryMin = 2
+
 	mentionRowInset = 8 // left/right breathing room inside a row
 	mentionRowGap   = 8 // between avatar, name and handle
 )
 
 // MentionKind is what a mention names, which is both the marker that opens the
-// picker and the wire form it is accepted as: Revolt writes a user as <@id> and
-// a channel as <#id>.
+// picker and the wire form it is accepted as: Revolt writes a user as <@id>, a
+// channel as <#id> and a custom emoji as :id:.
 type MentionKind uint8
 
 const (
 	MentionUser MentionKind = iota
 	MentionChannel
+	MentionEmoji
 )
 
 // marker is the character that opens a mention of this kind.
 func (k MentionKind) marker() string {
-	if k == MentionChannel {
+	switch k {
+	case MentionChannel:
 		return "#"
+	case MentionEmoji:
+		return ":"
 	}
 
 	return "@"
 }
 
-// markerKind is marker's inverse; the pair is the only place the two characters
-// are named.
+// markerKind is marker's inverse; the pair is the only place the three
+// characters are named.
 func markerKind(r rune) (MentionKind, bool) {
 	switch r {
 	case '@':
 		return MentionUser, true
 	case '#':
 		return MentionChannel, true
+	case ':':
+		return MentionEmoji, true
 	}
 
 	return 0, false
 }
 
-// MentionCandidate is one person or channel the mention picker can insert. Name
-// and Username are both matched against what the user has typed, so either the
-// nickname shown in chat or the underlying @handle finds someone; a channel has
-// only its name.
+// MentionCandidate is one person, channel or emoji the mention picker can
+// insert. Name and Username are both matched against what the user has typed, so
+// either the nickname shown in chat or the underlying @handle finds someone; a
+// channel has only its name, and an emoji its name and its keywords.
 type MentionCandidate struct {
 	Kind MentionKind
 	ID   string
 
-	Name      string // nickname / display name / channel name, as the client shows it
-	Username  string // the @handle, without the @; "" for a channel
+	Name      string // nickname / display name / channel name / emoji name, as the client shows it
+	Username  string // the @handle, without the @; "" for anything else
 	AvatarURL string
 	Color     color.Color // role colour; nil falls back to the standard text colour
 
@@ -1381,9 +1401,15 @@ type MentionCandidate struct {
 	// led by their avatar. Meaningless for a user.
 	ChannelKind domain.ChannelKind
 
+	// Emoji is what an emoji candidate draws and inserts — a picture and an ID, or
+	// a character. Zero for the other kinds.
+	Emoji EmojiChoice
+
 	// Lowercased match keys, folded once at construction: the picker filters the
 	// whole set on every keystroke, which is what keeps a 2000-member server cheap.
-	nameKey, userKey string
+	// altKey is the second thing a kind answers to — a person's handle, an emoji's
+	// keywords.
+	nameKey, altKey string
 }
 
 // NewMentionCandidate builds a candidate for a person, with its match keys
@@ -1397,7 +1423,7 @@ func NewMentionCandidate(userID, name, username, avatarURL string, roleColor col
 		AvatarURL: avatarURL,
 		Color:     roleColor,
 		nameKey:   strings.ToLower(name),
-		userKey:   strings.ToLower(username),
+		altKey:    strings.ToLower(username),
 	}
 }
 
@@ -1414,9 +1440,29 @@ func NewChannelCandidate(channel domain.Channel) MentionCandidate {
 	}
 }
 
+// NewEmojiCandidate builds a candidate for an emoji, taking the same choice the
+// pop-up picker is drawn from so the two cannot offer different things. The ID is
+// the choice's value — a custom emoji's ULID, or the character itself — which is
+// what keeps a pooled row's identity unique across both.
+func NewEmojiCandidate(choice EmojiChoice) MentionCandidate {
+	return MentionCandidate{
+		Kind:    MentionEmoji,
+		ID:      choice.Value(),
+		Name:    choice.Name,
+		Emoji:   choice,
+		nameKey: strings.ToLower(choice.Name),
+		altKey:  strings.ToLower(choice.Keywords),
+	}
+}
+
 // token is the wire form the composer inserts for this candidate, with the space
-// that readies the next word.
+// that readies the next word. An emoji is inserted as the picker's button inserts
+// it — a character, or the ID between colons that markdown.Emoji reads back.
 func (c *MentionCandidate) token() string {
+	if c.Kind == MentionEmoji {
+		return c.Emoji.Token() + " "
+	}
+
 	return "<" + c.Kind.marker() + c.ID + "> "
 }
 
@@ -1430,15 +1476,16 @@ func SortCandidates(candidates []MentionCandidate) {
 }
 
 // rank scores a candidate against an already-lowercased query: 0 for a prefix
-// match on name or handle, 1 for a substring, -1 for none. An empty query — the
-// bare "@" — matches everyone at 0. The receiver is a pointer only because filter
-// calls this twice per candidate per keystroke, and the struct is wide.
+// match on the name or the alternate key, 1 for a substring, -1 for none. An
+// empty query — the bare "@" — matches everyone at 0. The receiver is a pointer
+// only because filter calls this twice per candidate per keystroke, and the
+// struct is wide.
 func (c *MentionCandidate) rank(query string) int {
 	switch {
 	case query == "",
-		strings.HasPrefix(c.nameKey, query), strings.HasPrefix(c.userKey, query):
+		strings.HasPrefix(c.nameKey, query), strings.HasPrefix(c.altKey, query):
 		return 0
-	case strings.Contains(c.nameKey, query), strings.Contains(c.userKey, query):
+	case strings.Contains(c.nameKey, query), strings.Contains(c.altKey, query):
 		return 1
 	}
 
@@ -1452,13 +1499,15 @@ func (c *MentionCandidate) rank(query string) int {
 // building and discarding a list.
 type MentionPicker struct {
 	widget.BaseWidget
-	images   *cache.ImageCache
+	deps     Deps
 	onAccept func(MentionCandidate)
 
 	// One pool per kind, replaced independently: a server's people change as the
-	// gateway resolves them, its channels only when the sidebar is rebuilt.
+	// gateway resolves them, its channels only when the sidebar is rebuilt, and its
+	// emoji only when the account joins or leaves a server.
 	users    []MentionCandidate
 	channels []MentionCandidate
+	emojis   []MentionCandidate
 
 	matches  []MentionCandidate
 	overflow int // matches beyond mentionMaxRows, reported by the footer
@@ -1480,12 +1529,12 @@ var _ fyne.Widget = (*MentionPicker)(nil)
 
 // NewMentionPicker builds an empty, hidden picker. onAccept receives the chosen
 // candidate; the composer turns it into a mention token.
-func NewMentionPicker(images *cache.ImageCache, onAccept func(MentionCandidate)) *MentionPicker {
-	p := &MentionPicker{images: images, onAccept: onAccept}
+func NewMentionPicker(deps Deps, onAccept func(MentionCandidate)) *MentionPicker {
+	p := &MentionPicker{deps: deps, onAccept: onAccept}
 
 	pooled := make([]fyne.CanvasObject, mentionMaxRows)
 	for i := range mentionMaxRows {
-		row := newMentionRow(images, func() { p.selectRow(i) }, func() { p.selectRow(i); p.Accept() })
+		row := newMentionRow(deps, func() { p.selectRow(i) }, func() { p.selectRow(i); p.Accept() })
 		row.Hide()
 
 		p.rows = append(p.rows, row)
@@ -1515,9 +1564,12 @@ func (p *MentionPicker) CreateRenderer() fyne.WidgetRenderer {
 // its membership does, or the sidebar is rebuilt; the picker snapshots the list
 // and never goes to the network itself.
 func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCandidate) {
-	if kind == MentionChannel {
+	switch kind {
+	case MentionChannel:
 		p.channels = candidates
-	} else {
+	case MentionEmoji:
+		p.emojis = candidates
+	default:
 		p.users = candidates
 	}
 	p.fresh = false
@@ -1538,8 +1590,11 @@ func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCand
 
 // pool is the candidate list a kind filters against.
 func (p *MentionPicker) pool(kind MentionKind) []MentionCandidate {
-	if kind == MentionChannel {
+	switch kind {
+	case MentionChannel:
 		return p.channels
+	case MentionEmoji:
+		return p.emojis
 	}
 
 	return p.users
@@ -1644,12 +1699,12 @@ func (p *MentionPicker) Reset() {
 	p.fresh = false
 }
 
-// mentionRow is one pooled row of the picker: a lead — a person's avatar or a
-// channel's type glyph — the name in the author's role colour, and the dim
-// @handle a channel leaves empty.
+// mentionRow is one pooled row of the picker: a lead — a person's avatar, a
+// channel's type glyph or the emoji itself — the name in the author's role
+// colour, and the dim @handle everything but a person leaves empty.
 type mentionRow struct {
 	tapBase
-	images *cache.ImageCache
+	deps Deps
 
 	background  *canvas.Rectangle
 	lead        *fyne.Container
@@ -1677,11 +1732,11 @@ var (
 	_ desktop.Hoverable = (*mentionRow)(nil)
 )
 
-func newMentionRow(images *cache.ImageCache, onHover, onTap func()) *mentionRow {
+func newMentionRow(deps Deps, onHover, onTap func()) *mentionRow {
 	size := fyne.NewSize(theme.Sizes.MentionAvatarSize, theme.Sizes.MentionAvatarSize)
 
 	r := &mentionRow{
-		images:      images,
+		deps:        deps,
 		background:  canvas.NewRectangle(color.Transparent),
 		placeholder: canvas.NewCircle(theme.Colors.AvatarPlaceholder),
 		name:        newBoldText("", theme.Colors.TextPrimary, theme.Sizes.MentionNameSize),
@@ -1740,7 +1795,8 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 		r.name.Color = solidColor(candidate.Color)
 	}
 
-	// A channel has no handle: the marker it was found by is already in its glyph.
+	// Only a person has a handle: the marker the others were found by is already in
+	// the glyph or the emoji leading the row.
 	r.handle.Text = ""
 	if candidate.Kind == MentionUser {
 		r.handle.Text = "@" + candidate.Username
@@ -1749,8 +1805,13 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	r.handle.Refresh()
 	r.setSelected(selected)
 
-	if candidate.Kind == MentionChannel {
+	switch candidate.Kind {
+	case MentionChannel:
 		r.lead.Objects = []fyne.CanvasObject{ChannelGlyph(candidate.ChannelKind)}
+		r.lead.Refresh()
+		return
+	case MentionEmoji:
+		r.lead.Objects = []fyne.CanvasObject{newMentionEmoji(r.deps, candidate.Emoji)}
 		r.lead.Refresh()
 		return
 	}
@@ -1759,12 +1820,12 @@ func (r *mentionRow) set(candidate MentionCandidate, selected bool) {
 	// this candidate may have no avatar at all.
 	r.lead.Objects = []fyne.CanvasObject{r.placeholder}
 	r.lead.Refresh()
-	if candidate.AvatarURL == "" || r.images == nil {
+	if candidate.AvatarURL == "" || r.deps.Images == nil {
 		return
 	}
 
 	size := fyne.NewSize(theme.Sizes.MentionAvatarSize, theme.Sizes.MentionAvatarSize)
-	r.images.LoadAsync(imageCacheID(candidate.AvatarURL), candidate.AvatarURL, true, func(img image.Image) {
+	r.deps.Images.LoadAsync(imageCacheID(candidate.AvatarURL), candidate.AvatarURL, true, func(img image.Image) {
 		if r.generation != generation {
 			return
 		}

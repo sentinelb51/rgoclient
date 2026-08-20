@@ -82,23 +82,17 @@ func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.Point
 }
 
 func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
-	width, height := attachment.Width, attachment.Height
-	size := fitWithin(width, height, theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
-	if size.Width == 0 || size.Height == 0 {
-		// No usable metadata: reserve a wide half-height box so the row barely moves
-		// once the real picture arrives.
-		size = fyne.NewSize(theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight/2)
-	}
+	bounds := fyne.NewSize(theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
 
-	placeholder := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
-	placeholder.SetMinSize(size)
-	image := container.NewStack(placeholder)
+	// No usable metadata: reserve a wide half-height box so the row barely moves
+	// once the real picture arrives and the box takes its shape. It has to take it
+	// — the bar is as wide as the box, and a portrait picture left in this one
+	// wears one twice its own width.
+	reserve := fyne.NewSize(bounds.Width, bounds.Height/2)
 
-	if url := attachment.URL; url != "" {
-		images.LoadIntoContainer(imageCacheID(url), url, size, image, false, nil)
-	}
+	picture := imageFrame(images, attachment, bounds, reserve, theme.Colors.ServerDefaultBg, nil)
 
-	return VBoxNoSpacing(image, bar)
+	return VBoxNoSpacing(picture, bar)
 }
 
 func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {

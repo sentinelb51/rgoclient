@@ -107,6 +107,10 @@ func (a *App) refreshServerList() {
 
 	a.serverList.Objects = icons
 	a.serverList.Refresh()
+
+	// Which servers the account is in is also which emoji it may type, and this runs
+	// wherever that changes: ready, joined, left.
+	a.refreshEmojiCandidates()
 }
 
 /* Channel sidebar */
@@ -516,6 +520,11 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	a.syncServerSelection(serverID)
 	a.setHeader(a.serverHeader, server.Name)
 	a.refreshChannelList()
+
+	// The emoji of the server being entered come first in the composer's list, as
+	// they do in the picker, so the order is re-taken here rather than only when the
+	// set changes.
+	a.refreshEmojiCandidates()
 
 	// Paint what is known, then fetch the rest. Both selectServer and #mention
 	// navigation funnel through here, so it is the one place to ask for membership.

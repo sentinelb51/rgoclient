@@ -2,6 +2,7 @@ package ui
 
 import (
 	"hash/fnv"
+	"image"
 	"image/color"
 	"math"
 	"slices"
@@ -1004,14 +1005,34 @@ func loadAvatar(images *cache.ImageCache, target *fyne.Container, avatarURL stri
 	images.LoadIntoContainer(imageCacheID(avatarURL), avatarURL, size, target, true, nil)
 }
 
+// maxSideQuery is how Autumn is asked for a capped rendition of a file, which
+// every avatar and icon the client draws is fetched with.
+const maxSideQuery = "?max_side="
+
+// fullSizeURL drops that cap, so what arrives is the file as it was uploaded
+// rather than the copy an avatar is drawn from.
+func fullSizeURL(imageURL string) string {
+	url, _, _ := strings.Cut(imageURL, maxSideQuery)
+
+	return url
+}
+
 // imageCacheID is the key a picture is cached under: its Autumn file ID for one
 // of Revolt's URLs, a hash otherwise. The ID doubles as the disk cache's
 // filename, and an embed preview's URL — scheme and slashes — is no filename.
+//
+// The rendition is part of the key: Autumn serves the capped copy and the
+// original from the same file ID, and the viewer asks for the original of an
+// avatar the card beside it already has at 256 pixels.
 func imageCacheID(imageURL string) string {
 	if imageURL == "" {
 		return ""
 	}
 	if id := util.IDFromAttachmentURL(imageURL); id != "" {
+		if _, side, capped := strings.Cut(imageURL, maxSideQuery); capped {
+			return id + "-" + side
+		}
+
 		return id
 	}
 
@@ -1019,6 +1040,56 @@ func imageCacheID(imageURL string) string {
 	sum.Write([]byte(imageURL))
 
 	return strconv.FormatUint(sum.Sum64(), 16)
+}
+
+// imageFrame is a picture in the box it is drawn in, at most bounds and never
+// enlarged to fill it. Revolt makes a file's dimensions optional and carries
+// none at all for a bare embed picture or an avatar: without them the box is
+// reserved at reserve and re-fitted from the decoded picture, since a box
+// reserved at the column's full width otherwise stays that wide whatever shape
+// the picture turns out to be. fill is what stands in the box until it lands.
+//
+// onFitted, for a caller with chrome that has to follow, is given the picture's
+// real dimensions and the box they fit in. Only where there were none to size
+// the box by, and on the UI thread — during the build for a picture the cache
+// already holds, so what it touches has to be built by then or checked for.
+func imageFrame(images *cache.ImageCache, file *domain.File, bounds, reserve fyne.Size, fill color.Color, onFitted func(image.Point, fyne.Size)) *fyne.Container {
+	size := fitWithin(file.Width, file.Height, bounds.Width, bounds.Height)
+
+	known := size.Width > 0 && size.Height > 0
+	if !known {
+		size = reserve
+	}
+
+	placeholder := canvas.NewRectangle(fill)
+	placeholder.SetMinSize(size)
+
+	frame := container.NewStack(placeholder)
+	if file.URL == "" {
+		return frame
+	}
+
+	images.LoadAsync(imageCacheID(file.URL), file.URL, false, func(img image.Image) {
+		pixels := img.Bounds()
+
+		fitted := size
+		if !known {
+			fitted = fitWithin(pixels.Dx(), pixels.Dy(), bounds.Width, bounds.Height)
+		}
+
+		picture := canvas.NewImageFromImage(img)
+		picture.FillMode = canvas.ImageFillContain
+		picture.SetMinSize(fitted)
+
+		frame.Objects = []fyne.CanvasObject{picture}
+		frame.Refresh()
+
+		if !known && onFitted != nil {
+			onFitted(image.Pt(pixels.Dx(), pixels.Dy()), fitted)
+		}
+	})
+
+	return frame
 }
 
 // Avatar is the circular, tappable avatar beside a message. Deliberately not

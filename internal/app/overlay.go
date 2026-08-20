@@ -90,6 +90,7 @@ func (a *App) closeOverlay() {
 // which keeps the copy for its own selection. closeOverlay unbinds it.
 func (a *App) showAttachmentViewer(attachment *domain.File) {
 	viewer := ui.NewAttachmentViewer(a.deps(), attachment, a.viewerBounds(), a.closeOverlay)
+	viewer.OnResize = a.repositionOverlay
 
 	a.showOverlay(viewer.Content)
 	a.window.Canvas().AddShortcut(copyShortcut, func(fyne.Shortcut) { viewer.Copy() })

@@ -167,7 +167,7 @@ func TestMentionQuery(t *testing.T) {
 // never offer a person, nor '@' a channel, however well the query matches the
 // other pool.
 func TestMentionPoolsAreSeparate(t *testing.T) {
-	picker := NewMentionPicker(nil, nil)
+	picker := NewMentionPicker(Deps{}, nil)
 	picker.SetCandidates(MentionUser, candidates())
 	picker.SetCandidates(MentionChannel, channelCandidates())
 
@@ -206,7 +206,7 @@ func TestAcceptChannelInsertsToken(t *testing.T) {
 // TestMentionPickerRanking checks that prefix matches outrank substring matches
 // and that either the display name or the handle can find someone.
 func TestMentionPickerRanking(t *testing.T) {
-	picker := NewMentionPicker(nil, nil)
+	picker := NewMentionPicker(Deps{}, nil)
 	picker.SetCandidates(MentionUser, candidates())
 
 	if !picker.Update(MentionUser, "sar") {

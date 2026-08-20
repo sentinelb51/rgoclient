@@ -493,3 +493,19 @@ func newPickerEmoji(deps Deps, choice EmojiChoice) fyne.CanvasObject {
 
 	return frame
 }
+
+// newMentionEmoji draws one emoji as the lead of an autocomplete row, at the size
+// the other kinds' avatars and glyphs are drawn at. No outlined placeholder,
+// unlike the grid's: the name beside it already says the row is filled.
+func newMentionEmoji(deps Deps, choice EmojiChoice) fyne.CanvasObject {
+	if choice.ID == "" {
+		return newText(choice.Char, theme.Colors.TextPrimary, theme.Sizes.MentionEmojiSize)
+	}
+
+	side := theme.Sizes.MentionAvatarSize
+	size := fyne.NewSize(side, side)
+	frame := container.NewGridWrap(size, canvas.NewRectangle(color.Transparent))
+	deps.Emojis.LoadIntoContainer(choice.ID, deps.Store.EmojiURL(choice.ID), size, frame, false, nil)
+
+	return frame
+}

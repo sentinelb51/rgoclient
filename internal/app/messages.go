@@ -88,6 +88,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.SetPlaceHolder(composerPlaceholder)
 	a.input.OnSubmit = a.handleSubmit
 	a.input.OnEditLast = a.editLastOwnMessage
+	a.input.OnEscape = a.escapeToPresent
 	a.input.OnRefused = func(reason string) { a.notify(ui.ToneWarning, "%s", reason) }
 	a.input.OnTyping = a.noteTyping
 	a.input.OnKeystroke = a.noteKeystroke
@@ -1073,6 +1074,17 @@ func (a *App) backToPresent() {
 	}
 
 	a.jumpToLatest()
+}
+
+// escapeToPresent is Escape doing what tapping the bar does, and nothing at all
+// when the bar is down — Escape in a column already at the tail should not move
+// it, and it still has to reach the entry that pressed it.
+func (a *App) escapeToPresent() {
+	if !a.viewingOlder() {
+		return
+	}
+
+	a.backToPresent()
 }
 
 // holdUncached files a fetched window where ResolveMessage can find it, beside

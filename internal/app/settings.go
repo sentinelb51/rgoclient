@@ -60,9 +60,11 @@ func (a *App) closeSettings() {
 }
 
 // bindKeys points Escape at the topmost layer that answers it: the modal layer,
-// which draws over the settings page, then the page. A focused entry swallows
-// keys before the canvas sees them, so Escape does nothing while the cursor is in
-// a field — which is why both surfaces keep a close button in view.
+// which draws over the settings page, then the page, then the message column,
+// where it is the jump bar. A focused entry swallows keys before the canvas sees
+// them, so this handler only ever speaks for what has no focused field of its own
+// — which is why both overlays keep a close button in view, and why the composer
+// carries its own Escape.
 func (a *App) bindKeys() {
 	var onEscape func()
 
@@ -71,6 +73,8 @@ func (a *App) bindKeys() {
 		onEscape = a.closeOverlay
 	case a.settings != nil && a.settings.IsOpen():
 		onEscape = a.closeSettings
+	case a.messageScroll != nil:
+		onEscape = a.escapeToPresent
 	}
 
 	if onEscape == nil {

@@ -21,10 +21,11 @@ dependency DAG and the client's contract; this file is the wire-level notes.
 - `ServerRole` carries `Hoist` and `Rank`; `PartialUser` makes every field nilable
   and keeps `Online` separate from `Status`, which is what lets `userUpdateKinds`
   tell a presence change from a rename without diffing against State.
-- **Known bug:** `Session.ChannelMessages(..., IncludeUsers: true)` only feeds
-  Users/Members into State when the request *failed* (`if err != nil` where
-  `err == nil` was meant). Hence the batched `ensureAuthor` path; when fixed, the
-  batch simply finds nothing to do.
+- `Session.ChannelMessages(..., IncludeUsers: true)` does feed Users/Members
+  into State (gated on `TrackBulkAPICalls`), so a history page resolves its own
+  authors. The batched `ensureAuthor` path covers what no page carries — a
+  webhook, somebody departed, a search or pin result — and finds nothing to do
+  otherwise.
 - **Missing field:** Revolt carries `slowmode` (seconds) on a text channel and in
   `ChannelUpdate`; revoltgo models neither, so the number never arrives with the
   channel and nothing announces a change — including this client's own edit, hence

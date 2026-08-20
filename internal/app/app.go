@@ -433,6 +433,7 @@ func (a *App) deps() ui.Deps {
 func (a *App) showMainUI() {
 	a.window.SetPadded(false) // sections sit flush against the window chrome
 	a.window.SetContent(a.buildUI())
+	a.bindKeys() // the message column answers Escape once there is one
 	a.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 
 	a.window.SetOnClosed(func() {

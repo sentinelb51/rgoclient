@@ -76,6 +76,10 @@ type MessageInput struct {
 	// outline while the entry is live.
 	OnFocusChanged func(focused bool)
 
+	// OnEscape fires on Escape with nothing pending to cancel, which is what the
+	// jump bar answers to as well.
+	OnEscape func()
+
 	// OnRefused reports an input the composer would not take, so the app can say
 	// why — dropping a file into a channel that forbids uploads would otherwise be
 	// nothing happening, which is indistinguishable from a bug.
@@ -380,8 +384,9 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 }
 
 // TypedKey sends on Enter, newlines on Shift+Enter, cancels pending
-// replies/attachments on Escape, edits the last own message on Up in an empty
-// composer, and otherwise defers to the entry, refreshing so MinSize recomputes.
+// replies/attachments on Escape — or reports the Escape when there is nothing to
+// cancel — edits the last own message on Up in an empty composer, and otherwise
+// defers to the entry, refreshing so MinSize recomputes.
 //
 // Which of Enter and Ctrl+Enter sends is a setting; Shift+Enter is a newline
 // either way. An open mention picker gets first refusal on the navigation keys,
@@ -403,6 +408,9 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 			m.ClearReplies()
 			m.ClearAttachments()
 			return
+		}
+		if m.OnEscape != nil {
+			m.OnEscape()
 		}
 		m.Entry.TypedKey(key)
 	case key.Name == fyne.KeyBackspace || key.Name == fyne.KeyDelete:

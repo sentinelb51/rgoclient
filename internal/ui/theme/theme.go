@@ -27,6 +27,8 @@ var Colors = struct {
 
 	MessageJumpBackground color.Color
 
+	MessageEditBackground color.Color
+
 	ChannelHoverBackground color.Color
 	ChannelSelectedBg      color.Color
 	ServerDefaultBg        color.Color
@@ -203,6 +205,11 @@ var Colors = struct {
 	// the wash says "here", where the mention wash says "you", and a message can
 	// be both at once.
 	MessageJumpBackground: color.RGBA{R: 45, G: 55, B: 92, A: 255}, // #2D375C
+
+	// What an edit washes the row with as it lands, in and back out again. Cooler
+	// and fainter than the jump wash: it announces a change the reader did not ask
+	// for, where a jump answers one they did.
+	MessageEditBackground: color.RGBA{R: 34, G: 52, B: 66, A: 255}, // #223442
 
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},   // #262B3A
 	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
@@ -518,6 +525,7 @@ var Sizes = struct {
 	MessageReplyLineGap           float32
 	MessageTimestampSize          float32
 	MessagePinMarkSize            float32
+	MessageEditMarkSize           float32
 	ReactionEmojiSize             float32
 	ReactionCountSize             float32
 	ReactionRadius                float32
@@ -869,6 +877,7 @@ var Sizes = struct {
 	MessageReplyLineGap:           8,
 	MessageTimestampSize:          12,
 	MessagePinMarkSize:            11,
+	MessageEditMarkSize:           10,
 
 	// A reaction chip. The emoji is drawn a little above body size — it is the
 	// whole of what the chip says, and a custom one is a picture of that side —

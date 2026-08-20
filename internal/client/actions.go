@@ -725,6 +725,7 @@ func (c *Client) ResolveAuthors(targets []AuthorRef) AuthorResolution {
 // author, pulling both into State. It reports whether the author is now
 // resolvable.
 func resolveAuthor(session *revoltgo.Session, target AuthorRef) bool {
+
 	if session.State.User(target.UserID) == nil {
 		if _, err := session.User(target.UserID); err != nil {
 			log.Printf("fetch user %s: %v", target.UserID, err)

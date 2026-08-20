@@ -2,6 +2,7 @@ package ui
 
 import (
 	"image/color"
+	"math"
 	"strings"
 	"time"
 
@@ -28,6 +29,11 @@ const (
 	// long enough to find the row, short enough not to read as a state it is in.
 	flashDuration = 1200 * time.Millisecond
 
+	// editFlashDuration is the wash an edit lands with, up and back down inside it.
+	// Shorter than a jump's and symmetric: nobody asked to be shown this row, so it
+	// has to be noticed in passing rather than sat through.
+	editFlashDuration = 1000 * time.Millisecond
+
 	maxReplyUsernameLength = 16
 	maxReplyPreviewLength  = 80
 	replyPreviewAvatarSize = 16
@@ -53,6 +59,13 @@ type MessageWidget struct {
 	// gutterTimestamp stands in the avatar's place on a grouped continuation,
 	// revealed on hover. Nil for a full message.
 	gutterTimestamp *canvas.Text
+
+	// editMark is the pencil-and-span note an edited message trails, and editMarkRow
+	// the box holding it. Both nil when the message has never been edited. Kept so
+	// the span can be rewritten as it grows — see RefreshEditMark — without
+	// rebuilding the row.
+	editMark    *canvas.Text
+	editMarkRow *fyne.Container
 
 	// A system message's target, the rest of its sentence, and the row they share
 	// with the time — kept so a target resolving later can be written in place,
@@ -576,21 +589,38 @@ func (w *MessageWidget) setHighlighted(on bool) {
 // premultiplied (see theme.Fade), so fading that way darkens the row on the way
 // out — hence fading *to* what is behind a row at rest.
 func (w *MessageWidget) Flash() {
+	// Held, then let go: ease-out would spend most of the second on a colour too
+	// faint to have found anything by.
+	w.flashWash(theme.Colors.MessageJumpBackground, flashDuration, fyne.AnimationEaseIn,
+		func(done float32) float32 { return 1 - done })
+}
+
+// FlashEdit washes the row an edit landed on, in and back out again. The same
+// wash as a jump's on every count but two: its own colour, and a strength that
+// rises before it falls — an edit is not a place the reader was brought to, so
+// the row must not already be at full wash on the frame it arrives.
+func (w *MessageWidget) FlashEdit() {
+	w.flashWash(theme.Colors.MessageEditBackground, editFlashDuration, fyne.AnimationLinear,
+		func(done float32) float32 { return float32(math.Sin(float64(done) * math.Pi)) })
+}
+
+// flashWash animates the row's background between what it rests against and wash,
+// strength saying how far towards wash each tick stands. The last tick hands the
+// background back to fill(), so the row goes on answering the pointer.
+func (w *MessageWidget) flashWash(wash color.Color, duration time.Duration, curve fyne.AnimationCurve, strength func(done float32) float32) {
 	w.stopFlash()
 
-	from, to := theme.Colors.MessageJumpBackground, w.restBackdrop()
-	w.flash = fyne.NewAnimation(flashDuration, func(done float32) {
+	rest := w.restBackdrop()
+	w.flash = fyne.NewAnimation(duration, func(done float32) {
 		if done >= 1 {
 			w.background.FillColor = w.fill(w.overMessage || w.overChild)
 		} else {
-			w.background.FillColor = mixColor(from, to, done)
+			w.background.FillColor = mixColor(rest, wash, strength(done))
 		}
 		canvas.Refresh(w.background)
 	})
 
-	// Held, then let go: ease-out would spend most of the second on a colour too
-	// faint to have found anything by.
-	w.flash.Curve = fyne.AnimationEaseIn
+	w.flash.Curve = curve
 	w.flash.Start()
 }
 
@@ -689,7 +719,15 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 			collapse:  true,
 		}
 		leftColumn = container.New(gutter, w.gutterTimestamp)
-		body = stackExtras(w.bodySlot, w.buildExtras())
+
+		// A continuation draws no header, so its edit mark hangs under the body
+		// instead — ahead of the attachments, being a note about what was said rather
+		// than something else the message carries.
+		extras := w.buildExtras()
+		if mark := w.buildEditMark(); mark != nil {
+			extras = append([]fyne.CanvasObject{mark}, extras...)
+		}
+		body = stackExtras(w.bodySlot, extras)
 	} else {
 		name, nameColor, avatarURL := resolveAuthor(deps, message)
 		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
@@ -702,7 +740,7 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 		}, w.avatar)
 
 		w.authorText = NewAccentText(name, nameColor, 0, fyne.TextStyle{Bold: true})
-		header := buildMessageHeader(w.authorText, fullTime, message.Pinned, w.bodySlot)
+		header := buildMessageHeader(w.authorText, fullTime, message.Pinned, w.buildEditMark(), w.bodySlot)
 		body = stackExtras(header, w.buildExtras())
 	}
 
@@ -905,13 +943,17 @@ func (w *MessageWidget) setOverChild(hovering bool) {
 // body text running under it, and both being siblings in the HBox, the smaller one
 // centres itself against the name.
 //
-// A pinned message trails the same line with the pin event's own mark, in the
-// timestamp's colour: a note about the message rather than part of what was said.
-// A bare image, not a widget, so the row's hover and menu pass through it.
-func buildMessageHeader(author *AccentText, timestamp string, pinned bool, body fyne.CanvasObject) fyne.CanvasObject {
+// An edited or pinned message trails the same line — the edit mark first, being
+// about when, then the pin event's own mark — both in the timestamp's colour: a
+// note about the message rather than part of what was said. A bare image, not a
+// widget, so the row's hover and menu pass through it.
+func buildMessageHeader(author *AccentText, timestamp string, pinned bool, edited, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := newText(timestamp, theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
 
 	line := []fyne.CanvasObject{author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts}
+	if edited != nil {
+		line = append(line, HorizontalSpacer(theme.Sizes.MessageContentPadding), edited)
+	}
 	if pinned {
 		side := theme.Sizes.MessagePinMarkSize
 		mark := newScaledIcon(tintedIcon(assets.SystemPinnedIcon, theme.Colors.TimestampText), side)
@@ -919,6 +961,51 @@ func buildMessageHeader(author *AccentText, timestamp string, pinned bool, body 
 	}
 
 	return VBoxNoSpacing(HBoxNoSpacing(line...), body)
+}
+
+/* The edit mark */
+
+// buildEditMark is the note an edited message trails: a pencil, then how long ago
+// it was changed. Nil when the message has never been edited, which is what keeps
+// it off the header line of nearly every row.
+func (w *MessageWidget) buildEditMark() fyne.CanvasObject {
+	if w.message.Edited == nil {
+		return nil
+	}
+
+	side := theme.Sizes.MessageEditMarkSize
+	mark := newScaledIcon(tintedIcon(assets.ActionEditIcon, theme.Colors.TimestampText), side)
+	w.editMark = newText(util.ShortAgo(*w.message.Edited), theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
+
+	w.editMarkRow = HBoxNoSpacing(
+		container.NewCenter(mark),
+		HorizontalSpacer(theme.Sizes.MessageAttachmentSpacing),
+		w.editMark,
+	)
+
+	return w.editMarkRow
+}
+
+// RefreshEditMark rewrites the span on the mark, reporting whether the row
+// carries one at all. The clock belongs to the caller: nothing else redraws a
+// message that has stopped changing, so a mark written as "just now" would go on
+// saying it for as long as the row stays mounted.
+func (w *MessageWidget) RefreshEditMark() bool {
+	if w.editMark == nil || w.message.Edited == nil {
+		return false
+	}
+
+	span := util.ShortAgo(*w.message.Edited)
+	if span == w.editMark.Text {
+		return true
+	}
+
+	// The span is a different width, so the row is laid out again rather than only
+	// repainted — canvas.Text's own Refresh does not re-run the box around it.
+	w.editMark.Text = span
+	Relayout(w.editMarkRow)
+
+	return true
 }
 
 /* Day separator */

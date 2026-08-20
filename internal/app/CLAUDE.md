@@ -110,6 +110,19 @@ DAG and conventions.
    applies optimistically and calls `Client.EditMessage`; failure reverts.
    Message-area rebuilds cancel the active edit; `refreshMessage` leaves a message
    being edited alone.
+   **An edit is announced twice over**: the row trails a pencil and how long ago
+   (`MessageWidget.buildEditMark`), and `refreshMessage` flashes it as it lands.
+   An update arrives as "this message changed", so `newlyEdited` compares the
+   mounted copy's `Edited` stamp with the new one — a reaction or an unfurled
+   embed must not flash. Only if `messageInView` says the row overlaps what the
+   dock does not cover; that is a walk of the mounted heights, affordable once
+   per edit for the reason `revealMounted`'s is once per jump.
+   The optimistic copy carries no stamp, so the author's own edit flashes once,
+   off the gateway echo, rather than twice.
+   The span goes stale on a row nothing else redraws, so `refreshEditMarks` walks
+   the mounted widgets every `editMarkTick` and re-arms only while one carries a
+   mark; `remountMessages` arms it, that being what every path changing the
+   mounted set already calls.
 8. **Mentions.** `@` or `#` at the start or after a space opens the picker, which
    gets first refusal on Up/Down/Enter/Tab/Esc. The marker decides which of the
    two pools is filtered and what the span is rewritten as — Revolt's `<@id>` or
@@ -870,13 +883,9 @@ DAG and conventions.
     `App.resizeDock` re-hangs the dock, the bar's height being part of
     `ui.DockReserve`. Tapping it is `backToPresent`: `returnToPresent` out of a
     jump window, the cheaper `jumpToLatest` out of plain scrollback.
-    `revealMounted` centres the row and `MessageWidget.Flash` marks it. The wash
-    is *not* a state the widget holds — `fill()` is untouched, so the row goes on
-    answering the pointer and the last tick hands the background back — and it
-    fades between two **opaque** colours: the palette writes straight alpha into
-    `color.RGBA`, which Go composites as premultiplied (see `theme.Fade`), so a
-    wash faded down its alpha darkens the row on the way out. Hovering stops it,
-    the pointer arriving being the reader having found the row.
+    `revealMounted` centres the row and `MessageWidget.Flash` marks it — see the
+    ui note on why a wash is an animation and not state. Hovering stops it, the
+    pointer arriving being the reader having found the row.
     `ObservableScroll.SyncContent` is what makes the scroll land: an offset is
     clamped against the size the content was last *laid out* at, and only a
     `Scroll.Refresh` updates that — which would re-wrap every mounted body.

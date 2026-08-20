@@ -33,6 +33,10 @@ const (
 	// so the first scroll lands short by whatever the column grew by.
 	settleDelay = 120 * time.Millisecond
 
+	// editMarkTick is how often a mounted message's "edited N ago" span is
+	// rewritten. A minute, because that is the finest span the mark ever names.
+	editMarkTick = time.Minute
+
 	// maxUncachedMessages bounds what is held outside the message cache: quoted
 	// messages older than a channel's cached tail, and the window a jump landed
 	// in. Only what reaches further back than the cache lands here, so it is a
@@ -1173,8 +1177,52 @@ func (a *App) refreshMessage(channelID, messageID string) {
 		return
 	}
 
+	// Read off the widget's own copy before it is replaced: an update is delivered
+	// as "this message changed", and only the stamp says which of the things that
+	// can change did. A reaction or an unfurled embed must not flash the row.
+	edited := newlyEdited(a.mountedMessage(i), message)
+
 	a.rebuildAt(i, message)
 	a.remountMessages()
+
+	if edited && a.messageInView(i) {
+		if w, ok := a.messageList.Objects[i].(*ui.MessageWidget); ok {
+			w.FlashEdit()
+		}
+	}
+}
+
+// newlyEdited reports whether next carries an edit the mounted copy did not. A
+// message the widget was built before the account joined has no previous copy to
+// compare, which counts as no news.
+func newlyEdited(previous, next *domain.Message) bool {
+	if next.Edited == nil || previous == nil {
+		return false
+	}
+
+	return previous.Edited == nil || !previous.Edited.Equal(*next.Edited)
+}
+
+// messageInView reports whether the widget at i overlaps the part of the viewport
+// the reader can actually see. The offset is a walk of what is above it, as
+// revealMounted's is — affordable for the same reason, this being once per edit
+// rather than once per frame. Call on the UI thread.
+func (a *App) messageInView(i int) bool {
+	objects := a.messageList.Objects
+	if i < 0 || i >= len(objects) || a.messageScroll == nil {
+		return false
+	}
+
+	var top float32
+	for _, obj := range objects[:i] {
+		top += obj.MinSize().Height
+	}
+	bottom := top + objects[i].MinSize().Height
+
+	// The composer dock floats over the bottom of the scroller, so what it covers
+	// is not seen however much of the viewport it stands in.
+	view := a.messageScroll.Offset.Y
+	return bottom > view && top < view+a.messageScroll.Size().Height-ui.DockReserve(a.composerDock)
 }
 
 // editLastOwnMessage opens the in-place editor on the user's newest editable
@@ -1568,6 +1616,42 @@ func (a *App) scrollToBottom() {
 // Only the container's geometry changed, which is what ui.Relayout does.
 func (a *App) remountMessages() {
 	ui.Relayout(a.messageList)
+	a.armEditMarks()
+}
+
+/* The edit marks' clock */
+
+// armEditMarks starts the clock rewriting the mounted rows' "edited N ago" spans
+// if it is not already running. Called from every path that changes the mounted
+// set, so a row carrying a mark can never be mounted without one. Call on the UI
+// thread.
+func (a *App) armEditMarks() {
+	if a.editMarkTimer == nil {
+		a.refreshEditMarks()
+	}
+}
+
+// refreshEditMarks rewrites those spans and re-arms while any row still carries
+// one, so a channel with none costs nothing. Nothing else redraws a message that
+// has stopped changing: without this a mark written as "just now" would still say
+// it an hour later. Call on the UI thread.
+func (a *App) refreshEditMarks() {
+	a.editMarkTimer = nil
+
+	var marked bool
+	for _, obj := range a.messageList.Objects {
+		if w, ok := obj.(*ui.MessageWidget); ok && w.RefreshEditMark() {
+			marked = true
+		}
+	}
+
+	if !marked {
+		return
+	}
+
+	a.editMarkTimer = time.AfterFunc(editMarkTick, func() {
+		a.doOnUI(a.refreshEditMarks, false)
+	})
 }
 
 // contentHeight is the laid-out height of the mounted column. It reads the size

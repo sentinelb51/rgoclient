@@ -215,3 +215,32 @@ func quantity(count int, unit string) string {
 
 	return strconv.Itoa(count) + " " + unit + "s"
 }
+
+// ShortAgo names how long ago an instant was in the fewest characters that still
+// say it: "just now", "2m ago", "3h ago", "5d ago", "2mo ago", "1y ago". A note
+// hung beside something else — the edit mark on a message — where RelativeTime's
+// spelled-out span would be longer than the line it annotates.
+//
+// Only backwards: what it marks has already happened.
+func ShortAgo(t time.Time) string {
+	distance := time.Since(t)
+	if distance < relativeNow {
+		return "just now"
+	}
+
+	var span string
+	switch {
+	case distance < time.Hour:
+		span = strconv.Itoa(max(int(distance/time.Minute), 1)) + "m"
+	case distance < day:
+		span = strconv.Itoa(int(distance/time.Hour)) + "h"
+	case distance < daysInMonth*day:
+		span = strconv.Itoa(int(distance/day)) + "d"
+	case distance < daysInYear*day:
+		span = strconv.Itoa(int(distance/(daysInMonth*day))) + "mo"
+	default:
+		span = strconv.Itoa(int(distance/(daysInYear*day))) + "y"
+	}
+
+	return span + " ago"
+}

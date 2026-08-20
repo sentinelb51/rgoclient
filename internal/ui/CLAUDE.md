@@ -288,4 +288,13 @@ naming and the test policy.
   interface contract, fixed by inheritance order and discoverable nowhere at
   runtime, and one wrong number calls a different method. Both report false where
   there is no native picker, which is what sends the caller to Fyne's.
+- **A row's wash is an animation, never state.** `MessageWidget.Flash` (a jump)
+  and `FlashEdit` (an edit landing) both go through `flashWash`: `fill()` is
+  untouched, so the row answers the pointer throughout and the last tick hands the
+  background back to it. It mixes two **opaque** colours — the palette writes
+  straight alpha into `color.RGBA`, which Go composites as premultiplied (see
+  `theme.Fade`), so fading a wash down its alpha darkens the row on the way out.
+  The two differ only in colour and in the strength curve: a jump starts at full
+  wash and lets go, an edit rises and falls inside its second, nobody having asked
+  to be shown that row.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.

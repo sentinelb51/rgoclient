@@ -284,11 +284,15 @@ type App struct {
 	//
 	// settleTimer is the pending re-scroll to the bottom after a channel's tail
 	// is mounted, see settleAtBottom.
+	//
+	// editMarkTimer is the clock rewriting the "edited N ago" spans on the mounted
+	// rows, armed only while one of them carries a mark — see refreshEditMarks.
 	loadingPage bool
 	jumped      bool
 	atOldest    bool
 
-	settleTimer *time.Timer
+	settleTimer   *time.Timer
+	editMarkTimer *time.Timer
 }
 
 var _ ui.MessageActions = (*App)(nil)

@@ -7,7 +7,7 @@ require (
 	github.com/ebitengine/oto/v3 v3.4.1
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/oklog/ulid/v2 v2.1.2
-	github.com/sentinelb51/revoltgo v0.0.0-20260820202106-a0e9e826477a
+	github.com/sentinelb51/revoltgo v0.0.0-20260821191211-a3aceadb97ee
 	golang.design/x/clipboard v0.8.0
 	golang.org/x/image v0.45.0
 )
@@ -29,7 +29,6 @@ require (
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260707082822-2a407d02d01a // indirect
 	github.com/go-text/render v0.2.1 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
-	github.com/goccy/go-json v0.10.6 // indirect
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
 	github.com/hack-pad/go-indexeddb v0.3.2 // indirect
 	github.com/hack-pad/safejs v0.1.1 // indirect
@@ -57,9 +56,6 @@ require (
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
 replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4
-
-replace github.com/sentinelb51/revoltgo => ../revoltgo

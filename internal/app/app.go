@@ -96,6 +96,11 @@ type App struct {
 	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
 	unreadChannels      map[string]bool
 
+	// mentions is which messages name this account, by channel and oldest first,
+	// which is what the sidebar counts and the inbox is a rendering of. See
+	// mentions.go.
+	mentions map[string][]string
+
 	/* Mounted UI */
 
 	mainRow         *fyne.Container // the four-column fill row, relaid out by toggleMemberList
@@ -120,17 +125,26 @@ type App struct {
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
 	homeButton      *ui.SidebarButton
-	friendsRow      *ui.FriendsRow // the way into the friends list, above the conversations
+	inboxButton     *ui.SidebarButton // the way into the mention inbox, under it
+	friendsRow      *ui.FriendsRow    // the way into the friends list, above the conversations
 	serverHeader    *widget.Label
 	channelHeader   *widget.Label
 	channelGlyph    *fyne.Container  // holds the message header's # / @ / group mark
 	channelTopic    *ui.ChannelTopic // what the channel is for, after its name in that row
+	serverCog       *ui.IconButton   // opens the open server's settings; hidden where there is nothing to manage
 
 	/* Modal layer and the settings page */
 
 	// settings is a layer in the window's content stack rather than a canvas
 	// overlay, so a confirmation — which is one — can still be shown over it.
 	settings *ui.SettingsPage
+
+	// serverSettings is that same surface for one server, and the second such layer.
+	// One page for the process as settings is — its hooks read serverSettingsID
+	// rather than closing over a server, so opening it on another is a field and a
+	// rebuild rather than a widget tree.
+	serverSettings   *ui.ServerSettingsPage
+	serverSettingsID string
 
 	overlay       *ui.Overlay          // nil when nothing is showing
 	joinDialog    *ui.JoinServerDialog // the invite dialog on the modal layer, if any
@@ -162,6 +176,14 @@ type App struct {
 	pins          *ui.PinsDialog
 	pinsChannelID string
 	pinned        []*domain.Message
+
+	/* The mention inbox, see mentions.go */
+
+	// inbox is the panel on the modal layer, if any. inboxSeq counts its openings,
+	// so a fill arriving for one already closed and reopened is dropped — every row
+	// is a request, and the panel holds no snapshot of its own between them.
+	inbox    *ui.MentionsDialog
+	inboxSeq uint64
 
 	/* Channel search, see search.go */
 
@@ -267,8 +289,9 @@ type App struct {
 	loginStatus *ui.StatusLine
 	readyTimer  *time.Timer
 
-	pendingToken string // stashed by a credential login until Ready names the user
-	pendingJoin  bool   // a join is in flight, so its ServerJoined should select
+	pendingToken  string // stashed by a credential login until Ready names the user
+	pendingJoin   bool   // a join is in flight, so its ServerJoined should select
+	pendingRoleID string // a role just created, opened once the event carrying it lands
 
 	/* The mounted window, see messages.go */
 
@@ -326,6 +349,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		notices:             ui.NewNoticeStack(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
+		mentions:            make(map[string][]string),
 		fetchedAuthors:      make(map[string]bool),
 		fetchedMembers:      make(map[string]bool),
 		memberFailed:        make(map[string]bool),
@@ -336,8 +360,9 @@ func New(fyneApp fyne.App, info Info) *App {
 	}
 
 	// Built here rather than on first open, so the layer is a fixed object buildUI
-	// can stack: the page has to survive the rebuild a style change asks for.
+	// can stack: both pages have to survive the rebuild a style change asks for.
 	a.settings = ui.NewSettingsPage(a.settingsHooks())
+	a.serverSettings = ui.NewServerSettingsPage(a.serverSettingsHooks())
 
 	return a
 }

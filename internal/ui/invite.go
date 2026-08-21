@@ -30,12 +30,29 @@ import (
 
 // Captions name the state the card is in. They are what tells someone whether
 // the button below is going to join them to something or merely go there.
+//
+// Neither of the two states without an invite names what the code opens: a
+// server and a group come back through the same route, and which arrived is not
+// known until it has.
 const (
-	inviteCaptionLoading = "Server invite"
-	inviteCaptionJoin    = "You've been invited to join a server"
-	inviteCaptionJoined  = "You're already a member of this server"
-	inviteCaptionFailed  = "Server invite"
+	inviteCaptionLoading = "Invite"
+	inviteCaptionFailed  = "Invite"
 )
+
+// inviteCaptionFor is the caption a resolved invite wears — what it opens, and
+// whether the account is in it already.
+func inviteCaptionFor(kind domain.InviteKind, joined bool) string {
+	noun := "server"
+	if kind == domain.InviteGroup {
+		noun = "group"
+	}
+
+	if joined {
+		return "You're already a member of this " + noun
+	}
+
+	return "You've been invited to join a " + noun
+}
 
 // InviteCard is a mounted invite. Content is what a caller mounts; SetInvite
 // fills in what arrives after the card is up, and Fail replaces it with the
@@ -47,9 +64,19 @@ type InviteCard struct {
 	code string
 
 	// iconURL is held rather than passed down: setBody rebuilds the whole row per
-	// state, and the picture outlives the state that brought it.
-	iconURL string
-	caption *canvas.Text
+	// state, and the picture outlives the state that brought it. bannerURL is the
+	// same, and is drawn only on a preview.
+	iconURL   string
+	bannerURL string
+	caption   *canvas.Text
+
+	// preview marks a card built from an invite already in hand, which differs in
+	// both directions. It draws the banner: in a message the card mounts saying
+	// nothing and is filled a moment later, so a part only some invites have would
+	// shove the messages under it down as the answer landed — a preview has nothing
+	// under it to move. And it draws no button: a preview stands beside the
+	// caller's own.
+	preview bool
 
 	// background is held for its stroke alone — a failed card reddens its edge.
 	background *canvas.Rectangle
@@ -77,9 +104,12 @@ func NewInviteCard(deps Deps, code string) *InviteCard {
 }
 
 // NewInviteCardFor mounts a card for an invite that is already resolved, for a
-// caller holding one — a join dialog previewing what a pasted code opens.
+// caller holding one — the join dialog, previewing what a pasted code opens
+// beside the button that would redeem it. It says what the code opens and
+// nothing else: see preview above for the two ways it differs.
 func NewInviteCardFor(deps Deps, invite domain.Invite) *InviteCard {
 	c := newInviteCard(deps, invite.Code)
+	c.preview = true
 	c.SetInvite(invite)
 
 	return c
@@ -118,33 +148,69 @@ func newInviteCard(deps Deps, code string) *InviteCard {
 // than by the caller: the account is already in the server or it is not, and the
 // store is the only thing that knows.
 func (c *InviteCard) SetInvite(invite domain.Invite) {
-	c.iconURL = invite.IconURL
+	c.iconURL, c.bannerURL = invite.IconURL, invite.BannerURL
 
-	name := strings.TrimSpace(invite.ServerName)
-	if name == "" {
-		name = "Unnamed server"
-	}
-
+	name := inviteName(invite)
 	state := inviteState{
 		title:   name,
 		initial: name,
 		detail:  inviteDetail(invite),
 	}
 
-	if _, joined := c.deps.Store.Server(invite.ServerID); joined {
-		serverID := invite.ServerID
-		state.caption = inviteCaptionJoined
-		state.action = inviteButton("Go to server", ButtonPlain, func() {
-			c.deps.Actions.OnServerTapped(serverID)
-		})
-	} else {
-		state.caption = inviteCaptionJoin
+	label, open, joined := c.destination(invite)
+	state.caption = inviteCaptionFor(invite.Kind, joined)
+
+	switch {
+	case c.preview: // the caller has the only button
+	case joined:
+		state.action = inviteButton(label, ButtonPlain, open)
+	default:
 		state.action = inviteButton("Join", ButtonPrimary, func() {
 			c.deps.Actions.OnJoinInvite(c.code)
 		})
 	}
 
 	c.setBody(state)
+}
+
+// destination is where the card leads when the account is in what the code opens
+// already — the server, or for a group the channel that *is* the group, there
+// being no server to be in. A miss is the ordinary case: an invite is
+// interesting precisely when it names something never seen.
+func (c *InviteCard) destination(invite domain.Invite) (label string, open func(), joined bool) {
+	if invite.Kind == domain.InviteGroup {
+		if _, in := c.deps.Store.Channel(invite.ChannelID); !in {
+			return "", nil, false
+		}
+
+		channelID := invite.ChannelID
+
+		return "Go to group", func() { c.deps.Actions.OnChannelTapped(channelID) }, true
+	}
+
+	if _, in := c.deps.Store.Server(invite.ServerID); !in {
+		return "", nil, false
+	}
+
+	serverID := invite.ServerID
+
+	return "Go to server", func() { c.deps.Actions.OnServerTapped(serverID) }, true
+}
+
+// inviteName is what the card calls the thing it opens. A group has no server
+// name — Revolt describes one with the channel fields alone — so its name is the
+// channel's, which is also why the detail line below must not repeat it.
+func inviteName(invite domain.Invite) string {
+	name, fallback := strings.TrimSpace(invite.ServerName), "Unnamed server"
+	if invite.Kind == domain.InviteGroup {
+		name, fallback = strings.TrimSpace(invite.ChannelName), "Unnamed group"
+	}
+
+	if name == "" {
+		return fallback
+	}
+
+	return name
 }
 
 // Fail marks the invite as one that will never resolve. Revolt answers a code
@@ -199,8 +265,32 @@ func (c *InviteCard) setBody(state inviteState) {
 		row = append(row, HorizontalSpacer(theme.Sizes.EmbedAccentGap), container.NewCenter(state.action))
 	}
 
-	c.body.Objects = []fyne.CanvasObject{NewFillRow(2, row...)}
+	body := fyne.CanvasObject(NewFillRow(2, row...))
+	if strip := c.bannerStrip(state); strip != nil {
+		body = VBoxNoSpacing(strip, VerticalSpacer(theme.Sizes.EmbedRowGap), body)
+	}
+
+	c.body.Objects = []fyne.CanvasObject{body}
 	c.body.Refresh()
+}
+
+// bannerStrip is the server's own banner across the card, or nil where there is
+// none to draw. It sits inside the card's padding rather than against its edge:
+// a canvas.Image has no corner radius, and one drawn to the edge would square off
+// the two corners the card rounds.
+func (c *InviteCard) bannerStrip(state inviteState) fyne.CanvasObject {
+	if !c.preview || c.bannerURL == "" || state.failed {
+		return nil
+	}
+
+	height := theme.Sizes.InviteBannerHeight
+	width := theme.Sizes.InviteCardWidth - 2*theme.Sizes.EmbedPaddingH
+	size := fyne.NewSize(width, height)
+
+	frame := container.NewGridWrap(size, canvas.NewRectangle(theme.Colors.ServerDefaultBg))
+	c.deps.Images.LoadIntoContainer(imageCacheID(c.bannerURL), c.bannerURL, size, frame, false, nil)
+
+	return frame
 }
 
 // icon is the server's picture over the initial it falls back to. A card with no
@@ -264,6 +354,16 @@ func inviteButton(label string, weight ButtonWeight, onTap func()) fyne.CanvasOb
 // code lands in when Revolt named one. Either half may be missing, so the line
 // is assembled from what actually arrived rather than formatted in one go.
 func inviteDetail(invite domain.Invite) string {
+	// A group's name is already the title and it comes back with no count, so the
+	// line under it is who is asking rather than what it is.
+	if invite.Kind == domain.InviteGroup {
+		if invite.InviterName == "" {
+			return ""
+		}
+
+		return "Invited by " + invite.InviterName
+	}
+
 	var parts []string
 
 	if invite.MemberCount > 0 {

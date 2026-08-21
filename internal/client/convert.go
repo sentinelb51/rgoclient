@@ -32,13 +32,10 @@ const iconSize = "64"
 // drawn wider than the profile dialog.
 const bannerSize = "512"
 
-// emojiTag is the Autumn bucket custom emoji are served from, and emojiSize the
-// rendition asked for: one is drawn at a line's height and never larger, so the
-// smallest rendition the CDN offers is already generous.
-const (
-	emojiTag  = "emojis"
-	emojiSize = "128"
-)
+// emojiSize is the rendition asked for of a custom emoji: one is drawn at a
+// line's height and never larger, so the smallest the CDN offers is already
+// generous. The bucket it is served from is revoltgo.FileTagEmojis.
+const emojiSize = "128"
 
 // convertAll maps a slice of wire values through convert, dropping the ones it
 // refuses — a nil entry, a video embed with no player to hand it to, an unfurl
@@ -286,14 +283,19 @@ func toEmbeds(embeds []*revoltgo.MessageEmbed) []*domain.Embed {
 
 func toServer(server *revoltgo.Server) domain.Server {
 	out := domain.Server{
-		ID:       server.ID,
-		Name:     server.Name,
-		OwnerID:  server.Owner,
-		Channels: server.Channels,
+		ID:                 server.ID,
+		Name:               server.Name,
+		OwnerID:            server.Owner,
+		Description:        server.Description,
+		DefaultPermissions: domain.Permission(server.DefaultPermissions),
+		Channels:           server.Channels,
 	}
 
 	if server.Icon != nil {
 		out.IconID, out.IconURL = server.Icon.ID, server.Icon.URL(iconSize)
+	}
+	if server.Banner != nil {
+		out.BannerURL = server.Banner.URL(bannerSize)
 	}
 
 	out.Categories = make([]domain.Category, 0, len(server.Categories))
@@ -317,8 +319,10 @@ func toServer(server *revoltgo.Server) domain.Server {
 func toInvite(code string, invite *revoltgo.Invite) domain.Invite {
 	out := domain.Invite{
 		Code:        code,
+		Kind:        toInviteKind(invite.Type),
 		ServerID:    invite.ServerID,
 		ServerName:  invite.ServerName,
+		ChannelID:   invite.ChannelID,
 		ChannelName: invite.ChannelName,
 		InviterName: invite.UserName,
 		MemberCount: int(invite.MemberCount),
@@ -327,8 +331,23 @@ func toInvite(code string, invite *revoltgo.Invite) domain.Invite {
 	if invite.ServerIcon != nil {
 		out.IconURL = invite.ServerIcon.URL(iconSize)
 	}
+	if invite.ServerBanner != nil {
+		out.BannerURL = invite.ServerBanner.URL(bannerSize)
+	}
 
 	return out
+}
+
+// toInviteKind reads which of the two shapes came back. Server is the default
+// because it is what every field beyond the channel pair belongs to: a code
+// answering with a type nothing recognises still names a server or it names
+// nothing at all.
+func toInviteKind(kind revoltgo.InviteType) domain.InviteKind {
+	if kind == revoltgo.InviteTypeGroup {
+		return domain.InviteGroup
+	}
+
+	return domain.InviteServer
 }
 
 /* Channels */

@@ -65,12 +65,16 @@ func (a *App) closeOverlay() {
 	a.window.Canvas().RemoveShortcut(copyShortcut)
 
 	a.overlay = nil
-	a.joinDialog = nil
+	if a.joinDialog != nil {
+		a.joinDialog.Close() // a preview still on its way is for a card that is gone
+		a.joinDialog = nil
+	}
 	a.prompt = nil
 	a.channelDialog = nil
 	a.closeFriends()
 	a.closePins()
 	a.closeSearch()
+	a.closeMentions()
 	a.bindKeys()
 
 	// The settings page has its own focus to keep; only the client underneath
@@ -119,7 +123,9 @@ func (a *App) showJoinServer() {
 		return
 	}
 
-	dialog := ui.NewJoinServerDialog(a.joinServer, a.createServer, a.closeOverlay)
+	dialog := ui.NewJoinServerDialog(a.deps(), a.joinServer, a.createServer, a.closeOverlay)
+	dialog.OnResize = a.repositionOverlay // the preview grows the card
+
 	a.showOverlay(dialog.Content)
 	a.joinDialog = dialog // after showOverlay, which clears the field
 	a.window.Canvas().Focus(dialog.Entry)

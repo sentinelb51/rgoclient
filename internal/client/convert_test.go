@@ -153,15 +153,15 @@ func TestUserUpdateKindsSeparatesPresenceFromIdentity(t *testing.T) {
 	tests := []struct {
 		label              string
 		data               revoltgo.PartialUser
-		clear              []string
+		clear              []revoltgo.UserRemoveField
 		presence, identity bool
 	}{
 		{"coming online", revoltgo.PartialUser{Online: &online}, nil, true, false},
 		{"a status", revoltgo.PartialUser{Status: &revoltgo.UserStatus{Text: "afk"}}, nil, true, false},
 		{"a rename", revoltgo.PartialUser{DisplayName: &name}, nil, false, true},
 		{"both at once", revoltgo.PartialUser{Online: &online, DisplayName: &name}, nil, true, true},
-		{"a cleared avatar", revoltgo.PartialUser{}, []string{"Avatar"}, false, true},
-		{"profile text nothing draws", revoltgo.PartialUser{}, []string{"ProfileContent"}, false, false},
+		{"a cleared avatar", revoltgo.PartialUser{}, []revoltgo.UserRemoveField{revoltgo.UserRemoveAvatar}, false, true},
+		{"profile text nothing draws", revoltgo.PartialUser{}, []revoltgo.UserRemoveField{revoltgo.UserRemoveProfileContent}, false, false},
 		{"nothing at all", revoltgo.PartialUser{}, nil, false, false},
 	}
 

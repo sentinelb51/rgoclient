@@ -1,10 +1,10 @@
 name: Release
 
-# workflow_dispatch is the normal path: the run derives this month's version
-# and creates the tag itself. The other two are escape hatches taking the tag
-# verbatim — a tag pushed by hand, with or without the v, and a release drafted
-# in the web UI, which fires `release` and not always `push`. One release can
-# fire both, so the concurrency group keeps them off each other.
+# workflow_dispatch is the normal path: the run derives this month's version and
+# the release at the end mints the tag. The other two are escape hatches taking
+# the tag verbatim — a tag pushed by hand, with or without the v, and a release
+# drafted in the web UI, which fires `release` and not always `push`. One release
+# can fire both, so the concurrency group keeps them off each other.
 on:
   push:
     tags: [ 'v*', '[0-9]*' ]
@@ -20,44 +20,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # Ahead of the version job, which pushes the tag: a failure on any platform
-  # must not leave a tag behind pointing at a tree that never built.
-  test:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: true
-      matrix:
-        os: [ windows-latest, ubuntu-latest, macos-latest ]
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Install Linux build dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgl1-mesa-dev xorg-dev libwayland-dev libxkbcommon-dev libasound2-dev
-
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      # internal/ui mounts real widgets, so the tests need the same cgo toolchain
-      # the build does; they are not a pure-Go unit suite.
-      - name: Test
-        env:
-          CGO_ENABLED: 1
-        run: go test ./...
-
-  # One job, because it pushes the tag: three matrix legs resolving the version
-  # would race to create it.
+  # One job, so the three build legs stamp the same number rather than each
+  # counting the tags for itself.
   version:
-    needs: test
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
@@ -71,6 +38,10 @@ jobs:
       # YY.M.N, UTC, unpadded (26.8.1): the year and month it shipped in, then a
       # counter that restarts each month. The highest tag already in this month
       # decides the counter, so a gap in the tags never repeats a version.
+      #
+      # The tag is resolved here and created by the release at the end, so a
+      # failure on any platform cannot leave one behind pointing at a tree that
+      # never built.
       - name: Resolve version
         id: version
         shell: pwsh
@@ -86,7 +57,6 @@ jobs:
             $tag = $env:GITHUB_REF -replace '^refs/tags/', ''
             $notes = $true
           } else {
-            git fetch --tags --quiet
             $now = [datetime]::UtcNow
             $base = "{0}.{1}" -f ($now.Year % 100), $now.Month
 
@@ -100,8 +70,6 @@ jobs:
 
             $tag = "$base.$($last + 1)"
             $notes = $true
-            git tag $tag
-            git push origin $tag
           }
 
           $version = $tag -replace '^v', ''
@@ -111,10 +79,15 @@ jobs:
           "version=$version" >> $env:GITHUB_OUTPUT
           "notes=$($notes.ToString().ToLower())" >> $env:GITHUB_OUTPUT
 
+  # Tests and the build are one leg per platform: split across two jobs they pay
+  # for the checkout, the cgo headers and the whole dependency compile twice.
   build:
     needs: version
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
+    # fail-fast off: one platform breaking is the thing the other two are here
+    # to tell apart from a break everywhere.
     strategy:
       fail-fast: false
       matrix:
@@ -126,14 +99,19 @@ jobs:
             # console from opening behind the window. Passing it anywhere else
             # is a link error, not a no-op.
             ldflags: -H windowsgui
+            # A bare exe is worth zipping into the artifact; the tarballs below
+            # are already compressed, so a second pass only costs CPU.
+            compression: 6
           - os: ubuntu-latest
             target: linux-amd64
             binary: RGOClient
             ldflags: ""
+            compression: 0
           - os: macos-latest
             target: macos-arm64
             binary: RGOClient
             ldflags: ""
+            compression: 0
 
     steps:
       - name: Checkout
@@ -156,6 +134,13 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # internal/ui mounts real widgets, so the tests need the same cgo toolchain
+      # the build does; they are not a pure-Go unit suite.
+      - name: Test
+        env:
+          CGO_ENABLED: 1
+        run: go test ./...
 
       - name: Build
         shell: bash
@@ -187,11 +172,13 @@ jobs:
         with:
           name: RGOClient-${{ matrix.target }}
           path: dist/*
+          compression-level: ${{ matrix.compression }}
           if-no-files-found: error
 
   publish:
     needs: [ version, build ]
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Collect assets
         uses: actions/download-artifact@v8
@@ -200,10 +187,15 @@ jobs:
           merge-multiple: true
           path: dist
 
+      # This is what creates the tag on the dispatch path, which is why nothing
+      # earlier pushes one. target_commitish has to be named: left out, the tag
+      # is cut from the default branch's head rather than the tree that was
+      # tested. On the two escape hatches the tag already exists and is kept.
       - name: Publish release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: ${{ needs.version.outputs.version }}
           files: dist/*
           generate_release_notes: ${{ needs.version.outputs.notes }}

@@ -59,6 +59,9 @@ var Colors = struct {
 	AttachmentHoverBorder color.Color
 	AvatarPlaceholder     color.Color
 	UnreadIndicator       color.Color
+	MentionIndicator      color.Color
+	MentionBadgeBg        color.Color
+	MentionBadgeText      color.Color
 	HashtagIcon           color.Color
 	CategoryText          color.Color
 	CategoryIndicator     color.Color
@@ -263,13 +266,21 @@ var Colors = struct {
 	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
 	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
 	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
-	HashtagIcon:           color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
-	CategoryText:          color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	CategoryIndicator:     color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
-	TextPrimary:           color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
-	TimestampText:         color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
-	DaySeparatorText:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
-	DaySeparatorLine:      color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142 hairline
+
+	// A mention takes over the marker the unread bar draws in rather than standing
+	// beside it — every mention is unread, so a row wearing both would be saying one
+	// thing twice in one slot. It leans on the same warm ramp the mentioning message
+	// itself is washed in, lifted to where a bar one pixel wide still carries.
+	MentionIndicator:  color.RGBA{R: 240, G: 178, B: 60, A: 255},  // #F0B23C
+	MentionBadgeBg:    color.RGBA{R: 214, G: 150, B: 38, A: 255},  // #D69626, filled where the bar is a line
+	MentionBadgeText:  color.RGBA{R: 26, G: 20, B: 8, A: 255},     // #1A1408, dark on the fill
+	HashtagIcon:       color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	CategoryText:      color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	CategoryIndicator: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
+	TextPrimary:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	TimestampText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
+	DaySeparatorText:  color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	DaySeparatorLine:  color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142 hairline
 
 	// A system line is the channel narrating itself, not someone speaking, so it
 	// is set in the same grey the day separator names its date in — legible, and
@@ -473,6 +484,15 @@ var Sizes = struct {
 	SelectionMarkerWidth  float32
 	ChannelLabelSize      float32
 
+	// The count a channel row carries at its trailing end. Height is fixed so the
+	// pill is the same shape at one digit and at three, the width following the
+	// number inside it.
+	MentionBadgeHeight   float32
+	MentionBadgeMinSize  float32
+	MentionBadgeRadius   float32
+	MentionBadgeTextSize float32
+	MentionBadgePadH     float32
+
 	/* Member list */
 
 	MemberAvatarSize float32
@@ -623,13 +643,14 @@ var Sizes = struct {
 	CodeCopySize  float32
 	CodeCopyInset float32
 
-	InviteCardWidth   float32
-	InviteIconSize    float32
-	InviteCaptionSize float32
-	InviteNameSize    float32
-	InviteDetailSize  float32
-	InviteTextGap     float32
-	InviteFailedMark  float32
+	InviteCardWidth    float32
+	InviteBannerHeight float32
+	InviteIconSize     float32
+	InviteCaptionSize  float32
+	InviteNameSize     float32
+	InviteDetailSize   float32
+	InviteTextGap      float32
+	InviteFailedMark   float32
 
 	/* Composer and its mention picker */
 
@@ -704,6 +725,14 @@ var Sizes = struct {
 	ButtonPaddingH  float32
 	ButtonMinWidth  float32
 	ButtonMinHeight float32
+
+	// An icon button with an edge: the square it occupies, the mark inside it, and
+	// the gap between two of them in a row. Sized apart from a text button — what
+	// makes one of those a button is the words in it, where this has to be a target
+	// on its own.
+	IconButtonSize  float32
+	IconButtonGlyph float32
+	IconButtonGap   float32
 
 	/* Chips */
 
@@ -847,6 +876,12 @@ var Sizes = struct {
 	UnreadIndicatorWidth:  1,
 	SelectionMarkerWidth:  3,
 	ChannelLabelSize:      14,
+
+	MentionBadgeHeight:   16,
+	MentionBadgeMinSize:  16,
+	MentionBadgeRadius:   8,
+	MentionBadgeTextSize: 11,
+	MentionBadgePadH:     5,
 
 	MemberAvatarSize: 28,
 	MemberRowHeight:  36,
@@ -1009,7 +1044,12 @@ var Sizes = struct {
 	// InviteCardWidth is the card's whole width, not a ceiling like
 	// EmbedMaxWidth: an invite mounts empty and is filled in a moment later, so
 	// it has to be the same size before and after.
-	InviteCardWidth:   340,
+	InviteCardWidth: 340,
+
+	// The banner is drawn only where the card is built already resolved, so its
+	// height is never reserved on a card that may not get one — see NewInviteCardFor.
+	InviteBannerHeight: 76,
+
 	InviteIconSize:    44,
 	InviteCaptionSize: 11,
 	InviteNameSize:    15,
@@ -1115,6 +1155,13 @@ var Sizes = struct {
 	ButtonPaddingH:  16,
 	ButtonMinWidth:  76,
 	ButtonMinHeight: 32,
+
+	// Square, and the same height as a text button so a row can hold either. The
+	// mark is a little over half of it: any larger and the edge reads as a box drawn
+	// round an icon rather than as the button's own shape.
+	IconButtonSize:  32,
+	IconButtonGlyph: 17,
+	IconButtonGap:   6,
 
 	// The dot is what carries a role's colour once the chip has an edge of its own,
 	// so it is sized against the cap height of the text beside it rather than the

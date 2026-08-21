@@ -34,6 +34,9 @@ var searchSVG []byte
 //go:embed forbidden.svg
 var forbiddenSVG []byte
 
+//go:embed cog.svg
+var cogSVG []byte
+
 //go:embed rgo.png
 var appIconPNG []byte
 
@@ -42,6 +45,7 @@ var appIconPNG []byte
 // would read as two icon sets sitting together.
 //
 //go:embed account.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg advanced.svg about.svg
+//go:embed server-overview.svg server-channels.svg server-roles.svg server-invites.svg server-bans.svg
 var settingsIcons embed.FS
 
 // The marks a system message is announced by, one per event Revolt names. They
@@ -98,6 +102,11 @@ var (
 	// the account may not write.
 	ForbiddenIcon fyne.Resource = fyne.NewStaticResource("forbidden.svg", forbiddenSVG)
 
+	// CogIcon opens a server's settings from the channel sidebar's header. Drawn
+	// rather than taken from Fyne's set, which is filled where this row's other
+	// marks are stroked.
+	CogIcon fyne.Resource = fyne.NewStaticResource("cog.svg", cogSVG)
+
 	// AppIcon is the window/taskbar icon.
 	AppIcon fyne.Resource = fyne.NewStaticResource("rgo.png", appIconPNG)
 )
@@ -113,6 +122,16 @@ var (
 	PerformanceIcon = settingsIcon("performance.svg")
 	AdvancedIcon    = settingsIcon("advanced.svg")
 	AboutIcon       = settingsIcon("about.svg")
+)
+
+// The server settings sections, in rail order. The same set as the client's own
+// — one rail is drawn by both pages — so they are read the same way.
+var (
+	ServerOverviewIcon = settingsIcon("server-overview.svg")
+	ServerChannelsIcon = settingsIcon("server-channels.svg")
+	ServerRolesIcon    = settingsIcon("server-roles.svg")
+	ServerInvitesIcon  = settingsIcon("server-invites.svg")
+	ServerBansIcon     = settingsIcon("server-bans.svg")
 )
 
 // The system events, in the order domain names them. SystemEventIcon is what an

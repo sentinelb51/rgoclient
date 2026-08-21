@@ -131,12 +131,19 @@ func (a *App) resetSessionState() {
 
 	a.resetInvites()
 
+	// A server's settings are about a server the account signing out is in, and the
+	// page holds its own fetched lists — one of which may have a request out that
+	// a.stale is about to swallow, leaving the section claiming to be fetching for
+	// as long as it stayed open. Closing it drops both halves.
+	a.closeServerSettings()
+
 	// The profile and the fields the Account section was drawn from belong to the
 	// account signing out.
 	a.selfProfile, a.selfProfileOK = domain.UserProfile{}, false
 	a.selfAvatarURL, a.selfHandle = "", ""
 
 	a.unreadChannels = make(map[string]bool)
+	a.mentions = make(map[string][]string)
 	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise
 	a.serverIDs = nil
 	a.currentServerID = ""

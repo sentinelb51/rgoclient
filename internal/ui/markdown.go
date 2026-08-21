@@ -15,6 +15,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/cache"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/markdown"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -40,6 +41,21 @@ func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fy
 	}
 
 	return renderBlocks(deps, doc.Blocks, onMenu)
+}
+
+// PreviewText flattens a body onto the one line a summary has room for — a
+// panel row, a notice, anything listing a message it is not drawing. The store
+// is what names a custom emoji, which would otherwise be 26 characters of ULID
+// or nothing at all; whitespace is collapsed because the source's is a body's
+// rather than a line's.
+//
+// Here rather than in the controller because markdown is inside this package:
+// what a row shows and what a body renders should not be two readings of one
+// message.
+func PreviewText(store domain.Store, content string) string {
+	flat := markdown.DocumentTextNamed(markdown.Parse(content), store.EmojiName)
+
+	return strings.Join(strings.Fields(flat), " ")
 }
 
 // hasCodeBlock reports whether a fenced block stands on its own in the body. One

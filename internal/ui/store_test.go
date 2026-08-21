@@ -23,9 +23,11 @@ type fakeStore struct {
 
 	serverMembers map[string][]domain.Member // serverID
 	hoisted       map[string][]domain.Role   // serverID
+	serverRoles   map[string][]domain.Role   // serverID
 
 	permissions       domain.Permission
 	serverPermissions domain.Permission
+	memberPermissions domain.Permission
 }
 
 var _ domain.Store = (*fakeStore)(nil)
@@ -67,6 +69,8 @@ func (s *fakeStore) MemberRoles(serverID, userID string) []domain.Role {
 
 func (s *fakeStore) HoistedRoles(serverID string) []domain.Role { return s.hoisted[serverID] }
 
+func (s *fakeStore) ServerRoles(serverID string) []domain.Role { return s.serverRoles[serverID] }
+
 func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 	channel, ok := s.channels[channelID]
 	return channel, ok
@@ -85,6 +89,18 @@ func (s *fakeStore) EmojiURL(emojiID string) string {
 }
 
 func (s *fakeStore) Emojis() []domain.Emoji { return s.emojis }
+
+// EmojiName answers only for what the fake was given, as the real store answers
+// only for the servers the account is in.
+func (s *fakeStore) EmojiName(emojiID string) string {
+	for _, emoji := range s.emojis {
+		if emoji.ID == emojiID {
+			return emoji.Name
+		}
+	}
+
+	return ""
+}
 
 func (s *fakeStore) Server(serverID string) (domain.Server, bool) {
 	server, ok := s.servers[serverID]
@@ -118,6 +134,10 @@ func (s *fakeStore) SystemTextParts(system *domain.SystemMessage) (name, rest st
 
 func (s *fakeStore) Permissions(string) domain.Permission       { return s.permissions }
 func (s *fakeStore) ServerPermissions(string) domain.Permission { return s.serverPermissions }
+
+func (s *fakeStore) MemberServerPermissions(string, string) domain.Permission {
+	return s.memberPermissions
+}
 
 // testDeps is the bundle a widget test mounts against: a store that knows
 // nothing, and the real caches, which are inert without a network. Every field

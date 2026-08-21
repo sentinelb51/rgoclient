@@ -11,9 +11,10 @@ from it, bugs included, so ground a claim about wire behaviour against these
 rather than against `revoltgo` or memory:
 
 - `sources/openapi-spec-0.15.1.json` — the Stoat OpenAPI spec, also live at
-  https://developers.stoat.chat/api-reference
+  https://developers.stoat.chat/api-reference. **374 KB: grep it, never read
+  it** — one whole read is most of a context window.
 - https://github.com/stoatchat/stoatchat — the Rust backend (crate `delta`),
-  authoritative for what a route or event actually does
+  authoritative for what a route or event actually does.
 
 ## Architecture
 
@@ -33,9 +34,9 @@ app        -> audio, cache, client, config, domain, ui, util
 
 `config` is a leaf so everything above can read a setting. `cache` and `audio`
 deliberately do *not* import it — budgets, directories, volumes and file paths
-arrive as arguments, so either can be built in a test with no settings file
-anywhere. `ui` does not import `audio` either: the composer names the *kind* of
-keystroke (`ui.Keystroke`) and `app` decides what it sounds like.
+arrive as arguments, so either builds in a test with no settings file anywhere.
+`ui` does not import `audio` either: the composer names the *kind* of keystroke
+(`ui.Keystroke`) and `app` decides what it sounds like.
 
 The seam is not tidiness: `revoltgo.State`'s caches are unexported and
 `newState()` is package-private, so nothing holding a `*revoltgo.Session` can be
@@ -43,24 +44,25 @@ built in a test. `domain.Store` can — `ui/store_test.go` has a map-backed
 `fakeStore`.
 
 No globals. The `*app.App` controller owns the client, caches and widgets and
-passes what widgets need through `ui.Deps` (`Store`, `Images`, `Texts`,
-`Actions`, `Tooltip`). `App.deps()` is the only producer, so **every field is always set** —
-widgets do not nil-check them. The only package-level mutable state is pure
-measurement memoisation (`ui.lineHeights`, `ui.spaceWidths`), UI-thread only.
+passes widgets what they need through `ui.Deps` (`Store`, `Images`, `Texts`,
+`Actions`, `Tooltip`). `App.deps()` is the only producer, so **every field is
+always set** and widgets never nil-check them. The only package-level mutable
+state is measurement memoisation (`ui.lineHeights`, `ui.spaceWidths`), UI-thread
+only.
 
 ### The client's contract
 
 - **`Client.Store()`** — reads, safe from any goroutine, never the network. A
-  miss reports `ok=false`. Returns resolved values: a `domain.Member` already
+  miss reports `ok=false`. Values arrive resolved: a `domain.Member` already
   carries nickname, per-server avatar, role colour, presence, bot mark and the
   hoisted role it is filed under. Safe off-thread is not cheap — `Members`
   resolves all of that per member and sorts, so it belongs on a worker.
 - **`Client.Events()`** — one buffered channel, gateway order. `app.pumpEvents`
   is its single reader; `dispatch` hops onto the UI thread once per event.
   `client.Event`'s marker method is unexported, so the switch is exhaustive.
-- **Action methods** (`SendMessage`, `HistoryBefore`, …) — these **block**. They
-  do the request and the cache update and return; they never touch a widget and
-  never spawn a goroutine. The caller owns the UI thread (`App.background`).
+- **Action methods** (`SendMessage`, `HistoryBefore`, …) **block**: the request
+  and the cache update, no widget touched, no goroutine spawned. The caller owns
+  the UI thread (`App.background`).
 
 Logged out is a valid state: reads report nothing, actions return
 `client.ErrNoSession`. `Client.session` is an `atomic.Pointer` because actions
@@ -74,7 +76,7 @@ This file is the **core**: the DAG, the client's contract, the layout, the
 conventions and the build. The rest is filed beside the code it is about, so a
 change in `markdown/` does not pay for the Fyne footguns:
 
-- `internal/app/CLAUDE.md` — the data flow, items 1-28: what happens in what
+- `internal/app/CLAUDE.md` — the data flow, items 1-35: what happens in what
   order and why each step is where it is.
 - `internal/client/CLAUDE.md` — the revoltgo notes: every bug, missing field
   and route that has to be sent by hand.
@@ -94,18 +96,14 @@ is three of these.
 The tree is ~1.2 MB of Go and the largest files are 50 KB each, so what gets
 read *is* the budget.
 
-- **`sources/openapi-spec-0.15.1.json` is 374 KB — grep it, never read it.**
-  One whole read is most of a context window.
-- **Use the `rgo-explore` agent to locate code** (`.claude/agents/`), rather
-  than reading files to find it. It searches in its own context and reports
+- **Use the `rgo-explore` agent to locate code** (`.claude/agents/`) rather than
+  reading files to find it. It searches in its own context and reports
   `file:line` and the shape, so a twenty-file sweep costs a paragraph here.
-  Worth the round trip for anything spanning more than about three files.
+  Worth the round trip for anything past about three files.
 - **Then read the file before editing it.** A summary carries what a function
   does and drops the constraint it is shaped by. The agent narrows what has to
-  be read — it does not stand in for reading it, and nothing is edited off a
-  report alone.
-- Grep with context lines beats a whole-file read when the question is about
-  one identifier.
+  be read; nothing is edited off a report alone.
+- Grep with context lines beats a whole-file read for one identifier.
 
 ## Project structure
 
@@ -133,8 +131,8 @@ internal/
                          synth.go (the built-in sounds, rendered rather than shipped)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
-                         pins.go, search.go, emoji.go, notify.go, alerts.go,
-                         settings.go
+                         pins.go, search.go, mentions.go, emoji.go, notify.go,
+                         alerts.go, settings.go, serversettings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
                          embed.go, invite.go,
@@ -152,136 +150,167 @@ scripts/                 update-deps.sh — every module *except* Fyne and the
                          `go get -u`
 ```
 
-Where things live that the filename doesn't tell you:
+Where things live that the filename doesn't say. The *why* of each is in that
+package's own `CLAUDE.md`; this is the map:
 
-- `app/events.go` is the pump, every handler **and** the refresh queue: queueing
-  a rebuild is what most of those handlers do, so hiding the queue elsewhere
-  would put it half a file from the thing it is about.
-- `app/messages.go` is the message area end to end — composer dock, submit,
+- `app/events.go` — the pump, every handler **and** the refresh queue: queueing
+  a rebuild is what most of those handlers do.
+- `app/messages.go` — the message area end to end: composer dock, submit,
   slowmode, the window and what mounting a row asks for (`onMessageMounted`),
   load/render, jumps and paging.
-- `app/navigation.go` holds `buildUI` (the 4-column fill row), both sidebars,
-  selection, sidebar context menus and the home/DM view. The `#mention`
-  candidates come off the channel sidebar's own walk, as the `@` ones come off
-  the member sidebar's, and `OnChannelTapped` — following one — is why entering a
-  server is split into `enterServer` (move both sidebars) and picking a channel:
-  `selectServer` would load the first channel on the way past.
-- `app/members.go` holds lazy author resolution as well as the member sidebar and
-  the mention candidates, since one `Store.Members` walk feeds all three.
-- `app/pins.go` and `app/search.go` are the two message panels, and the summary a
-  row is drawn from (`messageEntry`, `messagePreview`, `messageWhen`) lives in the
-  first: a pin list and a search result are the same row reached two ways.
-- `app/alerts.go` is everything the client does about something the reader did
-  not ask to be told — the sound and the taskbar flash — and the catalogue
-  binding a sound to the setting that turns it on and the copy it is listed
-  under. One table, because playing one, listing them all and pointing one at a
-  file are three walks of the same set.
-- `app/typing.go` holds both halves of the typing indicator — the expiry map and
-  its timer, and the throttle that announces this account — one feature with one
-  setting group, neither legible without the other.
-- `ui/members.go` is the member list end to end, its own subsystem: the flat
+- `app/navigation.go` — `buildUI` (the 4-column fill row), both sidebars,
+  selection, sidebar context menus, the home/DM view. `#mention` candidates come
+  off the channel sidebar's own walk as `@` ones come off the member sidebar's,
+  and `OnChannelTapped` following one is why entering a server splits into
+  `enterServer` (move both sidebars) and picking a channel: `selectServer` would
+  load the first channel on the way past.
+- `app/members.go` — lazy author resolution as well as the member sidebar and
+  the mention candidates: one `Store.Members` walk feeds all three. It also holds
+  what the member menu *does* to a member — nickname, roles, timeout — one route
+  under three permissions, filed with the people it is about rather than beside
+  the kick and ban confirmations in `notify.go`.
+- `app/pins.go`, `app/search.go`, `app/mentions.go` — the three message panels.
+  The summary a row is drawn from (`messageEntry`, `messagePreview`,
+  `messageWhen`) lives in pins: a pin list and a search result are the same row
+  reached two ways. It carries a `Where` for the inbox, whose rows come from as
+  many channels as the account is in. `mentions.go` holds both halves of
+  mentions — the set (channel → message IDs, what the sidebar counts and the
+  rail marks off) and the inbox, those IDs fetched back into messages — because
+  a channel gaining one moves both and neither is legible without the other.
+- `app/alerts.go` — everything the client does about something the reader did
+  not ask to be told: the sound, the taskbar flash, and the catalogue binding a
+  sound to the setting that turns it on and the copy it is listed under. One
+  table, because playing one, listing them all and pointing one at a file are
+  three walks of the same set.
+- `app/typing.go` — both halves of the typing indicator (the expiry map and its
+  timer; the throttle that announces this account): one feature, one setting
+  group, neither legible without the other.
+- `ui/members.go` — the member list end to end, its own subsystem: the flat
   model (`NewMemberModel`), the geometry (`memberOffsets`, `visibleRange`,
-  `memberListLayout`), the virtualised `MemberList`, and the recycled `MemberRow`
-  / `MemberSectionRow`. The model is pure and theme-free so `App` can build it
-  off the UI thread. `memberStatus` — the strip above the list — is here too,
-  being what speaks for the rows when there are none.
-- `ui/messagelist.go` is the message column, the other virtualised list: the
-  window's rows as data (`windowRow`, with the grouping rules `continuesGroup` /
-  `dayLabel` that derive one from its neighbours), the estimate a row is placed
-  by before it has been measured, and `MessageList`, which owns the scroller and
-  mounts only the rows on screen. Variable-height, so unlike the member list it
-  measures in its layout and moves the offset as heights settle.
-- `ui/widgets.go` is the shared vocabulary: `newText` / `newBoldText` (how every
+  `memberListLayout`), the virtualised `MemberList`, the recycled `MemberRow` /
+  `MemberSectionRow`, and `memberStatus`, the strip that speaks for the rows
+  when there are none. The model is pure and theme-free so `App` can build it
+  off the UI thread.
+- `ui/messagelist.go` — the message column, the other virtualised list: the
+  window's rows as data (`windowRow`, with `continuesGroup` / `dayLabel`
+  deriving one from its neighbours), the estimate a row is placed by before it
+  is measured, and `MessageList`, which mounts only the rows on screen.
+  Variable-height, so unlike the member list it measures in its layout and moves
+  the offset as heights settle.
+- `ui/widgets.go` — the shared vocabulary: `newText` / `newBoldText` (how every
   `canvas.Text` in the package is built — they flatten the fill, so a gradient
-  cannot reach one; a zero size is the theme's own) and `newInitial`, the letter a
-  server icon falls back to in both the rail and an invite card; `glyphBox` +
+  cannot reach one; a zero size is the theme's own) and `newInitial`, the letter
+  a server icon falls back to in both the rail and an invite card; `glyphBox` +
   `glyphLine`, the 20-unit grid every drawn mark shares; tapBase widgets and
   `reportHover`; `Outline`, `hairline` + the two dividers, `Elevate`; `Button` —
-  the only text button the client mounts, `ButtonWeight` deciding whether it wears
-  the hairline or a tone fill; Tooltip,
-  chips, `NewBotMark`, `StatusLine`, the avatar loader, `ObservableScroll` + its
-  indicator, `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here
-  rather than beside a caller because the composer's line, a channel row and the
-  member sidebar's status all mount one. `imageCacheID` and `imageFrame` are here
-  too: Revolt's file dimensions are optional, so the box a picture is drawn in is
-  re-fitted from the decode where there were none, and the key a picture is
-  cached under names its rendition as well as its file.
-- `ui/input.go` holds the composer, the mention picker, the slowmode chip, the
-  typing line, `ComposerNotice` — what stands where the entry is hidden — and
-  `JumpBar`. The chip and the line are one row under one set of
-  rules: a pill of their own (`newDockBadgeSurface`) sized by what it holds rather
-  than by the row, accepting no pointer event so the messages underneath stay
-  hoverable, an `OnResize` hook so the row can be re-laid out, and a change guard
-  before any repaint. The bar is the opposite of that pill on every count — it
-  spans the card's width, answers a tap, and says where the *column* is standing
-  rather than something about the channel — but it hangs in the same stack and
-  reports its own appearance the same way. `NewComposerButtonSlot` is beside them
-  — it bottom-anchors the emoji button against the growing entry and lifts it by
-  the entry's own `InnerPadding`, so it centres on the last *line* rather than on
-  the entry's box.
-- `ui/code.go` is the fenced code block end to end: the well it is drawn in, the
-  one-pass lexer that colours it, and `codeCopy`, the chip in its corner — a
-  coloured block is many RichText segments and only a one-segment Label is
-  selectable, so the chip is the only way to get the text out. A body carrying one is a column
+  the only text button the client mounts, `ButtonWeight` deciding whether it
+  wears the hairline or a tone fill; `Tooltip`, chips, `NewBotMark`,
+  `StatusLine`, the avatar loader, `ObservableScroll` + its indicator,
+  `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here because the
+  composer's line, a channel row and the member sidebar's status all mount one.
+  `imageCacheID` and `imageFrame` are here too: Revolt's file dimensions are
+  optional, so the box a picture is drawn in is re-fitted from the decode where
+  there were none, and the key a picture is cached under names its rendition as
+  well as its file.
+- `ui/input.go` — the composer, the mention picker, the slowmode chip, the
+  typing line, `ComposerNotice` (what stands where the entry is hidden),
+  `JumpBar` and `NewComposerButtonSlot`.
+- `ui/code.go` — the fenced code block end to end: the well, the one-pass lexer
+  that colours it, and `codeCopy`, the chip in its corner (a coloured block is
+  many RichText segments and only a one-segment Label is selectable, so the chip
+  is the only way to get the text out). A body carrying one is a column
   (`renderCodeColumn`) rather than a single widget, the card being block-level —
-  which is the only reason `ui/markdown.go` renders *runs* of blocks.
-- `ui/layouts.go` holds every custom layout, `fitWithin` and `Relayout`.
-- `ui/message.go` also owns the system line, the day separator, reply previews and
-  `NewChannelNote` — the strip under the header saying what the client cannot do
-  in the channel, which only a voice channel draws.
-- `ui/reactions.go` is the reaction row end to end — the chip and the emoji inside
-  it — neither being anything on its own and both answering the same question
-  about what the server sent. What *adds* one is `ui/emoji.go`, the one picker,
-  which the composer opens too.
-- `ui/emoji.go` is that picker: what can be picked (`EmojiChoice`, and `Value` /
-  `Token`, the two things one is worth), the pop-up, and the cell. `app/emoji.go`
-  is the other half — which emoji are on offer and in what order, that being a
-  walk of every server the account is in and no widget knows them. That one walk
-  also feeds the composer's `:` autocomplete, so the pop-up and the typed list
-  cannot disagree.
-- `ui/invite.go` holds the invite card *and* `inviteCodesIn`, the scan that
-  decides a message has one — the card is mounted from what that scan finds.
-- `ui/panels.go` holds both message panels — the pins list and channel search —
-  because they are one card with one row (`MessageEntry`, `messageRow`) and differ
-  only in what fills it. `ui/modal.go` holds the cards that are not lists: the
-  attachment viewer, the join dialog, `PromptDialog` (a field per answer and one
-  button — a name is all Revolt takes to create a server, where changing a
-  username is that name *and* the account password), `BanDialog` — a confirmation
-  that has to ask for more than a yes, the route taking a reason and a window of
-  the member's recent messages — and the `dialogHeader` all of them wear.
-- `ui/settings_controls.go` holds the controls, none of them a Fyne form widget.
-- `ui/settings_search.go` is the box at the head of the rail and the page of
+  the only reason `ui/markdown.go` renders *runs* of blocks.
+- `ui/layouts.go` — every custom layout, `fitWithin`, `Relayout`.
+- `ui/message.go` — also the system line, the day separator, reply previews and
+  `NewChannelNote`, the strip under the header that only a voice channel draws.
+- `ui/reactions.go` — the reaction row end to end, the chip and the emoji in it.
+  What *adds* one is `ui/emoji.go`, the one picker, which the composer opens too.
+- `ui/emoji.go` — that picker: what can be picked (`EmojiChoice`, and `Value` /
+  `Token`, the two things one is worth), the pop-up, the cell. `app/emoji.go` is
+  the other half — which emoji are on offer and in what order, a walk of every
+  server the account is in that no widget knows. That one walk also feeds the
+  composer's `:` autocomplete, so the pop-up and the typed list cannot disagree.
+- `ui/invite.go` — the invite card *and* `inviteCodesIn`, the scan that decides
+  a message has one. `NewInviteCardFor` is the same card built from an invite
+  already in hand — the join dialog's preview, which draws the banner and no
+  button, neither being safe on a card a message is holding open.
+- `ui/panels.go` — both message panels, pins and channel search: one card with
+  one row (`MessageEntry`, `messageRow`), differing only in what fills it. A
+  row's line is flattened by `ui.PreviewText`, which is where a body's markdown
+  and its emoji shortcodes are resolved for a summary the controller assembles.
+- `ui/modal.go` — the cards that are not lists: the attachment viewer, the join
+  dialog (which previews what a pasted code opens once the typing settles),
+  `PromptDialog` (a field per answer and one button), `BanDialog` (a
+  confirmation that has to ask for more than a yes, the route taking a reason
+  and a window of the member's recent messages), and the `dialogHeader` they all
+  wear.
+- `ui/settings_shell.go` — the surface *both* settings pages are drawn on (the
+  layer, the rail, the pane, the vocabulary of rows), embedded by value so a
+  section reaches every row shape by promotion. `settings.go` is then the
+  client's own sections and the controls that write to config;
+  `settings_server.go` is one server's, almost all lists rather than switches
+  (`entryRow`) — and the one section that drills into a row of its own, the role
+  editor, whose permission grid is the whole of what Revolt defines in the three
+  states it stores each bit in. `settings_controls.go` holds the controls, none
+  of them a Fyne form widget.
+- `ui/settings_search.go` — the box at the head of the rail and the page of
   results it puts in the pane. Its index is taken by *building every section
-  twice* — once as each mode lists them — with the rows answering with their names
-  instead of drawing anything (`indexRow`), so a section that gains a row gains a
-  result and there is no second list of names to keep in step. What only the
-  advanced pass saw is what that mode reveals. An Advanced hit renders its real
-  control rather than a link, those rows being a line of table each, which is why
-  the section no longer carries a filter of its own.
-- `ui/theme/overrides.go` holds `Apply` — reflection over the two tables, against
-  a defaults snapshot taken at init.
-- `cache/message.go`: entries *and* published slices are immutable, so a UI-thread
-  reader holding an older slice is safe. Find/Remove/Replace binary-search by ULID.
-- `cache/image.go`: memory bounded in *bytes*, plus disk. `Get` stamps mtime, so
+  twice*, once as each mode lists them, the rows answering with their names
+  instead of drawing anything (`indexRow`): a section that gains a row gains a
+  result, and there is no second list of names to keep in step. What only the
+  advanced pass saw is what that mode reveals, and an Advanced hit renders its
+  real control rather than a link.
+- `ui/theme/overrides.go` — `Apply`, reflection over the two tables against a
+  defaults snapshot taken at init.
+- `cache/message.go` — entries *and* published slices are immutable, so a
+  UI-thread reader holding an older slice is safe. Find/Remove/Replace
+  binary-search by ULID.
+- `cache/image.go` — memory bounded in *bytes*, plus disk; `Get` stamps mtime so
   `trimDiskCache` evicts by recency. One `ImageCache` is one *folder* under the
-  configured root (`ImagesFolder`, `EmojisFolder`), with its own budget and LRU —
-  otherwise an afternoon of scrolling attachments evicts the handful of emoji
-  every message is drawn with. The settings name **one** budget, so
-  `app.emojiShare` divides it rather than the second cache doubling it, and
-  `cacheStats` sums both against that one number.
+  configured root (`ImagesFolder`, `EmojisFolder`) with its own budget and LRU,
+  or an afternoon of scrolling attachments evicts the handful of emoji every
+  message is drawn with. The settings name **one** budget, so `app.emojiShare`
+  divides it rather than the second cache doubling it, and `cacheStats` sums
+  both against that one number.
 
 ## Conventions
 
-- **Keep revoltgo inside `internal/client`.** A new field the UI needs is a field
-  on a `domain` type plus a line in `client/convert.go`; a new lookup is a
+- **Keep revoltgo inside `internal/client`.** A new field the UI needs is a
+  field on a `domain` type plus a line in `client/convert.go`; a new lookup is a
   `domain.Store` method.
-- **Store methods return resolved values and never touch the network.** A miss is
-  `ok=false`, not a fetch.
+- **Store methods return resolved values and never touch the network.** A miss
+  is `ok=false`, not a fetch.
+- **A surface that fetches its own list holds it, asks once, and expires it.**
+  Three rules, each of them a request that would otherwise be sent twice.
+  `ui.cachedList` in `settings_server.go` is the worked example; anything else
+  fetching a list a reader can navigate away from and back to copies its shape
+  rather than re-deriving it.
+  - **Hold** the answer for as long as the surface is open, keyed to nothing
+    else — tapping between two sections must not re-ask, the second answer being
+    unable to differ. Drop it when the surface closes: that is the honest bound
+    on how long an answer nothing announces can be believed.
+  - **Single-flight** it: claim before the request goes out, release when it
+    answers, so re-mounting a section whose first answer is still on its way
+    *waits* rather than sending another. A plain bool, never `sync.Once` — the
+    UI thread is single-threaded already and the point is "not again *yet*", not
+    "exactly once": the entry has to be re-askable once it goes stale.
+  - **Expire** it on a short TTL, so a list left on screen is not a lie.
+
+  Two guards go with it, answering different questions. *Recording* a late
+  answer is guarded on the surface still being the same **opening** (a counter
+  bumped by open and close — a page reopened on another server is not the one
+  that asked). *Drawing* it is guarded on the section still being **mounted**,
+  and refills the body mounted **now** rather than one captured when the request
+  went out: under single-flight no second request will come along to fill a card
+  the first one missed. Whatever changes the list from inside clears its own
+  entry before re-asking, or the next visit draws back what was just removed.
 - Background goroutines update the UI through `App.doOnUI(fn, wait)` or
   `ui.DoOnUI(fn)`. `main.go` declares the `fyneDo` migration, so an off-thread
   widget touch is a real data race, not a logged warning.
-- **A worker that outlives its session must not paint.** Capture `epoch := a.epoch`
-  before leaving the UI thread, check `a.stale(epoch)` on the way back.
+- **A worker that outlives its session must not paint.** Capture
+  `epoch := a.epoch` before leaving the UI thread, check `a.stale(epoch)` on the
+  way back.
 - Receivers: `w` widget, `a` app, `c` cache/client, `s` store. Interface
   assertions live near the type.
 - **Naming.** Types are `DomainRoot + Modifier`, flat. Constructors are `newX` /
@@ -296,37 +325,37 @@ Where things live that the filename doesn't tell you:
   **Comment only what the code cannot say** — the non-obvious Fyne/revoltgo
   constraint, the reason an invariant holds. Do not narrate mechanics.
 - **Files.** Prefer fewer, larger files with `/* Label */` sectioning.
-- Colors and sizes come from `ui/theme`, never hardcoded. Don't express one size
-  as an offset from an unrelated one — add a named entry. Adding one makes it
+- Colours and sizes come from `ui/theme`, never hardcoded. Don't express one
+  size as an offset from an unrelated one — add a named entry, which makes it
   configurable the same day: the settings page reaches the table by reflection.
-- A tunable the user should be able to change is a field on `config.Settings` read
-  at its use site, not a `const`. Everything else stays a `const` — the settings
-  page is not a dumping ground for every number in the client.
+- A tunable the user should be able to change is a field on `config.Settings`
+  read at its use site, not a `const`. Everything else stays a `const` — the
+  settings page is not a dumping ground for every number in the client.
 - Use the `log` package for diagnostics.
 - Keep these files current, each in the one it belongs to: packages and the DAG
   here, data flow and `App` fields in `internal/app/CLAUDE.md`, a revoltgo bug
-  or missing route in `internal/client/CLAUDE.md`, a widget or a Fyne
-  constraint in `internal/ui/CLAUDE.md`, a limit worked around rather than
-  fixed in `docs/known-gaps.md`, a measured cost or a rejected optimisation in
-  `docs/performance.md`. Keep them *terse* — the constraint and the
-  reason, not the mechanics or the history. A note in the wrong file is paid for
-  by every task that does not need it.
+  or missing route in `internal/client/CLAUDE.md`, a widget or a Fyne constraint
+  in `internal/ui/CLAUDE.md`, a limit worked around rather than fixed in
+  `docs/known-gaps.md`, a measured cost or a rejected optimisation in
+  `docs/performance.md`. Keep them **terse** — the constraint and the reason,
+  not the mechanics or the history. A note in the wrong file is paid for by
+  every task that does not need it.
 
 ### Tests
 
-**Do not add a test unless it was asked for.** Finish the change, then ask at the
-end whether one is wanted, in a sentence naming what it would cover and how it
-could fail. A change is done when the code is done; an unrequested test is
+**Do not add a test unless it was asked for.** Finish the change, then ask at
+the end whether one is wanted, in a sentence naming what it would cover and how
+it could fail. A change is done when the code is done; an unrequested test is
 scope nobody asked for, and one written to have written something is worse than
 none — it has to be read, kept current and believed.
 
 When one *is* asked for: test rules and decisions, not rendering. A test earns
-its place if it can fail for a reason a person wouldn't spot immediately:
+its place if it can fail for a reason a person wouldn't spot immediately —
 parsing, ordering, caching, conversion, the mention query, a layout that has to
 *react* (Relayout, placeBeside, a card that grows). Do **not** assert that a
 palette constant is what the palette says, that a widget was built out of the
 objects it was just built out of, or that a hand-tuned offset is still that
-offset — those only make the next visual change more expensive.
+offset: those only make the next visual change more expensive.
 
 To check appearance, render to a PNG with `fyne.io/fyne/v2/driver/software`,
 look at it, and **delete the harness**. A screenshot test left behind asserts
@@ -338,36 +367,35 @@ nothing and fails on every deliberate change.
 
 Fyne is **patched**, and the patched copy is a repository of its own —
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) — reached by a
-`replace` in `go.mod` and fetched like any other module. Nothing is vendored
-here and there is no checkout step: a fresh clone builds. The fork keeps the
-module path `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside
-it. Its `PATCHES.md` is the list of four, and `./update-fyne.sh vX.Y.Z` there
-carries them onto a new Fyne by rebasing them onto a pristine upstream branch.
-A bare `go get -u` floats what that frozen Fyne compiles against, so everything
-else updates through `scripts/update-deps.sh`.
+`replace` in `go.mod` and fetched like any other module. Nothing is vendored and
+there is no checkout step: a fresh clone builds. The fork keeps the module path
+`fyne.io/fyne/v2`, which is why the `replace` needs nothing beside it. Its
+`PATCHES.md` lists the four, and `./update-fyne.sh vX.Y.Z` there carries them
+onto a new Fyne by rebasing onto a pristine upstream branch. A bare `go get -u`
+floats what that frozen Fyne compiles against, so everything else updates
+through `scripts/update-deps.sh`.
 
-The repository is LF throughout and `core.autocrlf=true` converts on checkout, so
-on Windows `gofmt -l` names every file it has converted — the diff is the line
-endings and nothing else. Read its output as *which* files rather than *whether
-any*, and check a named one with `gofmt -d` before believing it. Write source
-files with LF regardless: what is committed must stay LF.
+The repository is LF throughout and `core.autocrlf=true` converts on checkout,
+so on Windows `gofmt -l` names every file it has converted — the diff is the
+line endings and nothing else. Read its output as *which* files rather than
+*whether any*, and check a named one with `gofmt -d` before believing it. Write
+source files with LF regardless: what is committed must stay LF.
 
 ## Versioning / CI
 
-Calendar versions: `YY.M.N`, UTC, no zero padding (`26.8.1`) — year and month,
-then a counter that restarts each month, taken from the highest `26.8.*` tag so
-a deleted tag is never reissued. Three components, so the tag parses as semver.
-Tags are never `v`-prefixed: the ones predating this scheme are, and the counter
-reads both spellings, but nothing new mints one.
-CI builds of `main`/PRs use the next number with `-dev`. There is no version
-literal in the source — `main.version` and `main.build` are stamped at link time
-with `-X`.
+Calendar versions `YY.M.N`, UTC, no zero padding (`26.8.1`): year and month,
+then a counter restarting each month, taken from the highest `26.8.*` tag so a
+deleted tag is never reissued. Three components, so the tag parses as semver.
+New tags are never `v`-prefixed — the ones predating this scheme are, and the
+counter reads both spellings. CI builds of `main`/PRs use the next number with
+`-dev`. There is no version literal in the source: `main.version` and
+`main.build` are stamped at link time with `-X`.
 
 Two workflows, each a matrix over `windows-latest`, `ubuntu-latest` and
 `macos-latest` (arm64), running `go test ./...` and building `./cmd/rgoclient`
 with `CGO_ENABLED=1`. The tests need cgo — `internal/ui` mounts real widgets —
-and they use Fyne's software driver, so no display is involved. Only Windows
-takes `-H windowsgui`; passing it to any other linker is an error, not a no-op.
+and use Fyne's software driver, so no display is involved. Only Windows takes
+`-H windowsgui`; passing it to any other linker is an error, not a no-op.
 Ubuntu installs the cgo headers its image lacks (`libgl1-mesa-dev xorg-dev
 libwayland-dev libxkbcommon-dev libasound2-dev` — GL/X11 for GLFW and the
 clipboard, xkbcommon for the keymap, ALSA for oto, and Wayland because glfw v3.4
@@ -375,20 +403,29 @@ compiles *both* display backends unless built with `-tags x11`, as does Fyne's
 driver). Nothing is signed or notarised.
 
 Resolving the version is its own job in both, so the three legs stamp one number
-rather than each counting the tags — and in `release.yml`, so they don't race to
-push the tag. Tests there are a job of their own *ahead* of it, so a failing tree
-can't leave a tag behind.
+rather than each counting the tags. Nothing pushes a tag: `release.yml` resolves
+it up front and the release at the end mints it, which keeps a failing tree from
+leaving one behind — so tests are a step in the build leg rather than a job
+ahead of it, and a platform is compiled once per run instead of twice.
 
-- `build.yml` — push/PR to `main` + manual. One artifact per target.
-- `release.yml` — `workflow_dispatch` computes this month's next version, pushes
-  the tag and publishes. The escape hatches take the tag verbatim: a tag pushed
-  by hand (`v` optional), and a release drafted in the web UI, which fires
-  `release` rather than reliably firing `push`. That last path attaches the
-  binaries and leaves the notes alone — the body is one someone wrote.
+- `build.yml` — push/PR to `main` + manual. One artifact per target. A second
+  push cancels the first (`concurrency`, `cancel-in-progress`), which `release`
+  deliberately does not do.
+- `release.yml` — `workflow_dispatch` computes this month's next version and
+  publishes; `softprops/action-gh-release` creates the tag, at
+  `target_commitish: github.sha` so it names the tree that was tested rather
+  than the default branch's head. The escape hatches take the tag verbatim: a
+  tag pushed by hand (`v` optional), and a release drafted in the web UI, which
+  fires `release` rather than reliably firing `push` — that path attaches the
+  binaries and leaves the notes alone, the body being one someone wrote.
+
+Every job carries a `timeout-minutes`: a deadlocked widget test would otherwise
+hold a runner for six hours, billed at 10× on macOS.
 
 Assets are named for their target. The unix ones ship as a `.tar.gz`: a release
-asset is served as-is and an artifact is re-zipped, and neither keeps the execute
-bit. macOS gets a bare binary rather than an `.app` — see `docs/known-gaps.md`.
+asset is served as-is and an artifact is re-zipped, and neither keeps the
+execute bit. macOS gets a bare binary rather than an `.app` — see
+`docs/known-gaps.md`.
 
 ## Known gaps
 

@@ -73,7 +73,7 @@ func TestBasicModeShowsWholeGroups(t *testing.T) {
 		page.advanced = advanced
 
 		for _, entry := range visibleRailEntries(advanced) {
-			page.showSection(entry.section)
+			page.showSection(SettingsSection(entry.section))
 
 			if len(page.groups) == 0 {
 				t.Errorf("advanced=%v: the %q section is empty", advanced, entry.title)
@@ -88,7 +88,7 @@ func TestBasicModeShowsWholeGroups(t *testing.T) {
 				}
 			}
 
-			counts[advanced][entry.section] = len(page.groups)
+			counts[advanced][SettingsSection(entry.section)] = len(page.groups)
 		}
 	}
 
@@ -118,7 +118,7 @@ func TestAdvancedSectionFallsBack(t *testing.T) {
 
 	listed := false
 	for _, entry := range visibleRailEntries(false) {
-		if entry.section == page.section {
+		if entry.section == int(page.section) {
 			listed = true
 		}
 	}

@@ -12,7 +12,6 @@ package app
 import (
 	"log"
 	"slices"
-	"strings"
 
 	"RGOClient/internal/client"
 	"RGOClient/internal/domain"
@@ -179,7 +178,7 @@ func (a *App) messageEntry(message *domain.Message) ui.MessageEntry {
 	return ui.MessageEntry{
 		Author:    author.Name,
 		AvatarURL: author.AvatarURL,
-		Preview:   messagePreview(message),
+		Preview:   a.messagePreview(message),
 		When:      messageWhen(messageID),
 
 		Jump: func() {
@@ -189,11 +188,13 @@ func (a *App) messageEntry(message *domain.Message) ui.MessageEntry {
 	}
 }
 
-// messagePreview flattens a message onto one line. A pin need not be text — a
-// picture is among the things most worth keeping — so an empty body says what it
-// carries instead of drawing an empty row.
-func messagePreview(message *domain.Message) string {
-	if content := strings.Join(strings.Fields(message.Content), " "); content != "" {
+// messagePreview flattens a message onto one line. Through the parser rather
+// than off the raw source: a row has space for what the reader would have seen,
+// not for the asterisks behind it or for an emoji's ULID. A pin need not be text
+// — a picture is among the things most worth keeping — so an empty body says
+// what it carries instead of drawing an empty row.
+func (a *App) messagePreview(message *domain.Message) string {
+	if content := ui.PreviewText(a.store, message.Content); content != "" {
 		return util.Truncate(content, previewRunes)
 	}
 

@@ -27,6 +27,11 @@ type MessageEntry struct {
 	Preview   string
 	When      string
 
+	// Where names the channel the message is in, for a panel whose rows are not all
+	// from one — the mention inbox. Empty in the two that are, where the heading
+	// already said it and every row repeating it would be a column of one word.
+	Where string
+
 	Jump func()
 }
 
@@ -56,9 +61,21 @@ func messageRow(deps Deps, entry MessageEntry, trailing fyne.CanvasObject) fyne.
 	// The name takes the leftover width and the time keeps its own, so a long name
 	// shortens rather than pushing the time out. Spacers rather than a Center: an
 	// ellipsis box reports no width, so centring hands it nothing at all.
+	//
+	// Where rides between them, at the fixed end: it is as much of the row's
+	// address as the name is, and a channel that had to shorten would be the half
+	// that says which of a dozen alike this one is.
+	heading := []fyne.CanvasObject{NewEllipsisText(name), HorizontalSpacer(gap)}
+	if entry.Where != "" {
+		heading = append(heading,
+			newText(entry.Where, theme.Colors.MentionText, theme.Sizes.PanelPreviewSize),
+			HorizontalSpacer(gap))
+	}
+	heading = append(heading, when)
+
 	identity := container.NewVBox(
 		layout.NewSpacer(),
-		NewFillRow(0, NewEllipsisText(name), HorizontalSpacer(gap), when),
+		NewFillRow(0, heading...),
 		NewEllipsisText(preview),
 		layout.NewSpacer(),
 	)
@@ -237,6 +254,39 @@ func (d *SearchDialog) SetEntries(entries []MessageEntry) {
 // Searching says a request is out, replacing whatever the last one found: a list
 // left standing under a new query reads as a result for it.
 func (d *SearchDialog) Searching() { d.panel.say("Searching...") }
+
+/* The mention inbox */
+
+// MentionsDialog lists every message naming the account, wherever it is. It is
+// the third panel and the only one not about a channel: the rows come from as
+// many as the account is in, so each carries where it is from and there is no
+// heading that could say it for them.
+type MentionsDialog struct {
+	Content fyne.CanvasObject
+
+	panel *messagePanel
+}
+
+// NewMentionsDialog builds the panel, showing that it is loading. onClose
+// dismisses the layer.
+func NewMentionsDialog(deps Deps, onClose func()) *MentionsDialog {
+	panel, content := newMessagePanel(deps, "Mentions", "Loading mentions...", nil, onClose)
+
+	return &MentionsDialog{Content: content, panel: panel}
+}
+
+// SetEntries replaces the whole list. Call on the UI thread.
+func (d *MentionsDialog) SetEntries(entries []MessageEntry) {
+	rows := make([]fyne.CanvasObject, 0, len(entries))
+	for _, entry := range entries {
+		rows = append(rows, messageRow(d.panel.deps, entry, HorizontalSpacer(0)))
+	}
+
+	d.panel.setRows(rows, "Nobody has mentioned you.")
+}
+
+// Fail replaces the list with a reason it is not there. Call on the UI thread.
+func (d *MentionsDialog) Fail(reason string) { d.panel.say(reason) }
 
 // Fail replaces the results with a reason there are none. Call on the UI thread.
 func (d *SearchDialog) Fail(reason string) { d.panel.say(reason) }

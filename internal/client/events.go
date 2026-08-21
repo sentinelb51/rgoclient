@@ -24,11 +24,17 @@ import (
 type Event interface{ isEvent() }
 
 // Ready is the initial gateway snapshot: the account's servers, in the order
-// they should appear, and which channels have unread messages. It arrives once
-// per session and is the signal that Store can answer for this account.
+// they should appear, which channels have unread messages, and which messages in
+// them name the account. It arrives once per session and is the signal that
+// Store can answer for this account.
 type Ready struct {
 	ServerIDs        []string
 	UnreadChannelIDs []string
+
+	// MentionIDs is the messages naming this account, by channel and in the order
+	// Revolt kept them, which is oldest first. A channel with any is unread by
+	// that alone.
+	MentionIDs map[string][]string
 }
 
 // Disconnected reports the session dropping. Fatal marks the credentials as
@@ -120,8 +126,14 @@ type ChannelClosed struct {
 // the one event that arrives *because* of another client, which is why it exists
 // at all: without it a conversation read on a phone stays bold here for the life
 // of the session.
+//
+// MessageID is how far it was read. Revolt drops the mentions up to and
+// including it rather than all of them, so a reader that clears the lot would
+// disagree with the account's own record the moment a mention arrived out of
+// order.
 type ChannelRead struct {
 	ChannelID string
+	MessageID string
 }
 
 // MembersChanged reports that a server's membership has changed — someone joined
@@ -236,15 +248,15 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventReady) {
 		log.Printf("ready: %d user(s), %d server(s)", len(event.Users), len(event.Servers))
 
+		unread, mentions := readState(event)
+
 		ready := Ready{
 			ServerIDs:        make([]string, 0, len(event.Servers)),
-			UnreadChannelIDs: make([]string, 0, len(event.ChannelUnreads)),
+			UnreadChannelIDs: unread,
+			MentionIDs:       mentions,
 		}
 		for _, server := range event.Servers {
 			ready.ServerIDs = append(ready.ServerIDs, server.ID)
-		}
-		for _, unread := range event.ChannelUnreads {
-			ready.UnreadChannelIDs = append(ready.UnreadChannelIDs, unread.ID.Channel)
 		}
 
 		c.emit(epoch, ready)
@@ -272,6 +284,51 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 	})
 }
 
+// readState derives from a Ready what the account has not caught up with: the
+// channels with something new in them, and the messages in each that name it.
+//
+// EventReady.ChannelUnreads is not either list: it is the account's read
+// *markers*, one row per channel it has ever acknowledged, each carrying the last
+// message read there and the mentions still standing past it. Taking the rows as
+// the unread set inverts the feature — acknowledging a channel is what creates
+// its row — so a channel is unread when its newest message is past its marker,
+// and one never acknowledged is unread outright. IDs are ULIDs, so newer sorts
+// higher and the comparison is lexical.
+func readState(event *revoltgo.EventReady) (unread []string, mentions map[string][]string) {
+
+	lastRead := make(map[string]string, len(event.ChannelUnreads))
+	mentions = make(map[string][]string)
+
+	for _, marker := range event.ChannelUnreads {
+		if marker.LastMessageID != nil {
+			lastRead[marker.ID.Channel] = *marker.LastMessageID
+		}
+		if len(marker.MentionIDs) > 0 {
+			mentions[marker.ID.Channel] = slices.Sorted(slices.Values(marker.MentionIDs))
+		}
+	}
+
+	unread = make([]string, 0, len(event.ChannelUnreads))
+	for _, channel := range event.Channels {
+		if channel.ChannelType == revoltgo.ChannelTypeSavedMessages {
+			continue
+		}
+
+		// A mention standing past the marker is unread on its own account: Revolt
+		// prunes them as far as the channel was read, so one that is still here names
+		// something the account has not seen.
+		if len(mentions[channel.ID]) > 0 {
+			unread = append(unread, channel.ID)
+			continue
+		}
+		if channel.LastMessageID != nil && *channel.LastMessageID > lastRead[channel.ID] {
+			unread = append(unread, channel.ID)
+		}
+	}
+
+	return unread, mentions
+}
+
 // registerMessages wires the conversation itself. These are the only handlers
 // that write to the message cache; the rest emit and nothing more.
 func (c *Client) registerMessages(session *revoltgo.Session, epoch uint64) {
@@ -280,24 +337,55 @@ func (c *Client) registerMessages(session *revoltgo.Session, epoch uint64) {
 		previous := c.messages.Append(event.Channel, message)
 
 		c.emit(epoch, MessageCreated{Message: message, Previous: previous})
-		c.applyPinEvent(epoch, message)
 	})
 
-	// Only the fields whose absent state reads the same as their zero one are
-	// taken: EventMessageUpdate.Data is a whole Message, not a partial.
+	// EventMessageUpdate.Data is a PartialMessage, so a field left alone and a
+	// field emptied are different things here. Three of Revolt's four writers
+	// only became readable with that: an edit sends content, edited and embeds
+	// together; a pin sends pinned alone; an unpin sends *nothing* and names
+	// Pinned in clear; a bulk reaction clear sends an empty map and nothing else
+	// (message_pin.rs, message_unpin.rs, message_edit.rs,
+	// message_clear_reactions.rs). No writer sends two of those at once, so each
+	// arm below stands on its own.
+	//
+	// The arms split on whether the field can echo a write this client already
+	// made. Content, Edited and Embeds arrive only on somebody's edit, so they
+	// are taken as sent; Pinned and Reactions echo PinMessage and ClearReactions,
+	// which write the cache the moment the server agrees, so they report a change
+	// only when there is one — else the chip repaints twice for one tap.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventMessageUpdate) {
 		changed := c.reviseMessage(event.Channel, event.ID, func(message *domain.Message) bool {
-			if event.Data.Content != "" {
-				message.Content = event.Data.Content
+			moved := false
+
+			if event.Data.Content != nil {
+				message.Content = *event.Data.Content
+				moved = true
 			}
 			if event.Data.Edited != nil {
 				message.Edited = event.Data.Edited
+				moved = true
 			}
 			if event.Data.Embeds != nil {
 				message.Embeds = toEmbeds(event.Data.Embeds)
+				moved = true
 			}
 
-			return true
+			// Only ever the bulk clear, and always an empty map, so the count is
+			// the whole of the difference. A non-empty one would be a shape this
+			// does not model, and is applied as sent rather than merged.
+			if event.Data.Reactions != nil {
+				if reactions := toReactions(event.Data.Reactions); len(reactions) != len(message.Reactions) {
+					message.Reactions = reactions
+					moved = true
+				}
+			}
+
+			if pinned := pinnedAfter(event, message.Pinned); pinned != message.Pinned {
+				message.Pinned = pinned
+				moved = true
+			}
+
+			return moved
 		})
 
 		if changed {
@@ -431,7 +519,7 @@ func (c *Client) registerChannels(session *revoltgo.Session, epoch uint64) {
 	// acks back. The reader treats it as "no longer unread" either way, which our
 	// own ack has already made true.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelAck) {
-		c.emit(epoch, ChannelRead{ChannelID: event.ID})
+		c.emit(epoch, ChannelRead{ChannelID: event.ID, MessageID: event.MessageID})
 	})
 
 	// Both halves again — EventChannelStopTyping embeds the start event — and the
@@ -512,29 +600,23 @@ func (c *Client) registerUsers(session *revoltgo.Session, epoch uint64) {
 	})
 }
 
-// applyPinEvent records a pin or unpin announced by an incoming system message,
-// naming the message it moved so a mounted row can redraw.
+// pinnedAfter is a message's pin state once an update has been applied, given
+// what it was before.
 //
-// A pin is announced twice over — here and as a MessageUpdate carrying the flag
-// — and only this one can be believed: Data is a whole Message, so Pinned false
-// cannot be told from "not mentioned", and every content edit would read as an
-// unpin.
-func (c *Client) applyPinEvent(epoch uint64, message *domain.Message) {
-	if message.System == nil {
-		return
+// The two directions arrive differently. A pin sets the flag; an **unpin** sends
+// an empty partial and names Pinned in clear (message_unpin.rs), there being no
+// field to carry false — so a client reading Data alone sees an unpin as an
+// update that says nothing at all.
+func pinnedAfter(event *revoltgo.EventMessageUpdate, pinned bool) bool {
+	if slices.Contains(event.Clear, revoltgo.MessageClearPinned) {
+		return false
 	}
 
-	target := message.System.PinnedMessageID()
-	if target == "" {
-		return
+	if event.Data.Pinned != nil {
+		return *event.Data.Pinned
 	}
 
-	pinned := message.System.Kind == domain.SystemMessagePinned
-	if !c.markPinned(message.ChannelID, target, pinned) {
-		return
-	}
-
-	c.emit(epoch, MessageUpdated{ChannelID: message.ChannelID, MessageID: target})
+	return pinned
 }
 
 // userUpdateKinds classifies a partial user update. Both may be true, and two
@@ -545,7 +627,7 @@ func (c *Client) applyPinEvent(epoch uint64, message *domain.Message) {
 // Online separate from Status — so a presence change is recognisable without
 // diffing against what was there. Clear names what the update *removes*, and a
 // cleared avatar or display name is as much a change as a set one.
-func userUpdateKinds(data revoltgo.PartialUser, clear []string) (presence, identity bool) {
+func userUpdateKinds(data revoltgo.PartialUser, clear []revoltgo.UserRemoveField) (presence, identity bool) {
 	// Status is taken as presence whatever moved inside it. It carries the
 	// presence and the status line together, and re-reading is cheap where
 	// guessing wrong leaves somebody in the wrong section.
@@ -554,7 +636,7 @@ func userUpdateKinds(data revoltgo.PartialUser, clear []string) (presence, ident
 		data.Discriminator != nil || data.Avatar != nil || data.Badges != nil
 
 	for _, field := range clear {
-		if field == "Avatar" || field == "DisplayName" {
+		if field == revoltgo.UserRemoveAvatar || field == revoltgo.UserRemoveDisplayName {
 			identity = true
 		}
 	}

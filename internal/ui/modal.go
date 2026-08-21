@@ -354,16 +354,25 @@ func viewerText(attachment *domain.File, bounds fyne.Size) fyne.CanvasObject {
 	body.Wrapping = fyne.TextWrapWord
 	body.Selectable = true
 
-	go func() {
-		text, err := fetchText(attachment.URL, attachmentViewerRead)
-		DoOnUI(func() {
-			if err != nil {
-				body.SetText("Could not load this file.")
-				return
-			}
-			body.SetText(text)
-		})
-	}()
+	// An attachment with no URL is one nothing can be fetched for, so it is
+	// answered here rather than sent and failed. That it starts no goroutine also
+	// keeps the card off Fyne's *test* driver, which runs a DoOnUI callback
+	// concurrently with the test rather than serialising it onto a UI thread — the
+	// real driver has one and queues.
+	if attachment.URL == "" {
+		body.SetText("Could not load this file.")
+	} else {
+		go func() {
+			text, err := fetchText(attachment.URL, attachmentViewerRead)
+			DoOnUI(func() {
+				if err != nil {
+					body.SetText("Could not load this file.")
+					return
+				}
+				body.SetText(text)
+			})
+		}()
+	}
 
 	return container.NewGridWrap(bounds, container.NewPadded(container.NewVScroll(body)))
 }
@@ -390,19 +399,41 @@ type JoinServerDialog struct {
 	Content fyne.CanvasObject
 	Entry   fyne.Focusable
 
+	// OnResize fires when the preview appears or is replaced, the card being
+	// centred at the size it was mounted at.
+	OnResize func()
+
+	deps   Deps
+	entry  *modalEntry
 	status dialogStatus
 	join   *Button
+
+	// preview holds the card describing what the typed code opens, empty until one
+	// resolves. previewed is the code it is describing, so a field re-edited back
+	// to the same code does not ask again.
+	preview   *fyne.Container
+	previewed string
+
+	// settle waits for the typing to stop before anything is asked: a code is
+	// typed a character at a time and every prefix of one is a plausible code.
+	settle *time.Timer
 }
+
+// invitePreviewDelay is how long the field must go quiet before the code in it is
+// resolved. Long enough that typing one out sends a single request, short enough
+// that a paste answers while the pointer is still moving to the button.
+const invitePreviewDelay = 400 * time.Millisecond
 
 // NewJoinServerDialog builds the dialog. onJoin receives an already-validated
 // invite code, onCreate opens server creation, and onClose dismisses the modal;
 // all three are called on the UI thread.
-func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *JoinServerDialog {
-	d := &JoinServerDialog{}
+func NewJoinServerDialog(deps Deps, onJoin func(code string), onCreate, onClose func()) *JoinServerDialog {
+	d := &JoinServerDialog{deps: deps, preview: container.NewStack()}
 
 	entry := newModalEntry(onClose)
 	entry.SetPlaceHolder("stt.gg/dcRHWEF1")
-	d.Entry = entry
+	entry.OnChanged = d.codeTyped
+	d.Entry, d.entry = entry, entry
 
 	d.status = newDialogStatus()
 
@@ -426,6 +457,7 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 		widget.NewSeparator(),
 		widget.NewLabel("Invite code"),
 		WithCaret(entry),
+		d.preview,
 		d.status.row(),
 		d.join,
 		widget.NewSeparator(),
@@ -444,6 +476,76 @@ func NewJoinServerDialog(onJoin func(code string), onCreate, onClose func()) *Jo
 func (d *JoinServerDialog) Fail(message string) {
 	d.status.set(message, theme.Colors.ErrorText)
 	d.join.Enable()
+}
+
+// Close stops the card asking anything more on its way out — the field can be
+// edited and the dialog dismissed inside one delay. Call on the UI thread.
+func (d *JoinServerDialog) Close() {
+	if d.settle != nil {
+		d.settle.Stop()
+	}
+}
+
+// codeTyped previews what the field's code opens, once the typing has stopped.
+// Every prefix of a code parses as one, so the delay is what keeps a code typed
+// out by hand to a single request.
+func (d *JoinServerDialog) codeTyped(text string) {
+	if d.settle != nil {
+		d.settle.Stop()
+	}
+
+	code := util.InviteCode(text)
+	if code == d.previewed {
+		return // what is up is what the field says
+	}
+
+	// Cleared before the ask rather than replaced after it: a card describing a
+	// code the field no longer holds is beside a button that would redeem the one
+	// it does.
+	d.setPreview("", nil)
+
+	if code == "" {
+		return
+	}
+
+	d.settle = time.AfterFunc(invitePreviewDelay, func() {
+		DoOnUI(func() { d.resolvePreview(code) })
+	})
+}
+
+// resolvePreview asks what a code opens and draws the answer beside the button
+// that would redeem it. A failure leaves the empty slot rather than reporting
+// anything: a code half typed comes back refused exactly as an expired one does,
+// and the field is still being worked in. The status line answers for a join
+// actually attempted.
+func (d *JoinServerDialog) resolvePreview(code string) {
+	d.deps.Actions.ResolveInvite(code, func(invite domain.Invite, err error) {
+		// The field has moved on: what came back is not what it now says.
+		if err != nil || code != util.InviteCode(d.entry.Text) {
+			return
+		}
+
+		d.setPreview(code, NewInviteCardFor(d.deps, invite))
+	})
+}
+
+// setPreview mounts a card, or clears the slot when card is nil. The dialog is
+// centred at the size it was mounted at, so the layer is told either way.
+func (d *JoinServerDialog) setPreview(code string, card *InviteCard) {
+	if code == d.previewed && card == nil {
+		return // already empty; nothing to re-place
+	}
+	d.previewed = code
+
+	d.preview.Objects = nil
+	if card != nil {
+		d.preview.Objects = []fyne.CanvasObject{container.NewCenter(card.Content)}
+	}
+	d.preview.Refresh()
+
+	if d.OnResize != nil {
+		d.OnResize()
+	}
 }
 
 // dialogHeader is the title row every card on the modal layer wears: the heading
@@ -616,6 +718,12 @@ type ChannelSettings struct {
 	Slowmode  *time.Duration
 	UserLimit *int
 
+	// Voice follows the same rule for the one thing only a *new* channel decides:
+	// Revolt takes the kind at creation and never again, an edit that named one
+	// being what would turn a text channel into a voice one. So a nil is an edit
+	// and the row is left out; a non-nil is a creation and the row is drawn.
+	Voice *bool
+
 	NSFW bool
 }
 
@@ -635,6 +743,22 @@ type ChannelDialog struct {
 // NewChannelDialog builds the card, opened on current. onSubmit is called on the
 // UI thread with what the fields hold; onClose dismisses the modal layer.
 func NewChannelDialog(current ChannelSettings, onSubmit func(ChannelSettings), onClose func()) *ChannelDialog {
+	return newChannelDialog("Edit channel", "Save", "Saving...", current, onSubmit, onClose)
+}
+
+// NewChannelCreateDialog is the same card asking from empty. Revolt takes only a
+// name, a topic, a kind and the age gate at creation — no cooldown and no user
+// limit — so those two rows are absent by the rule that already leaves them out
+// of a group's edit, and the channel is edited for them once it exists.
+func NewChannelCreateDialog(onSubmit func(ChannelSettings), onClose func()) *ChannelDialog {
+	text := false
+
+	return newChannelDialog("New channel", "Create", "Creating...",
+		ChannelSettings{Voice: &text}, onSubmit, onClose)
+}
+
+func newChannelDialog(title, action, pending string, current ChannelSettings,
+	onSubmit func(ChannelSettings), onClose func()) *ChannelDialog {
 	d := &ChannelDialog{}
 
 	name := newModalEntry(onClose)
@@ -659,6 +783,14 @@ func NewChannelDialog(current ChannelSettings, onSubmit func(ChannelSettings), o
 		dialogField("Topic", fieldSurface(topic)),
 	}
 
+	// The kind leads the rest: it is the one answer that cannot be changed
+	// afterwards, so it is decided before the fields that can.
+	var kind *choiceField
+	if current.Voice != nil {
+		kind = newChoiceField(boolChoice(*current.Voice), []int{0, 1}, channelKindLabel)
+		fields = append(fields, dialogField("Kind", kind.control))
+	}
+
 	var slowmode, limit *choiceField
 	if current.Slowmode != nil {
 		slowmode = newChoiceField(int(*current.Slowmode/time.Second), slowmodeChoices, slowmodeLabel)
@@ -672,11 +804,15 @@ func NewChannelDialog(current ChannelSettings, onSubmit func(ChannelSettings), o
 	fields = append(fields, dialogSwitch("Age-restricted", "Hidden until the reader agrees to see it.", nsfw))
 
 	d.status = newDialogStatus()
-	d.action = NewWeightedButton("Save", ButtonPrimary, func() {
-		d.status.set("Saving...", theme.Colors.TimestampText)
+	d.action = NewWeightedButton(action, ButtonPrimary, func() {
+		d.status.set(pending, theme.Colors.TimestampText)
 		d.action.Disable()
 
 		edited := ChannelSettings{Name: name.Text, Description: topic.Text, NSFW: nsfw.On()}
+		if kind != nil {
+			voice := kind.value == 1
+			edited.Voice = &voice
+		}
 		if slowmode != nil {
 			cooldown := time.Duration(slowmode.value) * time.Second
 			edited.Slowmode = &cooldown
@@ -688,7 +824,7 @@ func NewChannelDialog(current ChannelSettings, onSubmit func(ChannelSettings), o
 		onSubmit(edited)
 	})
 
-	rows := []fyne.CanvasObject{dialogHeader("Edit channel", onClose), widget.NewSeparator()}
+	rows := []fyne.CanvasObject{dialogHeader(title, onClose), widget.NewSeparator()}
 	rows = append(rows, fields...)
 	rows = append(rows, d.status.row(), d.action)
 
@@ -867,6 +1003,28 @@ var (
 	slowmodeChoices  = []int{0, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 21600}
 	userLimitChoices = []int{0, 2, 5, 10, 15, 25, 50, 100}
 )
+
+// channelKindLabel names the two kinds a channel can be created as. Revolt takes
+// "Text" or "Voice" and nothing else, and a voice channel is a text channel
+// carrying a voice object — so the client's own glyph is the only thing that
+// tells them apart afterwards.
+func channelKindLabel(voice int) string {
+	if voice == 1 {
+		return "Voice"
+	}
+
+	return "Text"
+}
+
+// boolChoice is a bool as a choiceField holds it, that field being numeric for
+// the two duration ladders it was built for.
+func boolChoice(on bool) int {
+	if on {
+		return 1
+	}
+
+	return 0
+}
 
 func slowmodeLabel(seconds int) string {
 	if seconds <= 0 {

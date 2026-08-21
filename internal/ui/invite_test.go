@@ -184,12 +184,12 @@ func TestInviteCardStateReplacesCaption(t *testing.T) {
 	}
 
 	card.SetInvite(domain.Invite{Code: "aaaaaaaa", ServerID: "01OTHER", ServerName: "Elsewhere"})
-	if !says(card, inviteCaptionJoin) {
+	if !says(card, inviteCaptionFor(domain.InviteServer, false)) {
 		t.Errorf("a resolved invite says %q, want the join caption", cardTexts(card))
 	}
 
 	card.SetInvite(domain.Invite{Code: "aaaaaaaa", ServerID: "01JOINED", ServerName: "Home"})
-	if !says(card, inviteCaptionJoined) {
+	if !says(card, inviteCaptionFor(domain.InviteServer, true)) {
 		t.Errorf("an invite to a server already joined says %q, want the member caption", cardTexts(card))
 	}
 }

@@ -7,11 +7,21 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+# A second push supersedes the first: three runners apiece is too much to spend
+# on a commit nobody is waiting on any more.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # One job, so the three builds stamp the same number rather than each
   # counting the tags for itself.
   version:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -42,6 +52,7 @@ jobs:
   build:
     needs: version
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     # fail-fast off: one platform breaking is the thing the other two are here
     # to tell apart from a break everywhere.

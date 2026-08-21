@@ -76,6 +76,12 @@ func (a *App) flushRefresh() {
 	}
 	if targets&refreshChannels != 0 {
 		a.refreshChannelList()
+
+		// The cog and the page it opens are drawn from the same server this rebuild
+		// just re-read — and a role change is the one thing that moves what either
+		// may offer without the selection moving at all.
+		a.syncServerCog()
+		a.refreshServerSettings()
 	}
 	if targets&refreshMembers != 0 {
 		a.refreshMemberList()
@@ -158,6 +164,12 @@ func (a *App) onReady(event client.Ready) {
 
 	for _, channelID := range event.UnreadChannelIDs {
 		a.unreadChannels[channelID] = true
+	}
+	// Taken wholesale rather than merged: Ready is the account's whole read state,
+	// and a reconnect must not carry over a mention the reader has since cleared.
+	a.mentions = event.MentionIDs
+	if a.mentions == nil {
+		a.mentions = make(map[string][]string)
 	}
 
 	a.showMainUI()
@@ -246,6 +258,8 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 
 	a.alertMessage(event.Message)
 
+	// The open channel is acknowledged as it arrives, which is what clears the
+	// mention on Revolt's side too, so nothing here is recorded for one.
 	if channelID == a.currentChannelID {
 		a.appendMessage(event.Message, event.Previous)
 		a.scheduleAck(channelID, event.Message.ID)
@@ -253,6 +267,7 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 	}
 
 	a.unreadChannels[channelID] = true
+	a.recordMention(event.Message)
 	a.refreshChannelRow(channelID)
 }
 
@@ -333,6 +348,12 @@ func (a *App) onServerLeft(event client.ServerLeft) {
 	a.serverIDs = slices.Delete(a.serverIDs, i, i+1)
 	a.refreshServerList()
 
+	// Immediate rather than queued: the page's every section is about a server the
+	// account is no longer in, and a settling window would leave it up saying so.
+	if a.serverSettingsID == event.ServerID {
+		a.closeServerSettings()
+	}
+
 	if a.currentServerID != event.ServerID {
 		return
 	}
@@ -371,6 +392,11 @@ func (a *App) onServerUpdated(event client.ServerUpdated) {
 // rather than made: a rank reorder arrives as one event per role, and creating a
 // role arrives as an update for one State has never heard of.
 func (a *App) onRolesChanged(event client.RolesChanged) {
+	// A role created here is drawn from the store, so the event is the first
+	// moment the page can open the one it just made — and the page is about a
+	// server whether or not it is the one selected.
+	a.openPendingRole(event.ServerID)
+
 	if a.currentServerID != event.ServerID {
 		return
 	}
@@ -432,7 +458,16 @@ func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 // somewhere else. Our own acks echo back here too, where they land on a mark
 // already cleared and cost one map delete.
 func (a *App) onChannelRead(event client.ChannelRead) {
+	// Pruned rather than cleared, matching what the ack does to the account's own
+	// record: Revolt drops the mentions as far as the message acknowledged and no
+	// further, so one that arrived past it is still standing.
+	pruned := a.pruneMentions(event.ChannelID, event.MessageID)
+
 	if !a.unreadChannels[event.ChannelID] {
+		if pruned {
+			a.refreshChannelRow(event.ChannelID)
+		}
+
 		return
 	}
 
@@ -444,6 +479,7 @@ func (a *App) onChannelRead(event client.ChannelRead) {
 // arrive the same way, so only the home view's own ordering needs maintaining.
 func (a *App) onChannelClosed(event client.ChannelClosed) {
 	delete(a.unreadChannels, event.ChannelID)
+	a.clearMentions(event.ChannelID)
 	if i := slices.Index(a.dmChannels, event.ChannelID); i >= 0 {
 		a.dmChannels = slices.Delete(a.dmChannels, i, i+1)
 	}

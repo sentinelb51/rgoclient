@@ -73,6 +73,8 @@ func (a *App) bindKeys() {
 		onEscape = a.closeOverlay
 	case a.settings != nil && a.settings.IsOpen():
 		onEscape = a.closeSettings
+	case a.serverSettingsOpen():
+		onEscape = a.closeServerSettings
 	case a.messages != nil:
 		onEscape = a.escapeToPresent
 	}

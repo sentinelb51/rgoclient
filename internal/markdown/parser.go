@@ -15,20 +15,35 @@ func Parse(input string) *Document {
 
 // PlainText returns the unformatted text of inline nodes, for previews and for
 // spans whose visuals show plain text.
-func PlainText(nodes []Inline) string {
-	var b strings.Builder
-	writePlain(&b, nodes)
-
-	return b.String()
-}
+func PlainText(nodes []Inline) string { return PlainTextNamed(nodes, nil) }
 
 // DocumentText returns a whole document as one run of unformatted text, blocks
 // joined by a space — for a preview with room for a sentence rather than a body.
-func DocumentText(doc *Document) string {
-	var b strings.Builder
-	writeBlocks(&b, doc.Blocks)
+func DocumentText(doc *Document) string { return DocumentTextNamed(doc, nil) }
 
-	return b.String()
+// PlainTextNamed and DocumentTextNamed are those two for a caller that can name
+// a custom emoji — which the parser cannot, a shortcode being held by the server
+// and this package having no session. name answers a shortcode or "" for one the
+// caller has no server for, and a nil namer answers "" for every one.
+func PlainTextNamed(nodes []Inline, name func(emojiID string) string) string {
+	f := flatten{name: name}
+	f.inlines(nodes)
+
+	return f.b.String()
+}
+
+func DocumentTextNamed(doc *Document, name func(emojiID string) string) string {
+	f := flatten{name: name}
+	f.blocks(doc.Blocks)
+
+	return f.b.String()
+}
+
+// flatten writes a document out as one line. It carries the namer rather than
+// passing it down, the walk being recursive through both blocks and inlines.
+type flatten struct {
+	b    strings.Builder
+	name func(emojiID string) string
 }
 
 // Links reports every URL a document links to, in reading order and with
@@ -84,75 +99,90 @@ func collectInlineLinks(found *[]string, nodes []Inline) {
 	}
 }
 
-// writeBlocks appends each block's plain text, separated by a single space. The
+// blocks appends each block's plain text, separated by a single space. The
 // separator is written from what is already there rather than from the loop
 // index, since a blockquote recurses and would otherwise open with a second one.
-func writeBlocks(b *strings.Builder, blocks []Block) {
+func (f *flatten) blocks(blocks []Block) {
 	for _, block := range blocks {
-		if s := b.String(); s != "" && s[len(s)-1] != ' ' {
-			b.WriteByte(' ')
+		if s := f.b.String(); s != "" && s[len(s)-1] != ' ' {
+			f.b.WriteByte(' ')
 		}
 
 		switch v := block.(type) {
 		case *Paragraph:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Heading:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Subtext:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Blockquote:
-			writeBlocks(b, v.Blocks)
+			f.blocks(v.Blocks)
 		case *CodeBlock:
 			// The only text kept verbatim by the parser, so the only place a newline
 			// can reach a preview — a canvas.Text draws one as a missing glyph.
-			b.WriteString(strings.ReplaceAll(v.Text, "\n", " "))
+			f.b.WriteString(strings.ReplaceAll(v.Text, "\n", " "))
 		case *List:
 			for i, item := range v.Items {
 				if i > 0 {
-					b.WriteByte(' ')
+					f.b.WriteByte(' ')
 				}
-				writePlain(b, item.Children)
+				f.inlines(item.Children)
 			}
 		}
 	}
 }
 
-func writePlain(b *strings.Builder, nodes []Inline) {
+func (f *flatten) inlines(nodes []Inline) {
 	for _, n := range nodes {
 		switch v := n.(type) {
 		case *Text:
-			b.WriteString(v.Text)
+			f.b.WriteString(v.Text)
 		case *Code:
-			b.WriteString(v.Text)
+			f.b.WriteString(v.Text)
 		case *LineBreak:
-			b.WriteByte(' ')
+			f.b.WriteByte(' ')
 		case *Strong:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Emphasis:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Underline:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Strike:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Spoiler:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *Link:
-			writePlain(b, v.Children)
+			f.inlines(v.Children)
 		case *UserMention:
 			// No session here to name the ID, and the raw token would read worse than
 			// nothing, so the marker alone stands in.
-			b.WriteByte('@')
+			f.b.WriteByte('@')
 		case *ChannelMention:
-			b.WriteByte('#')
+			f.b.WriteByte('#')
 		case *Emoji:
-			// Nothing stands in: the name lives on the server and the ID is 26
-			// characters of noise in a line asked for because space was short.
+			f.emoji(v.EmojiID)
 		case *Timestamp:
 			// The reader's clock format is the renderer's to decide, so a preview
 			// takes the plainest reading of the instant.
-			b.WriteString(v.Time.Local().Format("2 Jan 2006 15:04"))
+			f.b.WriteString(v.Time.Local().Format("2 Jan 2006 15:04"))
 		}
 	}
+}
+
+// emoji writes an emoji as the shortcode it is typed as, and writes nothing
+// where the caller cannot name it: the name is held on the server, and the ID is
+// 26 characters of noise in a line asked for because space was short.
+func (f *flatten) emoji(emojiID string) {
+	if f.name == nil {
+		return
+	}
+
+	name := f.name(emojiID)
+	if name == "" {
+		return
+	}
+
+	f.b.WriteString(":" + name + ":")
 }
 
 /* Blocks */

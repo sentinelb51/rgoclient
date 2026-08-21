@@ -152,11 +152,13 @@ func buildSettingsIndex(hooks SettingsHooks) []settingsHit {
 // indexPass builds every section a mode lists, onto a page that exists for the
 // walk alone.
 func indexPass(hooks SettingsHooks, advanced bool) []settingsHit {
-	p := &SettingsPage{hooks: hooks, indexing: true, advanced: advanced}
+	p := &SettingsPage{hooks: hooks, advanced: advanced}
+	p.indexing = true
+	p.record = p.recordGroup
 
 	for _, entry := range visibleRailEntries(advanced) {
-		p.section = entry.section
-		p.sectionGroups(entry.section)
+		p.section = SettingsSection(entry.section)
+		p.sectionGroups(p.section)
 	}
 
 	return p.index
@@ -225,7 +227,10 @@ func (p *SettingsPage) onQuery(text string) {
 // showResults swaps the pane to what the query matches.
 func (p *SettingsPage) showResults() {
 	p.searching = true
+	p.account = accountRows{} // a profile landing after this has nothing left to fill
+	p.previews = nil
 	p.mount(p.resultGroups(), "Search")
+	p.rebuildRail()
 }
 
 // matches is the index filtered by the query, and how many more the limit

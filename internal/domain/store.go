@@ -44,6 +44,12 @@ type Store interface {
 	// it regardless.
 	EmojiURL(emojiID string) string
 
+	// EmojiName is the shortcode a custom emoji is written as, or "" for one the
+	// account holds no server for — unlike the picture, a name can only be looked
+	// up, and a message routinely carries an emoji from somewhere the account is
+	// not. It is what stands in where a picture cannot be drawn at all.
+	EmojiName(emojiID string) string
+
 	// Emojis is every custom emoji the account may use, ordered by name. A walk,
 	// so the picker asks once when it opens rather than per entry.
 	Emojis() []Emoji
@@ -70,6 +76,11 @@ type Store interface {
 	// most senior first — the sections once, not every member's roles per member.
 	HoistedRoles(serverID string) []Role
 
+	// ServerRoles is every role a server defines, most senior first, each with the
+	// override the role editor sets. Ready carries them, so this is a read like any
+	// other rather than the fetch the route would be.
+	ServerRoles(serverID string) []Role
+
 	// MessageAuthor resolves an author in one pass — channel to member to user —
 	// preferring the per-server member and falling back to the raw user.
 	MessageAuthor(message *Message) Author
@@ -88,4 +99,9 @@ type Store interface {
 	// bit Revolt defines. Ask it with Permission.Has.
 	Permissions(channelID string) Permission
 	ServerPermissions(serverID string) Permission
+
+	// MemberServerPermissions is the same question about somebody else, which is
+	// what a moderation action asks: Revolt refuses a timeout against anybody
+	// holding the permission to hand one out.
+	MemberServerPermissions(serverID, userID string) Permission
 }

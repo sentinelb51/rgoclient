@@ -135,8 +135,9 @@ func TestMessagePreview(t *testing.T) {
 		},
 	}
 
+	a := &App{store: storeStub{}}
 	for _, c := range cases {
-		if got := messagePreview(&c.message); got != c.want {
+		if got := a.messagePreview(&c.message); got != c.want {
 			t.Errorf("%s: summarised as %q, want %q", c.name, got, c.want)
 		}
 	}

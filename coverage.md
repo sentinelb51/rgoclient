@@ -4,9 +4,9 @@
 
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` (module cache:
-`revoltgo@v0.0.0-20260820200553-51930346333a/session.go`) exposes ~110 REST methods plus the
-socket pair. The client calls **40** of them, and registers **31** of revoltgo's 49 gateway
-event types. Five routes are reached without revoltgo's types at all, because revoltgo
+`revoltgo@v0.0.0-20260820202106-a0e9e826477a/session.go`) exposes ~110 REST methods plus the
+socket pair. The client calls **55** of them, and registers **31** of revoltgo's 49 gateway
+event types. Three routes are reached without revoltgo's types at all, because revoltgo
 cannot express them — see *Round the typed API* below.
 
 `ChannelMessages` counts once but is now asked four ways: the newest page, `Before` into
@@ -20,7 +20,7 @@ is built and working, not merely planned.
 
 ---
 
-## Covered today (39 calls)
+## Covered today (55 calls)
 
 | Area | revoltgo call | Client action |
 |---|---|---|
@@ -45,6 +45,7 @@ is built and working, not merely planned.
 | Read state | `MessageAck`, `ServerAck` | `AckMessage`, `AckServer` |
 | Typing | `ChannelBeginTyping`, `ChannelEndTyping` | `BeginTyping`, `EndTyping` |
 | Channels | `Channel` | `OpenConversation` (State backfill) |
+| | `ServerChannelCreate` | `CreateChannel` (name, topic, kind, age gate) |
 | | `ChannelEdit` | `EditChannel` (name, topic, cooldown, user limit, age gate) |
 | | `ChannelDelete` | `CloseChannel` |
 | Conversations | `DirectMessages`, `DirectMessageCreate` | `Conversations`, `OpenConversation` |
@@ -54,16 +55,29 @@ is built and working, not merely planned.
 | | `FriendDelete` | `RemoveFriend` (unfriend, decline, withdraw) |
 | | `UserBlock` / `UserUnblock` | `BlockUser` / `UnblockUser` |
 | Servers | `ServerCreate` | `CreateServer` (the join dialog's other half) |
+| | `ServerEdit` | `SetServerName`, `SetServerDescription` (Overview's two fields) |
 | | `ServerMembers` | `FetchMembers` |
 | | `ServerDelete` | `LeaveServer` |
 | | `ServerMemberDelete` | `KickMember` |
+| | `ServerMemberBan` | `BanMember` (a card, the route taking a reason and a window) |
+| | `ServerMemberUnban` | `UnbanMember` (the ban list's own action) |
+| | `ServerMemberEdit` | `SetMemberNickname`, `TimeoutMember` / `RemoveTimeout`, `SetMemberRoles` |
+| Roles | `ServersRoleCreate` | `CreateRole` |
+| | `ServerRoleEdit` | `SetRoleName`, `SetRoleColor`, `SetRoleHoist` |
+| | `ServerRoleDelete` | `DeleteRole` |
+| | `ServersRoleRanksEdit` | `SetRoleRanks` (the whole order, the route refusing part of it) |
+| | `PermissionsSet` | `SetRolePermissions` (one role's override, both halves at once) |
+| | `PermissionsSetDefault` | `SetDefaultPermissions` (what everybody holds under the roles) |
 | Invites | `Invite`, `InviteJoin` | `FetchInvite`, `JoinInvite` |
 | | `ChannelInviteCreate` | `CreateInvite` |
+| | `InviteDelete` | `DeleteInvite` (the invite list's own action) |
+| | `ServerBans` | `ServerBans` (the ban list) |
+| | `ServerInvites` | `ServerInvites` (the invite list) |
+| | `UserMutual` | `Mutual` (a profile's mutual servers and friends) |
+| | `UserEdit` (`Profile`) | `SetBio`, `SetBanner`, `RemoveBanner` |
 | Raw | `HTTP.Request` → `EndpointAutumn(bucket)` | `uploadFile` — attachments, avatars and banners alike |
-| | `HTTP.Request` → `EndpointUser` (`profile`) | `SetBio`, `SetBanner`, `RemoveBanner` |
 | | `HTTP.Request` → `EndpointAuthSession("login")` | `Client.Login`, `Client.AnswerMFA` |
 | | `HTTP.Request` → `EndpointUserFriend("")` | `Client.AddFriend` (revoltgo has no *send* route) |
-| | `HTTP.Request` → `EndpointUserMutual` | `Client.Mutual` (revoltgo's decodes into the wrong shape) |
 
 `Session.Server` is never called, correctly — `client/store.go` reads `State`, and the
 account's own servers arrive with Ready. **`Session.ServerEmojis` is the same case and now
@@ -76,7 +90,7 @@ answer. `NewWithLogin` and `Session.Login` are no longer called either — see b
 
 ### Round the typed API
 
-Five things the client needs are not reachable through revoltgo's types, and all go
+Three things the client needs are not reachable through revoltgo's types, and all go
 through `Session.HTTP.Request`, which takes any struct and any result.
 
 **An upload names its bucket.** `Session.AttachmentUpload` posts to Autumn's *attachments*
@@ -85,12 +99,6 @@ is used — so an attachment's ID offered as an avatar is refused as a file that
 exist. `uploadFile` is the same request with the bucket as an argument, which is the whole
 difference between an attachment, an avatar and a banner; `AttachmentUpload` is therefore
 no longer called at all.
-
-**A profile edit cannot carry a banner.** `UserEditParams.Profile` is a `*UserProfile`
-whose `Background` is a `*File` — the shape a profile is *read* in — where the route takes
-an attachment ID. `Client.editProfile` sends its own body, and the bio rides along in it
-rather than being sent the one way the typed API can express: one field pair sent two
-different ways is worth less than the one shape.
 
 **An MFA login** cannot be expressed at all. `LoginResponse` carries neither the ticket nor
 `allowed_methods`, so the challenge is invisible; `LoginParams` carries no `mfa_ticket`, so
@@ -110,21 +118,30 @@ not interchangeable, and the wrong one aimed at a stranger is a refusal with not
 why — so `Client.AddFriend` composes the body itself, reading the handle out of `State` since
 the caller holds only an ID.
 
-**Mutual friends and servers** cannot be asked for at all. `/users/{id}/mutual` answers
-with one object and `Session.UserMutual` decodes into a **slice** of them, so the request
-fails on shape whatever the account; its struct also drops `channels`, the groups and
-conversations both are in. It is the only one of these four that is a plain
-mis-declaration rather than a missing field or a missing route.
+**Four role and permission routes were mis-declared and were fixed in revoltgo rather than
+worked around here**, none of them having been called before: `PermissionsSet` and both
+channel-permission routes sent the *read* shape of an overwrite (`{a, d}`) where the routes
+take `{"permissions": {"allow", "deny"}}`; `ServersRoleRanksEdit` sent a bare array where the
+route takes `{"ranks": [...]}`; and `ServersRoleCreate` decoded `{id, role}` into a role, so
+the ID a creation answers with was lost. See `internal/client/CLAUDE.md`.
+
+Four more were here until revoltgo was fixed, and are now plain typed calls: a profile edit
+(`UserEditParams.Profile` is a `*UserProfileParams`, taking the attachment ID the route
+wants), `UserMutual` and `ServerBans` (both decoded one object into a **slice** of it, so
+each could only ever fail on shape), and `ServerInvites` — the one that failed *silently*,
+decoding another route's read shape into a slice of empty structs.
+
+Three of these seven are plain mis-declarations; the rest are a missing field or a missing
+route.
 
 ### Notes on the ones that are not a plain call
 
-**Pinning** is the only action whose result the gateway cannot be trusted to report.
-`EventMessageUpdate.Data` is a whole `Message` rather than a partial one, so `Pinned` arrives
-as a plain `bool` with no way to tell *now false* from *not mentioned in this update* — read
-there, every ordinary content edit would land as an unpin. The pin/unpin **system message**
-names the message and says which of the two happened, so `client.applyPinEvent` is what
-believes anything about pin state; `Client.PinMessage` writes the cache itself for the pin
-this client made, and `markPinned` reports "nothing moved" so the echo does not repaint twice.
+**Pinning** arrives on `EventMessageUpdate`, whose `Data` is a `PartialMessage` — so `Pinned`
+is a `*bool` and *now false* is finally distinguishable from *not mentioned*. The two
+directions are still spelled differently: a pin sets the flag, an **unpin sends an empty
+partial** and names `Pinned` in the event's `clear` array, which is what `client.pinnedAfter`
+reads first. `Client.PinMessage` still writes the cache itself so a tap answers immediately,
+and the echo reports "nothing moved" so it does not repaint twice.
 Pinning needs `ManageMessages` even over your own message — a pin is a change to the channel,
 not to the message — which is why `canPin` does not fall back to authorship the way `canDelete`
 does.
@@ -247,6 +264,40 @@ opens (`foldGroups`), a keystroke otherwise lowering the whole set per character
 the line under the grid is what names a cell at all — what the pointer is over, or what
 Enter would take when it is over nothing.
 
+**Editing a member** is one route with four permissions on it. `ServerMemberEdit` carries a
+nickname (this account's own under `ChangeNickname`, anybody else's under `ManageNicknames`),
+a timeout (`TimeoutMembers`, which Revolt refuses against yourself and against anybody
+holding the same bit) and a set of roles (`AssignRoles`, and only roles *below* the actor's
+own rank). Each is asked before the menu item is drawn rather than after the request is
+refused, which is what `Store.MemberServerPermissions` and `App.serverRanking` exist for.
+The set of roles is sent whole — the route takes a set, not a change to one — and clearing
+any of the three is the `Remove` shape a display name already uses. A timeout is bounded
+nowhere by the backend, so the menu's own six spans are the only limit there is.
+
+**A role is edited through two routes and reordered through a third.** Name, colour and
+hoist are `ServerRoleEdit`; the permissions are `PermissionsSet`, which takes the whole
+override, so the editor holds what it last sent rather than recomputing from a role that has
+not echoed back yet. **Rank is settable through neither** — `roles_edit.rs` drops it from the
+partial — so moving a role is `ServersRoleRanksEdit` with the server's *entire* order, rank
+being the index in that array. Every one of them, plus the delete, refuses a role at or above
+the actor's own rank, hence `ServerRoleEntry.Editable`: a role that outranks the reader is
+listed without a way in.
+
+**Those two routes are two different permissions, and the grid is gated a third time.**
+`ManageRole` covers the name, the colour, the hoist, the order and the delete; the
+permission grid is `ManagePermissions`; and `permissions_set.rs` additionally refuses to
+grant a bit the actor does not hold themselves. So the editor draws each half as a control
+or as the state in words, per bit, rather than offering picks the server would refuse — and
+the Roles section is listed for **either** permission, which is why `permissionFor` names a
+mask any one bit of which is enough.
+
+**The default role is not a role.** What everybody holds is `Server.DefaultPermissions`, a
+plain value on the server rather than an override, set through `PermissionsSetDefault` and
+announced as a *server* update. It has no name, no colour, no rank and no delete, so the
+page draws it in a card of its own beneath the roles and its editor is switches rather than
+the three-state control: there is nothing beneath it to inherit from. It is also what
+"Inherit" on a role means, which is the reason it had to be reachable at all.
+
 **Creating an invite** is offered on a *channel*, not on the server icon — Revolt has no
 server-wide invite, only one per channel that lands the joiner in it — and gated on
 `InviteOthers`, a bit `domain.Permission` had to name. `util.InviteLink` composes the link and
@@ -280,19 +331,29 @@ users are a member of some server and nothing more.
 | Call(s) | Feature |
 |---|---|
 | `AuthMFA*` (8 calls) | **Managing** a second factor — enabling or disabling TOTP, generating and listing recovery codes. Signing *in* with one is built (see above); configuring one is not, so an account can be reached but not secured from here. |
-| `ServerChannelCreate` | Creating a channel. `EventChannelCreate` is handled, so the result would already reflect. Editing one is built (`ChannelEdit`). |
-| `ServerInvites`, `InviteDelete` | Listing and revoking a server's invites. Creating one is built; nothing can see or withdraw them afterwards, and Revolt offers no expiry or use limit to set at creation either. |
 | `GroupCreate`, `GroupMemberAdd` / `Delete`, `GroupMembers` | Group DMs beyond viewing one. |
 | `SyncUnreads` | Refreshing unread state after a resume; only Ready carries it now. |
 | `Sessions`, `SessionEdit`, `SessionsDelete` | A session manager in settings. |
 | `Account`, `AccountChangePassword`, `AccountChangeEmail`, `AccountDisable`, `AccountDelete*` | Account settings. |
 
-### Tier 3 — moderation / administration (per `CLAUDE.md`, deliberately not offered)
+### Tier 3 — moderation / administration, still not offered
 
-`ServerMemberBan`, `ServerMemberUnban`, `ServerBans`, `ServerMemberEdit` (nickname, roles,
-timeout), `ServerEdit`, `ChannelMessageDeleteBulk`, `ServersRole*` (5 calls),
-`PermissionsSet`, `PermissionsSetDefault`, `ChannelPermissionsSet`,
-`ChannelPermissionsSetDefault`.
+`ChannelMessageDeleteBulk`, `ServersRole` (fetching one role, which Ready already
+carries), and `ChannelPermissionsSet` / `ChannelPermissionsSetDefault` — per-channel
+overrides, which are the same tri-state grid aimed at a channel rather than at a
+server. What stops those two is the surface rather than the routes, which revoltgo
+now declares correctly: the page drills one level, and a channel's overrides are a
+channel *and* a role, which is two.
+
+What has come out of this tier is what the client could already *do* but not undo, and
+what it could already *read* but not write. Banning was built without a ban list, so
+`ServerBans` / `ServerMemberUnban` are now covered, as `ServerMemberBan` already was.
+`ServerEdit` came out with the settings page — the name, the description and both
+pictures, all `ManageServer`; its categories, system messages and flags are structures
+with no surface here. **Roles** came out last: the client has drawn role colours and
+hoisted sections since the member sidebar existed and handled all three role events
+without being able to cause any of them, so `ServersRole*` and `PermissionsSet` are now
+a section of a server's settings, and `ServerMemberEdit` is the member menu.
 
 ### Tier 4 — out of scope for this client
 
@@ -382,8 +443,13 @@ the third such pair in the file, so both must be registered.
 - **An unpin made from another client is believed only through its system message.** If
   Revolt ever stops emitting one, the flag would go stale until the channel is re-fetched;
   the partial update alongside it cannot be read for the reason given above.
-- **An invite made here is permanent.** Revolt takes no expiry and no use count at creation,
-  and nothing in the client lists or revokes one afterwards (`ServerInvites` / `InviteDelete`).
+- **An invite made here is permanent until it is revoked.** Revolt takes no expiry and no
+  use count at creation, so the Invites section of a server's settings is the only thing
+  that limits one — and it is a **snapshot**, like every list on that page: nothing
+  announces a revoked invite, a lifted ban or an invite made from another client, so each
+  is re-asked after an action here and never otherwise. A row names the channel it lands in
+  and who made it as far as the store can; a creator who has left the server is not named
+  at all rather than shown as an ID.
 - **The status line is set, not seen.** Nothing in the client draws anybody's status text,
   this account's included, so the settings row is the only place it appears — and it shows
   what the store last said rather than what was just typed, the change returning as a
@@ -453,3 +519,45 @@ the third such pair in the file, so both must be registered.
   which answers nothing, there being nobody named in it to lead to. Only the dialog carries
   them, they do not refresh while it is open, and `channels` (the groups and conversations in
   common) is dropped: Revolt sends it and there is nowhere here to say it.
+- **A server's settings edit two fields and state the rest.** The cog on the channel
+  sidebar's header opens `ui.ServerSettingsPage` — the same shell the client's own settings
+  are drawn on — and appears only where the account holds `ManageChannel`, `ManageServer` or
+  `BanMembers`, a page offering none of those being a reading of the sidebar behind it.
+  Overview's name and description go through `ServerEdit` under `ManageServer` and are
+  read-only without it; neither writes back what it sent, the edit returning as a
+  `ServerUpdate` the store answers for. The **icon** is not settable — it is an upload into a
+  bucket of its own — and there is no member count: `Store.Members` answers with whoever has
+  been resolved rather than with the membership, so the number would climb as the reader
+  scrolled.
+- **The two fetched lists are held for one visit and no longer.** No gateway event announces
+  an unban, a revoked invite or a created invite, so Bans and Invites are asked for once as
+  their section first mounts and then kept in `ui.cachedList` for the life of that opening,
+  expiring after `listTTL` — switching between the two and back costs nothing, a second
+  fetch having no way to answer differently. One request is out at a time, so re-mounting a
+  section whose first answer is still on its way waits for it rather than sending another.
+  Whatever changes a list from here clears its own entry and re-asks; closing the page
+  drops both, so a second visit is a fresh fetch. An answer arriving after the reader has
+  moved on is **recorded but not drawn**, which is what makes going back free. A banned account is generally one the store has never heard of, which is
+  why `domain.Ban` carries a name and a picture rather than an ID to look up, and a ban
+  naming somebody the response left out is still listed, under their ID.
+- **A role is edited whole except for its picture, and only at server scope.** The editor
+  sets the name, the colour, the hoist, the order and all thirty-four permission bits, and
+  Revolt's role `icon` is neither read nor set. The colour is a **hex**, which is less than
+  Revolt takes: the field writes what the swatch and the palette agree on, so a role already
+  wearing a CSS gradient keeps it until somebody picks a colour, and there is no way to
+  type one back. The grid is the role's own override at server scope; **per-channel
+  overrides are not offered at all** (Tier 3), so a role denied something in one channel
+  can only be read that way, never written. Nothing counts how many members hold a role,
+  for the reason there is no member count: `Store.Members` answers with whoever has been
+  resolved. Assigning one is the member menu rather than a list on this page.
+- **A member's roles are the set the store can resolve.** `Store.MemberRoles` drops a role
+  ID the server has not published, so a member holding one the client never heard of would
+  lose it the next time somebody toggled a role on them. Ready carries every role of every
+  server the account is in, so this is a missed role event rather than a normal state.
+- **A channel is created with four fields and edited for the rest.** Revolt takes a name, a
+  topic, the kind and the age gate at creation and nothing else, so the cooldown and the
+  user limit are absent from that card by the same rule that leaves them off a group's edit.
+  The kind is the one answer that cannot be changed afterwards — a `voice` object sent to a
+  text channel is what would *make* it one — hence `ChannelSettings.Voice` being nil for an
+  edit and non-nil for a creation. The new channel reaches the sidebar as `ChannelCreated`,
+  which was already handled; the response is spent only on selecting it.

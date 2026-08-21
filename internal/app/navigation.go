@@ -23,12 +23,13 @@ import (
 // members. Only the message area (index 2) stretches; the rest keep their fixed
 // widths, which is what makes the sections sit flush.
 //
-// Three layers sit over the row — notices, the tooltip (a server icon's name has
-// to overhang the narrow column it is anchored in) and the settings page. The
-// first two match no pointer event bar a notice card itself, so the row keeps
+// Four layers sit over the row — notices, the tooltip (a server icon's name has
+// to overhang the narrow column it is anchored in) and the two settings pages.
+// The first two match no pointer event bar a notice card itself, so the row keeps
 // receiving every click and hover. Settings is a layer rather than an overlay
 // because the modal layer holds one thing at a time, and a confirmation raised
-// from the page has to draw over it.
+// from the page has to draw over it. Only one of the two pages is ever up: a
+// server's is opened from the sidebar the client's own covers.
 func (a *App) buildUI() fyne.CanvasObject {
 	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
@@ -37,29 +38,43 @@ func (a *App) buildUI() fyne.CanvasObject {
 		a.buildMemberList(),
 	)
 
-	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer, a.settings.Layer)
+	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer,
+		a.settings.Layer, a.serverSettings.Layer)
 }
 
 /* Server sidebar */
 
-// buildServerList is the server rail: fixed home and settings buttons bookending
-// the scrolling icons, outside the scroll so they stay put as the list grows.
+// buildServerList is the server rail: fixed home, inbox and settings buttons
+// bookending the scrolling icons, outside the scroll so they stay put as the list
+// grows.
+//
+// The inbox is here rather than in the message header because it is the one
+// surface about no channel in particular: the header's three buttons are all
+// about the one on screen, and the rail is where this client keeps what is about
+// the account.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
 
 	a.homeButton = ui.NewSidebarButton(fynetheme.HomeIcon(), a.selectHome)
+	a.inboxButton = ui.NewSidebarButton(assets.MentionIcon, a.showMentions)
 	settings := ui.NewSidebarButton(fynetheme.SettingsIcon(), a.openSettings)
 
+	// Bare, not wrapped in a Center, for the reason refreshServerList mounts a
+	// ServerWidget bare: the button centres its own icon, and its marker is pinned
+	// to whatever width it is given. Centred, that width is the icon's, which puts
+	// the bar under the circle instead of on the rail's edge.
 	top := container.NewVBox(
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
-		container.NewCenter(a.homeButton),
+		a.homeButton,
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+		a.inboxButton,
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 		ui.NewSidebarSeparator(),
 	)
 	bottom := container.NewVBox(
 		ui.NewSidebarSeparator(),
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
-		container.NewCenter(settings),
+		settings,
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 	)
 
@@ -87,6 +102,7 @@ func (a *App) refreshServerList() {
 
 		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
 		w.SetSelected(serverID == a.currentServerID)
+		w.SetMentioned(a.serverMentioned(serverID))
 		w.OnHover = func(hovering bool) {
 			if hovering {
 				a.tooltip.Show(server.Name, w)
@@ -109,6 +125,9 @@ func (a *App) refreshServerList() {
 	a.serverList.Objects = icons
 	a.serverList.Refresh()
 
+	// The two fixed buttons are outside that list and so outside the walk above.
+	a.syncMentionMarks()
+
 	// Which servers the account is in is also which emoji it may type, and this runs
 	// wherever that changes: ready, joined, left.
 	a.refreshEmojiCandidates()
@@ -127,16 +146,26 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	a.serverHeader = widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.serverHeader.Truncation = fyne.TextTruncateEllipsis
 
+	// The cog is built once and shown per server, as the message header's own
+	// buttons are: which servers it belongs on changes with the selection, and a
+	// button rebuilt per switch is a widget per switch.
+	a.serverCog = ui.NewIconButton(assets.CogIcon, a.openServerSettings, nil)
+	a.syncServerCog()
+
 	a.refreshChannelList()
 
 	pad := theme.Sizes.ChannelSidebarPadding
 	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
 		container.NewVScroll(a.channelList))
 
+	// The name takes what the cog leaves, so a long one shortens rather than
+	// pushing the button out of the column.
+	title := container.NewBorder(nil, nil, nil, a.serverCog, a.serverHeader)
+
 	// The pinned group sits outside that padding and above the scroll: full column
 	// width, which is what says it is not one of the rows below, and it does not
 	// scroll away from what it leads to.
-	header := ui.VBoxNoSpacing(container.NewPadded(a.serverHeader), a.channelTop)
+	header := ui.VBoxNoSpacing(container.NewPadded(title), a.channelTop)
 	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
 
 	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background,
@@ -306,7 +335,7 @@ func (a *App) savedNotesID() string {
 func (a *App) applyChannelState(w *ui.ChannelWidget, animate bool) {
 	channelID := w.Channel.ID
 
-	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID])
+	w.SetState(channelID == a.currentChannelID, a.unreadChannels[channelID], a.mentionCount(channelID))
 	w.SetTyping(a.isTypingIn(channelID), animate)
 }
 
@@ -382,7 +411,9 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		)
 	}
 
-	return leadWithMarkRead(items, a.unreadChannels[channelID], func() { a.markChannelRead(channelID) })
+	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
+
+	return leadWithMarkRead(items, unread, func() { a.markChannelRead(channelID) })
 }
 
 // closeChannelLabel names what closing a conversation means for its kind: a
@@ -395,12 +426,14 @@ func (a *App) closeChannelLabel(channelID string) string {
 	return "Close conversation"
 }
 
-// memberMenu builds the items a member row offers on right-click. Each way out
-// of the server is offered only where it can actually be taken (canKickMember,
-// canBanMember), so the menu never presents an action the server will refuse.
+// memberMenu builds the items a member row offers on right-click. Every entry is
+// offered only where it can actually be taken — Revolt gates each of these
+// separately and refuses the rest — so the menu never presents an action the
+// server will refuse.
 //
-// A menu item carries no colour of its own, so the mark is what separates the
-// two: a kick is undone by a new invite, a ban until it is lifted is not.
+// A menu item carries no colour of its own, so the mark is what separates them:
+// a timeout ends by itself, a kick is undone by a new invite, a ban until it is
+// lifted is not.
 func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 	items := []*fyne.MenuItem{
 		fyne.NewMenuItemWithIcon("Copy user ID", fynetheme.ContentCopyIcon(), func() {
@@ -408,10 +441,19 @@ func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 		}),
 	}
 
+	edits := append(a.memberNicknameItems(serverID, userID), a.memberRoleItems(serverID, userID)...)
+	if len(edits) > 0 {
+		items = append(items, fyne.NewMenuItemSeparator())
+		items = append(items, edits...)
+	}
+
+	timeout := a.memberTimeoutItems(serverID, userID)
 	kick, ban := a.canKickMember(serverID, userID), a.canBanMember(serverID, userID)
-	if kick || ban {
+
+	if len(timeout) > 0 || kick || ban {
 		items = append(items, fyne.NewMenuItemSeparator())
 	}
+	items = append(items, timeout...)
 	if kick {
 		items = append(items, fyne.NewMenuItemWithIcon("Kick", ui.CautionMark(assets.SystemKickedIcon),
 			func() { a.confirmKickMember(serverID, userID) }))
@@ -445,6 +487,7 @@ func (a *App) markChannelRead(channelID string) {
 	}
 
 	delete(a.unreadChannels, channelID)
+	a.clearMentions(channelID)
 	a.refreshChannelRow(channelID)
 	a.scheduleAck(channelID, channel.LastMessageID)
 }
@@ -460,6 +503,7 @@ func (a *App) markServerRead(serverID string) {
 
 	for _, channelID := range server.Channels {
 		delete(a.unreadChannels, channelID)
+		a.clearMentions(channelID)
 	}
 	a.syncChannelList()
 
@@ -528,6 +572,7 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 
 	a.syncServerSelection(serverID)
 	a.setHeader(a.serverHeader, server.Name)
+	a.syncServerCog()
 	a.refreshChannelList()
 
 	// The emoji of the server being entered come first in the composer's list, as
@@ -597,7 +642,7 @@ func (a *App) selectChannel(channelID string) {
 	// stop being told it is still being written in.
 	a.stopTyping(a.currentChannelID)
 
-	unread := a.unreadChannels[channelID]
+	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)
 	permissions := a.store.Permissions(channelID)
 	viewable := known && a.canViewChannel(channel)
@@ -609,6 +654,7 @@ func (a *App) selectChannel(channelID string) {
 		a.setHeader(a.channelHeader, channel.Name)
 		if viewable && unread && channel.LastMessageID != "" {
 			delete(a.unreadChannels, channelID)
+			a.clearMentions(channelID)
 			a.scheduleAck(channelID, channel.LastMessageID)
 		}
 	}
@@ -669,6 +715,10 @@ func (a *App) syncServerSelection(selectedID string) {
 			w.SetSelected(w.Server.ID == selectedID)
 		}
 	}
+
+	// Selection outranks the mention bar and they share one marker, so the icon
+	// being entered or left is one that has to re-decide which it wears.
+	a.syncMentionMarks()
 }
 
 // channelRows walks every mounted channel row: the pinned group and the list.
@@ -756,6 +806,7 @@ func (a *App) selectHome() {
 
 	a.syncServerSelection("")
 	a.setHeader(a.serverHeader, homeHeader)
+	a.syncServerCog()
 	a.refreshChannelList()
 	a.refreshMemberList()
 

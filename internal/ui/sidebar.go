@@ -48,8 +48,9 @@ type ServerWidget struct {
 	baseLayout  fyne.Layout
 	grownLayout fyne.Layout
 
-	selected bool
-	hovered  bool
+	selected  bool
+	mentioned bool
+	hovered   bool
 }
 
 var (
@@ -87,6 +88,18 @@ func (w *ServerWidget) SetSelected(selected bool) {
 	w.refreshAppearance()
 }
 
+// SetMentioned marks the server as holding a message that names the account. The
+// rail says only that there is one — which channel and how many is what the
+// channel sidebar answers once the server is open.
+func (w *ServerWidget) SetMentioned(mentioned bool) {
+	if w.mentioned == mentioned {
+		return
+	}
+
+	w.mentioned = mentioned
+	w.refreshAppearance()
+}
+
 func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	iconSize := fyne.NewSize(theme.Sizes.ServerIconSize, theme.Sizes.ServerIconSize)
 
@@ -113,11 +126,21 @@ func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 func (w *ServerWidget) refreshAppearance() {
 	if w.selected {
 		w.background.FillColor = theme.Colors.ServerSelectedBg
-		w.marker.FillColor = theme.Colors.TextPrimary
 	} else {
 		w.background.FillColor = theme.Colors.ServerDefaultBg
+	}
+
+	// One bar, so selection outranks the mention: the server is open and its channel
+	// sidebar is already carrying the amber row the rail would be pointing at.
+	switch {
+	case w.selected:
+		w.marker.FillColor = theme.Colors.TextPrimary
+	case w.mentioned:
+		w.marker.FillColor = theme.Colors.MentionIndicator
+	default:
 		w.marker.FillColor = color.Transparent
 	}
+
 	w.background.Refresh()
 	w.marker.Refresh()
 
@@ -166,6 +189,7 @@ type ChannelWidget struct {
 	background         *canvas.Rectangle
 	selectionIndicator *canvas.Rectangle
 	unreadIndicator    *canvas.Rectangle
+	mentionBadge       *MentionBadge     // the count at the trailing end, hidden at zero
 	typingMark         *TypingMark       // the trailing mark, hidden unless somebody is composing
 	leading            fyne.CanvasObject // the type glyph, or a conversation's avatar
 	label              *canvas.Text
@@ -175,6 +199,7 @@ type ChannelWidget struct {
 
 	selected bool
 	unread   bool
+	mentions int  // how many messages here name the account
 	typing   bool // what SetTyping was last told, so a collapsed row can resume it
 	animate  bool
 }
@@ -202,6 +227,7 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 		background:         canvas.NewRectangle(color.Transparent),
 		selectionIndicator: canvas.NewRectangle(color.Transparent),
 		unreadIndicator:    canvas.NewRectangle(color.Transparent),
+		mentionBadge:       NewMentionBadge(),
 		typingMark:         NewTypingMark(theme.Sizes.ChannelTypingSize, theme.Colors.TypingMark),
 		leading:            channelLeading(deps, channel),
 		height:             height,
@@ -220,14 +246,18 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 	return w
 }
 
-// SetState updates selection and unread together, a no-op when unchanged.
-func (w *ChannelWidget) SetState(selected, unread bool) {
-	if w.selected == selected && w.unread == unread {
+// SetState updates selection, unread and the mention count together, a no-op
+// when unchanged. The three are drawn against each other — the marker says which
+// of unread and mentioned the row is — so nothing sets one of them alone.
+func (w *ChannelWidget) SetState(selected, unread bool, mentions int) {
+	if w.selected == selected && w.unread == unread && w.mentions == mentions {
 		return
 	}
 
 	w.selected = selected
 	w.unread = unread
+	w.mentions = mentions
+	w.mentionBadge.SetCount(mentions)
 	w.refreshAppearance()
 	w.Refresh()
 }
@@ -269,9 +299,17 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// The name takes the leftover width, or a long DM title widens the column. The
 	// typing mark rides in the right gutter, which held nothing but that gap: hidden
 	// it costs no width, and it cannot be read as the unread bar at the other edge.
+	// The count sits outside the typing mark, at the very end of the row: it is what
+	// the row still says once nobody is composing, where the mark comes and goes.
+	// Hidden it costs no width, so a row with neither is the row as it was.
 	content := container.NewBorder(nil, nil,
 		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
-		HBoxNoSpacing(container.NewCenter(w.typingMark), HorizontalSpacer(theme.Sizes.ChannelLeftPadding)),
+		HBoxNoSpacing(
+			container.NewCenter(w.typingMark),
+			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+			container.NewCenter(w.mentionBadge),
+			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+		),
 		w.labelBox,
 	)
 
@@ -290,9 +328,14 @@ func (w *ChannelWidget) refreshAppearance() {
 		w.selectionIndicator.FillColor = color.Transparent
 	}
 
-	if w.unread {
+	// A mention takes the marker over rather than adding to it: every mention is
+	// already unread, so the two can only ever be one bar saying which it is.
+	switch {
+	case w.mentions > 0:
+		w.unreadIndicator.FillColor = theme.Colors.MentionIndicator
+	case w.unread:
 		w.unreadIndicator.FillColor = theme.Colors.UnreadIndicator
-	} else {
+	default:
 		w.unreadIndicator.FillColor = color.Transparent
 	}
 

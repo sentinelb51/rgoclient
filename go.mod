@@ -61,3 +61,5 @@ require (
 )
 
 replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4
+
+replace github.com/sentinelb51/revoltgo => ../revoltgo

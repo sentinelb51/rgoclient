@@ -313,7 +313,7 @@ func (p *SettingsPage) interfaceSection() []settingsGroup {
 // ordinary overrides, so the Advanced section can still pull any one of them
 // away from the accent afterwards.
 func (p *SettingsPage) accentRow(accent string) fyne.CanvasObject {
-	control := p.colorControl(accent, func(hex string) {
+	control := p.colorControl(accent, nil, func(hex string) {
 		p.restyle(func(s *config.Settings) {
 			s.Interface.Accent = hex
 			for field, value := range theme.AccentOverrides(hex) {

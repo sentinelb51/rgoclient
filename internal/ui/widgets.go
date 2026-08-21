@@ -724,6 +724,86 @@ func (b *IconButton) setHovered(on bool) {
 	reportHover(b.onHover, on)
 }
 
+// OutlinedIconButton is an icon button that wears its own edge, in the icon's own
+// colour — the hairline an expired invite card draws in red, put round a target
+// rather than round a message.
+//
+// It exists because a plain IconButton is a *mark* that lights under the pointer:
+// right where the row it sits in has already said what is going on (a message's
+// own actions, revealed on hover), and wrong where the icon is the only thing
+// offering the action at all. An edge is what says "this is a button" without
+// spending a word on it — which is the whole reason a row can carry two of these
+// where two labelled buttons would be more to read than the row itself.
+//
+// The tint is the icon's, so a destructive one is outlined in the colour it is
+// drawn in and needs nothing else to read as destructive. Hover fills with the
+// neutral ButtonHoverBg rather than a wash of the tint: the fill has to work on
+// any surface this is laid on, and a tinted one mixed against the wrong card
+// would be a different colour on each.
+type OutlinedIconButton struct {
+	tapBase
+
+	background *canvas.Rectangle
+	icon       *canvas.Image
+	tint       color.Color
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*OutlinedIconButton)(nil)
+	_ desktop.Hoverable = (*OutlinedIconButton)(nil)
+)
+
+// NewOutlinedIconButton builds one. res is drawn as it is given, so a caller
+// wanting the mark in the same colour as the edge tints it themselves — which is
+// what every caller does, the pair being the point.
+func NewOutlinedIconButton(res fyne.Resource, tint color.Color, onTap func()) *OutlinedIconButton {
+	b := &OutlinedIconButton{
+		background: canvas.NewRectangle(color.Transparent),
+		icon:       newScaledIcon(res, theme.Sizes.IconButtonGlyph),
+		tint:       tint,
+	}
+	b.onTap = onTap
+	b.background.CornerRadius = theme.Sizes.ButtonRadius
+	b.background.StrokeWidth = theme.Sizes.OutlineWidth
+
+	b.content = container.NewStack(b.background, container.NewCenter(b.icon))
+	b.ExtendBaseWidget(b)
+	b.setHovered(false)
+
+	return b
+}
+
+func (b *OutlinedIconButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+// MinSize is the square every one of these occupies, whatever its mark measures,
+// so a row of them is evenly spaced and each is the same target.
+func (b *OutlinedIconButton) MinSize() fyne.Size {
+	side := theme.Sizes.IconButtonSize
+
+	return fyne.NewSize(side, side)
+}
+
+func (b *OutlinedIconButton) MouseIn(*desktop.MouseEvent) { b.setHovered(true) }
+func (b *OutlinedIconButton) MouseOut()                   { b.setHovered(false) }
+
+func (b *OutlinedIconButton) setHovered(on bool) {
+	b.background.FillColor = color.Transparent
+	b.background.StrokeColor = solidColor(b.tint)
+	b.icon.Translucency = iconRestTranslucency
+
+	if on {
+		b.background.FillColor = theme.Colors.ButtonHoverBg
+		b.background.StrokeColor = solidColor(theme.Lighten(b.tint, 0.25))
+		b.icon.Translucency = 0
+	}
+
+	b.background.Refresh()
+	b.icon.Refresh()
+}
+
 // SidebarButton is the circular icon button bookending the server list as the
 // fixed home and settings entries, in the server rows' own colours.
 type SidebarButton struct {
@@ -731,8 +811,14 @@ type SidebarButton struct {
 	background *canvas.Circle
 	icon       *canvas.Image
 
-	selected bool
-	hovered  bool
+	// marker is the bar on the rail's left edge, which a button wears for the same
+	// reason a server icon does: home is where the conversations are, and a mention
+	// in one is invisible from inside a server without it.
+	marker *canvas.Rectangle
+
+	selected  bool
+	mentioned bool
+	hovered   bool
 }
 
 var (
@@ -745,6 +831,7 @@ func NewSidebarButton(res fyne.Resource, onTap func()) *SidebarButton {
 	b := &SidebarButton{
 		background: canvas.NewCircle(theme.Colors.ServerDefaultBg),
 		icon:       newScaledIcon(res, theme.Sizes.ServerIconSize*0.5),
+		marker:     canvas.NewRectangle(color.Transparent),
 	}
 	b.onTap = onTap
 	b.ExtendBaseWidget(b)
@@ -757,7 +844,26 @@ func (b *SidebarButton) CreateRenderer() fyne.WidgetRenderer {
 	wrap := container.NewGridWrap(fyne.NewSize(size, size),
 		container.NewStack(b.background, container.NewCenter(b.icon)))
 
-	return widget.NewSimpleRenderer(container.NewCenter(wrap))
+	b.marker.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, theme.Sizes.ServerMarkerHeight))
+	b.refreshAppearance()
+
+	// Flush with the rail's left edge, as ServerWidget's is and for the same reason:
+	// the HBox pins it left, the Center inside gives it back its own height.
+	markerRow := container.NewHBox(container.NewCenter(b.marker))
+
+	return widget.NewSimpleRenderer(container.NewStack(markerRow, container.NewCenter(wrap)))
+}
+
+// SetMentioned marks the view behind the button as holding a message that names
+// the account. A no-op when unchanged, so a sidebar-wide sync only repaints what
+// moved.
+func (b *SidebarButton) SetMentioned(mentioned bool) {
+	if b.mentioned == mentioned {
+		return
+	}
+
+	b.mentioned = mentioned
+	b.refreshAppearance()
 }
 
 // SetSelected marks the button as the active view. A no-op when unchanged, so a
@@ -771,8 +877,9 @@ func (b *SidebarButton) SetSelected(selected bool) {
 	b.refreshAppearance()
 }
 
-// refreshAppearance repaints the circle. Selection outranks hover, so hovering
-// the active view does not dim it.
+// refreshAppearance repaints the circle and its marker. Selection outranks hover,
+// so hovering the active view does not dim it, and it outranks the mention bar
+// too: the view is open, so what is in it is already on screen saying so.
 func (b *SidebarButton) refreshAppearance() {
 	switch {
 	case b.selected:
@@ -783,6 +890,20 @@ func (b *SidebarButton) refreshAppearance() {
 		b.background.FillColor = theme.Colors.ServerDefaultBg
 	}
 	b.background.Refresh()
+
+	if b.marker == nil {
+		return
+	}
+
+	switch {
+	case b.selected:
+		b.marker.FillColor = theme.Colors.TextPrimary
+	case b.mentioned:
+		b.marker.FillColor = theme.Colors.MentionIndicator
+	default:
+		b.marker.FillColor = color.Transparent
+	}
+	b.marker.Refresh()
 }
 
 func (b *SidebarButton) MouseIn(*desktop.MouseEvent) {
@@ -1849,6 +1970,76 @@ func NewWrappedText(text string, width, size float32, colour color.Color) fyne.C
 	}
 
 	return VBoxNoSpacing(objects...)
+}
+
+/* Mention badge */
+
+// MentionBadge is the count of messages naming this account, drawn as a filled
+// pill. It rides at the trailing end of a channel row, where the number is what
+// the amber marker at the other edge cannot say — one mention and twelve wear the
+// same bar.
+//
+// A widget rather than a chip so the count can be reset in place: a sidebar row
+// is rebuilt for a great many reasons and a mention arriving is not one of them.
+// It accepts no pointer event, so hovering and right-clicking reach the row under
+// it.
+type MentionBadge struct {
+	widget.BaseWidget
+
+	background *canvas.Rectangle
+	label      *canvas.Text
+
+	count int
+}
+
+// NewMentionBadge creates the pill, hidden until it is given a count.
+func NewMentionBadge() *MentionBadge {
+	background := canvas.NewRectangle(theme.Colors.MentionBadgeBg)
+	background.CornerRadius = theme.Sizes.MentionBadgeRadius
+
+	w := &MentionBadge{
+		background: background,
+		label:      newBoldText("", theme.Colors.MentionBadgeText, theme.Sizes.MentionBadgeTextSize),
+	}
+	w.ExtendBaseWidget(w)
+	w.Hide()
+
+	return w
+}
+
+// SetCount labels the pill, hiding it at zero. A no-op when unchanged, so a
+// sidebar-wide sync only repaints what moved.
+func (w *MentionBadge) SetCount(count int) {
+	if w.count == count {
+		return
+	}
+
+	w.count = count
+	if count <= 0 {
+		w.Hide()
+		return
+	}
+
+	w.label.Text = strconv.Itoa(count)
+	w.label.Refresh()
+	w.Show()
+	w.Refresh()
+}
+
+// MinSize keeps the pill round at one digit and lets it widen past that. The
+// label reports its own text width, so this is a floor rather than the size.
+func (w *MentionBadge) MinSize() fyne.Size {
+	size := w.label.MinSize()
+	size.Width += theme.Sizes.MentionBadgePadH * 2
+
+	return fyne.NewSize(
+		fyne.Max(size.Width, theme.Sizes.MentionBadgeMinSize),
+		theme.Sizes.MentionBadgeHeight,
+	)
+}
+
+func (w *MentionBadge) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(container.NewStack(w.background, container.NewCenter(w.label)))
 }
 
 /* Typing mark */

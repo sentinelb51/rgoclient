@@ -2,12 +2,15 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"math"
 	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 
+	"RGOClient/assets"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
@@ -511,4 +514,255 @@ func memberCandidates(members []domain.Member) []ui.MentionCandidate {
 	}
 
 	return candidates
+}
+
+/* Editing a member */
+
+// timeoutSpans is what the timeout menu offers. Revolt bounds a timeout nowhere
+// — member_edit.rs validates neither a maximum nor a value in the past — so the
+// ceiling here is the client's own.
+var timeoutSpans = []struct {
+	label string
+	span  time.Duration
+}{
+	{"1 minute", time.Minute},
+	{"5 minutes", 5 * time.Minute},
+	{"10 minutes", 10 * time.Minute},
+	{"1 hour", time.Hour},
+	{"1 day", 24 * time.Hour},
+	{"1 week", 7 * 24 * time.Hour},
+}
+
+// serverRanking is how senior this account is in a server: the lowest rank it
+// holds, everything for the owner, and nothing at all for a member with no roles.
+// Revolt compares a role against it before letting that role be assigned, edited
+// or reordered, so the menu and the role editor ask it before offering either.
+// https://github.com/stoatchat/stoatchat/blob/main/crates/core/database/src/models/server_members/model.rs
+func (a *App) serverRanking(serverID string) int64 {
+	server, ok := a.store.Server(serverID)
+	if !ok {
+		return math.MaxInt64
+	}
+
+	self := a.store.SelfID()
+	if self != "" && server.OwnerID == self {
+		return math.MinInt64
+	}
+
+	roles := a.store.MemberRoles(serverID, self)
+	if len(roles) == 0 {
+		return math.MaxInt64
+	}
+
+	return roles[0].Rank // most senior first
+}
+
+// memberNicknameItems is the two ways a nickname is changed, offered only where
+// this account may change that member's: its own takes ChangeNickname, anybody
+// else's ManageNicknames.
+func (a *App) memberNicknameItems(serverID, userID string) []*fyne.MenuItem {
+	if !a.canRenameMember(serverID, userID) {
+		return nil
+	}
+
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Change nickname", func() { a.promptMemberNickname(serverID, userID) }),
+	}
+
+	if member, ok := a.store.Member(serverID, userID); ok && member.Nickname != "" {
+		items = append(items, fyne.NewMenuItem("Remove nickname", func() {
+			a.setMemberNickname(serverID, userID, "")
+		}))
+	}
+
+	return items
+}
+
+func (a *App) canRenameMember(serverID, userID string) bool {
+	if serverID == "" || userID == "" {
+		return false
+	}
+
+	permission := domain.PermissionManageNicknames
+	if userID == a.store.SelfID() {
+		permission = domain.PermissionChangeNickname
+	}
+
+	return a.store.ServerPermissions(serverID).Has(permission)
+}
+
+// promptMemberNickname raises the card that renames somebody in one server. The
+// card comes down on submit and the outcome is a notice: unlike a username, a
+// refusal here is nothing to correct in the field it came from. Call on the UI
+// thread.
+func (a *App) promptMemberNickname(serverID, userID string) {
+	name := a.memberName(serverID, userID)
+
+	dialog := ui.NewPromptDialog(ui.Prompt{
+		Title:  "Change nickname",
+		Action: "Change",
+		Busy:   "Changing...",
+		Fields: []ui.PromptField{{Label: "Nickname", Placeholder: name}},
+		OnSubmit: func(values []string) {
+			a.closeOverlay()
+			a.setMemberNickname(serverID, userID, values[0])
+		},
+	}, a.closeOverlay)
+
+	a.showOverlay(dialog.Content)
+	a.window.Canvas().Focus(dialog.Entry)
+}
+
+// setMemberNickname renames a member, an empty name taking the nickname off. What
+// took is drawn by the ServerMemberUpdate that follows.
+func (a *App) setMemberNickname(serverID, userID, nickname string) {
+	name := a.memberName(serverID, userID)
+
+	failure, success := "Could not rename %s.", "%s was renamed."
+	if nickname == "" {
+		failure, success = "Could not take %s's nickname off.", "%s's nickname was removed."
+	}
+
+	a.reportAction(
+		func() error { return a.client.SetMemberNickname(serverID, userID, nickname) },
+		"rename member "+userID+" in server "+serverID, failure, success, name,
+	)
+}
+
+// memberRoleItems is the roles this account may give and take, each marked with
+// whether the member already holds it. A role at or above this account's own rank
+// is left out rather than offered to be refused.
+func (a *App) memberRoleItems(serverID, userID string) []*fyne.MenuItem {
+	if serverID == "" || !a.store.ServerPermissions(serverID).Has(domain.PermissionAssignRoles) {
+		return nil
+	}
+
+	roles := a.store.ServerRoles(serverID)
+	ranking := a.serverRanking(serverID)
+
+	held := make(map[string]bool)
+	for _, role := range a.store.MemberRoles(serverID, userID) {
+		held[role.ID] = true
+	}
+
+	items := make([]*fyne.MenuItem, 0, len(roles))
+	for _, role := range roles {
+		if role.Rank <= ranking {
+			continue
+		}
+
+		item := fyne.NewMenuItem(role.Name, func() { a.toggleMemberRole(serverID, userID, role.ID) })
+		item.Checked = held[role.ID]
+		items = append(items, item)
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	parent := fyne.NewMenuItem("Roles", nil)
+	parent.ChildMenu = fyne.NewMenu("", items...)
+
+	return []*fyne.MenuItem{parent}
+}
+
+// toggleMemberRole gives a role or takes it back. Revolt takes the whole set
+// rather than a change to it, so what the member already holds is sent with it.
+func (a *App) toggleMemberRole(serverID, userID, roleID string) {
+	held := a.store.MemberRoles(serverID, userID)
+
+	next := make([]string, 0, len(held)+1)
+	var wore bool
+	for _, role := range held {
+		if role.ID == roleID {
+			wore = true
+			continue
+		}
+		next = append(next, role.ID)
+	}
+	if !wore {
+		next = append(next, roleID)
+	}
+
+	name, verb := a.memberName(serverID, userID), "given to"
+	if wore {
+		verb = "taken from"
+	}
+
+	a.reportAction(
+		func() error { return a.client.SetMemberRoles(serverID, userID, next) },
+		"set roles on member "+userID+" in server "+serverID,
+		"Could not change what %s holds.", "That role was "+verb+" %s.", name,
+	)
+}
+
+// memberTimeoutItems is the timeout menu: how long, or an end to one already
+// standing. Revolt refuses a timeout aimed at this account or at anybody who may
+// hand one out themselves, so neither is offered.
+func (a *App) memberTimeoutItems(serverID, userID string) []*fyne.MenuItem {
+	if !a.canTimeoutMember(serverID, userID) {
+		return nil
+	}
+
+	if member, ok := a.store.Member(serverID, userID); ok && member.Timeout.After(time.Now()) {
+		return []*fyne.MenuItem{fyne.NewMenuItem("End timeout", func() { a.removeTimeout(serverID, userID) })}
+	}
+
+	spans := make([]*fyne.MenuItem, 0, len(timeoutSpans))
+	for _, option := range timeoutSpans {
+		spans = append(spans, fyne.NewMenuItem(option.label, func() {
+			a.confirmTimeoutMember(serverID, userID, option.label, option.span)
+		}))
+	}
+
+	// The mark a timeout wears is the composer's own refusal, that being what one
+	// does: the member stays and cannot write.
+	parent := fyne.NewMenuItemWithIcon("Time out", ui.CautionMark(assets.ForbiddenIcon), nil)
+	parent.ChildMenu = fyne.NewMenu("", spans...)
+
+	return []*fyne.MenuItem{parent}
+}
+
+// canTimeoutMember: the permission, and a target who is neither this account nor
+// somebody holding the same permission — both of which member_edit.rs refuses.
+func (a *App) canTimeoutMember(serverID, userID string) bool {
+	if serverID == "" || userID == "" || userID == a.store.SelfID() {
+		return false
+	}
+	if !a.store.ServerPermissions(serverID).Has(domain.PermissionTimeoutMembers) {
+		return false
+	}
+
+	return !a.store.MemberServerPermissions(serverID, userID).Has(domain.PermissionTimeoutMembers)
+}
+
+// confirmTimeoutMember asks before silencing somebody. A warning rather than a
+// danger: it ends by itself, and can be ended sooner from the same menu.
+func (a *App) confirmTimeoutMember(serverID, userID, label string, span time.Duration) {
+	name := a.memberName(serverID, userID)
+
+	a.confirm(ui.Confirm{
+		Title:  "Time out member",
+		Body:   fmt.Sprintf("%s will be able to read the server but not write in it for %s.", name, label),
+		Action: "Time out",
+		Tone:   ui.ToneWarning,
+		OnConfirm: func() {
+			a.reportAction(
+				func() error { return a.client.TimeoutMember(serverID, userID, time.Now().Add(span)) },
+				"time out member "+userID+" in server "+serverID,
+				"Could not time %s out.", "%s was timed out for "+label+".", name,
+			)
+		},
+	})
+}
+
+// removeTimeout ends one early.
+func (a *App) removeTimeout(serverID, userID string) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.RemoveTimeout(serverID, userID) },
+		"end timeout on member "+userID+" in server "+serverID,
+		"Could not end %s's timeout.", "%s may write again.", name,
+	)
 }

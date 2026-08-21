@@ -65,23 +65,19 @@ func TestSystemMessageTargetKind(t *testing.T) {
 		kind   SystemKind
 		target string
 		user   bool
-		pinned string
 	}{
-		{SystemUserJoined, "01USER", true, ""},
-		{SystemUserKicked, "01USER", true, ""},
-		{SystemMessagePinned, "01MESSAGE", false, "01MESSAGE"},
-		{SystemMessageUnpinned, "01MESSAGE", false, "01MESSAGE"},
-		{SystemChannelRenamed, "", false, ""},          // names nothing at all
-		{SystemKind("teleported"), "01USER", true, ""}, // a kind added after this client
+		{SystemUserJoined, "01USER", true},
+		{SystemUserKicked, "01USER", true},
+		{SystemMessagePinned, "01MESSAGE", false},
+		{SystemMessageUnpinned, "01MESSAGE", false},
+		{SystemChannelRenamed, "", false},          // names nothing at all
+		{SystemKind("teleported"), "01USER", true}, // a kind added after this client
 	}
 
 	for _, tc := range cases {
 		system := &SystemMessage{Kind: tc.kind, Target: tc.target}
 		if got := system.TargetsUser(); got != tc.user {
 			t.Errorf("%q.TargetsUser() = %v, want %v", tc.kind, got, tc.user)
-		}
-		if got := system.PinnedMessageID(); got != tc.pinned {
-			t.Errorf("%q.PinnedMessageID() = %q, want %q", tc.kind, got, tc.pinned)
 		}
 	}
 }

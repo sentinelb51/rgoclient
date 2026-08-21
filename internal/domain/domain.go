@@ -172,9 +172,10 @@ type Message struct {
 	Webhook    *Webhook
 	Masquerade bool
 
-	// Pinned is kept by the channel, not the message: it changes without an edit,
-	// and the pin/unpin system event announces it — see client/events.go, where
-	// the partial update Revolt sends alongside can't be read for it.
+	// Pinned changes without an edit, and is announced twice: as a partial update
+	// carrying the flag, and as a system line in the channel. The update is what
+	// client/events.go reads — the line is a message like any other, and deriving
+	// state from one is deriving it from a rendering.
 	Pinned bool
 
 	// Reactions are in the order client/convert.go put them in; Revolt has no
@@ -261,15 +262,6 @@ func (s *SystemMessage) TargetsUser() bool {
 	return s.Target != "" && !s.isPin()
 }
 
-// PinnedMessageID is the message a pin or unpin event announces, else "".
-func (s *SystemMessage) PinnedMessageID() string {
-	if !s.isPin() {
-		return ""
-	}
-
-	return s.Target
-}
-
 // TextParts renders the event in the two pieces the client draws it in: the name
 // it opens with, kept apart because it is tappable like a mention, and the rest
 // of the sentence. who is Target's display name, resolved by the caller
@@ -352,10 +344,12 @@ type Embed struct {
 // trip, they simply have nothing here to ask them.
 type Permission int64
 
-// Channel-scoped permissions, asked of Store.Permissions.
+// Permissions named for a channel, asked of Store.Permissions.
 const (
 	// PermissionManageChannel is the whole of what editing a channel takes: Stoat's
 	// channel_edit route checks it once and gates no field behind anything further.
+	// It is also the bit *making* a channel takes, so it is asked of a server as
+	// well (Store.ServerPermissions) and is not channel-only.
 	PermissionManageChannel Permission = 1 << 0
 
 	PermissionViewChannel        Permission = 1 << 20
@@ -370,8 +364,37 @@ const (
 
 // Server-scoped permissions, asked of Store.ServerPermissions.
 const (
-	PermissionKickMembers Permission = 1 << 6
-	PermissionBanMembers  Permission = 1 << 7
+	PermissionManageServer      Permission = 1 << 1
+	PermissionManagePermissions Permission = 1 << 2
+	PermissionManageRole        Permission = 1 << 3
+	PermissionKickMembers       Permission = 1 << 6
+	PermissionBanMembers        Permission = 1 << 7
+	PermissionTimeoutMembers    Permission = 1 << 8
+	PermissionAssignRoles       Permission = 1 << 9
+	PermissionChangeNickname    Permission = 1 << 10
+	PermissionManageNicknames   Permission = 1 << 11
+)
+
+// The rest of what Revolt defines, which the role editor lists rather than asks.
+// Positions from ChannelPermission in
+// https://github.com/stoatchat/stoatchat/blob/main/crates/core/permissions/src/models/channel.rs
+const (
+	PermissionManageCustomisation Permission = 1 << 4
+	PermissionChangeAvatar        Permission = 1 << 12
+	PermissionRemoveAvatars       Permission = 1 << 13
+	PermissionManageWebhooks      Permission = 1 << 24
+	PermissionSendEmbeds          Permission = 1 << 26
+	PermissionMasquerade          Permission = 1 << 28
+	PermissionConnect             Permission = 1 << 30
+	PermissionSpeak               Permission = 1 << 31
+	PermissionVideo               Permission = 1 << 32
+	PermissionMuteMembers         Permission = 1 << 33
+	PermissionDeafenMembers       Permission = 1 << 34
+	PermissionMoveMembers         Permission = 1 << 35
+	PermissionListen              Permission = 1 << 36
+	PermissionMentionEveryone     Permission = 1 << 37
+	PermissionMentionRoles        Permission = 1 << 38
+	PermissionViewAuditLogs       Permission = 1 << 40
 )
 
 // Has reports whether every permission in want is held. Zero — which is what an
@@ -435,8 +458,22 @@ type Server struct {
 	Name    string
 	OwnerID string
 
+	// Description is the server's own blurb. Only its settings page states it —
+	// nothing in the sidebar has room — and it is routinely empty.
+	Description string
+
 	IconID  string
 	IconURL string
+
+	// BannerURL is the picture behind the channel list in clients that draw one.
+	// Nothing here does; it is kept so the settings page knows whether there is one
+	// to remove.
+	BannerURL string
+
+	// DefaultPermissions is what every member holds before any role adds to it or
+	// takes from it — a plain set rather than an override, there being nothing
+	// under it to inherit from.
+	DefaultPermissions Permission
 
 	Channels   []string
 	Categories []Category
@@ -457,16 +494,59 @@ type Category struct {
 // already in the server, it turns the card's action from joining into going.
 type Invite struct {
 	Code string
+	Kind InviteKind
 
 	ServerID   string
 	ServerName string
 	IconURL    string
+	BannerURL  string
+
+	// ChannelID is where a server invite lands and what a group invite *is* — for
+	// a group it is the only ID there is, the account being in the channel or not
+	// rather than in a server.
+	ChannelID string
 
 	// Either may be missing, so neither is load-bearing.
 	ChannelName string
 	InviterName string
 
 	MemberCount int
+}
+
+// InviteKind is what a code opens. Revolt serves both through one route and
+// describes a group with the channel fields alone — no server, no icon and no
+// count — so a card that assumed a server would name it wrongly and then quote
+// its own channel line back at it.
+type InviteKind uint8
+
+const (
+	InviteServer InviteKind = iota
+	InviteGroup
+)
+
+/* Server administration */
+
+// Ban is one entry of a server's ban list.
+//
+// It carries a name and a picture rather than only an ID to look up: the ban
+// list answers with a reduced user of its own, and a banned account is no longer
+// a member, so there would be nothing in the Store to resolve it against.
+type Ban struct {
+	UserID    string
+	Username  string
+	AvatarURL string
+
+	Reason string
+}
+
+// ServerInvite is one invite a server has outstanding.
+//
+// The whole of what Revolt stores is the code, who made it and where it lands —
+// there is no expiry, no use count and no creation time to list beside them.
+type ServerInvite struct {
+	Code      string
+	ChannelID string
+	CreatorID string
 }
 
 /* Emoji */
@@ -575,6 +655,7 @@ type Member struct {
 	UserID   string
 
 	Name      string
+	Nickname  string // the per-server name where there is one, kept apart from Name's fallback
 	Username  string // the account handle behind the nickname, for mention matching
 	AvatarURL string
 	Color     color.Color // most-senior coloured role; nil when none applies
@@ -585,6 +666,11 @@ type Member struct {
 	HoistRoleID string
 
 	JoinedAt time.Time
+
+	// Timeout is when a server-side timeout expires; zero for none, and one in the
+	// past has expired — no gateway event announces the expiry.
+	Timeout time.Time
+
 	Presence Presence
 
 	// HasRoles counts any role at all, including one the server has not published
@@ -603,6 +689,13 @@ type Role struct {
 	ID    string
 	Name  string
 	Color color.Color // nil when the role has no colour, or none that parses
+
+	// ColorText is the colour as Revolt holds it, which is any CSS colour — a
+	// gradient included — rather than the hex Color was parsed out of.
+	ColorText string
+
+	Allow Permission
+	Deny  Permission
 
 	Rank  int64
 	Hoist bool

@@ -1303,7 +1303,8 @@ func resolveReply(deps Deps, channelID, messageID string) (author, content, avat
 
 	// Flattened rather than shown raw: a quote is one line, and the asterisks and
 	// newlines the source carries would either read literally or break the row.
-	flat := markdown.DocumentText(markdown.Parse(message.Content))
+	// Named, so a reply to a message that is only emoji quotes something.
+	flat := markdown.DocumentTextNamed(markdown.Parse(message.Content), deps.Store.EmojiName)
 
 	return util.Truncate(a.Name, maxReplyUsernameLength),
 		util.Truncate(flat, maxReplyPreviewLength),

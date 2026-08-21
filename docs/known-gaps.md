@@ -7,13 +7,10 @@ is missing by accident.
 Simply not built, no constraint behind it: an attach button (files arrive by drag
 or paste), role mentions, a notice history panel,
 a hue wheel/alpha/eyedropper in the colour picker,
-`MessageEmbedSpecial` (YouTube, Spotify, …), creating or renaming a channel
-(`ServerChannelCreate` / `ChannelEdit`), listing or revoking the invites this
-client can now create (`ServerInvites` / `InviteDelete`), the ban list and with it
-any way to lift a ban this client can now place (`ServerBans` /
-`ServerMemberUnban`), and moderation beyond the destructive sidebar items (role
-edits, nicknames, channel deletion are one call away but deliberately not
-offered).
+`MessageEmbedSpecial` (YouTube, Spotify, …), and moderation beyond what a
+server's settings page and the destructive sidebar items offer — role edits,
+nicknames, timeouts and channel deletion are each one call away but deliberately
+not offered.
 
 The gateway events still unregistered are the ones nothing here has to do about:
 `EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
@@ -119,9 +116,21 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   come back newest first: `Relevance` is the route's default and is not asked for,
   a list that leads into a channel's history reading better in the order that
   history has.
+- **The mention inbox lists what Revolt has kept, which is not everything that
+  ever named you.** The set is the `mentions` array on each unread marker, so it
+  holds only what is still *unread*: acknowledging a channel prunes it, and there
+  is no history of mentions already read. `@everyone` and `@online` are message
+  flags rather than entries in that array, so a channel-wide ping washes the
+  message warm and rings the sound without ever reaching the inbox or the sidebar
+  count. A mention whose message was since deleted stays counted — Revolt prunes
+  the array on an ack and on nothing else — and shows as one row fewer than the
+  badge says. The panel resolves the newest `inboxLimit` of them, each being a
+  request, and there is no paging past that; the sidebar still counts the rest.
+  Nothing is muted, either: Revolt's per-channel notification settings are user
+  settings this client does not read, so a muted channel counts like any other.
 - **A server is created with a name and nothing else.** Revolt takes no icon and
-  no description at creation, so the card is one field; the icon has to be set
-  from another client, `ServerEdit` being moderation and deliberately not offered.
+  no description at creation, so the card is one field; both are set afterwards
+  from the server's own settings page.
   Nothing in the response can be believed either (see the revoltgo note), so the
   new server appears when the gateway says so rather than when the request
   returns.
@@ -164,19 +173,24 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   **video** embed is dropped at the boundary (revoltgo carries only the URL, and
   there is no player); a bare **image** embed has the same missing dimensions, so it
   draws against the placeholder until the picture lands.
-- **An invite card** says "server" whatever the code opens: revoltgo carries
-  `Invite.Type`, and a *group* invite resolves with no `ServerID`, so it is
-  offered as a join — which works — under the wrong noun. It draws no banner
-  (`Invite.ServerBanner` is dropped at the boundary, as a profile's is flat for
-  the same reason) and does not refresh, so a server joined from another client
-  keeps offering Join until the channel is reopened. `NewInviteCardFor` exists
-  for a caller holding a resolved invite, but nothing calls it yet — the join
-  dialog still validates a pasted code without previewing what it opens.
+- **An invite card does not refresh.** A server joined from another client keeps
+  offering Join until the channel is reopened, the card being filled once when it
+  resolves. Its **banner** is drawn only on a preview — the card the join dialog
+  mounts from an invite already in hand: in a message it mounts saying nothing and
+  is filled a moment later, so a part only some invites carry would shove the
+  messages under it down as the answer landed. A **group** invite is named and
+  offered as a group, but never with a picture: Revolt describes one with the
+  channel fields alone and sends no icon, so it is always the initial.
 - **A custom emoji** is a still: `image.Decode` takes the first frame of an
   animated one. It has no name beside it either — nothing tooltips a message body
   — so one whose picture fails to arrive leaves an empty square rather than the
-  `:shortcode:` other clients fall back to, and a preview of a body that is only
-  emoji (`markdown.PlainText`) is blank. A reaction chip inherits all of it, the
+  `:shortcode:` other clients fall back to. Two things hold that square there:
+  `ImageCache` reports a load that failed to nobody (`LoadAsync` simply returns),
+  and a segment reserves its width before the load starts, so text arriving in its
+  place would re-flow the line under somebody already reading it. A *flattened*
+  line does fall back — `markdown.DocumentTextNamed` takes `Store.EmojiName`, so a
+  reply preview and a panel row quote `:shortcode:` — but only for the servers the
+  account is in, a name being held nowhere else. A reaction chip inherits all of it, the
   square there being all the chip has to say. The **picker** names one at a time:
   its tooltip reads what the pointer is over, so a cell whose picture has not
   landed can be identified but not scanned for, nothing captions the cells
@@ -190,13 +204,11 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   store cannot name is counted rather than named, which for a reaction reaching
   accounts nothing on the page has fetched is the ordinary case, and nothing
   fetches them for the sake of a label. Ordering is by emoji rather than by who
-  reacted first — the payload is a map, and there is no first to read. **Clearing
-  them all is offered but only reflects
-  when this client does it:** Revolt announces a clear as a message update
-  carrying an empty reaction map, and revoltgo's `EventMessageUpdate.Data` is a
-  whole `Message`, so an empty map is also what an ordinary content edit brings —
-  the same unreadable field that keeps pin state off that event. One emoji taken
-  off wholesale is a different event and does land. `Message.Interactions` (the
+  reacted first — the payload is a map, and there is no first to read. Clearing
+  them all lands wherever it was made: `EventMessageUpdate.Data` is a
+  `PartialMessage` now, so the empty map Revolt announces a clear with is
+  distinguishable from an edit that never mentioned reactions at all. One emoji
+  taken off wholesale is a different event and lands too. `Message.Interactions` (the
   emoji a message *restricts* reactions to) is dropped at the boundary, so a pick
   it forbids is refused by the server rather than not offered.
 - **A typing indicator** runs off the client's own clock: Revolt sends no
@@ -297,14 +309,15 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **A picture is sent as it is, and a profile is a snapshot.** Nothing is checked
   about a file before it is uploaded: Autumn owns the size limit and the accepted
   types, and a refusal arrives as a status code, so the notice can only offer
-  "it may be too large". The bio and the banner are not on the user record —
-  `PartialUser` carries a `Profile` that revoltgo's own `User.update` ignores, so
-  no event announces either — which makes them a request asked once per session
+  "it may be too large". The bio and the banner are not on the user record — the
+  v0 user model has no `profile` field at all, so no event announces either —
+  which makes them a request asked once per session
   and again after each edit made here; one made from another client appears when
   the page is reopened. The banner is not previewed in the row that sets it, and
   a *username* refusal cannot be told apart: Revolt answers a taken name and a
-  wrong password alike. Revolt's `pronouns` is modelled by neither revoltgo's
-  `User` nor its edit params, so it is neither read nor set.
+  wrong password alike. **Pronouns** are simply not built: revoltgo models
+  `User.Pronouns` and `UserEditParams.Pronouns` now, so this is a row on the
+  settings page and a line on the profile card, not a constraint.
 - **A second factor is a code, and only a code.** `AuthMFA*` beyond the login
   itself is uncovered: nothing enables or disables 2FA, generates recovery codes
   or lists them (`AuthMFAGenerateTOTPSecret`, `AuthMFARecoveryCodes`), so an
@@ -325,13 +338,55 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   covers the login bodies, which are hand-written against the spec rather than
   taken from revoltgo and so are the one request shape that can be wrong on its
   own.
-- `ui.NewInviteCardFor` — the entry point for a caller already holding a resolved
-  `domain.Invite` — is built and unreferenced. The join dialog still validates a
-  pasted code without previewing what it opens, which is what it is for.
-- **`ui.TestAttachmentViewerFits` is intermittently flaky**, roughly one run in
-  fifteen. `ui.viewerText` starts a goroutine that fetches the file and calls
-  `DoOnUI`, and Fyne's *test* driver runs that work concurrently with the test
-  rather than serialising it onto a UI thread — so it races the harness inside
-  `go-text`'s unsynchronised font-shaper LRU (`concurrent map writes`) or Fyne's
-  own `RichText` row bounds. Nothing is wrong with the widget: the real driver has
-  one UI thread and `DoFromGoroutine` queues onto it. Re-run the package.
+- **A server's settings are three lists, a role editor and a statement of fact.**
+  The cog on the channel sidebar's header opens them, and appears only where the
+  account holds `ManageChannel`, `ManageServer`, `ManageRole` or `BanMembers` — a
+  page offering none of those would be a reading of the sidebar behind it. Each
+  section the account cannot reach is left off the rail rather than drawn empty.
+  What limits it is that **nothing announces any of it**. No gateway event carries
+  a lifted ban, a revoked invite or an invite created anywhere, so Bans and
+  Invites go through `ui.cachedList` — held for the opening, one request at a
+  time, expiring after `listTTL` (30s). So the window in which the page can be
+  wrong about somebody *else's* revoked invite or lifted ban is that TTL, and it
+  closes on the next tap into the section rather than on a timer: a list left on
+  screen untouched keeps showing what it last fetched, however long that is.
+  Overview sets the name, the description, the icon and the banner — that last
+  one drawn nowhere in this client, an invite card being where it shows — and
+  states the rest. There is no member count, since `Store.Members` answers with
+  whoever has been resolved rather than with the membership and the number would
+  climb as the reader scrolled.
+- **A role is edited at server scope, in hex, without a picture.** The editor sets
+  a role's name, colour, hoist, seniority and all thirty-four permission bits, and
+  three things about one are out of reach. Revolt's role **icon** is neither read
+  nor set. The **colour** is a hex — Revolt takes any CSS colour, gradients
+  included, and the client's own palette and swatch agree on hexes — so a role
+  already wearing a gradient keeps it until somebody picks a colour and there is
+  no way to type one back; `domain.Role.ColorText` is what the field opens on
+  where it can, and what a read-only row states exactly. And the grid is the
+  role's **server-wide** override only: per-channel overrides
+  (`ChannelPermissionsSet`) are the same three states aimed at a channel and are
+  not built. What stops them is the surface rather than the route — revoltgo
+  declares it correctly now — since a channel's overrides are a channel *and* a
+  role, and the page drills one level. So a role denied something in one channel
+  can be read that way and never written. Nothing counts how many members hold a
+  role, for the reason there is no member count. Which members hold it is the
+  member menu's question, not this page's.
+- **Three permissions decide what of a role can be changed, and the page asks all
+  three.** `ManageRole` covers the name, the colour, the hoist, the order and the
+  delete; `ManagePermissions` covers the grid; and Revolt refuses to grant a bit
+  the actor does not hold themselves, so the grid is drawn per bit — a control
+  where all of that holds, and the state in words where it does not. The section
+  is listed for either permission. What this cannot answer for is a *rank* change
+  under an open editor: the page rebuilds from the store on every role event, so a
+  role that has just risen above the reader closes its own editor and returns them
+  to the list, which is correct and abrupt.
+- **What a member menu can do to somebody depends on four permissions and a rank,
+  and the client asks all five.** A nickname, a set of roles and a timeout are one
+  route (`ServerMemberEdit`) under `ChangeNickname`/`ManageNicknames`,
+  `AssignRoles` and `TimeoutMembers`; roles are additionally gated on rank, since
+  Revolt refuses one at or above the actor's own. What it does **not** offer is a
+  per-server avatar (`ChangeAvatar`/`RemoveAvatars`), which is an upload into a
+  bucket with no surface here. A timeout has no server-side maximum, so the six
+  spans the menu lists are the client's own; a member's remaining time is not
+  drawn anywhere either — the menu offers to end one, which is the only place a
+  standing timeout shows at all.

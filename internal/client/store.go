@@ -295,10 +295,13 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, server *revo
 	}
 
 	if member.Nickname != nil {
-		out.Name = *member.Nickname
+		out.Name, out.Nickname = *member.Nickname, *member.Nickname
 	}
 	if member.Avatar != nil {
 		out.AvatarURL = member.Avatar.URL(avatarSize)
+	}
+	if member.Timeout != nil {
+		out.Timeout = *member.Timeout
 	}
 
 	// The account behind the membership fills in whatever the nickname and the
@@ -394,24 +397,62 @@ func (s *store) HoistedRoles(serverID string) []domain.Role {
 			roles = append(roles, toRole(id, role))
 		}
 	}
+	sortRoles(roles)
+
+	return roles
+}
+
+// ServerRoles is every role a server defines, most senior first. The role editor
+// asks for all of them where the sidebar asks only for the hoisted ones, and both
+// read what Ready already brought.
+func (s *store) ServerRoles(serverID string) []domain.Role {
+	state := s.state()
+	if state == nil || serverID == "" {
+		return nil
+	}
+
+	server := state.Server(serverID)
+	if server == nil {
+		return nil
+	}
+
+	roles := make([]domain.Role, 0, len(server.Roles))
+	for id, role := range server.Roles {
+		if role != nil {
+			roles = append(roles, toRole(id, role))
+		}
+	}
+	sortRoles(roles)
+
+	return roles
+}
+
+// sortRoles orders roles most senior first, which is ascending Rank.
+func sortRoles(roles []domain.Role) {
 	slices.SortFunc(roles, func(x, y domain.Role) int {
 		if by := cmp.Compare(x.Rank, y.Rank); by != 0 {
 			return by
 		}
 
 		// Ranks are not guaranteed distinct and map iteration is not ordered, so
-		// two roles sharing one would otherwise swap sections between rebuilds.
+		// two roles sharing one would otherwise swap places between rebuilds.
 		return strings.Compare(x.ID, y.ID)
 	})
-
-	return roles
 }
 
 // toRole converts one role definition. revoltgo leaves ServerRole.ID empty — the
 // map key is the ID — so it is passed in.
 func toRole(id string, role *revoltgo.ServerRole) domain.Role {
-	out := domain.Role{ID: id, Name: role.Name, Rank: role.Rank, Hoist: role.Hoist}
+	out := domain.Role{
+		ID:    id,
+		Name:  role.Name,
+		Allow: domain.Permission(role.Permissions.Allow),
+		Deny:  domain.Permission(role.Permissions.Deny),
+		Rank:  role.Rank,
+		Hoist: role.Hoist,
+	}
 	if role.Colour != nil {
+		out.ColorText = *role.Colour
 		if c, ok := parseColor(*role.Colour); ok {
 			out.Color = c
 		}
@@ -598,7 +639,24 @@ func (s *store) EmojiURL(emojiID string) string {
 		return ""
 	}
 
-	return revoltgo.EndpointAutumnFile(emojiTag, emojiID, emojiSize)
+	return revoltgo.EndpointAutumnFile(revoltgo.FileTagEmojis, emojiID, emojiSize)
+}
+
+// EmojiName is the shortcode an emoji is written as. Unlike the URL above this
+// is a lookup and can only answer for the servers the account is in: a name is
+// held nowhere else, and there is no route that asks for one emoji.
+func (s *store) EmojiName(emojiID string) string {
+	state := s.state()
+	if state == nil || emojiID == "" {
+		return ""
+	}
+
+	emoji := state.Emoji(emojiID)
+	if emoji == nil {
+		return ""
+	}
+
+	return emoji.Name
 }
 
 // Emojis is every custom emoji the account may use, ordered by name.
@@ -768,6 +826,23 @@ func (s *store) ServerPermissions(serverID string) domain.Permission {
 	}
 
 	return serverPermissions(server, state.Member(serverID, self.ID), self.ID)
+}
+
+// MemberServerPermissions is ServerPermissions asked about somebody else — what a
+// moderation action has to know about the person it is aimed at, Revolt refusing
+// one against somebody who holds the same permission.
+func (s *store) MemberServerPermissions(serverID, userID string) domain.Permission {
+	state := s.state()
+	if state == nil || serverID == "" || userID == "" {
+		return 0
+	}
+
+	server := state.Server(serverID)
+	if server == nil {
+		return 0
+	}
+
+	return serverPermissions(server, state.Member(serverID, userID), userID)
 }
 
 // channelPermissions resolves what a member may do in one of a server's

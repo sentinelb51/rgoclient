@@ -3,6 +3,8 @@ package client
 import (
 	"testing"
 
+	"github.com/sentinelb51/revoltgo"
+
 	"RGOClient/internal/domain"
 )
 
@@ -18,14 +20,9 @@ func pinFixture(t *testing.T) (*Client, *domain.Message) {
 	return c, message
 }
 
-// pinEvent is the system message Revolt announces a pin or unpin with. The
-// target is the *message* that moved, not a user.
-func pinEvent(kind domain.SystemKind, target string) *domain.Message {
-	return &domain.Message{
-		ID:        "01SYSTEM",
-		ChannelID: "01CHANNEL",
-		System:    &domain.SystemMessage{Kind: kind, Target: target},
-	}
+// pinUpdate is an update event carrying a partial and a clear array.
+func pinUpdate(data revoltgo.PartialMessage, clear ...revoltgo.MessageClearType) *revoltgo.EventMessageUpdate {
+	return &revoltgo.EventMessageUpdate{ID: "01MESSAGE", Channel: "01CHANNEL", Data: data, Clear: clear}
 }
 
 // A pin must reach the cache as a replacement rather than a write, since cached
@@ -64,62 +61,33 @@ func TestMarkPinnedReportsNoChange(t *testing.T) {
 	}
 }
 
-// applyPinEvent is the only path that believes anything about pin state, the
-// partial update Revolt sends alongside being unreadable for it. So it has to
-// act on both directions, name the message that moved rather than the system
-// line announcing it, and ignore every other kind of system event.
-func TestApplyPinEvent(t *testing.T) {
-	t.Run("a pin", func(t *testing.T) {
-		c, _ := pinFixture(t)
-		c.applyPinEvent(0, pinEvent(domain.SystemMessagePinned, "01MESSAGE"))
+// The two directions of a pin do not arrive the same way, and only one of them
+// puts anything in Data: an unpin sends an *empty* partial and names Pinned in
+// the clear array (message_unpin.rs), there being no field that carries false.
+// Reading Data alone therefore sees an unpin as an update that says nothing, and
+// the message stays pinned on screen with nothing to suggest why.
+func TestPinnedAfter(t *testing.T) {
+	pinned, unpinned := true, false
 
-		updated, ok := (<-c.events).(MessageUpdated)
-		if !ok || updated.MessageID != "01MESSAGE" {
-			t.Fatalf("announced %+v, want an update naming the pinned message", updated)
+	cases := []struct {
+		name  string
+		event *revoltgo.EventMessageUpdate
+		was   bool
+		want  bool
+	}{
+		{"a pin", pinUpdate(revoltgo.PartialMessage{Pinned: &pinned}), false, true},
+		{"an unpin", pinUpdate(revoltgo.PartialMessage{}, revoltgo.MessageClearPinned), true, false},
+		{"an unpin spelled as a flag", pinUpdate(revoltgo.PartialMessage{Pinned: &unpinned}), true, false},
+
+		// A content edit mentions neither, and must leave a pinned message pinned.
+		{"an edit", pinUpdate(revoltgo.PartialMessage{Content: new(string)}), true, true},
+	}
+
+	for _, tc := range cases {
+		if got := pinnedAfter(tc.event, tc.was); got != tc.want {
+			t.Errorf("%s: pinnedAfter(was %v) = %v, want %v", tc.name, tc.was, got, tc.want)
 		}
-		if !c.messages.Find("01CHANNEL", "01MESSAGE").Pinned {
-			t.Error("the message was not pinned")
-		}
-	})
-
-	t.Run("an unpin", func(t *testing.T) {
-		c, _ := pinFixture(t)
-		c.markPinned("01CHANNEL", "01MESSAGE", true)
-
-		c.applyPinEvent(0, pinEvent(domain.SystemMessageUnpinned, "01MESSAGE"))
-		if c.messages.Find("01CHANNEL", "01MESSAGE").Pinned {
-			t.Error("the message is still pinned")
-		}
-	})
-
-	// Every other system event carries a user in the same field, and acting on one
-	// would unpin whatever message happened to share the ID.
-	t.Run("another kind of event", func(t *testing.T) {
-		c, _ := pinFixture(t)
-		c.markPinned("01CHANNEL", "01MESSAGE", true)
-
-		c.applyPinEvent(0, pinEvent(domain.SystemUserJoined, "01MESSAGE"))
-		if !c.messages.Find("01CHANNEL", "01MESSAGE").Pinned {
-			t.Error("a join event changed a message's pin state")
-		}
-		select {
-		case event := <-c.events:
-			t.Errorf("announced %+v, want nothing", event)
-		default:
-		}
-	})
-
-	// An ordinary message is the common case and must not be looked at further.
-	t.Run("not a system message", func(t *testing.T) {
-		c, _ := pinFixture(t)
-		c.applyPinEvent(0, &domain.Message{ID: "01OTHER", ChannelID: "01CHANNEL"})
-
-		select {
-		case event := <-c.events:
-			t.Errorf("announced %+v, want nothing", event)
-		default:
-		}
-	})
+	}
 }
 
 /* Reactions */

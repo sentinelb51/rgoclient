@@ -35,16 +35,6 @@ const resolveWorkers = 4
 // refuses the request outright, so a longer one is cut rather than sent.
 const maxSearchQuery = 64
 
-// Autumn's buckets. A file is looked up by its ID *and* the bucket it was put
-// in at the moment it is used, so which one a picture is uploaded to is what
-// decides whether Revolt will take it as an avatar, as a banner or as an
-// attachment — see uploadTo.
-const (
-	bucketAttachments = "attachments"
-	bucketAvatars     = "avatars"
-	bucketBackgrounds = "backgrounds"
-)
-
 // AvatarURL builds the URL an avatar is served from. It exists for the saved
 // login cards, which persist an avatar ID from a session that no longer exists
 // and so cannot ask the store for one.
@@ -53,7 +43,7 @@ func AvatarURL(avatarID string) string {
 		return ""
 	}
 
-	return revoltgo.EndpointAutumnFile(bucketAvatars, avatarID, avatarSize)
+	return revoltgo.EndpointAutumnFile(revoltgo.FileTagAvatars, avatarID, avatarSize)
 }
 
 // trimTo trims s and shortens it to at most limit runes, trimming again in case
@@ -95,7 +85,7 @@ func uploadAttachments(session *revoltgo.Session, attachments []domain.Attachmen
 	ids := make([]string, 0, len(attachments))
 
 	for _, attachment := range attachments {
-		id, err := uploadFile(session, bucketAttachments, attachment.Path, attachment.Name)
+		id, err := uploadFile(session, revoltgo.FileTagAttachments, attachment.Path, attachment.Name)
 		if err != nil {
 			log.Printf("upload attachment %s: %v", attachment.Name, err)
 			continue
@@ -107,19 +97,19 @@ func uploadAttachments(session *revoltgo.Session, attachments []domain.Attachmen
 }
 
 // uploadFile puts a file in one of Autumn's buckets and hands back the ID Revolt
-// will take for it. It goes round Session.AttachmentUpload, which names the
-// attachments bucket and nothing else — Revolt looks a file up by ID *and*
-// bucket, so an attachment's ID offered as an avatar does not exist.
-func uploadFile(session *revoltgo.Session, bucket, path, name string) (string, error) {
+// will take for it. Everything uploaded from this client goes through here: the
+// path is opened and closed in one place, and the *tag* is named at the call
+// site, because a file is looked up by ID **and** tag when it is used — an
+// attachment's ID offered as an avatar is a file that does not exist.
+func uploadFile(session *revoltgo.Session, tag revoltgo.FileTag, path, name string) (string, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", err
 	}
 	defer func() { _ = file.Close() }()
 
-	var uploaded revoltgo.FileParamsData
-	if err := session.HTTP.Request(http.MethodPost, revoltgo.EndpointAutumn(bucket),
-		&revoltgo.FileParams{Name: name, Reader: file}, &uploaded); err != nil {
+	uploaded, err := session.Upload(tag, &revoltgo.FileParams{Name: name, Reader: file})
+	if err != nil {
 		return "", err
 	}
 
@@ -853,20 +843,13 @@ func (c *Client) CloseChannel(channelID string) error {
 
 /* Editing a channel */
 
-// Revolt's ceilings on what a channel edit carries. A name is cut to fit; an
-// empty one has no repair, so it is the one case reported back.
+// Revolt's ceilings on what a channel carries — the name and the description
+// bound making one as much as editing it. A name is cut to fit; an empty one has
+// no repair, so it is the one case reported back.
 const (
 	MaxChannelName        = 32
 	MaxChannelDescription = 1024
 	MaxChannelSlowmode    = 6 * time.Hour
-)
-
-// The names a cleared field is removed under. Neither an empty string nor a zero
-// reaches the wire — both are dropped by omitzero and read as "leave it alone" —
-// so clearing anything is a name rather than a blank, as it is for a user edit.
-const (
-	fieldChannelDescription = "Description"
-	fieldChannelSlowmode    = "Slowmode"
 )
 
 var ErrChannelNameEmpty = errors.New("channel name is empty")
@@ -915,7 +898,7 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 		NSFW:        &edit.NSFW,
 	}
 	if params.Description == "" {
-		params.Remove = append(params.Remove, fieldChannelDescription)
+		params.Remove = append(params.Remove, revoltgo.ChannelClearDescription)
 	}
 
 	if edit.Slowmode != nil {
@@ -925,7 +908,7 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 		if seconds > 0 {
 			params.Slowmode = &seconds
 		} else {
-			params.Remove = append(params.Remove, fieldChannelSlowmode)
+			params.Remove = append(params.Remove, revoltgo.ChannelClearSlowmode)
 		}
 	}
 
@@ -947,7 +930,12 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 
 // MaxServerName is Revolt's ceiling on a server name; ErrServerNameEmpty is the
 // other end of the same rule, the route taking nothing shorter than a character.
-const MaxServerName = 32
+// MaxServerDescription is the blurb's, which has no lower bound — an empty one is
+// a description removed.
+const (
+	MaxServerName        = 32
+	MaxServerDescription = 1024
+)
 
 var ErrServerNameEmpty = errors.New("server name is empty")
 
@@ -971,6 +959,55 @@ func (c *Client) CreateServer(name string) error {
 	_, err := session.ServerCreate(revoltgo.ServerCreateParams{Name: name})
 
 	return err
+}
+
+// ChannelCreate is what creating a channel takes. Voice is a flag rather than a
+// kind because it is one on the way out only: the route takes a channel type,
+// while what comes back says so with a voice object instead (see toChannelKind).
+type ChannelCreate struct {
+	Name        string
+	Description string
+
+	Voice bool
+	NSFW  bool
+}
+
+// CreateChannel makes a channel in a server and returns its ID. As with a server
+// name, a long one is cut and an empty one is the one case reported back.
+//
+// The channel itself reaches the sidebar as ChannelCreated on the gateway, which
+// is handled already — the response is read for its ID alone, so the caller can
+// select what it has just made.
+func (c *Client) CreateChannel(serverID string, create ChannelCreate) (channelID string, err error) {
+	session := c.session.Load()
+	if session == nil {
+		return "", ErrNoSession
+	}
+
+	name := trimTo(create.Name, MaxChannelName)
+	if name == "" {
+		return "", ErrChannelNameEmpty
+	}
+
+	kind := revoltgo.ServerChannelCreateDataTypeText
+	if create.Voice {
+		kind = revoltgo.ServerChannelCreateDataTypeVoice
+	}
+
+	channel, err := session.ServerChannelCreate(serverID, revoltgo.ServerChannelCreateParams{
+		Type:        kind,
+		Name:        name,
+		Description: trimTo(create.Description, MaxChannelDescription),
+		NSFW:        create.NSFW,
+	})
+	if err != nil {
+		return "", err
+	}
+	if channel == nil {
+		return "", errors.New("no channel returned")
+	}
+
+	return channel.ID, nil
 }
 
 // FetchMembers pulls a server's whole membership into the local cache, the
@@ -1040,6 +1077,48 @@ func (c *Client) CreateInvite(channelID string) (code string, err error) {
 	return invite.ID, nil
 }
 
+// ServerInvites lists the invites a server has outstanding, grouped by the
+// channel they land in so a re-fetch reads the same way twice.
+//
+// There is no expiry, no use count and no creation time on a stored invite, so
+// domain.ServerInvite is the whole of one.
+func (c *Client) ServerInvites(serverID string) ([]domain.ServerInvite, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+
+	response, err := session.ServerInvites(serverID)
+	if err != nil {
+		return nil, err
+	}
+
+	invites := make([]domain.ServerInvite, len(response))
+	for i, raw := range response {
+		invites[i] = domain.ServerInvite{Code: raw.ID, ChannelID: raw.Channel, CreatorID: raw.Creator}
+	}
+	slices.SortFunc(invites, func(x, y domain.ServerInvite) int {
+		if by := strings.Compare(x.ChannelID, y.ChannelID); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.Code, y.Code)
+	})
+
+	return invites, nil
+}
+
+// DeleteInvite revokes an invite. Nothing announces it, so a caller showing the
+// list re-fetches rather than waiting to be told.
+func (c *Client) DeleteInvite(code string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.InviteDelete(code)
+}
+
 // JoinInvite redeems an invite code. The joined server reaches the caller
 // through ServerJoined rather than this response, the same one path CreateServer
 // takes.
@@ -1064,6 +1143,98 @@ func (c *Client) LeaveServer(serverID string) error {
 	}
 
 	return session.ServerDelete(serverID)
+}
+
+// SetServerName renames a server. The new name reaches the client as
+// ServerUpdated, which revoltgo files into State on the way past, so nothing is
+// recorded here — the settings page and the sidebar both re-read the store.
+func (c *Client) SetServerName(serverID, name string) error {
+	name = trimTo(name, MaxServerName)
+	if name == "" {
+		return ErrServerNameEmpty
+	}
+
+	return c.editServer(serverID, revoltgo.ServerEditParams{Name: name})
+}
+
+// SetServerDescription publishes the blurb, blank removing it. As with every
+// other field Revolt models as `omitzero`, an empty string is read as "leave it
+// alone" — so clearing one is a name in `remove`, the shape a display name and a
+// status line already use.
+func (c *Client) SetServerDescription(serverID, description string) error {
+	description = trimTo(description, MaxServerDescription)
+	if description == "" {
+		return c.editServer(serverID, revoltgo.ServerEditParams{
+			Remove: []revoltgo.ServerEditParamsRemove{revoltgo.ServerEditDataRemoveDescription},
+		})
+	}
+
+	return c.editServer(serverID, revoltgo.ServerEditParams{Description: description})
+}
+
+// SetServerIcon and SetServerBanner hang a picture on a server. Revolt takes an
+// ID rather than the picture, so the file is uploaded first — into the bucket
+// that makes the ID usable as that kind, exactly as an avatar is. The two are
+// separate buckets and separate fields: an icon offered as a banner does not
+// exist.
+//
+// Nothing is recorded here either. The new picture arrives as a ServerUpdate,
+// which is also what makes one set from another client appear.
+func (c *Client) SetServerIcon(serverID, path, name string) error {
+	return c.uploadServerPicture(serverID, revoltgo.FileTagIcons, path, name,
+		func(id string) revoltgo.ServerEditParams { return revoltgo.ServerEditParams{Icon: id} })
+}
+
+func (c *Client) SetServerBanner(serverID, path, name string) error {
+	return c.uploadServerPicture(serverID, revoltgo.FileTagBanners, path, name,
+		func(id string) revoltgo.ServerEditParams { return revoltgo.ServerEditParams{Banner: id} })
+}
+
+// RemoveServerIcon and RemoveServerBanner take one off again. As with a
+// description, an empty string is read as "leave it alone", so clearing one is a
+// name in `remove`.
+func (c *Client) RemoveServerIcon(serverID string) error {
+	return c.editServer(serverID, revoltgo.ServerEditParams{
+		Remove: []revoltgo.ServerEditParamsRemove{revoltgo.ServerEditDataRemoveIcon},
+	})
+}
+
+func (c *Client) RemoveServerBanner(serverID string) error {
+	return c.editServer(serverID, revoltgo.ServerEditParams{
+		Remove: []revoltgo.ServerEditParamsRemove{revoltgo.ServerEditDataRemoveBanner},
+	})
+}
+
+// uploadServerPicture is the half the two setters share: the upload, then the
+// edit naming what was uploaded. Which field the ID lands in is the caller's,
+// the bucket and the field having to agree.
+func (c *Client) uploadServerPicture(serverID string, tag revoltgo.FileTag, path, name string, edit func(id string) revoltgo.ServerEditParams) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	id, err := uploadFile(session, tag, path, name)
+	if err != nil {
+		return err
+	}
+
+	return c.editServer(serverID, edit(id))
+}
+
+// editServer is the one request both setters make. Each field is sent alone:
+// Revolt applies the edit as a partial, so a setter that read the other half back
+// out of State and sent it again could only ever lose a race with somebody else's
+// change.
+func (c *Client) editServer(serverID string, edit revoltgo.ServerEditParams) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	_, err := session.ServerEdit(serverID, edit)
+
+	return err
 }
 
 // KickMember removes a member from a server. The sidebar is repainted by
@@ -1106,6 +1277,265 @@ func (c *Client) BanMember(serverID, userID string, options BanOptions) error {
 	})
 }
 
+// UnbanMember lifts a ban. Nothing on the gateway announces one being lifted, so
+// a caller showing the list re-fetches rather than waiting to be told.
+func (c *Client) UnbanMember(serverID, userID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ServerMemberUnban(serverID, userID)
+}
+
+// ServerBans lists who is banned from a server. Each entry carries the name and
+// the picture as well as the ID: the route answers with a reduced user of its
+// own, and a banned account is no longer a member, so there is nothing left in
+// the store to resolve one against. Those four fields are four of revoltgo's
+// User, which is what keeps the default-avatar fallback the same one every other
+// row gets.
+func (c *Client) ServerBans(serverID string) ([]domain.Ban, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+
+	response, err := session.ServerBans(serverID)
+	if err != nil {
+		return nil, err
+	}
+	if response == nil {
+		return nil, nil
+	}
+
+	users := make(map[string]*revoltgo.User, len(response.Users))
+	for _, user := range response.Users {
+		if user != nil {
+			users[user.ID] = user
+		}
+	}
+
+	entries := make([]keyed[domain.Ban], 0, len(response.Bans))
+	for _, ban := range response.Bans {
+		if ban == nil {
+			continue
+		}
+
+		// A ban naming somebody the response left out is still a ban, so the ID
+		// stands in for the name rather than the row going missing.
+		out := domain.Ban{UserID: ban.ID.User, Username: ban.ID.User, Reason: ban.Reason}
+		if user := users[ban.ID.User]; user != nil {
+			out.Username, out.AvatarURL = user.Username, user.AvatarURL(avatarSize)
+		}
+		entries = append(entries, keyed[domain.Ban]{out, strings.ToLower(out.Username), out.UserID})
+	}
+
+	return sortedByName(entries), nil
+}
+
+/* Editing a member */
+
+// What a member and a role edit will take, from DataMemberEdit and DataEditRole:
+// https://developers.stoat.chat/api-reference. A timeout is bounded nowhere, so
+// how long one may be is the menu's business rather than a limit to clamp to.
+const (
+	MaxNickname   = 32
+	MaxRoleName   = 32
+	MaxRoleColour = 128
+)
+
+// SetMemberNickname renames a member in one server, an empty name removing the
+// nickname. Revolt takes both through the same route under different permissions
+// — ChangeNickname for this account's own, ManageNicknames for anybody else's —
+// so which is being asked for is the caller's to have established.
+func (c *Client) SetMemberNickname(serverID, userID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+			Remove: []revoltgo.ServerMemberClearType{revoltgo.ServerMemberClearNickname},
+		})
+	}
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+		Nickname: trimTo(name, MaxNickname),
+	})
+}
+
+// TimeoutMember silences a member until a moment that must be in the future:
+// Revolt bounds a timeout nowhere, so one sent in the past is stored and read as
+// expired, which is a timeout that never happened.
+func (c *Client) TimeoutMember(serverID, userID string, until time.Time) error {
+	if !until.After(time.Now()) {
+		return c.RemoveTimeout(serverID, userID)
+	}
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{Timeout: &until})
+}
+
+// RemoveTimeout lets a member speak again before their timeout was due to end.
+func (c *Client) RemoveTimeout(serverID, userID string) error {
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+		Remove: []revoltgo.ServerMemberClearType{revoltgo.ServerMemberClearTimeout},
+	})
+}
+
+// SetMemberRoles replaces the whole set of roles a member holds — the route takes
+// the set rather than a change to it, so a caller adding one sends the others
+// back with it. An empty set is a removal, an empty array being omitted from the
+// request.
+func (c *Client) SetMemberRoles(serverID, userID string, roleIDs []string) error {
+	if len(roleIDs) == 0 {
+		return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+			Remove: []revoltgo.ServerMemberClearType{revoltgo.ServerMemberClearRoles},
+		})
+	}
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{Roles: roleIDs})
+}
+
+// editMember is the one request behind the four above. The member that comes back
+// is dropped: the change returns as ServerMemberUpdate, which revoltgo files into
+// State before the handler here sees it.
+func (c *Client) editMember(serverID, userID string, edit revoltgo.ServerMemberEditParams) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	_, err := session.ServerMemberEdit(serverID, userID, edit)
+
+	return err
+}
+
+/* Roles */
+
+// ErrRoleNameEmpty is a role named with nothing, refused here rather than by the
+// server: Revolt's minimum is one character.
+var ErrRoleNameEmpty = errors.New("role name is empty")
+
+// CreateRole adds a role to a server. Revolt assigns its rank — the rank a
+// creation carries has no effect, ranks being the other route's business — and
+// the role reaches the client as a role update for one State has never heard of.
+// The ID is handed back so the caller can open what it just made.
+func (c *Client) CreateRole(serverID, name string) (roleID string, err error) {
+	session := c.session.Load()
+	if session == nil {
+		return "", ErrNoSession
+	}
+
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ErrRoleNameEmpty
+	}
+
+	role, err := session.ServersRoleCreate(serverID, revoltgo.ServerRoleCreateParams{
+		Name: trimTo(name, MaxRoleName),
+	})
+	if err != nil {
+		return "", err
+	}
+	if role == nil {
+		return "", nil
+	}
+
+	return role.ID, nil
+}
+
+// SetRoleName renames a role.
+func (c *Client) SetRoleName(serverID, roleID, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ErrRoleNameEmpty
+	}
+
+	return c.editRole(serverID, roleID, revoltgo.ServerRoleEditParams{Name: trimTo(name, MaxRoleName)})
+}
+
+// SetRoleColor colours a role, an empty colour taking the colour off. Revolt
+// takes any CSS colour here — a gradient included — which is why what is sent is
+// not parsed back into the hex the picker offered.
+func (c *Client) SetRoleColor(serverID, roleID, colour string) error {
+	colour = strings.TrimSpace(colour)
+	if colour == "" {
+		return c.editRole(serverID, roleID, revoltgo.ServerRoleEditParams{
+			Remove: []revoltgo.ServerRoleClearType{revoltgo.ServerRoleClearColour},
+		})
+	}
+
+	return c.editRole(serverID, roleID, revoltgo.ServerRoleEditParams{Colour: trimTo(colour, MaxRoleColour)})
+}
+
+// SetRoleHoist decides whether a role gets a section of its own in the member
+// list.
+func (c *Client) SetRoleHoist(serverID, roleID string, hoist bool) error {
+	return c.editRole(serverID, roleID, revoltgo.ServerRoleEditParams{Hoist: &hoist})
+}
+
+// DeleteRole removes a role from a server and from everybody holding it.
+func (c *Client) DeleteRole(serverID, roleID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ServerRoleDelete(serverID, roleID)
+}
+
+// SetRolePermissions publishes a role's whole override. Revolt takes both halves
+// together, so a caller changing one bit sends the rest back unchanged.
+func (c *Client) SetRolePermissions(serverID, roleID string, allow, deny domain.Permission) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.PermissionsSet(serverID, roleID, revoltgo.PermissionOverwrite{
+		Allow: int64(allow),
+		Deny:  int64(deny),
+	})
+}
+
+// SetDefaultPermissions publishes what every member of a server holds before any
+// role is applied. A plain set rather than an override, there being nothing under
+// it to inherit from — which is also why it is a different route from a role's.
+func (c *Client) SetDefaultPermissions(serverID string, allow domain.Permission) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.PermissionsSetDefault(serverID, revoltgo.PermissionsSetDefaultParams{
+		Permissions: int64(allow),
+	})
+}
+
+// SetRoleRanks reorders a server's roles, most senior first. The route takes
+// **every** role the server has and refuses a partial list, so the caller sends
+// the whole order rather than the one role that moved:
+// https://github.com/stoatchat/stoatchat/blob/main/crates/delta/src/routes/servers/roles_edit_positions.rs
+func (c *Client) SetRoleRanks(serverID string, roleIDs []string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ServersRoleRanksEdit(serverID, roleIDs)
+}
+
+// editRole is the one request behind the three setters above. As with a server's
+// own name, what took is drawn by the role update that follows rather than by
+// what came back.
+func (c *Client) editRole(serverID, roleID string, edit revoltgo.ServerRoleEditParams) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	_, err := session.ServerRoleEdit(serverID, roleID, edit)
+
+	return err
+}
+
 /* This account */
 
 // account is the session and this account's own user record. Every edit here
@@ -1127,17 +1557,6 @@ func (c *Client) account() (*revoltgo.Session, *revoltgo.User, error) {
 // MaxStatusText is how long a status line may be. Revolt refuses a longer one
 // outright, so the client clamps rather than spending a round trip finding out.
 const MaxStatusText = 128
-
-// The fields a user edit may name in its remove list. A value it is meant to
-// clear is *omitted* from the request when it is empty, so removing anything
-// here is a name rather than a blank.
-const (
-	fieldStatusText        = "StatusText"
-	fieldDisplayName       = "DisplayName"
-	fieldAvatar            = "Avatar"
-	fieldProfileContent    = "ProfileContent"
-	fieldProfileBackground = "ProfileBackground"
-)
 
 // The display name's bounds are Revolt's, which refuses anything outside them.
 const (
@@ -1167,7 +1586,7 @@ func (c *Client) SetDisplayName(name string) error {
 
 	params := revoltgo.UserEditParams{DisplayName: name}
 	if name == "" {
-		params.Remove = []string{fieldDisplayName}
+		params.Remove = []revoltgo.UserRemoveField{revoltgo.UserRemoveDisplayName}
 	}
 
 	_, err = session.UserEdit(self.ID, params)
@@ -1211,7 +1630,7 @@ func (c *Client) SetPresence(presence domain.Presence) error {
 func (c *Client) SetStatusText(text string) error {
 	text = trimTo(text, MaxStatusText)
 	if text == "" {
-		return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = "" }, fieldStatusText)
+		return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = "" }, revoltgo.UserRemoveStatusText)
 	}
 
 	return c.editStatus(func(status *revoltgo.UserStatus) { status.Text = text })
@@ -1221,7 +1640,7 @@ func (c *Client) SetStatusText(text string) error {
 // line beside it as one object and takes the whole of it, so whichever half is
 // not being changed has to be read back out of State and sent again unchanged —
 // either caller omitting the other's half would silently destroy it.
-func (c *Client) editStatus(change func(*revoltgo.UserStatus), remove ...string) error {
+func (c *Client) editStatus(change func(*revoltgo.UserStatus), remove ...revoltgo.UserRemoveField) error {
 	session, self, err := c.account()
 	if err != nil {
 		return err
@@ -1252,7 +1671,7 @@ func (c *Client) SetAvatar(path, name string) error {
 		return err
 	}
 
-	id, err := uploadFile(session, bucketAvatars, path, name)
+	id, err := uploadFile(session, revoltgo.FileTagAvatars, path, name)
 	if err != nil {
 		return err
 	}
@@ -1269,7 +1688,7 @@ func (c *Client) RemoveAvatar() error {
 		return err
 	}
 
-	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Remove: []string{fieldAvatar}})
+	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Remove: []revoltgo.UserRemoveField{revoltgo.UserRemoveAvatar}})
 
 	return err
 }
@@ -1283,10 +1702,10 @@ const MaxBio = 2000
 func (c *Client) SetBio(text string) error {
 	text = trimTo(text, MaxBio)
 	if text == "" {
-		return c.editProfile(nil, fieldProfileContent)
+		return c.editProfile(nil, revoltgo.UserRemoveProfileContent)
 	}
 
-	return c.editProfile(&profileEdit{Content: &text})
+	return c.editProfile(&revoltgo.UserProfileParams{Content: &text})
 }
 
 // SetBanner puts a picture behind the profile, and RemoveBanner takes it away
@@ -1297,26 +1716,16 @@ func (c *Client) SetBanner(path, name string) error {
 		return err
 	}
 
-	id, err := uploadFile(session, bucketBackgrounds, path, name)
+	id, err := uploadFile(session, revoltgo.FileTagBackgrounds, path, name)
 	if err != nil {
 		return err
 	}
 
-	return c.editProfile(&profileEdit{Background: &id})
+	return c.editProfile(&revoltgo.UserProfileParams{Background: id})
 }
 
 func (c *Client) RemoveBanner() error {
-	return c.editProfile(nil, fieldProfileBackground)
-}
-
-// profileEdit is the profile half of a user edit, sent round revoltgo's typed
-// API: UserEditParams models Profile as a *UserProfile whose Background is a
-// *File — the shape a profile is *read* in — where the route takes an attachment
-// ID. The bio could go through it and does not: one field pair sent two
-// different ways is worth less than the one shape.
-type profileEdit struct {
-	Content    *string `json:"content,omitempty"`
-	Background *string `json:"background,omitempty"`
+	return c.editProfile(nil, revoltgo.UserRemoveProfileBackground)
 }
 
 // editProfile sends one partial profile. Revolt applies it as a partial, so the
@@ -1325,18 +1734,15 @@ type profileEdit struct {
 // Nothing about a profile is recorded anywhere: it is not on the user record,
 // State has no room for it, and no gateway event announces a change — so a
 // caller drawing what took has to ask for it again.
-func (c *Client) editProfile(edit *profileEdit, remove ...string) error {
+func (c *Client) editProfile(edit *revoltgo.UserProfileParams, remove ...revoltgo.UserRemoveField) error {
 	session, self, err := c.account()
 	if err != nil {
 		return err
 	}
 
-	body := struct {
-		Profile *profileEdit `json:"profile,omitempty"`
-		Remove  []string     `json:"remove,omitempty"`
-	}{Profile: edit, Remove: remove}
+	_, err = session.UserEdit(self.ID, revoltgo.UserEditParams{Profile: edit, Remove: remove})
 
-	return session.HTTP.Request(http.MethodPatch, revoltgo.EndpointUser(self.ID), body, nil)
+	return err
 }
 
 /* This account's username */
@@ -1555,11 +1961,8 @@ func (c *Client) Mutual(userID string) (domain.Mutual, error) {
 		return domain.Mutual{}, ErrNoSession
 	}
 
-	var response struct {
-		Users   []string `json:"users"`
-		Servers []string `json:"servers"`
-	}
-	if err := session.HTTP.Request(http.MethodGet, revoltgo.EndpointUserMutual(userID), nil, &response); err != nil {
+	response, err := session.UserMutual(userID)
+	if err != nil {
 		return domain.Mutual{}, err
 	}
 

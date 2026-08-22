@@ -730,8 +730,8 @@ func showIf(obj fyne.CanvasObject, visible bool) {
 
 /* Rows */
 
-// MemberRow is one person: a presence bar on the left edge, avatar, name in
-// their role's colour, bot mark. A widget with an in-place updater because the list recycles
+// MemberRow is one person: avatar in a presence ring, name in their role's
+// colour, bot mark. A widget with an in-place updater because the list recycles
 // it — see the file comment. Every field below records what is currently *drawn*,
 // so SetMember touches only what moved.
 type MemberRow struct {
@@ -741,7 +741,7 @@ type MemberRow struct {
 	onMenu func(userID string) []*fyne.MenuItem
 
 	background  *canvas.Rectangle
-	presenceBar *canvas.Rectangle
+	ring        *canvas.Circle
 	avatar      *fyne.Container
 	placeholder *canvas.Circle // the one the slot falls back to; see newAvatarSlot
 	name        *canvas.Text
@@ -786,7 +786,7 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		deps:        deps,
 		onMenu:      onMenu,
 		background:  canvas.NewRectangle(color.Transparent),
-		presenceBar: canvas.NewRectangle(color.Transparent),
+		ring:        canvas.NewCircle(color.Transparent),
 		avatar:      avatar,
 		placeholder: placeholder,
 		name:        name,
@@ -798,18 +798,14 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		fill:     theme.Colors.TextPrimary,
 		presence: domain.PresenceOffline,
 	}
+	// Both start out of the way of the recorded state above: nobody is drawn yet, and
+	// the recorded presence is offline, which is the ring drawing nothing.
 	w.botMark.Hide()
-
-	// The bar is flush with the sidebar's left edge, the way the channel rows' own
-	// markers are, and with the rows themselves — entries are laid out edge to edge,
-	// so a run of present members reads as one column. Its width comes from the
-	// minimum rather than the HBox, which hands a rectangle no width of its own.
-	w.presenceBar.SetMinSize(fyne.NewSize(theme.Sizes.MemberPresenceBarWidth, 0))
+	w.ring.Hide()
 
 	leading := HBoxNoSpacing(
-		w.presenceBar,
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(w.avatar),
+		container.NewCenter(container.New(&memberRingLayout{}, w.ring, w.avatar)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
@@ -891,8 +887,18 @@ func (w *MemberRow) setPresence(presence domain.Presence) {
 	}
 
 	w.presence = presence
-	w.presenceBar.FillColor = presenceBarColor(presence)
-	w.presenceBar.Refresh()
+
+	// Offline is drawn as nothing rather than the offline grey — absence is what
+	// offline looks like, the answer the profile card's ring gives too — and hidden
+	// rather than filled transparent, since the painter blends a transparent circle
+	// and skips a hidden one. The block keeps its size either way: the layout sizes
+	// it from the avatar, so nobody coming online moves the name beside them.
+	w.ring.Hidden = !presence.IsOnline()
+	if !w.ring.Hidden {
+		w.ring.FillColor = presenceColor(presence)
+	}
+
+	w.ring.Refresh()
 }
 
 func (w *MemberRow) setBot(bot bool) {
@@ -985,15 +991,27 @@ func memberNameColor(member *domain.Member) color.Color {
 	return theme.Colors.TextPrimary
 }
 
-// presenceBarColor is the edge bar's fill. Offline draws nothing rather than the
-// offline grey: rows are flush, so the bars form one column, and a grey behind
-// every offline member would read as a border the sidebar had grown.
-func presenceBarColor(presence domain.Presence) color.Color {
-	if !presence.IsOnline() {
-		return color.Transparent
-	}
+// memberRingLayout draws the band at full size with the avatar centred on it, so
+// the ring is what the picture is inset from. Placed rather than stacked: a Stack
+// stretches every child, and a stretched circle is an ellipse.
+type memberRingLayout struct{}
 
-	return presenceColor(presence)
+func (l *memberRingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	ring, avatar := objects[0], objects[1]
+
+	ring.Resize(size)
+	ring.Move(fyne.Position{})
+
+	inner := avatar.MinSize()
+	avatar.Resize(inner)
+	avatar.Move(fyne.NewPos((size.Width-inner.Width)/2, (size.Height-inner.Height)/2))
+}
+
+func (l *memberRingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	side := objects[1].MinSize()
+	band := 2 * theme.Sizes.MemberPresenceRing
+
+	return fyne.NewSize(side.Width+band, side.Height+band)
 }
 
 /* Section headers */

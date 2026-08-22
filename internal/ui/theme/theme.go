@@ -146,7 +146,8 @@ var Colors = struct {
 	/* Bot mark */
 
 	// BotMark is the glyph following the name of an account Revolt marks as a
-	// bot, on a member row and on a profile alike.
+	// bot, on a member row and on a profile alike. The webhook mark takes it too:
+	// both say the same thing about who is posting, and only the glyph differs.
 	BotMark color.Color
 
 	/* Invite cards */
@@ -571,11 +572,10 @@ var Sizes = struct {
 	MemberSectionTopPad   float32
 	MemberSectionTextSize float32
 
-	// The bar on a member row's left edge, coloured by presence — the member
-	// list's only presence mark. Its own width rather than the channel unread
-	// bar's: the two say different things and a colour needs more of the edge
-	// than a state does.
-	MemberPresenceBarWidth float32
+	// The band around a member row's avatar, coloured by presence — the member
+	// list's only presence mark. It widens the avatar block by twice this on each
+	// axis, so MemberRowHeight has to keep room for it.
+	MemberPresenceRing float32
 
 	/* Voice participants */
 
@@ -599,10 +599,15 @@ var Sizes = struct {
 
 	/* Bot mark */
 
-	// One glyph at two sizes: it follows a name, and the two names it follows are
-	// set differently.
-	MemberBotMarkSize  float32
-	ProfileBotMarkSize float32
+	// One family of glyphs at four sizes: a mark follows a name, and the names it
+	// follows are set differently. The last three size whichever of the author
+	// marks a row draws — bot, webhook, masquerade — since they are read against
+	// each other in one column.
+	MemberBotMarkSize     float32
+	ProfileBotMarkSize    float32
+	MessageAuthorMarkSize float32
+	ReplyAuthorMarkSize   float32
+	IslandAuthorMarkSize  float32
 
 	/* Server and channel rows */
 
@@ -743,6 +748,7 @@ var Sizes = struct {
 	ComposerRadius      float32
 	ComposerPaddingV    float32
 	ComposerPaddingH    float32
+	ComposerRowGap      float32 // between the dock's rows, and between reply cards
 	ComposerGutterWidth float32
 	ComposerButtonSize  float32
 	ComposerIconSize    float32
@@ -1026,7 +1032,7 @@ var Sizes = struct {
 	MemberSectionTopPad:   8,
 	MemberSectionTextSize: 12,
 
-	MemberPresenceBarWidth: 2,
+	MemberPresenceRing: 2,
 
 	VoiceRowHeight:  26,
 	VoiceRowIndent:  31,
@@ -1040,8 +1046,11 @@ var Sizes = struct {
 	MemberStatusPadding:  10,
 	MemberStatusGap:      8,
 
-	MemberBotMarkSize:  14,
-	ProfileBotMarkSize: 18,
+	MemberBotMarkSize:     14,
+	ProfileBotMarkSize:    18,
+	MessageAuthorMarkSize: 15,
+	ReplyAuthorMarkSize:   12,
+	IslandAuthorMarkSize:  13,
 
 	ServerIconSize:          40,
 	ServerItemHeight:        50,
@@ -1224,6 +1233,7 @@ var Sizes = struct {
 	ComposerRadius:      8,
 	ComposerPaddingV:    3,
 	ComposerPaddingH:    6,
+	ComposerRowGap:      6,
 	ComposerGutterWidth: 30,
 	ComposerButtonSize:  24,
 	ComposerIconSize:    18,

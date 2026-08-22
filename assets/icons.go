@@ -19,6 +19,12 @@ var membersSVG []byte
 //go:embed bot.svg
 var botSVG []byte
 
+//go:embed webhook.svg
+var webhookSVG []byte
+
+//go:embed masquerade.svg
+var masqueradeSVG []byte
+
 //go:embed notes.svg
 var notesSVG []byte
 
@@ -96,6 +102,16 @@ var (
 
 	// BotIcon follows the name of an account Revolt marks as a bot.
 	BotIcon fyne.Resource = fyne.NewStaticResource("bot.svg", botSVG)
+
+	// WebhookIcon follows the name a webhook posted under. Its own mark rather than
+	// BotIcon: a bot is an account with a profile behind it, a webhook is nobody at
+	// all — which is also why its avatar opens nothing.
+	WebhookIcon fyne.Resource = fyne.NewStaticResource("webhook.svg", webhookSVG)
+
+	// MasqueradeIcon follows a name posted under a mask. The client draws the
+	// account behind it rather than the override, so the mark is what says the name
+	// is not what the message was posted as.
+	MasqueradeIcon fyne.Resource = fyne.NewStaticResource("masquerade.svg", masqueradeSVG)
 
 	// NotesIcon prefixes Saved Notes, the one conversation that is nobody else —
 	// so the avatar every other conversation is led by would be this account's own
@@ -186,6 +202,12 @@ var (
 	ActionSaveIcon   = actionIcon("action-save.svg")
 	ActionCancelIcon = actionIcon("action-cancel.svg")
 	ActionAddIcon    = actionIcon("action-add.svg")
+
+	// The pair a list row offers its place in an order with — a server settings
+	// list rather than a message, but the same set: an action is drawn the same
+	// way wherever it is offered.
+	ActionUpIcon   = actionIcon("action-up.svg")
+	ActionDownIcon = actionIcon("action-down.svg")
 
 	// ActionEmojiIcon opens the emoji picker from the composer. It is in this set
 	// rather than beside the reaction chip's mark because both open the same

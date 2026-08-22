@@ -1021,6 +1021,17 @@ DAG and conventions.
     Revolt's own copy. `onChannelRead` prunes rather than deletes, the ack pulling
     mentions only as far as the message named. Item 22's rule holds: the mark is
     immediate, nothing is queued.
+    **The other way one goes is that it stopped existing**, and every path that
+    can leave one behind forgets it, or the inbox is lit for a message it can
+    never list: a deleted message (`removeMessages`, for *any* channel — the one
+    nobody is looking at is the one that would go on counting), a server left
+    (`forgetLeftServer`), a conversation taken off the platform
+    (`onUserRemoved`), and the inbox itself, which drops what the server answered
+    404/403 for (`forgetGone`, off `ResolveMessages`' `gone` — a request that
+    merely failed leaves the set alone and the panel says so instead). Losing one
+    locally is safe in a way keeping a dead one is not: `App.mentions` is a copy
+    of the account's own record and the next Ready brings it back, nothing here
+    acknowledging anything.
     Three surfaces read it. A **channel row** takes the count
     (`ChannelWidget.SetState`), which recolours the marker slot the unread bar
     already owns — a mention is unread by definition, so the two can only ever be

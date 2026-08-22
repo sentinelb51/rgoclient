@@ -206,7 +206,9 @@ package's own `CLAUDE.md`; this is the map:
   `glyphLine`, the 20-unit grid every drawn mark shares; tapBase widgets and
   `reportHover`; `Outline`, `hairline` + the two dividers, `Elevate`; `Button` —
   the only text button the client mounts, `ButtonWeight` deciding whether it
-  wears the hairline or a tone fill; `Tooltip`, chips, `NewBotMark`,
+  wears the hairline or a tone fill; `Tooltip`, chips, `NewAuthorMark` and the
+  three glyphs it answers with (`NewBotMark`, `NewWebhookMark`,
+  `NewMasqueradeMark` — one tone, and nil for a person),
   `StatusLine`, the avatar loader, `ObservableScroll` + its indicator,
   `AccentText`, `NewEllipsisText`, `TypingMark` — that last one here because the
   composer's line, a channel row and the member sidebar's status all mount one.
@@ -268,7 +270,10 @@ package's own `CLAUDE.md`; this is the map:
   `settings_server.go` is one server's, almost all lists rather than switches
   (`entryRow`) — and the one section that drills into a row of its own, the role
   editor, whose permission grid is the whole of what Revolt defines in the three
-  states it stores each bit in. `settings_controls.go` holds the controls, none
+  states it stores each bit in. Two of those lists are also *ordered* by the rows
+  in them (`moveButtons`): the roles by seniority, and the channels by the
+  arrangement they are drawn in — which for a channel is its category as well as
+  its place, a move past the end of one being how it joins the next. `settings_controls.go` holds the controls, none
   of them a Fyne form widget.
 - `ui/settings_search.go` — the box at the head of the rail and the page of
   results it puts in the pane. Its index is taken by *building every section

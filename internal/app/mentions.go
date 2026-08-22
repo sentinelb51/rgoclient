@@ -103,6 +103,54 @@ func (a *App) pruneMentions(channelID, messageID string) bool {
 	return true
 }
 
+// forgetMentions drops named messages from a channel's mentions, for the two
+// ways one stops being a mention without being read: the message was deleted,
+// and the inbox asked for it only to be told it is not there. Reports whether
+// anything went. Call on the UI thread.
+func (a *App) forgetMentions(channelID string, messageIDs []string) bool {
+	pending := a.mentions[channelID]
+	if len(pending) == 0 || len(messageIDs) == 0 {
+		return false
+	}
+
+	kept := slices.DeleteFunc(slices.Clone(pending), func(id string) bool {
+		return slices.Contains(messageIDs, id)
+	})
+	if len(kept) == len(pending) {
+		return false
+	}
+
+	if len(kept) == 0 {
+		delete(a.mentions, channelID)
+	} else {
+		a.mentions[channelID] = kept
+	}
+	a.syncMentionMarks()
+
+	return true
+}
+
+// forgetLeftServer drops what a departed server's channels were still marked
+// with. Both maps are keyed by channel and nothing else names them again: the
+// rail icon and the rows are gone, so a mention left behind would light the
+// inbox for a channel that cannot be opened. revoltgo evicts the server from
+// State but keeps its channels, which is what still answers which server a
+// channel was in. Call on the UI thread.
+func (a *App) forgetLeftServer(serverID string) {
+	for channelID := range a.mentions {
+		if channel, ok := a.store.Channel(channelID); ok && channel.ServerID == serverID {
+			delete(a.mentions, channelID)
+		}
+	}
+	for channelID := range a.unreadChannels {
+		if channel, ok := a.store.Channel(channelID); ok && channel.ServerID == serverID {
+			delete(a.unreadChannels, channelID)
+		}
+	}
+
+	a.syncMentionMarks()
+}
+
 // mentionCount is how many messages in a channel name the account.
 func (a *App) mentionCount(channelID string) int { return len(a.mentions[channelID]) }
 
@@ -122,10 +170,20 @@ func (a *App) serverMentioned(serverID string) bool {
 // homeMentioned reports whether a conversation holds one. The home button wears
 // the same bar a server icon does, so a mention in a direct message is visible
 // from inside a server.
+//
+// Asked of the store rather than of App.dmChannels: that list is a request the
+// home view makes when it is first opened, so a client that started in a server
+// has none, and the one mention the button exists for would be the one it could
+// not see. Every channel Ready carries is in the store, and one with no server is
+// in the home view by definition.
 func (a *App) homeMentioned() bool {
-	return slices.ContainsFunc(a.dmChannels, func(channelID string) bool {
-		return len(a.mentions[channelID]) > 0
-	})
+	for channelID := range a.mentions {
+		if channel, ok := a.store.Channel(channelID); ok && channel.ServerID == "" {
+			return true
+		}
+	}
+
+	return false
 }
 
 // syncMentionMarks repaints the rail: every server icon, the home button and the
@@ -183,7 +241,7 @@ func (a *App) loadMentions() {
 	epoch := a.epoch
 
 	go func() {
-		messages := a.client.ResolveMessages(targets)
+		messages, gone := a.client.ResolveMessages(targets)
 
 		// Resolved here rather than through ensureAuthor's queue, as the pins panel
 		// does it: a webhook or somebody departed would otherwise be a raw ID the panel
@@ -192,10 +250,21 @@ func (a *App) loadMentions() {
 		a.client.ResolveAuthors(a.unknownMentionAuthors(messages, channels))
 
 		a.doOnUI(func() {
-			if a.stale(epoch) || a.inbox == nil || a.inboxSeq != seq {
+			if a.stale(epoch) {
 				return
 			}
-			if len(messages) == 0 {
+
+			// A mention the server says is not there is not a mention, and forgetting it
+			// is the set's business rather than the panel's — a reader who closed the
+			// inbox before the answer landed must not be left with marks over messages
+			// that cannot be listed. Only what the server answered *for* is dropped, so a
+			// request that simply failed leaves the set alone and is reported below.
+			a.forgetGone(gone)
+
+			if a.inbox == nil || a.inboxSeq != seq {
+				return
+			}
+			if len(messages) == 0 && len(gone) == 0 {
 				log.Print("mentions: nothing resolved")
 				a.inbox.Fail("Couldn't load your mentions.")
 
@@ -205,6 +274,21 @@ func (a *App) loadMentions() {
 			a.showMentioned(messages)
 		}, false)
 	}()
+}
+
+// forgetGone drops the mentions the inbox was told are not there and repaints
+// what counted them. Call on the UI thread.
+func (a *App) forgetGone(gone []client.MessageRef) {
+	byChannel := make(map[string][]string, len(gone))
+	for _, ref := range gone {
+		byChannel[ref.ChannelID] = append(byChannel[ref.ChannelID], ref.MessageID)
+	}
+
+	for channelID, messageIDs := range byChannel {
+		if a.forgetMentions(channelID, messageIDs) {
+			a.refreshChannelRow(channelID)
+		}
+	}
 }
 
 // mentionTargets is the newest mentions across every channel, and the server each

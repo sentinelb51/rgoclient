@@ -185,6 +185,7 @@ func (a *App) messageCard(message *domain.Message) ui.MessageCard {
 		Author:      author.Name,
 		AuthorColor: author.Color,
 		AvatarURL:   author.AvatarURL,
+		Mark:        author.Mark,
 
 		Preview: a.messagePreview(message),
 		When:    messageWhen(messageID),

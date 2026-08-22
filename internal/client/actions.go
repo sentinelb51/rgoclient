@@ -12,12 +12,14 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/oklog/ulid/v2"
 	"github.com/sentinelb51/revoltgo"
 
 	"RGOClient/internal/domain"
@@ -741,24 +743,36 @@ type MessageRef struct {
 // taking a list of IDs, so a batch is only a batch in that the caller gets one
 // answer for it.
 //
-// Nothing failed is reported because nothing retries — the usual reason is that
-// the message was deleted, and a quoted line remounts on every scroll past it.
-// Nothing is written to the message cache, for the reason messagePage gives.
-func (c *Client) ResolveMessages(targets []MessageRef) []*domain.Message {
+// gone names the targets the server answered *for* — the message was deleted, or
+// the channel is no longer the account's to read — and only those. A request that
+// merely failed is in neither list, so a caller acting on gone (the mention inbox
+// forgets what it holds) never reads a dropped connection as a message that has
+// stopped existing.
+//
+// Nothing is retried, and nothing is written to the message cache, for the reason
+// messagePage gives.
+func (c *Client) ResolveMessages(targets []MessageRef) (resolved []*domain.Message, gone []MessageRef) {
 	session := c.session.Load()
 	if session == nil || len(targets) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	var (
-		mu       sync.Mutex
-		resolved []*domain.Message
-	)
+	var mu sync.Mutex
 
 	inParallel(targets, func(target MessageRef) {
 		message, err := session.ChannelMessage(target.ChannelID, target.MessageID)
 		if err != nil {
 			log.Printf("fetch message %s: %v", target.MessageID, err)
+
+			if !answeredGone(err) {
+				return
+			}
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			gone = append(gone, target)
+
 			return
 		}
 
@@ -770,7 +784,29 @@ func (c *Client) ResolveMessages(targets []MessageRef) []*domain.Message {
 		}
 	})
 
-	return resolved
+	return resolved, gone
+}
+
+// answeredGone reports whether an error is the server saying the thing is not
+// there — 404, or a 403 for a channel the account may no longer read.
+//
+// revoltgo returns every non-2xx as a formatted string with neither a type nor a
+// code on it ("bad status code %d: %s"), so the number is read back out of the
+// text. A wording it stops using reads as no status at all, which is the safe
+// answer: a caller that forgets what is gone forgets nothing instead.
+func answeredGone(err error) bool {
+	rest, ok := strings.CutPrefix(err.Error(), "bad status code ")
+	if !ok {
+		return false
+	}
+
+	code, _, _ := strings.Cut(rest, ":")
+	status, err := strconv.Atoi(code)
+	if err != nil {
+		return false
+	}
+
+	return status == http.StatusNotFound || status == http.StatusForbidden
 }
 
 /* Conversations */
@@ -1263,6 +1299,62 @@ func (c *Client) editServer(serverID string, edit revoltgo.ServerEditParams) err
 	_, err := session.ServerEdit(serverID, edit)
 
 	return err
+}
+
+// MaxCategoryTitle is Revolt's ceiling on a category's name, and on its ID with
+// it — a ULID is well inside that. ErrCategoryTitleEmpty is the one refusal the
+// caller can act on, the route taking neither an empty title nor a missing one.
+const MaxCategoryTitle = 32
+
+var ErrCategoryTitleEmpty = errors.New("category title is empty")
+
+// SetServerCategories publishes a server's category structure. Unlike every other
+// server field this is a **replacement**: the route takes the whole arrangement
+// and stores it as sent, so moving one channel means sending every category the
+// server has.
+//
+// What is sent has to be the server's own arrangement rearranged rather than the
+// part of it this account can see. Revolt drops any channel it cannot find in the
+// server and refuses the edit outright if one appears twice, so a channel hidden
+// from the reader must still be carried through the move that passes it — leaving
+// it out files it out of its category.
+//
+// A category with no ID is a new one. Which ID it gets is the client's to choose,
+// Revolt asking only that it be unique in the server, so a ULID is minted here as
+// every other Revolt client does.
+//
+// Categories is `omitzero`, so no categories at all is a name in `remove` rather
+// than an empty array — the shape a description already takes.
+func (c *Client) SetServerCategories(serverID string, categories []domain.Category) error {
+	if len(categories) == 0 {
+		return c.editServer(serverID, revoltgo.ServerEditParams{
+			Remove: []revoltgo.ServerEditParamsRemove{revoltgo.ServerEditDataRemoveCategories},
+		})
+	}
+
+	sending := make([]*revoltgo.ServerCategory, 0, len(categories))
+	for _, category := range categories {
+		title := trimTo(category.Title, MaxCategoryTitle)
+		if title == "" {
+			return ErrCategoryTitleEmpty
+		}
+
+		id := category.ID
+		if id == "" {
+			id = ulid.Make().String()
+		}
+
+		// Non-nil: `channels` is required by the route, and a nil slice is omitted
+		// rather than sent as the empty list an empty category needs.
+		channels := category.Channels
+		if channels == nil {
+			channels = []string{}
+		}
+
+		sending = append(sending, &revoltgo.ServerCategory{ID: id, Title: title, Channels: channels})
+	}
+
+	return c.editServer(serverID, revoltgo.ServerEditParams{Categories: sending})
 }
 
 // KickMember removes a member from a server. The sidebar is repainted by

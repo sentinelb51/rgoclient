@@ -63,6 +63,22 @@ func HBoxNoSpacing(objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{horizontal: true, fill: -1}, objects...)
 }
 
+// NewGapColumn stacks objects top to bottom with gap between the *visible* ones.
+// The composer's reply cards are the caller: they come and go, and a hidden one
+// must cost neither its height nor its gap — which a VBox of spacers cannot say.
+func NewGapColumn(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&noSpacingLayout{fill: -1, gap: gap}, objects...)
+}
+
+// NewGapBlock is the same with gap above and below the block as well, and
+// nothing at all — not even the gap — while every child is hidden. The composer
+// dock's optional rows are the caller: the card's own padding is sized for the
+// entry, which brings InnerPadding of its own, where a reply card or an
+// attachment brings none and would otherwise sit against the card's top edge.
+func NewGapBlock(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&noSpacingLayout{fill: -1, gap: gap, edges: true}, objects...)
+}
+
 // NewWrapColumn stacks objects top to bottom, each given the column's full width
 // *before* it is measured. A wrapping widget answers MinSize with whatever width
 // it was last laid out at, so a column that measured first — VBoxNoSpacing does —
@@ -138,10 +154,13 @@ func Relayout(c *fyne.Container) {
 
 // noSpacingLayout arranges visible children edge to edge along one axis, each
 // stretched to the container's full extent on the other. The child at fill (-1
-// for none) absorbs whatever space the others leave.
+// for none) absorbs whatever space the others leave. A non-zero gap goes between
+// the *visible* children only, so a row that hides itself takes its gap with it.
 type noSpacingLayout struct {
 	horizontal bool
 	fill       int
+	gap        float32
+	edges      bool
 
 	// extents holds each child's measurement for the length of one pass, so a fill
 	// layout measures each child once rather than twice. Reused, UI-thread only.
@@ -152,9 +171,11 @@ func (l *noSpacingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	l.extents = slices.Grow(l.extents[:0], len(objects))
 
 	var fixed float32
+	var shown int
 	for i, child := range objects {
 		var extent float32
 		if child.Visible() {
+			shown++
 			extent = l.extent(child.MinSize())
 			if i != l.fill {
 				fixed += extent
@@ -163,12 +184,19 @@ func (l *noSpacingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 		l.extents = append(l.extents, extent)
 	}
+	fixed += l.gaps(shown)
 
 	var pos float32
+	first := true
 	for i, child := range objects {
 		if !child.Visible() {
 			continue
 		}
+
+		if !first || l.edges {
+			pos += l.gap
+		}
+		first = false
 
 		extent := l.extents[i]
 		if i == l.fill {
@@ -188,11 +216,13 @@ func (l *noSpacingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 func (l *noSpacingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	var w, h float32
+	var shown int
 	for _, child := range objects {
 		if !child.Visible() {
 			continue
 		}
 
+		shown++
 		m := child.MinSize()
 		if l.horizontal {
 			w += m.Width
@@ -203,7 +233,26 @@ func (l *noSpacingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 		}
 	}
 
+	if l.horizontal {
+		w += l.gaps(shown)
+	} else {
+		h += l.gaps(shown)
+	}
+
 	return fyne.NewSize(w, h)
+}
+
+// gaps is what shown children cost in gaps: between them, and around the block
+// as well when the layout pads its edges. Nothing is shown, nothing is charged.
+func (l *noSpacingLayout) gaps(shown int) float32 {
+	if shown == 0 {
+		return 0
+	}
+	if l.edges {
+		return l.gap * float32(shown+1)
+	}
+
+	return l.gap * float32(shown-1)
 }
 
 // extent returns the size component along the layout's axis.

@@ -56,6 +56,13 @@ type MessageWidget struct {
 	authorText *AccentText
 	avatar     *Avatar
 
+	// authorLine is the header the name sits on and authorMarks the slot after it,
+	// holding the glyph that says who is posting. The slot is empty for a person,
+	// and an empty one is zero-width, so a name with nothing to say about it pays
+	// no gap; it is filled here or by RefreshAuthor, whichever learns first.
+	authorLine  *fyne.Container
+	authorMarks *fyne.Container
+
 	// gutterTimestamp stands in the avatar's place on a grouped continuation,
 	// revealed on hover. Nil for a full message.
 	gutterTimestamp *canvas.Text
@@ -237,9 +244,13 @@ func (w *MessageWidget) RefreshAuthor() {
 		return
 	}
 
-	name, nameColor, avatarURL := resolveAuthor(w.deps, w.message)
-	w.authorText.Set(name, nameColor)
-	w.avatar.SetSource(w.deps.Images, avatarURL)
+	author, nameColor := resolveAuthor(w.deps, w.message)
+	w.authorText.Set(author.Name, nameColor)
+	w.avatar.SetSource(w.deps.Images, author.AvatarURL)
+
+	// The mark can arrive with the answer: an unfetched account is not yet known to
+	// be a bot. A mask is known from the message and was drawn at the mount.
+	w.setAuthorMark(author.Mark)
 }
 
 // RefreshReplies re-reads the quoted lines whose target is in resolved. It takes
@@ -733,18 +744,28 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 		}
 		body = stackExtras(w.bodySlot, extras)
 	} else {
-		name, nameColor, avatarURL := resolveAuthor(deps, message)
-		w.avatar = NewAvatar(deps.Images, avatarURL, func() {
-			deps.Actions.OnUserTapped(message.AuthorID, w.avatar)
-		})
+		author, nameColor := resolveAuthor(deps, message)
+
+		// A webhook's author ID names no account, so its avatar opens nothing: the
+		// card would be an empty stranger over a message whose whole identity is the
+		// name beside it.
+		var onTap func()
+		if message.Webhook == nil {
+			onTap = func() { deps.Actions.OnUserTapped(message.AuthorID, w.avatar) }
+		}
+
+		w.avatar = NewAvatar(deps.Images, author.AvatarURL, onTap)
 		w.avatar.onSecondaryTap = w.TappedSecondary
 		leftColumn = container.New(&columnLayout{
 			width:     theme.Sizes.MessageAvatarColumnWidth,
 			topOffset: avatarTopOffset(),
 		}, w.avatar)
 
-		w.authorText = NewAccentText(name, nameColor, 0, fyne.TextStyle{Bold: true})
-		header := buildMessageHeader(w.authorText, fullTime, message.Pinned, w.buildEditMark(), w.bodySlot)
+		w.authorText = NewAccentText(author.Name, nameColor, 0, fyne.TextStyle{Bold: true})
+		w.authorMarks = HBoxNoSpacing()
+		w.setAuthorMark(author.Mark)
+
+		header := w.buildMessageHeader(fullTime, message.Pinned, w.buildEditMark(), w.bodySlot)
 		body = stackExtras(header, w.buildExtras())
 	}
 
@@ -766,16 +787,38 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 }
 
 // resolveAuthor is shared by construction and RefreshAuthor, so a lazily fetched
-// author renders identically either way.
-func resolveAuthor(deps Deps, message *domain.Message) (name string, nameColor color.Color, avatarURL string) {
-	author := deps.Store.MessageAuthor(message)
+// author renders identically either way. The colour comes back beside the author
+// rather than on it: a role's can be a gradient, and the fallback is the theme's,
+// which the store has no business naming.
+func resolveAuthor(deps Deps, message *domain.Message) (author domain.Author, nameColor color.Color) {
+	author = deps.Store.MessageAuthor(message)
 
 	nameColor = theme.Colors.TextPrimary
 	if author.Color != nil {
 		nameColor = author.Color
 	}
 
-	return author.Name, nameColor, author.AvatarURL
+	return author, nameColor
+}
+
+// setAuthorMark fills the slot after the name, once. A message keeps the first
+// mark it is given: a webhook's and a mask are fixed, and an account resolving
+// after the mount can only turn out to be a bot.
+func (w *MessageWidget) setAuthorMark(mark domain.AuthorMark) {
+	if w.authorMarks == nil || len(w.authorMarks.Objects) > 0 {
+		return
+	}
+
+	glyph := NewAuthorMark(mark, theme.Sizes.MessageAuthorMarkSize)
+	if glyph == nil {
+		return
+	}
+
+	w.authorMarks.Add(HorizontalSpacer(theme.Sizes.MessageContentPadding))
+	w.authorMarks.Add(glyph)
+
+	// The slot was zero-width, so the timestamp beside it has to be re-placed.
+	Relayout(w.authorLine)
 }
 
 /* System events */
@@ -947,14 +990,19 @@ func (w *MessageWidget) setOverChild(hovering bool) {
 // body text running under it, and both being siblings in the HBox, the smaller one
 // centres itself against the name.
 //
+// The name is followed by whatever says who is posting — nothing for a person,
+// the bot mark for an account Revolt marks as one, the webhook mark for a name an
+// integration posted under. It sits with the name rather than with the notes
+// after the time, being part of who wrote this rather than a note about it.
+//
 // An edited or pinned message trails the same line — the edit mark first, being
 // about when, then the pin event's own mark — both in the timestamp's colour: a
 // note about the message rather than part of what was said. A bare image, not a
 // widget, so the row's hover and menu pass through it.
-func buildMessageHeader(author *AccentText, timestamp string, pinned bool, edited, body fyne.CanvasObject) fyne.CanvasObject {
+func (w *MessageWidget) buildMessageHeader(timestamp string, pinned bool, edited, body fyne.CanvasObject) fyne.CanvasObject {
 	ts := newText(timestamp, theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
 
-	line := []fyne.CanvasObject{author, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts}
+	line := []fyne.CanvasObject{w.authorText, w.authorMarks, HorizontalSpacer(theme.Sizes.MessageContentPadding), ts}
 	if edited != nil {
 		line = append(line, HorizontalSpacer(theme.Sizes.MessageContentPadding), edited)
 	}
@@ -964,7 +1012,9 @@ func buildMessageHeader(author *AccentText, timestamp string, pinned bool, edite
 		line = append(line, HorizontalSpacer(theme.Sizes.MessageAttachmentSpacing), container.NewCenter(mark))
 	}
 
-	return VBoxNoSpacing(HBoxNoSpacing(line...), body)
+	w.authorLine = HBoxNoSpacing(line...)
+
+	return VBoxNoSpacing(w.authorLine, body)
 }
 
 /* The edit mark */
@@ -1234,6 +1284,11 @@ type replyPreview struct {
 	avatar  *fyne.Container
 	author  *canvas.Text
 	content *canvas.Text
+
+	// marks is the author mark's slot, filled once and empty for a person — the
+	// header's arrangement, for the same reason: what a quote names can resolve
+	// after the line is mounted.
+	marks *fyne.Container
 }
 
 func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.PointEvent)) *replyPreview {
@@ -1244,6 +1299,7 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 
 	p.author = newBoldText("", theme.Colors.TextPrimary, replyPreviewTextSize)
 	p.content = newText("", theme.Colors.TimestampText, replyPreviewTextSize)
+	p.marks = HBoxNoSpacing()
 
 	// A line that found nothing leads nowhere: everything a mounted reply names has
 	// been asked for by the time it is drawn, so one still unresolved was deleted.
@@ -1251,6 +1307,7 @@ func newReplyPreview(deps Deps, channelID, messageID string, onMenu func(*fyne.P
 		container.NewCenter(p.avatar),
 		HorizontalSpacer(8),
 		container.NewCenter(p.author),
+		p.marks,
 		HorizontalSpacer(5),
 		container.NewCenter(p.content),
 	), func() {
@@ -1284,31 +1341,49 @@ func (p *replyPreview) Refresh(deps Deps) {
 }
 
 func (p *replyPreview) set(deps Deps) {
-	author, content, avatarURL, _ := resolveReply(deps, p.channelID, p.messageID)
+	author, content := resolveReply(deps, p.channelID, p.messageID)
 
-	p.author.Text = author
+	p.author.Text = author.Name
 	p.content.Text = content
-	loadAvatar(deps.Images, p.avatar, avatarURL, fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize))
+	p.setMark(author.Mark)
+	loadAvatar(deps.Images, p.avatar, author.AvatarURL, fyne.NewSize(replyPreviewAvatarSize, replyPreviewAvatarSize))
 }
 
-// resolveReply looks up a referenced message: its author, truncated content,
-// avatar URL and role colour. A missing reference yields a placeholder.
-func resolveReply(deps Deps, channelID, messageID string) (author, content, avatarURL string, accent color.Color) {
-	message := deps.Actions.ResolveMessage(channelID, messageID)
-	if message == nil {
-		return "", "Unknown message reference", "", nil
+// setMark fills the slot after the quoted name, once — MessageWidget's own, at
+// the quote's smaller size.
+func (p *replyPreview) setMark(mark domain.AuthorMark) {
+	if len(p.marks.Objects) > 0 {
+		return
 	}
 
-	a := deps.Store.MessageAuthor(message)
+	glyph := NewAuthorMark(mark, theme.Sizes.ReplyAuthorMarkSize)
+	if glyph == nil {
+		return
+	}
+
+	p.marks.Add(HorizontalSpacer(4))
+	p.marks.Add(glyph)
+}
+
+// resolveReply looks up a referenced message: its author, with the name already
+// shortened to what a quote has room for, and its flattened content. A missing
+// reference yields a nameless author and says so in the content — the caller
+// draws the same line either way.
+func resolveReply(deps Deps, channelID, messageID string) (author domain.Author, content string) {
+	message := deps.Actions.ResolveMessage(channelID, messageID)
+	if message == nil {
+		return domain.Author{}, "Unknown message reference"
+	}
+
+	author = deps.Store.MessageAuthor(message)
+	author.Name = util.Truncate(author.Name, maxReplyUsernameLength)
 
 	// Flattened rather than shown raw: a quote is one line, and the asterisks and
 	// newlines the source carries would either read literally or break the row.
 	// Named, so a reply to a message that is only emoji quotes something.
 	flat := markdown.DocumentTextNamed(markdown.Parse(message.Content), deps.Store.EmojiName)
 
-	return util.Truncate(a.Name, maxReplyUsernameLength),
-		util.Truncate(flat, maxReplyPreviewLength),
-		a.AvatarURL, a.Color
+	return author, util.Truncate(flat, maxReplyPreviewLength)
 }
 
 /* In-place editor */
@@ -1323,6 +1398,7 @@ type EditEntry struct {
 	OnSave   func()
 	OnCancel func()
 
+	wrap         wrapMeter
 	shiftPressed bool
 	cursorPlaced bool
 }
@@ -1340,7 +1416,7 @@ func NewEditEntry(content string) *EditEntry {
 }
 
 // MinSize grows the entry as the composer's does.
-func (e *EditEntry) MinSize() fyne.Size { return composerMinSize(&e.Entry) }
+func (e *EditEntry) MinSize() fyne.Size { return composerMinSize(&e.Entry, &e.wrap) }
 
 // Resize places the caret at the end on the first real size. Set in the
 // constructor it lands against zero-width word-wrapped row bounds — one rune per

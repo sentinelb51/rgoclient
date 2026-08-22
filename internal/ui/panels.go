@@ -25,6 +25,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -42,6 +43,11 @@ type MessageCard struct {
 	Author      string
 	AuthorColor color.Color // nil where no coloured role applies
 	AvatarURL   string
+
+	// Mark is the glyph after the name, resolved by the store like the rest of the
+	// author: a card carries it for the same reason a row does — the name alone
+	// does not say a webhook posted it.
+	Mark domain.AuthorMark
 
 	Preview string
 	When    string
@@ -298,7 +304,11 @@ func newMessageCard(deps Deps, entry MessageCard) fyne.CanvasObject {
 	// rides at the fixed end: it is as much of the card's address as the name is,
 	// and a channel that had to shorten would be the half saying which of a dozen
 	// alike this one is.
-	heading := []fyne.CanvasObject{NewEllipsisText(name), HorizontalSpacer(gap)}
+	heading := []fyne.CanvasObject{NewEllipsisText(name)}
+	if mark := NewAuthorMark(entry.Mark, theme.Sizes.IslandAuthorMarkSize); mark != nil {
+		heading = append(heading, HorizontalSpacer(gap*halfStep), mark)
+	}
+	heading = append(heading, HorizontalSpacer(gap))
 	if entry.Where != "" {
 		heading = append(heading,
 			container.NewCenter(newText(entry.Where, theme.Colors.MentionText, theme.Sizes.IslandTimeSize)),

@@ -812,11 +812,14 @@ func (s *store) MessageAuthor(message *domain.Message) domain.Author {
 	case message.System != nil:
 		return domain.Author{Name: "System"}
 	case message.Webhook != nil:
-		return domain.Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL}
+		return domain.Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL, Mark: domain.AuthorWebhook}
 	}
 
 	if member, ok := s.Member(s.channelServerID(message.ChannelID), message.AuthorID); ok {
-		return domain.Author{Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color}
+		return domain.Author{
+			Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color,
+			Mark: authorMark(message, member.Bot),
+		}
 	}
 
 	// Read through to the raw account rather than going via User, which would build
@@ -825,11 +828,33 @@ func (s *store) MessageAuthor(message *domain.Message) domain.Author {
 	// a DM having no membership to prefer.
 	if message.AuthorID != "" {
 		if user := state.User(message.AuthorID); user != nil {
-			return domain.Author{Name: displayName(user), AvatarURL: user.AvatarURL(avatarSize)}
+			return domain.Author{
+				Name: displayName(user), AvatarURL: user.AvatarURL(avatarSize),
+				Mark: authorMark(message, user.Bot != nil),
+			}
 		}
 	}
 
-	return domain.Author{Name: "Message author: " + message.AuthorID}
+	return domain.Author{Name: "Message author: " + message.AuthorID, Mark: authorMark(message, false)}
+}
+
+// authorMark is the precedence domain.AuthorMark describes, for a message whose
+// author is an account: a mask outranks the bot almost always wearing it — a
+// bridge is a bot posting as somebody, and what the reader is being told is that
+// the name is the bot's rather than the person's.
+//
+// An account nothing is known about yet is not a bot — that arrives with the
+// fetch. The mask does not: it is on the message, so an unresolved author still
+// wears it.
+func authorMark(message *domain.Message, bot bool) domain.AuthorMark {
+	switch {
+	case message.Masquerade:
+		return domain.AuthorMasquerade
+	case bot:
+		return domain.AuthorBot
+	}
+
+	return domain.AuthorPerson
 }
 
 // SystemTextParts renders a system message, resolving whoever it is about.

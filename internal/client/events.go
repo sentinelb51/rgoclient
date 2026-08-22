@@ -320,20 +320,27 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 // its row — so a channel is unread when its newest message is past its marker,
 // and one never acknowledged is unread outright. IDs are ULIDs, so newer sorts
 // higher and the comparison is lexical.
+//
+// Both lists are taken from the channels the Ready carries rather than from the
+// markers. A marker outlives the channel it is about — leaving a server deletes
+// neither, and an ack is the only thing that ever prunes one — so a mention read
+// off a row the account no longer has a channel for can never be opened,
+// resolved or cleared, and would light the inbox for the rest of the session.
 func readState(event *revoltgo.EventReady) (unread []string, mentions map[string][]string) {
 
 	lastRead := make(map[string]string, len(event.ChannelUnreads))
-	mentions = make(map[string][]string)
+	marked := make(map[string][]string, len(event.ChannelUnreads))
 
 	for _, marker := range event.ChannelUnreads {
 		if marker.LastMessageID != nil {
 			lastRead[marker.ID.Channel] = *marker.LastMessageID
 		}
 		if len(marker.MentionIDs) > 0 {
-			mentions[marker.ID.Channel] = slices.Sorted(slices.Values(marker.MentionIDs))
+			marked[marker.ID.Channel] = slices.Sorted(slices.Values(marker.MentionIDs))
 		}
 	}
 
+	mentions = make(map[string][]string, len(marked))
 	unread = make([]string, 0, len(event.ChannelUnreads))
 	for _, channel := range event.Channels {
 		if channel.ChannelType == revoltgo.ChannelTypeSavedMessages {
@@ -343,7 +350,8 @@ func readState(event *revoltgo.EventReady) (unread []string, mentions map[string
 		// A mention standing past the marker is unread on its own account: Revolt
 		// prunes them as far as the channel was read, so one that is still here names
 		// something the account has not seen.
-		if len(mentions[channel.ID]) > 0 {
+		if ids := marked[channel.ID]; len(ids) > 0 {
+			mentions[channel.ID] = ids
 			unread = append(unread, channel.ID)
 			continue
 		}

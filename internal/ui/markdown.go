@@ -360,13 +360,6 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			b.WriteString(n.Text)
 		case *markdown.LineBreak:
 			b.WriteByte('\n') // style-neutral
-		case *markdown.Code:
-			style := em.textStyle()
-			style.Monospace = true
-			if !merge(style, size, dim) {
-				return false
-			}
-			b.WriteString(n.Text)
 		case *markdown.Strong:
 			next := em
 			next.bold = true
@@ -379,7 +372,7 @@ func flattenInlines(b *strings.Builder, nodes []markdown.Inline, em emphasis, si
 			if !flattenInlines(b, n.Children, next, size, dim, merge) {
 				return false
 			}
-		default: // Underline, Strike, Spoiler, Link, mentions, emoji, timestamp: custom visuals
+		default: // Code, Underline, Strike, Spoiler, Link, mentions, emoji, timestamp: custom visuals
 			return false
 		}
 	}
@@ -435,6 +428,31 @@ func (e emphasis) over(base widget.RichTextStyle) fyne.TextStyle {
 
 	return style
 }
+
+// code renders an inline span as the chip Fyne draws for a code-inline segment:
+// the text on a fill tight to its own glyphs, whatever width the row hands the
+// segment. It stays a native TextSegment — a widget of the client's own could be
+// broken neither across rows nor at its spaces — and the style is *copied* from
+// Fyne's var because what marks it as code inline is a field this package cannot
+// name.
+func (b *mdBuilder) code(s string, em emphasis, base widget.RichTextStyle) {
+	if s == "" {
+		return
+	}
+
+	style := widget.RichTextStyleCodeInline
+	style.ColorName = base.ColorName
+	style.SizeName = base.SizeName
+	style.TextStyle = fyne.TextStyle{Monospace: true, Bold: em.bold, Italic: em.italic}
+
+	b.segs = append(b.segs, &widget.TextSegment{Text: codePad + s + codePad, Style: style})
+}
+
+// codePad is the breathing room between the chip's fill and the code in it.
+// Nothing reaches the container Fyne draws that fill in, so the padding has to be
+// part of the text — and a non-breaking space at that, or a row could break
+// between the padding and the word and leave a chip of blank fill behind.
+const codePad = "\u00a0"
 
 // decorated splits a run into per-word segments separated by ordinary
 // break-point spaces, each bridging its trailing space so the decoration joins
@@ -585,10 +603,7 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Spoiler:
 			b.inlines(n.Children, em, base, &spoilerState{})
 		case *markdown.Code:
-			style := base
-			style.Inline = true
-			style.TextStyle = fyne.TextStyle{Monospace: true, Bold: em.bold, Italic: em.italic}
-			b.segs = append(b.segs, &widget.TextSegment{Text: n.Text, Style: style})
+			b.code(n.Text, em, base)
 		case *markdown.Link:
 			u, _ := url.Parse(n.URL)
 			b.segs = append(b.segs, &widget.HyperlinkSegment{Text: markdown.PlainText(n.Children), URL: u})

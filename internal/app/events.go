@@ -370,6 +370,10 @@ func (a *App) onServerLeft(event client.ServerLeft) {
 	}
 
 	a.serverIDs = slices.Delete(a.serverIDs, i, i+1)
+
+	// Before the rail is rebuilt: its walk repaints the mention marks, and the
+	// inbox button would otherwise stay lit for channels nothing can open again.
+	a.forgetLeftServer(event.ServerID)
 	a.refreshServerList()
 
 	// Immediate rather than queued: the page's every section is about a server the
@@ -575,6 +579,15 @@ func (a *App) onRecipientsChanged(event client.RecipientsChanged) {
 // in the home view forever, drawing no row and never leaving the list.
 func (a *App) onUserRemoved(event client.UserRemoved) {
 	a.refreshAuthorMessages(event.UserID)
+
+	// A conversation that went takes its mentions with it. Nothing can open one
+	// again, so a mention left inside would light the inbox for a channel that has
+	// no row — the same reason the order below is pruned.
+	for channelID := range a.mentions {
+		if _, ok := a.store.Channel(channelID); !ok {
+			a.clearMentions(channelID)
+		}
+	}
 
 	a.dmChannels = slices.DeleteFunc(a.dmChannels, func(channelID string) bool {
 		_, ok := a.store.Channel(channelID)

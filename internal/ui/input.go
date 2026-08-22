@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -80,6 +81,10 @@ type MessageInput struct {
 	// jump bar answers to as well.
 	OnEscape func()
 
+	// OnResize reports the entry taking a different number of rows because the
+	// composer got narrower or wider — see Resize.
+	OnResize func()
+
 	// OnRefused reports an input the composer would not take, so the app can say
 	// why — dropping a file into a channel that forbids uploads would otherwise be
 	// nothing happening, which is indistinguishable from a bug.
@@ -126,6 +131,7 @@ type MessageInput struct {
 
 	deps         Deps
 	window       fyne.Window
+	wrap         wrapMeter
 	shiftPressed bool
 	ctrlPressed  bool
 }
@@ -140,7 +146,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 		window:              window,
 		mentionStart:        -1,
 		AttachmentContainer: container.NewHBox(),
-		ReplyContainer:      container.NewVBox(),
+		ReplyContainer:      NewGapColumn(theme.Sizes.ComposerRowGap),
 	}
 	m.Mentions = NewMentionPicker(deps, m.acceptMention)
 	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
@@ -198,7 +204,25 @@ func (m *MessageInput) insert(text string) {
 }
 
 // MinSize grows the entry up to ComposerMaxLines as the user types.
-func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry) }
+func (m *MessageInput) MinSize() fyne.Size { return composerMinSize(&m.Entry, &m.wrap) }
+
+// Resize re-hangs the dock when a width change re-wraps the text into a
+// different number of rows. The count is taken at the width of the *last* layout
+// — see wrapMeter — so the pass that narrows the composer has already measured
+// it at the old one, and nothing would ask again until the next keystroke.
+func (m *MessageInput) Resize(size fyne.Size) {
+	if size.Width == m.Size().Width {
+		m.Entry.Resize(size)
+		return
+	}
+
+	rows := m.wrap.measure(&m.Entry)
+	m.Entry.Resize(size)
+
+	if m.wrap.measure(&m.Entry) != rows && m.OnResize != nil {
+		m.OnResize()
+	}
+}
 
 // SetPermissions tells the composer what the account may do here. Without
 // SendMessage the entry is disabled outright rather than refusing on submit — a
@@ -295,20 +319,73 @@ func (w *ComposerNotice) Set(reason string) {
 	w.Show()
 }
 
-// composerMinSize sizes a growing entry: one line per newline up to
+// composerMinSize sizes a growing entry: one line per *wrapped* row up to
 // ComposerMaxLines, plus InnerPadding above and below and nothing else. The input
 // border is *not* added on top — entryRenderer.Layout pays for that inset out of
 // the text provider's own padding, and counting it twice left dead pixels under
 // the caret.
-func composerMinSize(e *widget.Entry) fyne.Size {
+func composerMinSize(e *widget.Entry, rows *wrapMeter) fyne.Size {
 	size := e.MinSize()
-	lines := min(max(strings.Count(e.Text, "\n")+1, 1), int(theme.Sizes.ComposerMaxLines))
+	lines := min(rows.measure(e), int(theme.Sizes.ComposerMaxLines))
 	th := e.Theme()
 	size.Height = lineHeight(th.Size(fynetheme.SizeNameText))*float32(lines) +
 		th.Size(fynetheme.SizeNameInnerPadding)*2
 
 	return size
 }
+
+// wrapMeter counts the rows an entry's text *wraps* into, which is the height a
+// growing entry has to ask for. Counting hard newlines instead left the box a row
+// short of its own content, and Fyne scrolls the overflow: entryContentRenderer
+// keeps a line of clearance around the caret, so a wrapped line slid under the
+// entry's top edge on one keystroke and back on the next.
+//
+// The count comes from a widget.RichText holding the same text at the same width.
+// That is the widget an Entry wraps its text in, insets and all, so the two cannot
+// disagree — no other API reports it, the provider being unexported. Memoised per
+// (text, width) because MinSize runs on every layout pass.
+type wrapMeter struct {
+	mirror *widget.RichText
+	text   string
+	width  float32
+	rows   int
+}
+
+// measure returns the rows e's text occupies at the width e was last laid out at.
+// Before the first layout there is no width to wrap against and hard newlines are
+// the only answer available; the pass after it corrects the height.
+func (m *wrapMeter) measure(e *widget.Entry) int {
+	text, width := e.Text, e.Size().Width
+	if text == "" || width <= 0 {
+		return max(strings.Count(text, "\n")+1, 1)
+	}
+	if m.mirror != nil && m.text == text && m.width == width {
+		return m.rows
+	}
+
+	if m.mirror == nil {
+		m.mirror = widget.NewRichText()
+		m.mirror.Wrapping = fyne.TextWrapWord
+	}
+
+	// Height only bounds truncation, which word wrapping does not do.
+	m.mirror.Segments = []widget.RichTextSegment{&widget.TextSegment{Text: text}}
+	m.mirror.Resize(fyne.NewSize(width, wrapMeterHeight))
+	m.mirror.Refresh()
+
+	th := e.Theme()
+	body := m.mirror.MinSize().Height - th.Size(fynetheme.SizeNameInnerPadding)*2
+	line := lineHeight(th.Size(fynetheme.SizeNameText))
+
+	m.text, m.width = text, width
+	m.rows = max(int(math.Round(float64(body/line))), 1)
+
+	return m.rows
+}
+
+// wrapMeterHeight is the height the mirror is measured at: anything past what the
+// text can occupy, since only its width decides where the rows break.
+const wrapMeterHeight = 1 << 14
 
 // lineHeights memoises one line's height per text size — MinSize runs on every
 // layout pass. UI thread only, hence unsynchronised.
@@ -846,29 +923,35 @@ func (m *MessageInput) rebuildReplies() {
 // truncated preview, a mention toggle and a remove button, outlined in the
 // author's role colour and falling back to the app accent.
 func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
-	author, content, avatarURL, accent := resolveReply(m.deps, reply.ChannelID, reply.ID)
-	if author == "" {
-		author = "Unknown"
+	author, content := resolveReply(m.deps, reply.ChannelID, reply.ID)
+	if author.Name == "" {
+		author.Name = "Unknown"
 	}
+
+	accent := author.Color
 	if accent == nil {
 		accent = theme.Colors.ServerSelectedBg
 	}
 
-	avatar := circularAvatar(m.deps.Images, avatarURL, fyne.NewSize(replyAvatarSize, replyAvatarSize))
+	avatar := circularAvatar(m.deps.Images, author.AvatarURL, fyne.NewSize(replyAvatarSize, replyAvatarSize))
 
-	authorLabel := newBoldText(author, theme.Colors.TextPrimary, replyTextSize)
+	authorLabel := newBoldText(author.Name, theme.Colors.TextPrimary, replyTextSize)
 	contentLabel := newText(content, theme.Colors.TimestampText, replyTextSize)
 
 	// NewCenter vertically centres each element in the card's height; HBoxNoSpacing
 	// keeps the horizontal gaps explicit rather than inheriting theme padding.
-	left := HBoxNoSpacing(
+	// The card names whoever is about to be answered, so it wears the same mark the
+	// message does — a reply aimed at a webhook goes nowhere near a person.
+	left := []fyne.CanvasObject{
 		HorizontalSpacer(8),
 		container.NewCenter(avatar),
 		HorizontalSpacer(8),
 		container.NewCenter(authorLabel),
-		HorizontalSpacer(6),
-		container.NewCenter(contentLabel),
-	)
+	}
+	if mark := NewAuthorMark(author.Mark, theme.Sizes.ReplyAuthorMarkSize); mark != nil {
+		left = append(left, HorizontalSpacer(4), mark)
+	}
+	left = append(left, HorizontalSpacer(6), container.NewCenter(contentLabel))
 
 	var mention *replyIconButton
 	mention = newReplyIconButton(assets.MentionIcon, true, reply.Mention, func() {
@@ -882,7 +965,7 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 		HorizontalSpacer(6),
 	)
 
-	row := NewMinHeightContainer(replyCardHeight, container.NewBorder(nil, nil, left, right))
+	row := NewMinHeightContainer(replyCardHeight, container.NewBorder(nil, nil, HBoxNoSpacing(left...), right))
 
 	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
 	background.CornerRadius = 6

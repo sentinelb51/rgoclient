@@ -153,6 +153,11 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   the feature — acking a channel is what creates its row — so `readState`
   compares each channel's `last_message_id` against its marker, absent meaning
   never read, and a standing mention is unread on its own account.
+  **A marker outlives its channel**: leaving a server deletes neither it nor the
+  mentions on it, and only an ack ever prunes one, so `readState` builds *both*
+  lists by walking `event.Channels` and looking the marker up — a mention read
+  straight off the rows lights the inbox for a channel that can never be opened,
+  resolved or acknowledged again.
 - **An ack prunes mentions, it does not clear them.** `PUT /channels/{id}/ack/{m}`
   is `$pull: {mentions: {$lte: m}}` + `$set: {last_id: m}` in `delta`, so a
   mention past the message acknowledged survives — hence `ChannelRead.MessageID`,
@@ -237,6 +242,21 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   `roles_edit.rs` drops rank from the partial and `DataCreateRole.rank` is documented as
   having no effect. Ordering is `ServersRoleRanksEdit` and nothing else, and the array is
   the server's whole order — rank is the index in it (`Server::set_role_ordering`).
+- **A server's channel arrangement is one field, replaced whole.**
+  `ServerEditParams.Categories` (`[]*ServerCategory`: `id`, `title`, `channels`)
+  is the *only* way to order channels — `server.channels` takes no route, so the
+  channels no category claims have no order at all and are read back in whatever
+  order the server lists them. `server_edit.rs` gates this one field on
+  **`ManageChannel`** where the rest of the route is `ManageServer`, refuses the
+  edit outright if a channel appears in two categories, and silently drops any ID
+  it does not find in the server — so what is sent has to be the server's whole
+  arrangement, hidden channels included, rather than the part a reader can see.
+  An ID is the caller's to mint (unique, ≤32 characters; `SetServerCategories`
+  makes a ULID for a category with none), `channels` is required so an empty
+  category sends `[]` rather than a nil that `omitzero` would drop, and clearing
+  every category is `ServerEditDataRemoveCategories`, not an empty array. The
+  edit returns as a `ServerUpdate` carrying the whole structure, which
+  `State.updateServer` files — `PartialServer.Categories` is handled.
 - **`Session.WS` is nilable and unguarded.** `ChannelBeginTyping`/`ChannelEndTyping`
   are websocket writes rather than requests — no rate limiter, nothing to wait
   for — but they reach `s.WS.WriteMessage` without a check, and `WS` is nil until
@@ -254,6 +274,13 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   the other half. revoltgo's `FriendAdd` is also mis-named for what the client
   wants: it is `PUT /users/{id}/friend`, which *accepts*, while sending a request
   is `POST /users/friend` and has no method at all — see `Client.AddFriend`.
+- **An error carries no status.** Every non-2xx comes back as
+  `fmt.Errorf("bad status code %d: %s")` — no type, no code — so "it is not
+  there" and "the request failed" are one answer. `answeredGone` reads the number
+  back out of the text for the one caller that must tell them apart
+  (`ResolveMessages` reports `gone` so the mention inbox can forget a deleted
+  message without a dropped connection erasing a live one). A wording revoltgo
+  stops using reads as no status, which forgets nothing — the safe way round.
 - **No `context.Context`.** revoltgo's REST layer takes none, so a superseded
   request can't be cancelled — only its result discarded. `Client.fetching`
   (per-channel in-flight dedup → `ErrBusy`) and the epoch counters do that

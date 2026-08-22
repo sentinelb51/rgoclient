@@ -746,7 +746,30 @@ type Author struct {
 	Name      string
 	AvatarURL string
 	Color     color.Color // nil when no coloured role applies
+
+	// Mark is what the surfaces drawing this name have to say about it beyond the
+	// name itself — see AuthorMark.
+	Mark AuthorMark
 }
+
+// AuthorMark is what a row says about who posted, beyond the name: nothing for a
+// person, and otherwise the one thing the reader needs in order to read the name
+// correctly. A bot is an account like any other; a webhook is no account at all,
+// so nothing opens; a masquerade is somebody posting under a name and picture the
+// client does not draw — the account behind the mask is what it shows.
+//
+// A message can be more than one of these at once, so the order is a precedence:
+// a webhook's identity is the whole of what it is, and a mask is more surprising
+// than the bot usually wearing it. Store.MessageAuthor is where it is decided,
+// so a header, a quoted line and a summary card cannot disagree.
+type AuthorMark int
+
+const (
+	AuthorPerson AuthorMark = iota
+	AuthorBot
+	AuthorWebhook
+	AuthorMasquerade
+)
 
 // UserProfile is the half of a profile the client does not already hold: a
 // request of its own, so it lands after the card is on screen.

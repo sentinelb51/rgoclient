@@ -128,18 +128,33 @@ func (s *fakeStore) MessageAuthor(message *domain.Message) domain.Author {
 	case message.System != nil:
 		return domain.Author{Name: "System"}
 	case message.Webhook != nil:
-		return domain.Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL}
+		return domain.Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL, Mark: domain.AuthorWebhook}
 	}
 
 	serverID := s.channels[message.ChannelID].ServerID
 	if member, ok := s.Member(serverID, message.AuthorID); ok {
-		return domain.Author{Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color}
+		return domain.Author{
+			Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color,
+			Mark: fakeAuthorMark(message, member.Bot),
+		}
 	}
 	if user, ok := s.User(message.AuthorID); ok {
-		return domain.Author{Name: user.Name, AvatarURL: user.AvatarURL}
+		return domain.Author{Name: user.Name, AvatarURL: user.AvatarURL, Mark: fakeAuthorMark(message, user.Bot)}
 	}
 
-	return domain.Author{Name: "Message author: " + message.AuthorID}
+	return domain.Author{Name: "Message author: " + message.AuthorID, Mark: fakeAuthorMark(message, false)}
+}
+
+// fakeAuthorMark mirrors client.authorMark: a mask outranks a bot.
+func fakeAuthorMark(message *domain.Message, bot bool) domain.AuthorMark {
+	switch {
+	case message.Masquerade:
+		return domain.AuthorMasquerade
+	case bot:
+		return domain.AuthorBot
+	}
+
+	return domain.AuthorPerson
 }
 
 func (s *fakeStore) SystemTextParts(system *domain.SystemMessage) (name, rest string) {

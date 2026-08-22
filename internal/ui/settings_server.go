@@ -108,6 +108,17 @@ type ServerChannelEntry struct {
 	Editable bool
 }
 
+// ServerCategoryEntry is one stretch of the Channels section: a category and the
+// channels under it, in the order the sidebar draws them. The one with no ID is
+// the channels no category claimed, and is always first — as it is in the
+// sidebar, and as Revolt derives it.
+type ServerCategoryEntry struct {
+	ID    string
+	Title string
+
+	Channels []ServerChannelEntry
+}
+
 // ServerRoleEntry is one of a server's roles as the list and the editor draw it.
 // Allow and Deny are the role's own override rather than what somebody holding it
 // ends up with: a bit in neither is inherited, which is the third state the
@@ -199,9 +210,24 @@ type ServerSettingsHooks struct {
 
 	/* Channels */
 
-	Channels      func() []ServerChannelEntry
+	// Channels is the whole arrangement rather than a list: the uncategorised
+	// entry first, then every category in the server's own order.
+	Channels      func() []ServerCategoryEntry
 	CreateChannel func()
 	EditChannel   func(channelID string)
+
+	// MoveChannel moves one channel one place, across a category boundary where
+	// that is what the next place is. As with a role, the route takes the server's
+	// whole arrangement and the controller composes it.
+	MoveChannel func(channelID string, up bool)
+
+	// The category actions. All four publish the same arrangement MoveChannel
+	// does, and none of them reports back: the edit returns as a server update the
+	// store answers for.
+	CreateCategory func()
+	RenameCategory func(categoryID string)
+	MoveCategory   func(categoryID string, up bool)
+	DeleteCategory func(categoryID string)
 
 	/* Roles */
 
@@ -711,39 +737,119 @@ func plural(count int, noun string) string {
 
 /* Channels */
 
+const channelsDetail = "Every channel this account can see, in the order the sidebar draws them. " +
+	"A category names the ones under it, and moving a channel past the end of one is how it joins the next."
+
+// channelsSection is the sidebar's own arrangement as a list: the channels no
+// category claimed, then each category and what it holds. One list rather than a
+// card per category — what the section is about is the order, and an order split
+// across cards reads as several.
 func (p *ServerSettingsPage) channelsSection() []settingsGroup {
 	groups := []settingsGroup{}
 
-	if p.hooks.Can(domain.PermissionManageChannel) {
+	// A category is the server's structure rather than one channel's, so the row
+	// that makes one and every move below ask for the server-wide permission — the
+	// one Revolt itself checks for the route that publishes an arrangement.
+	manage := p.hooks.Can(domain.PermissionManageChannel)
+	if manage {
 		groups = append(groups, p.group("Add", "",
 			p.actionRow("New channel",
 				"Text or voice. It joins the sidebar as soon as Revolt confirms it.",
 				"Create", ToneInfo, p.hooks.CreateChannel),
+			p.actionRow("New category",
+				"A heading in the sidebar. It arrives empty, at the end of the order.",
+				"Create", ToneInfo, p.hooks.CreateCategory),
 		))
 	}
 
-	channels := p.hooks.Channels()
-	if len(channels) == 0 {
+	entries := p.hooks.Channels()
+	if len(entries) == 0 || (len(entries) == 1 && len(entries[0].Channels) == 0) {
 		return append(groups, p.group("Channels", "", p.note("This server has no channels.")))
 	}
 
-	rows := make([]fyne.CanvasObject, 0, len(channels))
-	for _, channel := range channels {
-		rows = append(rows, p.channelRow(channel))
+	var rows []fyne.CanvasObject
+	for at, entry := range entries {
+		if entry.ID != "" {
+			rows = append(rows, p.categoryRow(entry, at, len(entries), manage))
+		}
+		for index, channel := range entry.Channels {
+			rows = append(rows, p.channelRow(channel, entries, at, index, manage))
+		}
 	}
 
-	return append(groups, p.group("Channels",
-		"Every channel this account can see. Editing one is the same card the sidebar's own menu opens.",
-		rows...))
+	return append(groups, p.group("Channels", channelsDetail, rows...))
 }
 
-func (p *ServerSettingsPage) channelRow(channel ServerChannelEntry) fyne.CanvasObject {
+// categoryRow is the heading the channels under it are listed against. It carries
+// no glyph where a channel carries one, which is what indents them beneath it:
+// the two are not the same kind of row, and the eye should not have to read them
+// to find that out.
+func (p *ServerSettingsPage) categoryRow(entry ServerCategoryEntry, at, count int, manage bool) fyne.CanvasObject {
 	var controls []fyne.CanvasObject
+	if manage {
+		// The uncategorised stretch is at 0 and is not a category, so the first real
+		// one has nothing above it to trade places with.
+		controls = append(controls, moveButtons(at > 1, at < count-1,
+			func(up bool) { p.hooks.MoveCategory(entry.ID, up) })...)
+
+		controls = append(controls,
+			HorizontalSpacer(theme.Sizes.ChipSpacing),
+			editButton(func() { p.hooks.RenameCategory(entry.ID) }),
+			HorizontalSpacer(theme.Sizes.ChipSpacing),
+			deleteButton(func() { p.confirmDeleteCategory(entry) }),
+		)
+	}
+
+	return p.entryRow(nil, entry.Title, plural(len(entry.Channels), "channel"), controls...)
+}
+
+func (p *ServerSettingsPage) channelRow(channel ServerChannelEntry,
+	entries []ServerCategoryEntry, at, index int, manage bool) fyne.CanvasObject {
+
+	var controls []fyne.CanvasObject
+	if manage {
+		controls = append(controls, moveButtons(
+			channelCanMove(entries, at, index, true),
+			channelCanMove(entries, at, index, false),
+			func(up bool) { p.hooks.MoveChannel(channel.ID, up) })...)
+	}
 	if channel.Editable {
-		controls = append(controls, editButton(func() { p.hooks.EditChannel(channel.ID) }))
+		controls = append(controls, spaced(controls, editButton(func() { p.hooks.EditChannel(channel.ID) }))...)
 	}
 
 	return p.entryRow(ChannelGlyph(channel.Kind), channel.Name, channel.Description, controls...)
+}
+
+// channelCanMove reports whether a channel has anywhere to go. Leaving a category
+// counts: the move that takes a channel out of one is the move past its end.
+//
+// Up out of the uncategorised stretch is the one direction that is never
+// anything. Revolt keeps an order for the channels a category claims and none for
+// the rest, so from there the only move is down, into the first category — and
+// coming back up out of it lands wherever the server already had it.
+func channelCanMove(entries []ServerCategoryEntry, at, index int, up bool) bool {
+	if up {
+		return at > 0
+	}
+	if at == 0 {
+		return len(entries) > 1
+	}
+
+	return index < len(entries[at].Channels)-1 || at < len(entries)-1
+}
+
+// confirmDeleteCategory asks before dropping one, and says the whole of what
+// happens: a category is a heading, so deleting it keeps every channel in it and
+// takes away only where they were filed.
+func (p *ServerSettingsPage) confirmDeleteCategory(entry ServerCategoryEntry) {
+	p.hooks.Confirm(Confirm{
+		Title: "Delete category",
+		Body: fmt.Sprintf("%s goes away and the %s in it move to the top of the sidebar. No channel is deleted.",
+			entry.Title, plural(len(entry.Channels), "channel")),
+		Action:    "Delete",
+		Tone:      ToneDanger,
+		OnConfirm: func() { p.hooks.DeleteCategory(entry.ID) },
+	})
 }
 
 /* Roles */
@@ -777,15 +883,18 @@ func (p *ServerSettingsPage) rolesSection() []settingsGroup {
 	// The default is drawn apart from the list rather than at the end of it: it is
 	// not a role, cannot be reordered or deleted, and a row among the others would
 	// be offering all of that.
-	rows := make([]fyne.CanvasObject, 0, len(roles))
+	ranked := rankedRoles(roles)
+	rows := make([]fyne.CanvasObject, 0, len(ranked))
 	var everyone fyne.CanvasObject
 
+	// ranked is this list with the default taken out and in the same order, so a
+	// row's place in the order is the number of rows already made.
 	for _, role := range roles {
 		if role.Default {
-			everyone = p.roleRow(role)
+			everyone = p.roleRow(role, nil, -1)
 			continue
 		}
-		rows = append(rows, p.roleRow(role))
+		rows = append(rows, p.roleRow(role, ranked, len(rows)))
 	}
 
 	if len(rows) == 0 {
@@ -802,10 +911,21 @@ func (p *ServerSettingsPage) rolesSection() []settingsGroup {
 		everyone))
 }
 
-func (p *ServerSettingsPage) roleRow(role ServerRoleEntry) fyne.CanvasObject {
+// roleRow is one role in the list, offered its place in the order as well as its
+// editor: seniority is most of what a list of roles is read for, and a move that
+// could only be made two taps in is a move made against a list you cannot see.
+// at is its place among ranked, or -1 for the default, which has none.
+func (p *ServerSettingsPage) roleRow(role ServerRoleEntry, ranked []ServerRoleEntry, at int) fyne.CanvasObject {
 	var controls []fyne.CanvasObject
+
+	// A role this account does not outrank cannot be moved, and neither can one be
+	// moved above a role that outranks it — which is what the neighbour is asked.
+	if at != -1 && role.Editable && p.hooks.Can(domain.PermissionManageRole) {
+		controls = append(controls, moveButtons(at > 0 && ranked[at-1].Editable, at < len(ranked)-1,
+			func(up bool) { p.hooks.MoveRole(role.ID, up) })...)
+	}
 	if role.Editable {
-		controls = append(controls, editButton(func() { p.showRole(role) }))
+		controls = append(controls, spaced(controls, editButton(func() { p.showRole(role) }))...)
 	}
 
 	return p.entryRow(roleDot(role), role.Name, roleSummary(role), controls...)
@@ -842,6 +962,53 @@ func roleDot(role ServerRoleEntry) fyne.CanvasObject {
 	side := theme.Sizes.SettingsIconSize
 
 	return container.NewCenter(newSwatchRect(fill, side, side/2))
+}
+
+// deleteButton is the same target in the danger tone, wearing the mark and the
+// tint the invite list revokes with — a destructive row action reads the same
+// wherever one is offered.
+func deleteButton(onTap func()) *OutlinedIconButton {
+	tint := theme.Colors.SwiftActionDanger
+
+	return NewOutlinedIconButton(tintedIcon(assets.ActionDeleteIcon, tint), tint, onTap)
+}
+
+// moveButtons is how a list row offers its place in an order. Both are drawn
+// whatever they can do: a row at either end wears the pair with one of them dead
+// rather than a shape of its own, a list being read down its right-hand edge as
+// much as down its left.
+func moveButtons(canUp, canDown bool, onMove func(up bool)) []fyne.CanvasObject {
+	return []fyne.CanvasObject{
+		moveButton(assets.ActionUpIcon, canUp, func() { onMove(true) }),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		moveButton(assets.ActionDownIcon, canDown, func() { onMove(false) }),
+	}
+}
+
+// moveButton is one of that pair. Which tint it wears is decided here rather than
+// switched afterwards: the mark carries its colour in the resource, baked in at
+// construction so the raster is cached under it.
+func moveButton(mark fyne.Resource, available bool, onTap func()) *OutlinedIconButton {
+	if !available {
+		tint := theme.Colors.ButtonDisabledText
+
+		return NewOutlinedIconButton(tintedIcon(mark, tint), tint, nil).disabled()
+	}
+
+	tint := theme.Colors.SwiftActionIcon
+
+	return NewOutlinedIconButton(tintedIcon(mark, tint), tint, onTap)
+}
+
+// spaced is one more control for a row that may already have some. The gap
+// between two belongs to the second, so a row drawing a single button pays
+// nothing for the ones it left off.
+func spaced(existing []fyne.CanvasObject, control fyne.CanvasObject) []fyne.CanvasObject {
+	if len(existing) == 0 {
+		return []fyne.CanvasObject{control}
+	}
+
+	return []fyne.CanvasObject{HorizontalSpacer(theme.Sizes.ChipSpacing), control}
 }
 
 // editButton is how a list row offers the editor behind it: the same outlined

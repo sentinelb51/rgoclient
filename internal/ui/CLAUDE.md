@@ -82,9 +82,23 @@ naming and the test policy.
   preview, attachment row or mention picker growing the dock is accounted for
   without anything noticing; `MessageList.Relayout` re-reads it.
 - **Composer geometry.** A growing entry's height is
-  `lineHeight × lines + InnerPadding × 2` (`composerMinSize`) — the input border
+  `lineHeight × rows + InnerPadding × 2` (`composerMinSize`) — the input border
   is *not* added on top, because `entryRenderer.Layout` pays for it out of the
-  text provider's own padding. The dock hangs `ComposerDockMargin` in from three
+  text provider's own padding. `rows` is what the text **wraps** into, not its
+  newline count: an Entry scrolls whatever overflows its box and
+  `entryContentRenderer.ensureCursorVisible` keeps a line of clearance around the
+  caret, so a box a row short of its own content slid a wrapped line under its top
+  edge on one keystroke and back on the next. Nothing reports that count — the
+  text provider is unexported — so `wrapMeter` mirrors the text into a
+  `widget.RichText` at the same width, which is the widget an Entry wraps in, and
+  memoises per (text, width) since `MinSize` runs on every layout pass. The count
+  is taken at the width of the *last* layout, hence `MessageInput.Resize` →
+  `OnResize` → `App.resizeDock` when a width change re-wraps.
+  Everything above the entry — the mention picker, the reply cards, the
+  attachments — is one `ui.NewGapBlock`: `ComposerRowGap` between the rows and
+  around the block, and nothing at all while all three are hidden.
+  `ComposerPaddingV` is sized for the entry, which brings `InnerPadding` of its
+  own, and a reply card brings none. The dock hangs `ComposerDockMargin` in from three
   edges of the message area, which is why the area stacks through
   `ui.NewFillColumn`, not a `Border`: a Border would charge theme padding between
   its centre and the dock on top of that. The margin is only a gutter — widening
@@ -112,6 +126,16 @@ naming and the test policy.
 - **A RichText segment carries a colour *name*, not a colour**, so a palette it
   draws from has to be answerable by `AppTheme.Color` — `theme.ColorNameCode…`
   are the highlighter's, sitting beside Fyne's own with an `rgo` prefix.
+- **Inline code is Fyne's own chip.** What draws the fill behind a `` `span` `` is
+  an unexported mark on `widget.RichTextStyleCodeInline`, so `mdBuilder.code`
+  *copies* that var and sets only exported fields — a style built by hand draws
+  no fill. Fyne fits the rectangle to the glyphs and gives no way in: the fill is
+  `ColorNameInputBackground` and square, and the chip's breathing room is
+  therefore a non-breaking space in the text (`codePad`), an ordinary one letting
+  a row break between the padding and the word. A colour of its own or a corner
+  radius needs a fork patch. It stays a native `TextSegment` — a widget segment
+  is atomic and RichText never breaks a row before one — and a body carrying one
+  is off the flattened, selectable Label path.
 - **Mixed text sizes on one line** align by being siblings in an HBox — a
   `canvas.Text` centres its glyphs in whatever height it is given. Don't wrap one
   in a spacer to nudge it.
@@ -143,6 +167,28 @@ naming and the test policy.
   by, and the glyph is which event of that class it was. An unknown kind takes
   the generic mark in neutral grey, so an event Revolt adds later still reads as
   an event.
+- **A name is followed by what the name does not say.** `domain.AuthorMark` is
+  decided once, by `Store.MessageAuthor`, and drawn by `ui.NewAuthorMark` — nil
+  for a person, so no surface decides for itself when to draw nothing. Every
+  surface naming an author wears it at its own size: the message header
+  (`MessageAuthorMarkSize`), the quoted reply line and the composer's reply card
+  (`ReplyAuthorMarkSize`), and an island card (`IslandAuthorMarkSize`). One tone
+  — `Colors.BotMark` — three glyphs, since what is being said is the same thing.
+  A card's rides at the *fixed* end of the heading rather than against the name,
+  the name being the child that stretches; `MemberRow`'s mark sits the same way.
+- **A webhook post is nobody's.** `Message.Webhook` carries the name and picture
+  the integration chose, and `Message.AuthorID` is the hook's own ID — there is no
+  account behind it. So its avatar is given no tap (`Avatar.Cursor` then keeps the
+  arrow, `tapBase` promising a pointer unconditionally) and `app.onMessageMounted`
+  queues no author fetch; a card opened on that ID could only say Unknown user.
+  A masqueraded message is the opposite shape: the account is real and its avatar
+  opens, but the name drawn is the account's rather than the mask's, which the
+  client does not render (see `docs/known-gaps.md`) — the mark is what says so.
+  Both go in `MessageWidget.authorMarks`, a slot that is zero-width while empty so
+  a person's name pays no gap, filled once: a webhook's and a mask are known at
+  the mount, and an author resolving later can only turn out to be a bot. Filling
+  it re-lays `authorLine` out, the timestamp beside it having to move; the quoted
+  line's slot (`replyPreview.marks`) is the same arrangement for the same reason.
 - **Tinting one of the client's own marks is a substitution, not a theme name.**
   Fyne's `theme.NewColoredResource` rewrites an SVG's *fills* and leaves strokes
   alone, and every mark in `assets/` is an outline — so a stroked icon comes back
@@ -442,4 +488,16 @@ naming and the test policy.
   having to be mixed against whatever card it is laid on and coming out a
   different colour on each. It is square (`IconButtonSize`) at a text button's
   own height, so a row can hold either, and its mark is a named size rather than
-  a fraction of the box.
+  a fraction of the box. `disabled()` is how one offers nothing: the tint is
+  chosen by the *caller* and baked into the resource at construction (that is what
+  the raster is cached under), so an unavailable action is built in
+  `ButtonDisabledText` and then made inert — no tap, no hover, and the arrow back,
+  `tapBase` promising a pointer to everything.
+- **A place in an order is two buttons.** `moveButtons` is the pair every list
+  row offering one draws — the channels and categories of a server's settings, and
+  its roles — chevrons from the `action-*` set, and **both drawn whatever they can
+  do**: a row at either end wears a dead one rather than a shape of its own, a
+  list being read down its right-hand edge as much as down its left. The
+  *setting*-shaped row inside the role editor keeps labelled `Up`/`Down` buttons
+  instead, which is the same split as everywhere else here: `entryRow` takes
+  marks, `row` takes words.

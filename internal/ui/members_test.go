@@ -400,8 +400,8 @@ func TestMemberRowSetMemberNoOps(t *testing.T) {
 	if row.generation != settled {
 		t.Error("a presence change restarted the avatar load")
 	}
-	if row.presenceBar.FillColor != presenceColor(domain.PresenceIdle) {
-		t.Error("the presence bar did not follow the change")
+	if row.ring.FillColor != presenceColor(domain.PresenceIdle) {
+		t.Error("the presence ring did not follow the change")
 	}
 }
 

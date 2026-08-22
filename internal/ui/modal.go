@@ -597,6 +597,11 @@ type PromptField struct {
 	Label       string
 	Placeholder string
 
+	// Value is what the field opens with, for a card that changes something rather
+	// than asking for it new: a rename that made the reader retype the name would
+	// be asking them to remember it.
+	Value string
+
 	// Password masks the field. Nothing keeps what is typed into one: it is sent
 	// with the request that needed it and dropped with the card.
 	Password bool
@@ -642,6 +647,7 @@ func NewPromptDialog(prompt Prompt, onClose func()) *PromptDialog {
 	for _, field := range prompt.Fields {
 		entry := newModalEntry(onClose)
 		entry.SetPlaceHolder(field.Placeholder)
+		entry.SetText(field.Value)
 		entry.Password = field.Password
 
 		// Tap rather than the action itself: calling that bypasses the button's own

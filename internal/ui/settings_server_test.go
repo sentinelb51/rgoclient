@@ -159,9 +159,15 @@ func newTestServerSettingsPage(probe *serverListProbe) *ServerSettingsPage {
 		ChangeBanner:   func() {},
 		RemoveBanner:   func() {},
 
-		Channels:      func() []ServerChannelEntry { return nil },
+		Channels:      func() []ServerCategoryEntry { return nil },
 		CreateChannel: func() {},
 		EditChannel:   func(string) {},
+		MoveChannel:   func(string, bool) {},
+
+		CreateCategory: func() {},
+		RenameCategory: func(string) {},
+		MoveCategory:   func(string, bool) {},
+		DeleteCategory: func(string) {},
 
 		Roles:                 func() []ServerRoleEntry { return nil },
 		CreateRole:            func() {},

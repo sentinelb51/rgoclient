@@ -331,7 +331,9 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   `answerFor` rather than offered — Revolt names the method, and there is no
   WebAuthn here to answer it with.
 - **`domain.Message` drops** what nothing renders: role mentions, masquerade
-  contents (only *that* one exists survives, for grouping) and `Interactions`,
+  contents (only *that* one exists survives — it refuses grouping and draws
+  `domain.AuthorMasquerade`, so the row says the name is the account's rather
+  than the one posted under) and `Interactions`,
   which is the list a message may restrict its reactions to — nothing here refuses
   a pick against it, so the server does. `Mentions` and the one flag bit behind
   `MentionsEveryone` are kept — they are what warms a row, as `Pinned` is what
@@ -365,6 +367,20 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   states the rest. There is no member count, since `Store.Members` answers with
   whoever has been resolved rather than with the membership and the number would
   climb as the reader scrolled.
+- **A channel outside a category has no order, and there is no route that gives
+  it one.** The arrangement is one field of the edit-server route (`categories`:
+  id, title, and the channels under it), and `server.channels` — where everything
+  no category claims lives, in the order the server happens to list it — is not
+  editable by anything. So the Channels section moves a channel within a category
+  and across the boundary of one, and the stretch above the first category can
+  only be left, never reordered: down from there files a channel at the head of
+  the first category, and back up out of one returns it to wherever the server
+  already had it. Every move sends the **whole** arrangement, Revolt replacing it
+  rather than patching, including the channels this account cannot see — those are
+  carried through untouched, since leaving one out files it out of its category.
+  Categories are also the one field of that route gated on `ManageChannel` rather
+  than `ManageServer`, which is what the section asks for. There is no drag: Fyne
+  gives a list no reordering affordance, so a place in the order is two buttons.
 - **A role is edited at server scope, in hex, without a picture.** The editor sets
   a role's name, colour, hoist, seniority and all thirty-four permission bits, and
   three things about one are out of reach. Revolt's role **icon** is neither read

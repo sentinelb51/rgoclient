@@ -317,6 +317,39 @@ func NewBotMark(side float32) fyne.CanvasObject {
 	return container.NewCenter(newScaledIcon(tintedIcon(assets.BotIcon, theme.Colors.BotMark), side))
 }
 
+// NewWebhookMark is the same for a name a webhook posted under — the bot mark's
+// tone, its own glyph. The distinction is worth a second mark rather than
+// borrowing the first: a bot is an account, so its name opens a profile and its
+// avatar is somebody's, where a webhook is a name and a picture the integration
+// chose and there is nothing behind either.
+func NewWebhookMark(side float32) fyne.CanvasObject {
+	return container.NewCenter(newScaledIcon(tintedIcon(assets.WebhookIcon, theme.Colors.BotMark), side))
+}
+
+// NewMasqueradeMark is the mask a message posted under one wears. The client
+// draws the account behind it rather than the override it carries (see
+// docs/known-gaps.md), so this is the whole of what says the name is not the one
+// the message was posted under.
+func NewMasqueradeMark(side float32) fyne.CanvasObject {
+	return container.NewCenter(newScaledIcon(tintedIcon(assets.MasqueradeIcon, theme.Colors.BotMark), side))
+}
+
+// NewAuthorMark is the glyph a name is followed by wherever the client draws
+// one — a message header, a quoted reply, a summary card. Nil for a person, which
+// is what keeps three surfaces from each deciding when to draw nothing.
+func NewAuthorMark(mark domain.AuthorMark, side float32) fyne.CanvasObject {
+	switch mark {
+	case domain.AuthorBot:
+		return NewBotMark(side)
+	case domain.AuthorWebhook:
+		return NewWebhookMark(side)
+	case domain.AuthorMasquerade:
+		return NewMasqueradeMark(side)
+	}
+
+	return nil
+}
+
 // RoleChip is a role drawn as a chip: a dot in its colour beside its name. The
 // whole chip answers the right-click — the dot is a few pixels across.
 type RoleChip struct {
@@ -781,6 +814,11 @@ type OutlinedIconButton struct {
 	tint       color.Color
 	content    fyne.CanvasObject
 	onHover    func(bool)
+
+	// off is a button whose action is not available just now — the top row's "move
+	// up". It keeps its square so a list does not change shape down its right-hand
+	// edge, and answers nothing.
+	off bool
 }
 
 var (
@@ -818,8 +856,29 @@ func (b *OutlinedIconButton) reporting(onHover func(bool)) *OutlinedIconButton {
 	return b
 }
 
+// disabled turns the button off. What the mark is drawn in stays the caller's —
+// the resource carries its own colour, baked in at construction — so an
+// unavailable action is tinted where it is built and made inert here.
+func (b *OutlinedIconButton) disabled() *OutlinedIconButton {
+	b.off = true
+	b.onTap = nil
+	b.setHovered(false)
+
+	return b
+}
+
 func (b *OutlinedIconButton) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(b.content)
+}
+
+// Cursor keeps the arrow over a button that is offering nothing: tapBase promises
+// a pointer unconditionally, which on a disabled one is a lie the reader acts on.
+func (b *OutlinedIconButton) Cursor() desktop.Cursor {
+	if b.off {
+		return desktop.DefaultCursor
+	}
+
+	return desktop.PointerCursor
 }
 
 // MinSize is the square every one of these occupies, whatever its mark measures,
@@ -834,6 +893,8 @@ func (b *OutlinedIconButton) MouseIn(*desktop.MouseEvent) { b.setHovered(true) }
 func (b *OutlinedIconButton) MouseOut()                   { b.setHovered(false) }
 
 func (b *OutlinedIconButton) setHovered(on bool) {
+	on = on && !b.off
+
 	b.background.FillColor = color.Transparent
 	b.background.StrokeColor = solidColor(b.tint)
 	b.icon.Translucency = iconRestTranslucency
@@ -1289,6 +1350,17 @@ func (a *Avatar) CreateRenderer() fyne.WidgetRenderer {
 }
 
 func (a *Avatar) MinSize() fyne.Size { return avatarSize() }
+
+// Cursor keeps the arrow where the avatar opens nothing — a webhook's, there
+// being no account behind the picture. tapBase promises a pointer unconditionally,
+// which on that row would promise a profile that cannot be shown.
+func (a *Avatar) Cursor() desktop.Cursor {
+	if a.onTap == nil {
+		return desktop.DefaultCursor
+	}
+
+	return desktop.PointerCursor
+}
 
 func avatarSize() fyne.Size {
 	return fyne.NewSize(theme.Sizes.MessageAvatarSize, theme.Sizes.MessageAvatarSize)

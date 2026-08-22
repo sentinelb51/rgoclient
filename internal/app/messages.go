@@ -86,6 +86,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.input.OnRefused = func(reason string) { a.notify(ui.ToneWarning, "%s", reason) }
 	a.input.OnTyping = a.noteTyping
 	a.input.OnKeystroke = a.noteKeystroke
+	a.input.OnResize = a.resizeDock
 	a.input.RegisterDropHandler()
 
 	// Floating composer dock: mention picker, reply and attachment rows and the
@@ -122,10 +123,18 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// The notice replaces the row rather than joining it — see ui.ComposerNotice.
 	a.composerNotice = ui.NewComposerNotice()
 
+	// Everything above the entry is one block with a gap around it and between its
+	// rows — see ui.NewGapBlock. ComposerPaddingV is what the card is worth around
+	// the *entry*, which brings InnerPadding of its own; a reply card brings none
+	// and sat against the card's top edge with the text hard under it. The block
+	// costs nothing at all while all three rows are hidden, so an empty composer is
+	// the height it always was.
 	inner := ui.VBoxNoSpacing(
-		a.input.Mentions,
-		a.input.ReplyContainer,
-		a.input.AttachmentContainer,
+		ui.NewGapBlock(theme.Sizes.ComposerRowGap,
+			a.input.Mentions,
+			a.input.ReplyContainer,
+			a.input.AttachmentContainer,
+		),
 		a.composerEntry,
 		a.composerNotice,
 	)
@@ -508,7 +517,7 @@ func (a *App) flushReplies() {
 	epoch := a.epoch
 
 	go func() {
-		fetched := a.client.ResolveMessages(pending)
+		fetched, _ := a.client.ResolveMessages(pending)
 
 		a.doOnUI(func() {
 			if a.stale(epoch) || len(fetched) == 0 {
@@ -934,8 +943,19 @@ func (a *App) holdUncached(messages []*domain.Message) {
 // continuation whose group head was deleted regains its header. A moderation
 // sweep deletes a whole run at once, and one ID at a time would relayout the
 // column once per message. Call on the UI thread.
+//
+// The mention set is answered first and for *any* channel: a deleted message
+// naming the account is nothing the inbox can ever resolve, and one deleted in a
+// channel nobody is looking at is exactly the one that would go on being counted.
 func (a *App) removeMessages(channelID string, messageIDs []string) {
-	if channelID != a.currentChannelID || len(messageIDs) == 0 {
+	if len(messageIDs) == 0 {
+		return
+	}
+	if a.forgetMentions(channelID, messageIDs) {
+		a.refreshChannelRow(channelID)
+	}
+
+	if channelID != a.currentChannelID {
 		return
 	}
 

@@ -139,14 +139,26 @@ type ServerRoleEntry struct {
 	Editable bool
 }
 
-// ServerInviteEntry is one outstanding invite as the list draws it. Revolt stores
-// an invite as three IDs and nothing else — no expiry, no use count, no date — so
-// the two names are the controller's to resolve, and either may come back empty:
-// a channel deleted, or a creator who has since left.
+// ServerInviteEntry is one outstanding invite as the list draws it, and the whole
+// of what Revolt keeps about one: a code, the channel it opens and who made it.
+// There is no expiry, no use count and no date — the code is not a ULID either,
+// so nothing here can say when an invite was made or how long it has left.
+//
+// The two names are the controller's to resolve, and either may come back empty:
+// a channel deleted, or a creator whose account is gone. CreatorID outlives the
+// name — it is what the chip opens, and a profile is worth offering for somebody
+// this client could not name.
 type ServerInviteEntry struct {
 	Code    string
 	Channel string
-	Creator string
+
+	Creator          string
+	CreatorID        string
+	CreatorAvatarURL string
+
+	// CreatorColor is the colour this server's roles give them, nil where they have
+	// none — the chip's own, exactly as a role chip's is.
+	CreatorColor color.Color
 }
 
 /* The page */
@@ -223,6 +235,10 @@ type ServerSettingsHooks struct {
 	LoadInvites  func(onLoaded func(invites []ServerInviteEntry, err error))
 	CopyInvite   func(code string)
 	RevokeInvite func(code string, onDone func(err error))
+
+	// OpenProfile shows whoever made an invite, anchored on the chip naming them.
+	// The card mounts on the modal layer, which is above this page.
+	OpenProfile func(userID string, anchor fyne.CanvasObject)
 
 	/* Bans */
 
@@ -453,7 +469,7 @@ func (p *ServerSettingsPage) showSection(section ServerSettingsSection) {
 	// gone leaves the drilldown on the way past, and the title has to say where
 	// the reader ended up rather than where they were.
 	groups := p.sectionGroups(section)
-	p.mount(groups, p.sectionTitle(section))
+	p.mountUnder(groups, p.paneTitle(section), p.paneBack(section))
 
 	p.buildRail(p.railEntries(), int(section), func(picked int) {
 		// A rail tap is the section itself, so it leaves whichever role the Roles
@@ -463,15 +479,27 @@ func (p *ServerSettingsPage) showSection(section ServerSettingsSection) {
 	})
 }
 
-// sectionTitle heads the pane. A section drilled into a row of its own says both,
-// so the reader is told what they are editing as well as where it lives.
-func (p *ServerSettingsPage) sectionTitle(section ServerSettingsSection) string {
-	title := serverRailTitle(section)
+// paneTitle heads the pane with where the reader is standing: the section, or what
+// it was drilled into. Which section that drilldown lives in is the back line's to
+// say, so the title names one thing.
+func (p *ServerSettingsPage) paneTitle(section ServerSettingsSection) string {
 	if section == ServerSectionRoles && p.roleName != "" {
-		return title + " · " + p.roleName
+		return p.roleName
 	}
 
-	return title
+	return serverRailTitle(section)
+}
+
+// paneBack is the way out of the one drilldown the page has, and nothing for a
+// section, which the rail already reaches. Keyed on roleID rather than roleName:
+// the ID is what being drilled in *is*, while the name is only what the title
+// says and could be anything.
+func (p *ServerSettingsPage) paneBack(section ServerSettingsSection) backLink {
+	if section != ServerSectionRoles || p.roleID == "" {
+		return backLink{}
+	}
+
+	return backLink{label: serverRailTitle(ServerSectionRoles), onTap: p.showRoles}
 }
 
 // showRole opens one role's editor inside the Roles section, and showRoles is the
@@ -891,20 +919,18 @@ func roleCaption(role ServerRoleEntry) string {
 	return "Role"
 }
 
-// roleRows is the head of the editor: the way back, and then what the role is.
-// The default role is none of those things — it has no name, no colour and no
-// place in the order — so it says what it is instead.
+// roleRows is what the role is. The way out is the header's line rather than a row
+// here: a row among Name and Colour reads as something to set, and it scrolls away
+// with them. The default role is none of these things — it has no name, no colour
+// and no place in the order — so it says what it is instead.
 func (p *ServerSettingsPage) roleRows(role ServerRoleEntry, roles []ServerRoleEntry) []fyne.CanvasObject {
-	back := p.row("All roles", "", NewButton("Back", func() { p.showRoles() }))
-
 	if role.Default {
-		return []fyne.CanvasObject{back, p.note(
+		return []fyne.CanvasObject{p.note(
 			"Everybody in the server holds these. A role adds to them, and a role can take them " +
 				"away again — which is what a denial is for.")}
 	}
 
 	return []fyne.CanvasObject{
-		back,
 		p.roleNameRow(role),
 		p.roleColorRow(role),
 		p.roleHoistRow(role),
@@ -1270,7 +1296,7 @@ const invitesDetail = "Every invite to this server that still stands. Revolt set
 	"there being no server-wide invite."
 
 func (p *ServerSettingsPage) invitesSection() []settingsGroup {
-	group, _ := p.listGroup("Invites", invitesDetail, p.inviteRows())
+	group, _ := p.islandGroup("Invites", invitesDetail, p.inviteRows())
 	p.loadInvites()
 
 	return []settingsGroup{group}
@@ -1279,21 +1305,24 @@ func (p *ServerSettingsPage) invitesSection() []settingsGroup {
 // inviteRows is the held answer drawn, or the one line standing for whichever
 // state it is not in.
 func (p *ServerSettingsPage) inviteRows() []fyne.CanvasObject {
+	// The line standing for a list gets a surface of its own too: there is no card
+	// behind this section, so a note left bare would be a sentence floating on the
+	// page rather than the list saying it is empty.
 	switch {
 	case p.invites.pending():
-		return []fyne.CanvasObject{p.note("Fetching…")}
+		return []fyne.CanvasObject{newIsland(p.note("Fetching…"))}
 	case p.invites.err != nil:
-		return []fyne.CanvasObject{p.note("Could not fetch this server's invites.")}
+		return []fyne.CanvasObject{newIsland(p.note("Could not fetch this server's invites."))}
 	case len(p.invites.entries) == 0:
-		return []fyne.CanvasObject{p.note("There are no invites to this server.")}
+		return []fyne.CanvasObject{newIsland(p.note("There are no invites to this server."))}
 	}
 
-	rows := make([]fyne.CanvasObject, 0, len(p.invites.entries))
+	cells := make([]fyne.CanvasObject, 0, len(p.invites.entries))
 	for _, invite := range p.invites.entries {
-		rows = append(rows, p.inviteRow(invite))
+		cells = append(cells, newIsland(p.inviteRow(invite)))
 	}
 
-	return rows
+	return pairedRows(cells)
 }
 
 // loadInvites asks for the list, unless one is already out or the held answer is
@@ -1340,26 +1369,58 @@ func (p *ServerSettingsPage) inviteRow(invite ServerInviteEntry) fyne.CanvasObje
 		})
 	})
 
-	lead := newScaledIcon(tintedIcon(assets.ServerInvitesIcon, theme.Colors.CategoryText), theme.Sizes.SettingsIconSize)
-
-	return p.entryRow(lead, invite.Code, inviteWhere(invite),
-		copyInvite, HorizontalSpacer(theme.Sizes.IconButtonGap), revoke)
-}
-
-// inviteDetail says where an invite lands and who made it, dropping either half
-// the store could not name rather than saying so: a channel deleted or a creator
-// departed is not what the reader is here to be told.
-func inviteWhere(invite ServerInviteEntry) string {
-	switch {
-	case invite.Channel != "" && invite.Creator != "":
-		return fmt.Sprintf("#%s · made by %s", invite.Channel, invite.Creator)
-	case invite.Channel != "":
-		return "#" + invite.Channel
-	case invite.Creator != "":
-		return "Made by " + invite.Creator
+	if p.indexing {
+		return newIndexRow(invite.Code)
 	}
 
-	return ""
+	// Not entryRow's shape, and the one list here that is not: an invite has no lead
+	// glyph — two share a row, and the same mark drawn twice a line is decoration
+	// where there is no width for any — and its second line is a chip rather than a
+	// sentence. What leads an invite is its code.
+	gap := theme.Sizes.SettingsRowPaddingH
+	buttons := HBoxNoSpacing(copyInvite, HorizontalSpacer(theme.Sizes.IconButtonGap), revoke)
+	width := halfCardWidth() - gap - buttons.MinSize().Width - gap
+
+	lines := []fyne.CanvasObject{p.inviteWhere(invite, width)}
+	if invite.Creator != "" {
+		// In an HBox so the chip keeps its own width: a column would stretch it to the
+		// row and a pill the width of the card reads as a button.
+		lines = append(lines, VerticalSpacer(theme.Sizes.SettingsEntryLineGap),
+			HBoxNoSpacing(NewUserChip(p.hooks.Deps.Images, invite.Creator, invite.CreatorAvatarURL,
+				invite.CreatorColor,
+				func(anchor fyne.CanvasObject) { p.hooks.OpenProfile(invite.CreatorID, anchor) })))
+	}
+
+	row, _ := p.frame(NewFillRow(0,
+		vcenter(VBoxNoSpacing(lines...)),
+		HorizontalSpacer(gap),
+		vcenter(buttons),
+	))
+
+	return row
+}
+
+// inviteWhere is an invite's first line: the code, and beside it the channel the
+// invite opens. The code sits in a column, so the channels line up down the list
+// however wide a code draws — and so does the chip on the line below it, which
+// starts where the code does. Alignment is the whole point of the column: two
+// invites share a row, and a field that begins wherever the one before it ended
+// reads as a sentence per cell rather than a list.
+//
+// The channel is dropped rather than explained where the store could not name it:
+// a channel deleted is not what the reader is here to be told.
+func (p *ServerSettingsPage) inviteWhere(invite ServerInviteEntry, width float32) fyne.CanvasObject {
+	code := entryColumn(NewEllipsisText(
+		newText(invite.Code, theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)), width)
+
+	if invite.Channel == "" {
+		return HBoxNoSpacing(code)
+	}
+
+	channel := NewEllipsisText(
+		newText("#"+invite.Channel, theme.Colors.TimestampText, theme.Sizes.SettingsDetailSize))
+
+	return HBoxNoSpacing(code, NewFixedWidthContainer(width-entryColumnWidth(width), vcenter(channel)))
 }
 
 /* Bans */
@@ -1448,10 +1509,24 @@ func (p *ServerSettingsPage) banRow(ban domain.Ban) fyne.CanvasObject {
 // listGroup is the card a fetched list is drawn in, handed back beside its body
 // so a later answer can refill it in place.
 func (p *ServerSettingsPage) listGroup(caption, detail string, rows []fyne.CanvasObject) (settingsGroup, *fyne.Container) {
-	body := VBoxNoSpacing(separateRows(rows)...)
+	p.islands = false
+
+	body := VBoxNoSpacing(p.spaceRows(rows)...)
 	p.listBody = body
 
 	return p.groupOf(caption, detail, body), body
+}
+
+// islandGroup is listGroup for a list whose entries carry their own surfaces:
+// there is no card around them, and what separates two rows is space rather than
+// a hairline.
+func (p *ServerSettingsPage) islandGroup(caption, detail string, rows []fyne.CanvasObject) (settingsGroup, *fyne.Container) {
+	p.islands = true
+
+	body := VBoxNoSpacing(p.spaceRows(rows)...)
+	p.listBody = body
+
+	return p.bareGroupOf(caption, detail, body), body
 }
 
 // reloadList re-asks for whatever the open section lists, once something here has

@@ -174,6 +174,7 @@ func (p *SettingsPage) buildSearchField() fyne.CanvasObject {
 	entry.PlaceHolder = "Search settings"
 	entry.Text = p.query
 	entry.OnChanged = p.onQuery
+	p.field = entry
 
 	mark := newScaledIcon(tintedIcon(assets.SearchIcon, theme.Colors.CategoryText),
 		theme.Sizes.SettingsIconSize)
@@ -224,13 +225,27 @@ func (p *SettingsPage) onQuery(text string) {
 
 /* The results */
 
-// showResults swaps the pane to what the query matches.
+// showResults swaps the pane to what the query matches. Results stand inside no
+// section — the rail marks nothing while they show — so the back line is the only
+// way out of them that does not need the field found and emptied by hand.
 func (p *SettingsPage) showResults() {
 	p.searching = true
 	p.account = accountRows{} // a profile landing after this has nothing left to fill
 	p.previews = nil
-	p.mount(p.resultGroups(), "Search")
+	p.mountUnder(p.resultGroups(), "Search",
+		backLink{label: "All settings", onTap: p.clearQuery})
 	p.rebuildRail()
+}
+
+// clearQuery empties the field, which puts the open section back through onQuery.
+// Emptying p.query alone would leave the box holding a search nothing is showing,
+// and onQuery ignores a keystroke that types it again.
+func (p *SettingsPage) clearQuery() {
+	if p.field == nil {
+		return
+	}
+
+	p.field.SetText("")
 }
 
 // matches is the index filtered by the query, and how many more the limit

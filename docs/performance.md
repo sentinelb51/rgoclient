@@ -116,6 +116,24 @@ everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
   message row being too many shapes to redraw in place.
 - **Off-thread preparation.** `Store.Members` resolves and sorts on a worker;
   the model is pure and theme-free so it can be built off the UI thread.
+- **Presence does not walk.** A presence event is the one a busy server raises
+  continuously, and it moves a member between sections without moving anything
+  they are ordered by — so `refreshPresence` (`app/events.go`) copies the
+  membership the last walk resolved, re-resolves only who moved
+  (`App.refreshMemberPresence`) and rebuilds the model from that. No walk, no
+  fold, no sort, and the mention candidates are left alone. Over 20,000 members:
+  **7.0 ms / 13.7 MB / ~70,000 allocations → 0.94 ms / 4.5 MB / 10**, at up to
+  four bursts a second. The copy is what keeps it off the UI thread with no lock
+  — `App.memberCache` is published and never written into — and `memberWorking`
+  is the single flight that stops two of them starting from the same source.
+- **The sort moves keys, not members.** `client.sortedByName` sorts a
+  `{folded name, ID, index}` key and permutes once; sorting the entries
+  themselves put a 200-byte resolved member into every swap. Over 20,000
+  members, **9.4 ms → 6.2 ms**.
+- **The model points at members rather than carrying them.** `ui.MemberEntry`
+  holds a `*domain.Member` into the slice it was built from, which is published
+  and immutable. Over 20,000 members, `NewMemberModel` went **831 µs / 4.33 MB →
+  202 µs / 0.81 MB**.
 - **The model is counted, not bucketed.** `memberModel` files each member under a
   bucket index and counts it, then writes straight into an exactly-sized slice. A
   `domain.Member` is ~128 bytes, so materialising a slice per section and copying
@@ -124,11 +142,14 @@ everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
   This runs on every presence change, which is what makes it worth the second
   pass.
 - **Nothing is resolved twice on a walk.** `Store.Relationships` carries the
-  relationship it filtered on into the resolution rather than asking again, and
-  `refreshFriends` counts incoming requests instead of building four sections of
-  rows when the dialog is down. Both walk every cached account and both run off
-  `flushAuthors`, once per batch of resolved authors — the shape worth looking for
-  is a guard that resolves, then resolves again.
+  relationship it filtered on into the resolution rather than asking again. With
+  the friends dialog down, `awaitingAnswer` does not call it at all:
+  `Store.HasIncomingRequest` walks the same accounts resolving nobody, ordering
+  nothing and taking the client's lock once for the walk rather than once per
+  account (`Client.knownRelations`). Both run off `flushAuthors`, once per batch
+  of resolved authors, on the UI thread — the shape worth looking for is a guard
+  that resolves, then resolves again, and it was one level up from where it had
+  already been fixed.
 
 ## Reachable without touching Fyne
 
@@ -146,7 +167,10 @@ Ranked by return.
    timer refresh: refreshing a container to update one label inside it costs the
    same as a resize. Refresh the narrowest object that changed, and prefer *not
    dirtying at all* when the change is invisible (the change guards already used
-   by the slowmode chip and the typing line are the pattern).
+   by the slowmode chip and the typing line are the pattern). The one already
+   found: `MessageInput` refreshed after `widget.Entry`'s typing methods, which
+   end in a refresh of their own — two re-wraps and two dirty windows per
+   keystroke.
 3. **`FYNE_CACHE`.** `internal/cache/base.go:22` reads it as a `time.Duration` in
    `init()` and it is the only Fyne env knob that touches performance. Raising it
    past a minute keeps glyph textures alive across a scroll-away-and-back at the
@@ -157,13 +181,29 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-five patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+seven patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
 third is the font-parse cache, which is a leak fixed rather than a lever. The
 fifth replaced the driver's poll loop with a wait on the OS event queue, which
 is what makes the frame rate a ceiling on drawing rather than on noticing input.
+
+The last two are **work skipped**, both found by profiling the message column
+and both in exported code rather than under `internal/`:
+
+- **`widget.RichText.Resize` re-wrapped on a height.** Row bounds are wrapped
+  against the width alone, but any change of size called `Refresh` — which
+  re-runs `updateRowBounds` *and* dirties the canvas. This column resizes every
+  mounted row twice per settle, at the estimate it is placed by and then at the
+  height it measured, so every body on screen was wrapped twice for one settle.
+  Channel open 635µs/324KB → **499µs/258KB**; a prepended page 334µs/133KB →
+  **270µs/108KB**.
+- **`canvas.Image.MinSize` re-parsed the file.** It refreshed while
+  `i.Image == nil`, which for an SVG resource is until something rasterises it —
+  so every `MinSize` re-ran the XML parse that finds the aspect. The driver asks
+  every object on every dirty frame. Frame walk at 50 mounted rows
+  179µs/61.3KB → **111µs/8.4KB**; at 250, 252µs/66.1KB → **187µs/13.2KB**.
 
 What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the
@@ -217,7 +257,10 @@ from; run it before and after touching the column. Beyond that:
   A timer added to `repaintWindow` is a patch to carry forward; be sure it is
   worth carrying.
 - `pprof` on the loop goroutine catches layout and measurement cost, which is
-  where our own code lives; it will not catch GL or driver time.
+  where our own code lives; it will not catch GL or driver time. Reading one:
+  the mark phase is most of the profile by samples and almost none of it by wall
+  clock, running on the cores the loop is not. **`GOGC` is not a lever** —
+  100, 400 and 800 are indistinguishable on every benchmark here.
 - `-tags pprof` also serves `/debug/pprof/goroutineleak`. `App.epoch` drops a
   replaced session's workers rather than joining them, so a leak is possible;
   each carries a pprof label, so one reads as the action that started it.

@@ -135,7 +135,7 @@ internal/
                          alerts.go, settings.go, serversettings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
-                         embed.go, invite.go,
+                         embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, panels.go, notice.go, settings*.go,
                          theme/, titlebar_*.go, filedialog*.go (the OS picker —
@@ -169,11 +169,13 @@ package's own `CLAUDE.md`; this is the map:
   what the member menu *does* to a member — nickname, roles, timeout — one route
   under three permissions, filed with the people it is about rather than beside
   the kick and ban confirmations in `notify.go`.
-- `app/pins.go`, `app/search.go`, `app/mentions.go` — the three message panels.
-  The summary a row is drawn from (`messageEntry`, `messagePreview`,
-  `messageWhen`) lives in pins: a pin list and a search result are the same row
-  reached two ways. It carries a `Where` for the inbox, whose rows come from as
-  many channels as the account is in. `mentions.go` holds both halves of
+- `app/pins.go`, `app/search.go`, `app/mentions.go` — the three surfaces listing
+  messages. The card all three are drawn from (`messageCard`, `messagePreview`,
+  `messageWhen`) lives in pins: one summary, resolved and counted once, that each
+  surface then takes back what its own subject already said — the pins panel
+  drops the pinned badge, the inbox drops the mention edge. It carries a `Where`
+  for the inbox, whose cards come from as many channels as the account is in. `search.go` additionally holds the answer the filter chips
+  narrow — the route takes no filter, so a chip is applied here. `mentions.go` holds both halves of
   mentions — the set (channel → message IDs, what the sidebar counts and the
   rail marks off) and the inbox, those IDs fetched back into messages — because
   a channel gaining one moves both and neither is legible without the other.
@@ -227,7 +229,9 @@ package's own `CLAUDE.md`; this is the map:
 - `ui/reactions.go` — the reaction row end to end, the chip and the emoji in it.
   What *adds* one is `ui/emoji.go`, the one picker, which the composer opens too.
 - `ui/emoji.go` — that picker: what can be picked (`EmojiChoice`, and `Value` /
-  `Token`, the two things one is worth), the pop-up, the cell. `app/emoji.go` is
+  `Token`, the two things one is worth), the island, its header (the hovered
+  emoji redrawn large, which is what names a cell), the rail of servers that
+  marks and jumps between groups, and the cell. `app/emoji.go` is
   the other half — which emoji are on offer and in what order, a walk of every
   server the account is in that no widget knows. That one walk also feeds the
   composer's `:` autocomplete, so the pop-up and the typed list cannot disagree.
@@ -235,10 +239,22 @@ package's own `CLAUDE.md`; this is the map:
   a message has one. `NewInviteCardFor` is the same card built from an invite
   already in hand — the join dialog's preview, which draws the banner and no
   button, neither being safe on a card a message is holding open.
-- `ui/panels.go` — both message panels, pins and channel search: one card with
-  one row (`MessageEntry`, `messageRow`), differing only in what fills it. A
-  row's line is flattened by `ui.PreviewText`, which is where a body's markdown
-  and its emoji shortcodes are resolved for a summary the controller assembles.
+- `ui/panels.go` — the island all three message surfaces are drawn on and the
+  card one message is drawn as, plus two of the surfaces: pins and the mention
+  inbox. `messageIsland` is three surfaces deep (island, well, card) with a
+  header, a count line and an empty state that holds a floor open, so a panel
+  reporting one sentence is still an island rather than a strip. `islandParts` is
+  what a surface adds — blocks under the header, something opposite the count.
+  `MessageCard` is what a card is drawn from and `newMessageCard` draws it: a
+  heading, a line, and a badge strip naming what the message carries, left off
+  entirely where it carries nothing. A card's line is flattened by
+  `ui.PreviewText`, which is where a body's markdown and its emoji shortcodes are
+  resolved for a summary the controller assembles.
+- `ui/search.go` — channel search: the same island, plus what only a question
+  being refined needs. `SearchQuery` is the whole of what it asks —
+  `SameRequest` is what tells a filter from the two things the route is sent —
+  and `searchChip` is the pill both the filter run and the three orders are made
+  of.
 - `ui/modal.go` — the cards that are not lists: the attachment viewer, the join
   dialog (which previews what a pasted code opens once the typing settles),
   `PromptDialog` (a field per answer and one button), `BanDialog` (a
@@ -370,7 +386,7 @@ Fyne is **patched**, and the patched copy is a repository of its own —
 `replace` in `go.mod` and fetched like any other module. Nothing is vendored and
 there is no checkout step: a fresh clone builds. The fork keeps the module path
 `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside it. Its
-`PATCHES.md` lists the four, and `./update-fyne.sh vX.Y.Z` there carries them
+`PATCHES.md` lists the seven, and `./update-fyne.sh vX.Y.Z` there carries them
 onto a new Fyne by rebasing onto a pristine upstream branch. A bare `go get -u`
 floats what that frozen Fyne compiles against, so everything else updates
 through `scripts/update-deps.sh`.

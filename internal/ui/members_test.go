@@ -319,10 +319,10 @@ func TestMemberRowDropsAPictureForSomebodyElse(t *testing.T) {
 	picture := image.NewRGBA(image.Rect(0, 0, 4, 4))
 
 	row := newMemberRow(testDeps(), nil)
-	row.SetMember(domain.Member{UserID: "ada", Name: "Ada", AvatarURL: "https://cdn.invalid/a"})
+	row.SetMember(&domain.Member{UserID: "ada", Name: "Ada", AvatarURL: "https://cdn.invalid/a"})
 	stale := row.generation
 
-	row.SetMember(domain.Member{UserID: "bo", Name: "Bo", AvatarURL: "https://cdn.invalid/b"})
+	row.SetMember(&domain.Member{UserID: "bo", Name: "Bo", AvatarURL: "https://cdn.invalid/b"})
 	if row.generation == stale {
 		t.Fatal("recycling the row onto somebody else did not bump the generation")
 	}
@@ -359,11 +359,11 @@ func TestMemberRowKeepsOnePlaceholder(t *testing.T) {
 	side := fyne.NewSize(theme.Sizes.MemberAvatarSize, theme.Sizes.MemberAvatarSize)
 
 	row := newMemberRow(testDeps(), nil)
-	row.SetMember(domain.Member{UserID: "ada", Name: "Ada", AvatarURL: "https://cdn.invalid/a"})
+	row.SetMember(&domain.Member{UserID: "ada", Name: "Ada", AvatarURL: "https://cdn.invalid/a"})
 	row.paintAvatar(row.generation, image.NewRGBA(image.Rect(0, 0, 4, 4)), side)
 
 	row.release()
-	row.SetMember(domain.Member{UserID: "bo", Name: "Bo"}) // no avatar of their own
+	row.SetMember(&domain.Member{UserID: "bo", Name: "Bo"}) // no avatar of their own
 
 	if len(row.avatar.Objects) != 1 || row.avatar.Objects[0] != fyne.CanvasObject(row.placeholder) {
 		t.Fatal("a recycled row without an avatar does not hold the placeholder it was built with")
@@ -385,10 +385,10 @@ func TestMemberRowSetMemberNoOps(t *testing.T) {
 		Color:     color.NRGBA{R: 255, A: 255},
 	}
 
-	row.SetMember(ada)
+	row.SetMember(&ada)
 	settled := row.generation
 
-	row.SetMember(ada)
+	row.SetMember(&ada)
 	if row.generation != settled {
 		t.Error("an unchanged member restarted the avatar load")
 	}
@@ -396,12 +396,12 @@ func TestMemberRowSetMemberNoOps(t *testing.T) {
 	// A presence change alone must not restart it either — that is the event this
 	// list sees most.
 	ada.Presence = domain.PresenceIdle
-	row.SetMember(ada)
+	row.SetMember(&ada)
 	if row.generation != settled {
 		t.Error("a presence change restarted the avatar load")
 	}
-	if row.dot.FillColor != presenceColor(domain.PresenceIdle) {
-		t.Error("the presence dot did not follow the change")
+	if row.presenceBar.FillColor != presenceColor(domain.PresenceIdle) {
+		t.Error("the presence bar did not follow the change")
 	}
 }
 
@@ -415,7 +415,7 @@ func TestMemberRowNameSurvivesTruncation(t *testing.T) {
 	row := newMemberRow(testDeps(), nil)
 	long := strings.Repeat("Alexandra", 6)
 
-	row.SetMember(domain.Member{UserID: "ada", Name: long})
+	row.SetMember(&domain.Member{UserID: "ada", Name: long})
 	row.nameBox.Resize(fyne.NewSize(40, theme.Sizes.MemberRowHeight))
 
 	if row.name.Text == long {
@@ -425,7 +425,7 @@ func TestMemberRowNameSurvivesTruncation(t *testing.T) {
 		t.Errorf("fullName = %q, want the whole name", row.fullName)
 	}
 
-	row.SetMember(domain.Member{UserID: "bo", Name: "Bo"})
+	row.SetMember(&domain.Member{UserID: "bo", Name: "Bo"})
 	if row.fullName != "Bo" {
 		t.Errorf("fullName = %q after recycling, want Bo", row.fullName)
 	}

@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/test"
 
 	"RGOClient/internal/domain"
@@ -44,11 +45,12 @@ func TestServerListsAskOnce(t *testing.T) {
 
 	// And it has to land in the card mounted *now*: the one above is detached, and
 	// single-flight means nothing else is coming to fill this one.
-	probe.answerInvites([]ServerInviteEntry{{Code: "aaa"}, {Code: "bbb"}}, nil)
+	probe.answerInvites([]ServerInviteEntry{{Code: "aaa"}, {Code: "bbb"}, {Code: "ccc"}}, nil)
 
-	if len(page.listBody.Objects) <= 1 {
-		t.Errorf("the mounted card holds %d objects, want the two rows the answer carried",
-			len(page.listBody.Objects))
+	// Invites are drawn two to a row, so three of them fill two rows — which is also
+	// what tells the filled card from the one still holding its "Fetching…" line.
+	if rows := len(page.listBody.Objects); rows != 3 {
+		t.Errorf("the mounted card holds %d objects, want the two rows three invites fill and the hairline between them", rows)
 	}
 	if len(asked.Objects) != 1 {
 		t.Errorf("the answer was drawn into the card it was asked from, which is no longer on screen")
@@ -177,6 +179,7 @@ func newTestServerSettingsPage(probe *serverListProbe) *ServerSettingsPage {
 		},
 		CopyInvite:   func(string) {},
 		RevokeInvite: func(string, func(error)) {},
+		OpenProfile:  func(string, fyne.CanvasObject) {},
 
 		LoadBans: func(onLoaded func([]domain.Ban, error)) {
 			probe.banCalls++

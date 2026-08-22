@@ -25,9 +25,9 @@ const (
 	// hundred of it.
 	pinsLimit = 100
 
-	// previewRunes is how much of a message a panel row summarises: enough to
-	// recognise it, short enough that the row stays one line. Channel search draws
-	// the same rows, hence the shared name.
+	// previewRunes is how much of a message an island card summarises: enough to
+	// recognise it, short enough that its line stays one line. All three surfaces
+	// draw the same card, hence the shared name.
 	previewRunes = 120
 )
 
@@ -145,9 +145,9 @@ func (a *App) showPinned() {
 	// roles, and every row would get the same answer.
 	manage := a.store.Permissions(a.pinsChannelID).Has(domain.PermissionManageMessages)
 
-	entries := make([]ui.PinEntry, 0, len(a.pinned))
+	entries := make([]ui.MessageCard, 0, len(a.pinned))
 	for _, message := range a.pinned {
-		entries = append(entries, a.pinEntry(message, manage))
+		entries = append(entries, a.pinCard(message, manage))
 	}
 	a.pins.SetEntries(entries)
 
@@ -156,30 +156,47 @@ func (a *App) showPinned() {
 	a.repositionOverlay()
 }
 
-// pinEntry builds one row: the shared summary, plus the way to take the pin off
-// where the account may.
-func (a *App) pinEntry(message *domain.Message, manage bool) ui.PinEntry {
-	entry := ui.PinEntry{MessageEntry: a.messageEntry(message)}
+// pinCard builds one card: the shared summary, plus the way to take the pin off
+// where the account may. The pinned badge is dropped — this panel is the set of
+// pinned messages, so a mark on every card of it says nothing.
+func (a *App) pinCard(message *domain.Message, manage bool) ui.MessageCard {
+	card := a.messageCard(message)
+	card.Pinned = false
+
 	if manage {
-		entry.Unpin = func() { a.unpinFromPanel(message) }
+		card.Unpin = func() { a.unpinFromPanel(message) }
 	}
 
-	return entry
+	return card
 }
 
-// messageEntry summarises one message for a panel row, shared with channel search
-// — both list messages the column need not be holding. The panel closes on the
-// way to one: a jump moves the column underneath, and a panel left standing would
-// cover the thing the reader asked to see.
-func (a *App) messageEntry(message *domain.Message) ui.MessageEntry {
+// messageCard summarises one message for an island card, shared by all three
+// surfaces — each lists messages the column need not be holding, and each draws
+// them the same way. The counts are taken here because the widget is handed a
+// value rather than a message: the store is the controller's.
+//
+// The surface closes on the way to one: a jump moves the column underneath, and
+// a card left standing would cover the thing the reader asked to see.
+func (a *App) messageCard(message *domain.Message) ui.MessageCard {
 	author := a.store.MessageAuthor(message)
 	channelID, messageID := message.ChannelID, message.ID
 
-	return ui.MessageEntry{
-		Author:    author.Name,
-		AvatarURL: author.AvatarURL,
-		Preview:   a.messagePreview(message),
-		When:      messageWhen(messageID),
+	return ui.MessageCard{
+		Author:      author.Name,
+		AuthorColor: author.Color,
+		AvatarURL:   author.AvatarURL,
+
+		Preview: a.messagePreview(message),
+		When:    messageWhen(messageID),
+
+		Attachments: len(message.Attachments),
+		Images:      imagesIn(message),
+		Reactions:   len(message.Reactions),
+
+		Links:     hasLink(message),
+		Pinned:    message.Pinned,
+		Edited:    message.Edited != nil,
+		Mentioned: message.MentionsUser(a.store.SelfID()),
 
 		Jump: func() {
 			a.closeOverlay()

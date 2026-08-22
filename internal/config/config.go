@@ -91,6 +91,7 @@ type Behaviour struct {
 	HideRolelessMembers bool `json:"hide_roleless_members"`
 	FetchAllMembers     bool `json:"fetch_all_members"`
 	LiveMemberPresence  bool `json:"live_member_presence"`
+	ShowSelfFirst       bool `json:"show_self_first"`
 
 	// MemberListFallback shows the whole membership when the two hiding settings
 	// have left nothing to draw. A sidebar that is empty because of a setting
@@ -273,6 +274,7 @@ func Default() Settings {
 			HoistRoles:         true,
 			FetchAllMembers:    true,
 			LiveMemberPresence: true,
+			ShowSelfFirst:      true,
 			MemberListFallback: true,
 			MemberOverscan:     6,
 

@@ -64,13 +64,7 @@ func (a *App) refreshFriends() {
 // awaitingAnswer reports whether anybody is waiting on this account to answer a
 // friend request, which is all the sidebar row draws.
 func (a *App) awaitingAnswer() bool {
-	for _, user := range a.store.Relationships() {
-		if user.Relationship == domain.RelationshipIncoming {
-			return true
-		}
-	}
-
-	return false
+	return a.store.HasIncomingRequest()
 }
 
 // closeFriends forgets the dialog. Only closeOverlay calls it — the layer holds

@@ -15,7 +15,6 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/driver/desktop"
-	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/ui/theme"
@@ -25,6 +24,11 @@ import (
 // hundreds and an account may be in many, so the whole set is a page nobody reads
 // and a widget per entry nobody sees — the search field is what reaches past it.
 const emojiPickerLimit = 120
+
+// unicodeMark stands in the rail for the group that belongs to no server, the one
+// entry with no icon to draw. A character rather than one of the client's own
+// marks: what the group holds is characters.
+const unicodeMark = "🙂"
 
 /* What can be picked */
 
@@ -62,9 +66,15 @@ func (c EmojiChoice) Token() string {
 }
 
 // EmojiGroup is a heading and what is under it — one server's emoji, or the
-// unicode set. An empty group is dropped rather than drawn over nothing.
+// unicode set. An empty group is dropped rather than drawn over nothing. The icon
+// is what the rail jumps by; a group with no ServerID is the unicode set, which
+// has no picture to stand for it.
 type EmojiGroup struct {
-	Title   string
+	ServerID string
+	Title    string
+	IconID   string
+	IconURL  string
+
 	Choices []EmojiChoice
 }
 
@@ -108,17 +118,20 @@ type emojiEntry struct {
 	fold   string
 }
 
-// emojiSection is a heading and its folded entries — the groups the picker was
-// handed, prepared once when it opens.
+// emojiSection is a group and its folded entries — what the picker was handed,
+// prepared once when it opens.
 type emojiSection struct {
-	title   string
+	group   EmojiGroup
 	entries []emojiEntry
 }
 
-// emojiPicker is the pop-up itself, wearing the hairline as contextMenu does:
-// nothing in Fyne's pop-up draws one, and a floating surface with no edge reads
-// as part of what is behind it. A plain struct rather than a widget — everything
-// it draws is a container, and nothing here answers an event its children do not.
+// emojiPicker is the pop-up itself: a header naming what the pointer is over, the
+// search field, and a rail of the servers on offer beside the grid. It wears its
+// own rounded fill, the hairline and a shadow over the plain panel Fyne draws
+// behind any pop-up, which is what makes it read as a card floating over the
+// client rather than a menu dropping out of the composer. A plain struct rather
+// than a widget — everything it draws is a container, and nothing here answers an
+// event its children do not.
 type emojiPicker struct {
 	deps     Deps
 	sections []emojiSection
@@ -126,11 +139,27 @@ type emojiPicker struct {
 
 	search *emojiSearch
 	list   *fyne.Container // the sections, replaced wholesale on every query
-	empty  *canvas.Text
+	scroll *ObservableScroll
 
-	// tip names a cell. The picker's own rather than the app's: the app's is a layer
-	// in the window's content, and a pop-up is a canvas overlay over all of it, so a
-	// label mounted there would be covered by the grid it is naming.
+	/* The header */
+
+	previewIcon  *fyne.Container
+	previewName  *fyne.Container
+	previewGroup *fyne.Container
+
+	/* The rail */
+
+	// blocks are the drawn sections and railButtons the icons that jump to them:
+	// parallel, and both rebuilt per query, a section a query filtered away being
+	// nothing the rail can point at.
+	blocks      []*fyne.Container
+	rail        *fyne.Container
+	railButtons []*emojiRailButton
+	active      int
+
+	// tip names a rail icon. The picker's own rather than the app's: the app's is a
+	// layer in the window's content, and a pop-up is a canvas overlay over all of
+	// it, so a label mounted there would be covered by the rail it is naming.
 	tip *Tooltip
 
 	// cells memoises one widget per emoji, so narrowing a query reorders objects
@@ -139,8 +168,10 @@ type emojiPicker struct {
 	cells map[string]fyne.CanvasObject
 
 	// top is what Enter picks: the first match of the current query, which is why
-	// the field is worth typing into rather than scrolling past.
+	// the field is worth typing into rather than scrolling past. topIn is the group
+	// it sits under, the header naming one as well as drawing it.
 	top   EmojiChoice
+	topIn string
 	found bool
 
 	hovered EmojiChoice
@@ -157,32 +188,46 @@ func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(E
 		sections: foldGroups(groups),
 		onPick:   onPick,
 		list:     VBoxNoSpacing(),
-		empty:    newText("No emoji match that.", theme.Colors.TimestampText, theme.Sizes.EmojiPickerCaptionSize),
+		rail:     container.NewVBox(),
 		tip:      NewTooltip(),
 		cells:    make(map[string]fyne.CanvasObject),
 	}
-	p.empty.Hide()
 
 	p.search = newEmojiSearch(p.fill, p.acceptTop, func() { p.popUp.Hide() })
 
 	background := canvas.NewRectangle(theme.Colors.NoticeBg)
-	background.CornerRadius = fynetheme.Size(fynetheme.SizeNameMenuRadius)
+	background.CornerRadius = theme.Sizes.EmojiPickerRadius
 	Outline(background)
+	Elevate(background)
+
+	gap := theme.Sizes.EmojiPickerGap
 
 	// Held off the right edge by the indicator's own width, so the bar does not land
 	// on the last cell of every row.
 	gutter := theme.Sizes.ScrollIndicatorWidth + theme.Sizes.ScrollIndicatorInset*2
 	scrolled := NewInset(p.list, 0, 0, 0, gutter)
 
+	p.scroll = NewObservableVScroll(scrolled)
+	p.scroll.OnScroll = func(offset fyne.Position) { p.markSectionAt(offset.Y) }
+
+	// One group is the unicode set on its own, which a rail of one icon says nothing
+	// about. Decided as the picker opens rather than per query: a rail appearing and
+	// vanishing as a query narrows would re-wrap the grid under the pointer.
+	railColumn := p.buildRail()
+	showIf(railColumn, len(p.sections) > 1)
+
 	// The scroller cannot be asked how tall it wants to be — container.Scroll
 	// reports its own current height as its minimum — so the list is measured and
-	// the ceiling applied here.
+	// the ceiling applied here. The rail beside it is handed whatever that comes to.
 	viewport := container.New(
 		&cappedHeightLayout{content: scrolled, max: theme.Sizes.EmojiPickerMaxHeight},
-		NewObservableVScroll(scrolled))
+		NewFillRow(1, railColumn, NewInset(p.scroll, 0, 0, gap, 0)))
 
-	gap := theme.Sizes.EmojiPickerGap
-	body := VBoxNoSpacing(p.searchField(), VerticalSpacer(gap), p.empty, viewport)
+	body := VBoxNoSpacing(
+		p.buildPreview(), VerticalSpacer(gap),
+		viewport, VerticalSpacer(gap),
+		p.searchField())
+
 	p.content = container.NewStack(background, NewInset(body, gap, gap, gap, gap), p.tip.Layer)
 
 	p.fill("")
@@ -210,7 +255,7 @@ func foldGroups(groups []EmojiGroup) []emojiSection {
 			entries = append(entries, emojiEntry{choice: choice, fold: fold})
 		}
 
-		sections = append(sections, emojiSection{title: group.Title, entries: entries})
+		sections = append(sections, emojiSection{group: group, entries: entries})
 	}
 
 	return sections
@@ -228,12 +273,65 @@ func (p *emojiPicker) searchField() fyne.CanvasObject {
 	))
 }
 
+/* The header */
+
+// buildPreview is the strip at the head of the island: the emoji under the
+// pointer drawn large, its name, and the group it came from. A cell is a 34-unit square of
+// somebody else's artwork, which is most of what there is to recognise one by —
+// and with nothing hovered the strip says what Enter would take.
+func (p *emojiPicker) buildPreview() fyne.CanvasObject {
+	gap := theme.Sizes.EmojiPickerGap
+	side := theme.Sizes.EmojiPickerPreviewSize
+
+	p.previewIcon = container.NewGridWrap(fyne.NewSize(side, side))
+	p.previewName = NewEllipsisText(
+		newBoldText("", theme.Colors.TextPrimary, theme.Sizes.EmojiPickerPreviewNameSize))
+	p.previewGroup = NewEllipsisText(
+		newText("", theme.Colors.CategoryText, theme.Sizes.EmojiPickerCaptionSize))
+
+	// The island's padding, the card's own and the gap beside the picture: what is
+	// left is what a name has to be truncated into. Known here rather than at a
+	// layout, the pop-up being a fixed width.
+	room := theme.Sizes.EmojiPickerWidth - 5*gap - side
+	lines := NewFixedWidthContainer(room, VBoxNoSpacing(p.previewName, p.previewGroup))
+
+	card := canvas.NewRectangle(theme.Colors.SessionCardBg)
+	card.CornerRadius = theme.Sizes.ReactionRadius
+
+	row := HBoxNoSpacing(p.previewIcon, HorizontalSpacer(gap), container.NewCenter(lines))
+
+	return container.NewStack(card, NewInset(row, gap, gap, gap, gap))
+}
+
+// showPreview draws one emoji in the header, named and filed.
+func (p *emojiPicker) showPreview(choice EmojiChoice, in string) {
+	p.previewIcon.Objects = []fyne.CanvasObject{newPreviewEmoji(p.deps, choice)}
+	p.previewIcon.Refresh()
+
+	SetEllipsisText(p.previewName, previewName(choice))
+	SetEllipsisText(p.previewGroup, strings.ToUpper(in))
+}
+
+// restPreview is the header with nothing hovered: what Enter would take, or the
+// one line saying a query matched nothing — which is the whole of the empty
+// state, the grid under it collapsing to nothing of its own accord.
+func (p *emojiPicker) restPreview() {
+	if p.found {
+		p.showPreview(p.top, p.topIn)
+		return
+	}
+
+	p.previewIcon.Objects = nil
+	p.previewIcon.Refresh()
+
+	SetEllipsisText(p.previewName, "No emoji match that.")
+	SetEllipsisText(p.previewGroup, "")
+}
+
 // setHovered records what the pointer is over and names it. A cell reports
 // leaving with the choice it entered with, so a stale leave cannot take down the
-// label of the cell just entered. A tooltip rather than a caption under the grid:
-// read off the far end of the pop-up, a name says nothing about which square it
-// belongs to.
-func (p *emojiPicker) setHovered(choice EmojiChoice, cell fyne.CanvasObject, over bool) {
+// header of the cell just entered.
+func (p *emojiPicker) setHovered(choice EmojiChoice, in string, over bool) {
 	if !over && (!p.over || p.hovered.Value() != choice.Value()) {
 		return
 	}
@@ -241,11 +339,11 @@ func (p *emojiPicker) setHovered(choice EmojiChoice, cell fyne.CanvasObject, ove
 	p.hovered, p.over = choice, over
 
 	if !over {
-		p.tip.Hide()
+		p.restPreview()
 		return
 	}
 
-	p.tip.ShowAbove(previewName(choice), cell)
+	p.showPreview(choice, in)
 }
 
 // previewName is what one emoji is called. A custom one is written the way a
@@ -261,9 +359,88 @@ func previewName(choice EmojiChoice) string {
 	return choice.Name
 }
 
-// fill redraws the grid for a query. Matching is a case-insensitive substring of
-// the folded name, the query folded once here and each candidate once at
-// construction.
+/* The rail */
+
+// buildRail is the column of server icons down the picker's leading edge. It is
+// a surface of its own rather than a hairline seam because everything drawn on it
+// is the same tone as the picker's own fill — a server with no icon yet is a
+// ServerDefaultBg disc, and the mark saying which section is open is a
+// ChannelSelectedBg fill; on NoticeBg neither exists.
+func (p *emojiPicker) buildRail() fyne.CanvasObject {
+	background := canvas.NewRectangle(theme.Colors.SessionCardBg)
+	background.CornerRadius = theme.Sizes.ReactionRadius
+
+	column := container.NewStack(background, NewPlainVScroll(p.rail))
+
+	return NewFixedWidthContainer(theme.Sizes.EmojiPickerRailWidth, column)
+}
+
+// railButton is the icon that jumps to one drawn section, at position index in
+// what fill has just laid out.
+func (p *emojiPicker) railButton(group EmojiGroup, index int) *emojiRailButton {
+	var button *emojiRailButton
+	button = newEmojiRailButton(p.deps, group,
+		func() { p.jumpTo(index) },
+		func(over bool) {
+			if !over {
+				p.tip.Hide()
+				return
+			}
+
+			p.tip.ShowAbove(group.Title, button)
+		})
+
+	return button
+}
+
+// jumpTo brings one section's caption to the top of the grid. The selection is
+// set here rather than left to OnScroll: the scroll clamps at the end of the
+// content, so the last section never reaches the top and would never light.
+func (p *emojiPicker) jumpTo(index int) {
+	if index >= len(p.blocks) {
+		return
+	}
+
+	p.scroll.ScrollToOffset(fyne.NewPos(0, p.blocks[index].Position().Y))
+	p.markSection(index)
+}
+
+// markSectionAt follows the reader: the icon marked is the last one whose section
+// has started at or above the top of the grid. Read off the laid-out block rather
+// than summed from minimums — a wrapping grid answers MinSize with one cell, so
+// what a section costs is known only once it has been placed.
+func (p *emojiPicker) markSectionAt(offset float32) {
+	active := 0
+	for i, block := range p.blocks {
+		if block.Position().Y <= offset+theme.Sizes.EmojiPickerGap {
+			active = i
+		}
+	}
+
+	p.markSection(active)
+}
+
+// markSection repaints the two icons that changed, and nothing else. The rail is
+// not rebuilt to move the selection: following the grid's scroll would replace
+// every button several times a second, including the one under the pointer —
+// which then never hears MouseOut.
+func (p *emojiPicker) markSection(index int) {
+	if index == p.active || index >= len(p.railButtons) {
+		return
+	}
+
+	if p.active < len(p.railButtons) {
+		p.railButtons[p.active].setSelected(false)
+	}
+	p.railButtons[index].setSelected(true)
+	p.active = index
+}
+
+/* Filling the grid */
+
+// fill redraws the grid and the rail for a query. Matching is a case-insensitive
+// substring of the folded name, the query folded once here and each candidate
+// once at construction.
 func (p *emojiPicker) fill(query string) {
 	query = strings.ToLower(strings.TrimSpace(query))
 
@@ -275,7 +452,9 @@ func (p *emojiPicker) fill(query string) {
 	// offer a duplicate; dropping one keeps that a missing entry, not a hole.
 	placed := make(map[string]bool, emojiPickerLimit)
 
-	var rows []fyne.CanvasObject
+	var rows, icons []fyne.CanvasObject
+	p.blocks, p.railButtons = p.blocks[:0], p.railButtons[:0]
+
 	for _, section := range p.sections {
 		cells := make([]fyne.CanvasObject, 0, min(len(section.entries), emojiPickerLimit-drawn))
 
@@ -294,9 +473,9 @@ func (p *emojiPicker) fill(query string) {
 			placed[value] = true
 
 			if !p.found {
-				p.top, p.found = entry.choice, true
+				p.top, p.topIn, p.found = entry.choice, section.group.Title, true
 			}
-			cells = append(cells, p.cell(entry.choice))
+			cells = append(cells, p.cell(entry.choice, section.group.Title))
 			drawn++
 		}
 
@@ -307,18 +486,45 @@ func (p *emojiPicker) fill(query string) {
 		if len(rows) > 0 {
 			rows = append(rows, VerticalSpacer(theme.Sizes.EmojiPickerGap))
 		}
-		rows = append(rows, emojiCaption(section.title), p.grid(cells))
+
+		button := p.railButton(section.group, len(p.blocks))
+		block := VBoxNoSpacing(emojiCaption(section.group.Title), p.grid(cells))
+
+		p.blocks = append(p.blocks, block)
+		p.railButtons = append(p.railButtons, button)
+		rows = append(rows, block)
+		icons = append(icons, button)
 	}
 
 	p.list.Objects = rows
 	p.list.Refresh()
 
-	showIf(p.empty, !p.found)
+	p.rail.Objects = icons
+	p.rail.Refresh() // a container re-lays out only when it is told its children moved
+
+	p.active = 0
+	if len(p.railButtons) > 0 {
+		p.railButtons[0].setSelected(true)
+	}
+
+	// The content is a different height now, and the scroll clamps an offset against
+	// what it last measured — including the one written here.
+	p.scroll.SyncContent()
+	p.scroll.ScrollToOffset(fyne.Position{})
 
 	// The pointer is in the field, not the grid, so whatever a cell was naming has
 	// been reordered out from under it.
 	p.over = false
 	p.tip.Hide()
+	p.restPreview()
+
+	// A pop-up takes its size once, as it is shown, and a narrowed query is a
+	// shorter grid: without this the island stands at the height of the set it
+	// opened with, a query matching nothing leaving a panel of nothing. It can only
+	// shrink — the unfiltered set is what it opened at.
+	if p.popUp != nil {
+		p.popUp.Resize(p.popUp.MinSize())
+	}
 }
 
 // grid wraps the cells at whatever the picker's width allows, so the cell size is
@@ -330,17 +536,18 @@ func (p *emojiPicker) grid(cells []fyne.CanvasObject) fyne.CanvasObject {
 }
 
 // cell returns the widget for one emoji, building it the first time it is shown.
-func (p *emojiPicker) cell(choice EmojiChoice) fyne.CanvasObject {
+// The group is captured with it: an emoji is drawn under exactly one heading, so
+// what the header files it under cannot change between queries.
+func (p *emojiPicker) cell(choice EmojiChoice, in string) fyne.CanvasObject {
 	value := choice.Value()
 	if cell, ok := p.cells[value]; ok {
 		return cell
 	}
 
-	var cell *emojiCell
-	cell = newEmojiCell(p.deps, choice, func() {
+	cell := newEmojiCell(p.deps, choice, func() {
 		p.popUp.Hide()
 		p.onPick(choice)
-	}, func(over bool) { p.setHovered(choice, cell, over) })
+	}, func(over bool) { p.setHovered(choice, in, over) })
 	p.cells[value] = cell
 
 	return cell
@@ -392,7 +599,7 @@ func emojiCaption(title string) fyne.CanvasObject {
 
 /* The search field */
 
-// emojiSearch is the field at the top of the picker, a widget of its own only
+// emojiSearch is the field at the foot of the picker, a widget of its own only
 // because Enter and Escape have to mean something here: an Entry inside a pop-up
 // swallows both, and the pop-up never hears the key that should close it.
 type emojiSearch struct {
@@ -467,6 +674,118 @@ func (c *emojiCell) MouseOut() {
 	c.background.FillColor = color.Transparent
 	c.background.Refresh()
 	c.onHover(false)
+}
+
+/* One rail icon */
+
+// emojiRailButton is one group in the rail: the server's icon, the fill saying
+// the grid is showing it, and the bar the settings rail marks an open section
+// with. A widget rather than a TappableContainer because the selection has to
+// survive the pointer leaving.
+type emojiRailButton struct {
+	tapBase
+
+	background *canvas.Rectangle
+	marker     *canvas.Rectangle
+	content    fyne.CanvasObject
+	onHover    func(bool)
+
+	selected bool
+}
+
+var (
+	_ fyne.Tappable     = (*emojiRailButton)(nil)
+	_ desktop.Hoverable = (*emojiRailButton)(nil)
+)
+
+func newEmojiRailButton(deps Deps, group EmojiGroup, onTap func(), onHover func(bool)) *emojiRailButton {
+	b := &emojiRailButton{background: canvas.NewRectangle(color.Transparent), onHover: onHover}
+	b.background.CornerRadius = theme.Sizes.SettingsGroupRadius
+	b.onTap = onTap
+
+	var markerRow fyne.CanvasObject
+	b.marker, markerRow = newSettingsMarker()
+
+	b.content = NewMinHeightContainer(theme.Sizes.EmojiPickerRailRowHeight, container.NewStack(
+		b.background, markerRow, container.NewCenter(newRailIcon(deps, group))))
+	b.ExtendBaseWidget(b)
+
+	return b
+}
+
+// setSelected repaints in place.
+func (b *emojiRailButton) setSelected(selected bool) {
+	b.selected = selected
+
+	b.background.FillColor = color.Transparent
+	b.marker.FillColor = color.Transparent
+
+	if selected {
+		b.background.FillColor = theme.Colors.ChannelSelectedBg
+		b.marker.FillColor = theme.Colors.TextPrimary
+	}
+
+	b.background.Refresh()
+	b.marker.Refresh()
+}
+
+func (b *emojiRailButton) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(b.content)
+}
+
+func (b *emojiRailButton) MouseIn(*desktop.MouseEvent) {
+	if !b.selected {
+		b.background.FillColor = theme.Colors.TappableHoverBg
+		b.background.Refresh()
+	}
+
+	b.onHover(true)
+}
+
+func (b *emojiRailButton) MouseOut() {
+	if !b.selected {
+		b.background.FillColor = color.Transparent
+		b.background.Refresh()
+	}
+
+	b.onHover(false)
+}
+
+/* Drawing one emoji */
+
+// newRailIcon is what stands for a group in the rail: the server's icon, its
+// initial until the picture lands, and a character for the group no server owns.
+func newRailIcon(deps Deps, group EmojiGroup) fyne.CanvasObject {
+	if group.ServerID == "" {
+		return newText(unicodeMark, theme.Colors.TextPrimary, theme.Sizes.EmojiPickerEmojiSize)
+	}
+
+	side := theme.Sizes.EmojiPickerRailIconSize
+	size := fyne.NewSize(side, side)
+
+	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
+	icon := container.NewStack(background, container.NewCenter(newInitial(group.Title)))
+	if group.IconURL != "" {
+		deps.Images.LoadIntoContainer(group.IconID, group.IconURL, size, icon, true, background)
+	}
+
+	return container.NewGridWrap(size, icon)
+}
+
+// newPreviewEmoji draws one emoji at the size the header names it at — the
+// rendition a 34-unit cell cannot show, which is what the strip is for.
+func newPreviewEmoji(deps Deps, choice EmojiChoice) fyne.CanvasObject {
+	side := theme.Sizes.EmojiPickerPreviewSize
+
+	if choice.ID == "" {
+		return container.NewCenter(newText(choice.Char, theme.Colors.TextPrimary, side))
+	}
+
+	size := fyne.NewSize(side, side)
+	frame := container.NewGridWrap(size, canvas.NewRectangle(color.Transparent))
+	deps.Emojis.LoadIntoContainer(choice.ID, deps.Store.EmojiURL(choice.ID), size, frame, false, nil)
+
+	return frame
 }
 
 // newPickerEmoji draws one emoji at picker size: a picture for a custom one, the

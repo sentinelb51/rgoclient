@@ -205,6 +205,39 @@ func NewTappableChip(text string, tint color.Color, onTap func()) fyne.CanvasObj
 	return c
 }
 
+// NewUserChip is somebody drawn as a chip: their picture, their name in their
+// highest colour, and a click that opens their profile — the same shape a role
+// takes (NewRoleChip), which is what keeps a person and a role reading as the two
+// things this client draws as chips rather than as a mention that wandered out of
+// a message. An uncoloured account falls back to the primary text colour, as an
+// uncoloured role does.
+//
+// The chip is its own anchor, so the profile card lands on the name that was
+// clicked rather than on the row holding it.
+func NewUserChip(images *cache.ImageCache, name, avatarURL string, tint color.Color,
+	onTap func(anchor fyne.CanvasObject)) fyne.CanvasObject {
+
+	if tint == nil {
+		tint = theme.Colors.TextPrimary
+	}
+
+	c := &tappableChip{}
+	c.content, c.background = chipParts(newChipAvatar(images, avatarURL), name, tint)
+	c.onTap = func() { onTap(c) }
+	c.ExtendBaseWidget(c)
+
+	return c
+}
+
+// newChipAvatar is the picture a user chip leads with, centred in its own square
+// for the reason newChipDot is: a row layout stretches, and a stretched circle is
+// an ellipse.
+func newChipAvatar(images *cache.ImageCache, avatarURL string) fyne.CanvasObject {
+	side := theme.Sizes.ChipAvatarSize
+
+	return container.NewCenter(circularAvatar(images, avatarURL, fyne.NewSize(side, side)))
+}
+
 // tappableChip is NewChip's surface with a click on it — a widget of its own
 // rather than a TappableContainer, whose square hover fill behind a rounded label
 // reads as a second shape appearing rather than the chip responding.
@@ -747,6 +780,7 @@ type OutlinedIconButton struct {
 	icon       *canvas.Image
 	tint       color.Color
 	content    fyne.CanvasObject
+	onHover    func(bool)
 }
 
 var (
@@ -770,6 +804,16 @@ func NewOutlinedIconButton(res fyne.Resource, tint color.Color, onTap func()) *O
 	b.content = container.NewStack(b.background, container.NewCenter(b.icon))
 	b.ExtendBaseWidget(b)
 	b.setHovered(false)
+
+	return b
+}
+
+// reporting has the button hand its hover on as well as wearing it, for a
+// surface that fills under the pointer and holds one of these: the deepest
+// object gets the event, so without this the card goes out from under the hand
+// reaching for the button.
+func (b *OutlinedIconButton) reporting(onHover func(bool)) *OutlinedIconButton {
+	b.onHover = onHover
 
 	return b
 }
@@ -802,6 +846,8 @@ func (b *OutlinedIconButton) setHovered(on bool) {
 
 	b.background.Refresh()
 	b.icon.Refresh()
+
+	reportHover(b.onHover, on)
 }
 
 // SidebarButton is the circular icon button bookending the server list as the

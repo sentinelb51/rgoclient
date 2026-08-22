@@ -4,10 +4,10 @@
 
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` (module cache:
-`revoltgo@v0.0.0-20260820202106-a0e9e826477a/session.go`) exposes ~110 REST methods plus the
-socket pair. The client calls **55** of them, and registers **31** of revoltgo's 49 gateway
-event types. Three routes are reached without revoltgo's types at all, because revoltgo
-cannot express them — see *Round the typed API* below.
+`revoltgo@v0.0.0-20260821191211-a3aceadb97ee/session.go`) exposes ~110 REST methods plus the
+socket pair. The client calls **55** of them, and registers **38** of the **47** event types
+revoltgo's `eventConstructors` table can decode. Three routes are reached without revoltgo's
+types at all, because revoltgo cannot express them — see *Round the typed API* below.
 
 `ChannelMessages` counts once but is now asked four ways: the newest page, `Before` into
 the cache, and `Nearby` / `After` / an uncached `Before` for a jump window, which is why
@@ -360,16 +360,21 @@ a section of a server's settings, and `ServerMemberEdit` is the member menu.
 Webhooks (11 calls), bots (7), `AccountCreate` / `Onboarding*` / `PasswordReset*` /
 `VerifyEmail`, `PushSubscribe` / `Unsubscribe` (webpush), `SyncSettingsFetch` / `Set`
 (msgp tuples revoltgo itself flags as undecodable), `PolicyAck`, `UserFlags`,
-`UserDefaultAvatar`, `WriteSocketJSON` / `MSGP`, and voice (`ChannelsJoinCall`,
-`ChannelsEndRing` plus six `EventVoice*` / `EventUserVoiceState*` events — that wants a
-LiveKit client, not an action).
+`UserDefaultAvatar`, `WriteSocketJSON` / `MSGP`, and *joining* a call (`ChannelsJoinCall`,
+`ChannelsEndRing` — that wants a LiveKit client, not an action). The five voice **events**
+are handled and are not Tier 4: who is in a call is drawn under its channel in the sidebar,
+which needs no audio.
 
 ---
 
 ## The other half: gateway events
 
-An action without its event counterpart does not reflect. `client/events.go` registers 31 of
-revoltgo's 49 event types — it was 15 before pinning went in.
+An action without its event counterpart does not reflect. `client/events.go` registers 38 of
+the 47 revoltgo can decode — it was 15 before pinning went in.
+
+Count 47 from `eventConstructors` in revoltgo's `event.go`, not from the `Event*` structs in
+`events.go`: `EventReadyPolicyChange` is a field on `EventReady` (a ToS-change notice, not
+drawn), and `EventErrorData` / `EventErrorDataType` are the payload of `EventError`.
 
 ### Handled
 
@@ -379,7 +384,9 @@ revoltgo's 49 event types — it was 15 before pinning went in.
 `ServerRoleDelete`, `ServerRoleRanksUpdate`, `ChannelCreate`, `ChannelUpdate`, `ChannelDelete`,
 `ChannelAck`, `ChannelGroupJoin`, `ChannelGroupLeave`, `ServerMemberJoin`,
 `ServerMemberLeave`, `ServerMemberUpdate`, `UserUpdate`, `UserRelationship`,
-`UserPlatformWipe`, `ChannelStartTyping`, `ChannelStopTyping`, `Logout`.
+`UserPlatformWipe`, `ChannelStartTyping`, `ChannelStopTyping`, `Logout`,
+`EmojiCreate`, `EmojiDelete`, `VoiceChannelJoin`, `VoiceChannelLeave`, `VoiceChannelMove`,
+`UserVoiceStateUpdate`, `UserMoveVoiceChannel`.
 
 Everything a server, role, member or channel can do is now covered. Creating a role has no
 event of its own — it arrives as `ServerRoleUpdate` for a role `State` has never heard of,
@@ -388,12 +395,22 @@ which revoltgo files on the way past.
 The three role events collapse onto one `RolesChanged`: what a reader does about a role is
 re-read the members it colours and orders, and that is the same walk whichever of the three
 arrived. Every rebuild a handler asks for goes through `App.queueRefresh`, a dirty set over
-three surfaces flushed on one settling window, because Revolt's bursts do not respect the
-boundary: a rank reorder is an event per role, and a channel added to a server is a create
-*and* a server update. `ChannelAck` is the one event that exists *because* of another client — without it a
+four surfaces flushed on one settling window, because Revolt's bursts do not respect the
+boundary: a rank reorder is an event per role, a channel added to a server is a create *and*
+a server update, and an emoji upload is one event per file. `ChannelAck` is the one event that exists *because* of another client — without it a
 conversation read on a phone stayed bold here for the life of the session — and our own acks
 echo back through it onto a mark already cleared. `Logout` is a session revoked from
 elsewhere and is the same fatal drop a rejected authentication is.
+
+The two emoji events collapse onto one `EmojisChanged`, which names nothing. A delete
+carries only the emoji's ID and revoltgo has already dropped it from `State` by the time the
+handler runs, so there is no server left to name — and nothing would use one anyway, an
+emoji being usable in every server the account can write in. The only reader is
+`refreshEmojiCandidates`: the picker walks the store each time it opens, but the composer's
+`:` list is a *copy*, so without this an emoji uploaded minutes ago is uncompletable and a
+deleted one still completes to a token that draws as a broken picture. `flushRefresh` skips
+it when the same window rebuilt the rail, `refreshServerList` ending by re-taking those
+candidates itself.
 
 `revoltgo`'s own default handlers keep `State` current for every one of these first, so each
 handler here only names what moved and lets the store answer what things now are —
@@ -411,12 +428,27 @@ the third such pair in the file, so both must be registered.
 
 ### Still unhandled, and what each would cost
 
-- `EventEmojiCreate` / `Delete` — deliberately, now that the picker exists. revoltgo's own
-  default handlers file both into `State`, which is what a handler here would have had to
-  arrange, and the picker reads `State` as it opens rather than holding a copy — so there is
-  nothing left for one to do.
+- `EventAuth` — **a real gap.** Another session of this account being revoked
+  (`DeleteSession` / `DeleteAllSessions`, with a `SessionID` and an `ExcludeSessionID`); it
+  is the multi-session counterpart to `Logout`, which fires only when *this* session dies.
+  revoltgo registers no default handler for it either, so nothing anywhere reacts. It is not
+  part of logging in: the gateway takes the token as a query parameter on the URL, so no
+  `Authenticate` frame is ever sent.
 - `EventUserSettingsUpdate` — revoltgo flags its msgp tuples as undecodable (Tier 4).
-- `EventReportCreate`, `EventWebhook*` and the six voice events belong to Tier 4.
+- `EventReportCreate` — Tier 4, and revoltgo's struct is a `// todo: implement fields`
+  comment with no fields at all.
+- `EventWebhookCreate` / `Update` / `Delete` — Tier 4; no webhook surface exists.
+- `EventBulk`, `EventPong`, `EventAuthenticated` — not the client's business. revoltgo's own
+  default handler unwraps `EventBulk.V` and re-feeds each sub-event through `WS.handle` in
+  gateway order, `Pong` is consumed by `Websocket.OnPong`, and `Authenticated` is a bare ack
+  that `Ready` follows.
+
+What handling the emoji pair does **not** cover: a message already on screen keeps drawing a
+deleted emoji. The picture is fetched from an ID alone (`Store.EmojiURL` asks `State`
+nothing, so an emoji from a server the account is not in still renders), and re-rendering
+every mounted message on a delete would cost more than the staleness does. An open picker is
+stale for the same reason — it prepares its sections when it opens and holds no reference to
+refresh.
 
 ---
 

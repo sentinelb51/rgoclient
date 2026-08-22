@@ -103,6 +103,13 @@ type RolesChanged struct {
 	ServerID string
 }
 
+// EmojisChanged reports the account's custom emoji set gaining or losing one.
+//
+// It names nothing, and cannot: a delete carries only the emoji's own ID, and
+// revoltgo has already dropped it from State by the time this is emitted, so
+// there is no server left to look it up from. Ask Store.Emojis afterwards.
+type EmojisChanged struct{}
+
 // ChannelCreated is a channel that now exists for this account: one added to a
 // server, or a conversation opened from somewhere else.
 type ChannelCreated struct {
@@ -206,6 +213,22 @@ type TypingChanged struct {
 	Typing bool
 }
 
+// VoiceChanged names a voice channel whose call gained or lost somebody, or
+// whose participants changed what they are sharing. revoltgo's own handlers keep
+// State's voice cache in step, so this only names the channel — ask
+// Store.VoiceParticipants afterwards.
+//
+// A move arrives as one event naming two channels, so the reader is given both:
+// the sidebar redraws whatever a rebuild covers, and neither ID being the open
+// channel is still two rows that changed.
+type VoiceChanged struct {
+	ChannelID string
+
+	// FromChannelID is the call somebody left on their way into ChannelID, "" for
+	// anything that is not a move.
+	FromChannelID string
+}
+
 func (Ready) isEvent()               {}
 func (Disconnected) isEvent()        {}
 func (MessageCreated) isEvent()      {}
@@ -215,6 +238,7 @@ func (ServerJoined) isEvent()        {}
 func (ServerLeft) isEvent()          {}
 func (ServerUpdated) isEvent()       {}
 func (RolesChanged) isEvent()        {}
+func (EmojisChanged) isEvent()       {}
 func (ChannelCreated) isEvent()      {}
 func (ChannelUpdated) isEvent()      {}
 func (ChannelClosed) isEvent()       {}
@@ -227,6 +251,7 @@ func (UserUpdated) isEvent()         {}
 func (RelationshipChanged) isEvent() {}
 func (PresenceChanged) isEvent()     {}
 func (TypingChanged) isEvent()       {}
+func (VoiceChanged) isEvent()        {}
 
 /* Registration */
 
@@ -240,6 +265,7 @@ func (c *Client) register(session *revoltgo.Session, epoch uint64) {
 	c.registerChannels(session, epoch)
 	c.registerMembers(session, epoch)
 	c.registerUsers(session, epoch)
+	c.registerVoice(session, epoch)
 }
 
 // registerSession wires what the connection itself reports: the opening
@@ -453,7 +479,7 @@ func (c *Client) registerMessages(session *revoltgo.Session, epoch uint64) {
 	})
 }
 
-// registerServers wires a server's own details and its roles.
+// registerServers wires a server's own details, its roles and its emoji.
 func (c *Client) registerServers(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerCreate) {
 		log.Printf("joined server %s", event.ID)
@@ -484,6 +510,17 @@ func (c *Client) registerServers(session *revoltgo.Session, epoch uint64) {
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventServerRoleRanksUpdate) {
 		c.emit(epoch, RolesChanged{ServerID: event.ID})
+	})
+
+	// Both collapse the same way roles do, and for a stronger reason: what an
+	// emoji is worth to a reader is the whole set, which State already holds
+	// correctly by the time either of these runs.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, _ *revoltgo.EventEmojiCreate) {
+		c.emit(epoch, EmojisChanged{})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, _ *revoltgo.EventEmojiDelete) {
+		c.emit(epoch, EmojisChanged{})
 	})
 }
 
@@ -532,6 +569,39 @@ func (c *Client) registerChannels(session *revoltgo.Session, epoch uint64) {
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventChannelStopTyping) {
 		c.emit(epoch, TypingChanged{ChannelID: event.ID, UserID: event.User})
+	})
+}
+
+// registerVoice wires who is in which call. revoltgo tracks the participants
+// itself — State's voice cache is seeded from Ready and kept in step by these
+// same events — so every handler here does nothing but name the channel that
+// moved.
+func (c *Client) registerVoice(session *revoltgo.Session, epoch uint64) {
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelJoin) {
+		c.emit(epoch, VoiceChanged{ChannelID: event.ID})
+	})
+
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelLeave) {
+		c.emit(epoch, VoiceChanged{ChannelID: event.ID})
+	})
+
+	// A move is sent instead of a leave/join pair, so both ends are one event.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelMove) {
+		c.emit(epoch, VoiceChanged{ChannelID: event.To, FromChannelID: event.From})
+	})
+
+	// A camera or a screen share going on or off. Whether the participant is
+	// publishing audio arrives the same way and is not drawn — see
+	// domain.VoiceParticipant.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserVoiceStateUpdate) {
+		c.emit(epoch, VoiceChanged{ChannelID: event.ChannelID})
+	})
+
+	// The account itself being moved by a moderator. Everyone else sees the move
+	// above; this session is told separately, and with a voice token it has
+	// nothing to do with — the call is not joinable here.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserMoveVoiceChannel) {
+		c.emit(epoch, VoiceChanged{ChannelID: event.To, FromChannelID: event.From})
 	})
 }
 

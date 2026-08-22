@@ -30,6 +30,12 @@ type Store interface {
 	// than as a collection, so this reports whoever is both known and related.
 	Relationships() []User
 
+	// HasIncomingRequest reports whether anybody is waiting on this account to
+	// answer a friend request. The same walk Relationships makes, resolving
+	// nobody and ordering nothing: the sidebar's mark is one boolean, and it is
+	// asked for again every time a batch of message authors lands.
+	HasIncomingRequest() bool
+
 	Member(serverID, userID string) (Member, bool)
 	Channel(channelID string) (Channel, bool)
 	Server(serverID string) (Server, bool)
@@ -67,6 +73,12 @@ type Store interface {
 	// It resolves a nickname, avatar, presence and role colour per member, so it
 	// is the most expensive read here. Call it off the UI thread.
 	Members(serverID string) []Member
+
+	// VoiceParticipants is everybody connected to a voice channel's call, ordered
+	// by display name. A walk like Members and resolved the same way, but of the
+	// handful in one call rather than a whole membership, so the channel sidebar
+	// asks for it per voice channel as it builds.
+	VoiceParticipants(channelID string) []VoiceParticipant
 
 	// MemberRoles resolves one member's roles, most senior first. Kept off Member
 	// because only a profile draws them.

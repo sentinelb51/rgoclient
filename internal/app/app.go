@@ -187,12 +187,20 @@ type App struct {
 
 	/* Channel search, see search.go */
 
-	// search is the panel on the modal layer, if any, and searchQuery the query
-	// it is waiting on — an answer to an older one is dropped rather than drawn
-	// under a newer. searchChannelID is what pins' own is, for the same reason.
+	// search is the island on the modal layer, if any, and searchQuery the whole
+	// of what it is asking — an answer to an older query is dropped rather than
+	// drawn under a newer. searchChannelID is what pins' own is, for the same
+	// reason.
+	//
+	// searchFound is that answer, held while the island is up so a filter chip
+	// narrows what is already here rather than asking again; searchAnswered tells
+	// "nothing came back" from "nothing has been asked yet", which an empty slice
+	// cannot.
 	search          *ui.SearchDialog
 	searchChannelID string
-	searchQuery     string
+	searchQuery     ui.SearchQuery
+	searchFound     []*domain.Message
+	searchAnswered  bool
 
 	/* Lazy author resolution, see members.go */
 
@@ -221,9 +229,20 @@ type App struct {
 	/* The member sidebar, see members.go */
 
 	// memberSeq drops the older of two rebuilds racing back from their walks;
-	// memberStale records that the sidebar is hidden and has stopped following.
-	memberSeq   uint64
-	memberStale bool
+	// memberStale records that the sidebar is hidden and has stopped following;
+	// memberWorking that one is in flight, which is what holds a presence patch
+	// back rather than letting it copy a membership about to be replaced.
+	memberSeq     uint64
+	memberStale   bool
+	memberWorking bool
+
+	// memberCache is the last membership resolved for memberCacheServer, in the
+	// order the model draws it. Published and never written into: a presence flush
+	// copies it, re-resolves only who moved and publishes the copy, which is what
+	// keeps a rebuild off the walk and the sort. presenceDirty is who moved.
+	memberCache       []domain.Member
+	memberCacheServer string
+	presenceDirty     map[string]bool
 
 	fetchedMembers map[string]bool // serverID -> its whole membership has been pulled
 

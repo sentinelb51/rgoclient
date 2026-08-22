@@ -1,165 +1,488 @@
 package ui
 
-// The two panels listing a channel's messages as summaries: what has been
-// pinned, and what a search found. A row is one flattened line leading to the
-// message, never a second rendering of a body. They share the row, the card and
-// the sizes, differing only in what fills them — a pin list is one request as the
-// panel opens, a search one per query typed.
+// The island the three message surfaces are drawn on, the card one message is
+// drawn as, and two of the three surfaces themselves: what has been pinned in a
+// channel, and what has named this account anywhere. The third is channel
+// search, which adds a field and a run of chips to the same island — see
+// search.go.
+//
+// The island is three surfaces deep on purpose: the card it floats on, the well
+// the cards are sunk into, and the cards that lift back out of the well. Two
+// would leave a message reading as a row somebody drew a box around, which is
+// what these two panels were before.
+//
+// A card is a summary and never a second rendering of a body: the controller has
+// the store, so the text arrives flattened and the counts arrive counted.
 
 import (
+	"image/color"
+	"strconv"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/layout"
+	"fyne.io/fyne/v2/driver/desktop"
+	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/assets"
 	"RGOClient/internal/ui/theme"
 )
 
-/* One message as a row */
+/* One message as a card draws it */
 
-// MessageEntry is one message as a panel draws it. The text is already resolved
-// and already flattened: the controller has the store, and a row is a line of
-// summary rather than a second rendering of a body. Jump leads to the message.
-type MessageEntry struct {
-	Author    string
-	AvatarURL string
-	Preview   string
-	When      string
+// MessageCard is one message as any of the three surfaces draws it. Everything
+// is already resolved, and the badges say what the message carries rather than
+// carrying it.
+//
+// The two properties that are about the surface rather than the message —
+// Pinned and Mentioned — are the surface's to leave off: every card in the pins
+// panel is pinned and every card in the inbox names this account, and a mark on
+// all of them says nothing.
+type MessageCard struct {
+	Author      string
+	AuthorColor color.Color // nil where no coloured role applies
+	AvatarURL   string
 
-	// Where names the channel the message is in, for a panel whose rows are not all
-	// from one — the mention inbox. Empty in the two that are, where the heading
-	// already said it and every row repeating it would be a column of one word.
+	Preview string
+	When    string
+
+	// Where names the channel the message is in, for a surface whose cards are not
+	// all from one — the mention inbox. Empty in the two that are, where the
+	// heading already said it and every card repeating it would be a column of one
+	// word.
 	Where string
 
+	Attachments int
+	Images      int
+	Reactions   int
+
+	Links     bool
+	Pinned    bool
+	Edited    bool
+	Mentioned bool
+
 	Jump func()
-}
 
-// PinEntry is a MessageEntry the account may also unpin. Unpin is nil where it
-// may not manage the channel's messages, and the button is then not drawn at all
-// — a disabled one on every row says only that the reader is not a moderator.
-type PinEntry struct {
-	MessageEntry
-
+	// Unpin takes the pin off, for the panel that lists them. Nil where the account
+	// may not manage the channel's messages, and the button is then not drawn at
+	// all — a disabled one on every card says only that the reader is not a
+	// moderator.
 	Unpin func()
 }
 
-// messageRow draws one summary: who wrote it and when above what it said, with
-// trailing at the far end — a button, or a spacer where there is nothing to
-// offer. The summary is what is tappable; trailing is a sibling, so the pointer
-// reaches whichever it is over.
-func messageRow(deps Deps, entry MessageEntry, trailing fyne.CanvasObject) fyne.CanvasObject {
-	gap := theme.Sizes.PanelGap
-	side := theme.Sizes.PanelAvatarSize
-	avatar := circularAvatar(deps.Images, entry.AvatarURL, fyne.NewSize(side, side))
+/* The island the three surfaces share */
 
-	name := newBoldText(entry.Author, theme.Colors.TextPrimary, theme.Sizes.PanelNameSize)
+// islandParts is what a surface puts into the island beyond what every island
+// has. Controls are the blocks between the header and the count line — the
+// search field and its chips, nothing in the two panels — and Trailing is what
+// rides at the far end of that line.
+type islandParts struct {
+	Mark  fyne.Resource
+	Title string
+	Where string
 
-	when := newText(entry.When, theme.Colors.TimestampText, theme.Sizes.PanelPreviewSize)
-	preview := newText(entry.Preview, theme.Colors.TimestampText, theme.Sizes.PanelPreviewSize)
+	Controls []fyne.CanvasObject
+	Trailing fyne.CanvasObject
 
-	// The name takes the leftover width and the time keeps its own, so a long name
-	// shortens rather than pushing the time out. Spacers rather than a Center: an
-	// ellipsis box reports no width, so centring hands it nothing at all.
-	//
-	// Where rides between them, at the fixed end: it is as much of the row's
-	// address as the name is, and a channel that had to shorten would be the half
-	// that says which of a dozen alike this one is.
+	OnClose func()
+}
+
+// messageIsland is the shell: a header, a line saying what the cards amount to,
+// and the well they sit in. It fills in place rather than closing — unpinning
+// and searching again are actions whose whole result is the well moving.
+type messageIsland struct {
+	deps Deps
+
+	count    *canvas.Text
+	countRow fyne.CanvasObject
+	status   *canvas.Text
+	empty    fyne.CanvasObject // the line and its mark, standing where the cards are not
+	list     *fyne.Container
+
+	// countAlone is a surface with nothing to put opposite the count, whose line is
+	// hidden until there is a number to put in it.
+	countAlone bool
+}
+
+// newMessageIsland builds one and returns what mounts it.
+func newMessageIsland(deps Deps, parts islandParts) (*messageIsland, fyne.CanvasObject) {
+	gap := theme.Sizes.IslandGap
+	pad := theme.Sizes.IslandPadding
+
+	d := &messageIsland{deps: deps, list: VBoxNoSpacing()}
+
+	blocks := []fyne.CanvasObject{d.buildHeader(parts), VerticalSpacer(gap)}
+	for _, control := range parts.Controls {
+		blocks = append(blocks, control, VerticalSpacer(gap))
+	}
+	blocks = append(blocks,
+		d.buildCountRow(parts.Trailing),
+		VerticalSpacer(gap*countRowStep),
+		d.buildWell(parts.Mark),
+	)
+
+	island := canvas.NewRectangle(theme.Colors.IslandBg)
+	island.CornerRadius = theme.Sizes.IslandRadius
+	Outline(island)
+
+	// Fixed rather than minimum width: every card shortens to what it is given, so
+	// no name and no preview can widen the island.
+	content := newTapSink(NewFixedWidthContainer(theme.Sizes.IslandWidth,
+		container.NewStack(island, NewInset(VBoxNoSpacing(blocks...), pad, pad, pad, pad))))
+
+	return d, content
+}
+
+// countRowStep is how much of the island's gap stands under the count line. The
+// line labels the well rather than dividing two blocks, so it sits closer to
+// what it counts than to what is above it.
+const countRowStep = 0.6
+
+// islandInnerWidth is the room inside the island's padding — what a wrapping run
+// of chips wraps against. A number rather than the width it is laid out at,
+// because NewFlow is asked for its height before it has been given one.
+func islandInnerWidth() float32 {
+	return theme.Sizes.IslandWidth - 2*theme.Sizes.IslandPadding
+}
+
+// buildHeader is the island's one line of identity: the mark, what this is, and
+// where it is looking. The address takes the leftover width and shortens, so the
+// close button keeps its corner.
+func (d *messageIsland) buildHeader(parts islandParts) fyne.CanvasObject {
+	gap := theme.Sizes.IslandChipGap
+
+	mark := newScaledIcon(tintedIcon(parts.Mark, theme.Colors.TextPrimary), theme.Sizes.SearchFieldGlyph)
+	title := newBoldText(parts.Title, theme.Colors.TextPrimary, theme.Sizes.IslandNameSize+1)
+	where := newText(parts.Where, theme.Colors.IslandCountText, theme.Sizes.IslandTimeSize)
+
+	return NewFillRow(4,
+		container.NewCenter(mark),
+		HorizontalSpacer(gap),
+		container.NewCenter(title),
+		HorizontalSpacer(gap),
+		NewEllipsisText(where),
+		container.NewCenter(NewCloseButton(parts.OnClose)),
+	)
+}
+
+// buildCountRow is what the answer amounts to, and whatever the surface puts
+// opposite it. One line, because the two are read together: "12 of 87" only
+// means something beside the chips that took it there.
+func (d *messageIsland) buildCountRow(trailing fyne.CanvasObject) fyne.CanvasObject {
+	d.count = newText("", theme.Colors.IslandCountText, theme.Sizes.IslandCountTextSize)
+
+	row := []fyne.CanvasObject{
+		container.NewCenter(d.count),
+		HorizontalSpacer(theme.Sizes.IslandChipGap),
+	}
+	if trailing != nil {
+		row = append(row, trailing)
+	}
+
+	// A row holding nothing but an empty count is a band of nothing over the well,
+	// so a surface with nothing to put opposite the count only shows the line once
+	// it has a number to put in it.
+	d.countRow = NewFillRow(1, row...)
+	d.countAlone = trailing == nil
+	showIf(d.countRow, !d.countAlone)
+
+	return d.countRow
+}
+
+// buildWell is the sunk surface the cards sit in. The scroller cannot be asked
+// how tall it wants to be — container.Scroll reports its own current height as
+// its minimum — so the list is measured and the ceiling applied here, as the
+// friends list does it.
+func (d *messageIsland) buildWell(res fyne.Resource) fyne.CanvasObject {
+	pad := theme.Sizes.IslandWellPadding
+
+	well := canvas.NewRectangle(theme.Colors.IslandWellBg)
+	well.CornerRadius = theme.Sizes.IslandWellRadius
+	Outline(well)
+
+	mark := newScaledIcon(tintedIcon(res, theme.Colors.IslandHintText), theme.Sizes.SearchFieldGlyph)
+	mark.Translucency = iconRestTranslucency
+	d.status = newText("", theme.Colors.IslandHintText, theme.Sizes.IslandPreviewSize)
+
+	// A floor under the empty state, so an island holding one sentence — loading,
+	// nothing found, or a request that failed — is still an island rather than a
+	// strip with a line in it.
+	d.empty = NewMinHeightContainer(theme.Sizes.IslandListMaxHeight*emptyWellShare,
+		container.NewCenter(VBoxNoSpacing(
+			container.NewCenter(mark),
+			VerticalSpacer(theme.Sizes.IslandCardSpacing),
+			container.NewCenter(d.status),
+		)))
+
+	viewport := container.New(
+		&cappedHeightLayout{content: d.list, max: theme.Sizes.IslandListMaxHeight},
+		NewPlainVScroll(d.list))
+
+	return container.NewStack(well,
+		NewInset(VBoxNoSpacing(d.empty, viewport), pad, pad, pad, pad))
+}
+
+// emptyWellShare is how much of the list's ceiling the empty state holds open.
+// Not a setting: it is a proportion of a size that already is one.
+const emptyWellShare = 0.25
+
+/* Filling it */
+
+// setCards replaces the well's contents. Call on the UI thread.
+func (d *messageIsland) setCards(cards []fyne.CanvasObject) {
+	spaced := make([]fyne.CanvasObject, 0, 2*len(cards))
+	for _, card := range cards {
+		if len(spaced) > 0 {
+			spaced = append(spaced, VerticalSpacer(theme.Sizes.IslandCardSpacing))
+		}
+
+		spaced = append(spaced, card)
+	}
+
+	d.list.Objects = spaced
+	d.list.Refresh()
+}
+
+// reset empties the well and leaves one line standing in it. Call on the UI
+// thread.
+func (d *messageIsland) reset(reason string) {
+	d.setCards(nil)
+	d.setCount("")
+	d.say(reason)
+}
+
+// say fills the well's own line, or hides it where the cards speak for
+// themselves.
+func (d *messageIsland) say(reason string) {
+	d.status.Text = reason
+	d.status.Refresh()
+
+	showIf(d.empty, reason != "")
+}
+
+// setCount labels the well.
+func (d *messageIsland) setCount(text string) {
+	d.count.Text = text
+	d.count.Refresh()
+
+	if d.countAlone {
+		showIf(d.countRow, text != "")
+	}
+}
+
+/* One card */
+
+// newMessageCard draws one message: who wrote it and when, what it said, and
+// what it carries. The badge strip is left off entirely where there is nothing
+// to say, so a plain message is a shorter card rather than one with an empty
+// band.
+func newMessageCard(deps Deps, entry MessageCard) fyne.CanvasObject {
+	gap := theme.Sizes.IslandCardGap
+	pad := theme.Sizes.IslandCardPadding
+	side := theme.Sizes.IslandAvatarSize
+
+	card := &messageCard{
+		background: canvas.NewRectangle(theme.Colors.IslandCardBg),
+		jump: newScaledIcon(tintedIcon(assets.SearchJumpIcon, theme.Colors.IslandHintText),
+			theme.Sizes.IslandJumpGlyph),
+		mentioned: entry.Mentioned,
+	}
+	card.onTap = entry.Jump
+	card.background.CornerRadius = theme.Sizes.IslandCardRadius
+
+	name := newBoldText(entry.Author, authorFill(entry.AuthorColor), theme.Sizes.IslandNameSize)
+	when := newText(entry.When, theme.Colors.TimestampText, theme.Sizes.IslandTimeSize)
+
+	// The name takes the leftover width and the rest of the heading keeps its own,
+	// so a long name shortens rather than pushing the date out of the card. Where
+	// rides at the fixed end: it is as much of the card's address as the name is,
+	// and a channel that had to shorten would be the half saying which of a dozen
+	// alike this one is.
 	heading := []fyne.CanvasObject{NewEllipsisText(name), HorizontalSpacer(gap)}
 	if entry.Where != "" {
 		heading = append(heading,
-			newText(entry.Where, theme.Colors.MentionText, theme.Sizes.PanelPreviewSize),
+			container.NewCenter(newText(entry.Where, theme.Colors.MentionText, theme.Sizes.IslandTimeSize)),
 			HorizontalSpacer(gap))
 	}
-	heading = append(heading, when)
+	heading = append(heading, container.NewCenter(when))
 
-	identity := container.NewVBox(
-		layout.NewSpacer(),
+	preview := newText(entry.Preview, theme.Colors.TimestampText, theme.Sizes.IslandPreviewSize)
+
+	column := []fyne.CanvasObject{
 		NewFillRow(0, heading...),
+		VerticalSpacer(theme.Sizes.IslandCardSpacing * halfStep),
 		NewEllipsisText(preview),
-		layout.NewSpacer(),
+	}
+	if badges := messageBadges(entry); badges != nil {
+		column = append(column, VerticalSpacer(theme.Sizes.IslandCardSpacing), badges)
+	}
+
+	row := NewFillRow(2,
+		container.NewCenter(circularAvatar(deps.Images, entry.AvatarURL, fyne.NewSize(side, side))),
+		HorizontalSpacer(gap),
+		VBoxNoSpacing(column...),
+		HorizontalSpacer(gap),
+		card.trailing(entry.Unpin),
 	)
 
-	// The avatar is inside what answers the tap, so the hover fill covers the row
-	// rather than lighting up beside a picture leading to the same place.
-	summary := NewTappableContainer(NewFillRow(1,
-		HBoxNoSpacing(container.NewCenter(avatar), HorizontalSpacer(gap)),
-		identity,
-	), entry.Jump)
+	card.content = container.NewStack(card.background, NewInset(row, pad, pad, pad, pad))
+	card.ExtendBaseWidget(card)
+	card.paint()
 
-	return NewFixedHeightContainer(theme.Sizes.PanelRowHeight, NewFillRow(0, summary, trailing))
+	return card
 }
 
-/* The card both panels are */
+// halfStep is the tighter of the two gaps inside a card: the heading and the
+// line under it are one thing, where the badges below are another.
+const halfStep = 0.5
 
-// messagePanel is the shared body: a heading, one line that speaks when the rows
-// cannot, and the list. Both panels refill in place rather than closing —
-// unpinning and searching again are actions whose whole result is the list moving.
-type messagePanel struct {
-	deps   Deps
-	list   *fyne.Container // the rows themselves, replaced wholesale on a refill
-	status *canvas.Text    // the one line that speaks when the rows cannot
+// messageCard is the tappable surface one message is drawn on. It fills under
+// the pointer and its jump mark comes up with it, so the whole card reads as the
+// one thing it is — the way to the message.
+type messageCard struct {
+	tapBase
+
+	background *canvas.Rectangle
+	jump       *canvas.Image
+	content    fyne.CanvasObject
+
+	mentioned bool
 }
 
-// newMessagePanel builds the card. title heads it, onClose dismisses the layer,
-// and extra is what one panel has that the other does not — the search field,
-// or nothing.
-func newMessagePanel(deps Deps, title, loading string, extra fyne.CanvasObject, onClose func()) (*messagePanel, fyne.CanvasObject) {
-	pad := theme.Sizes.PanelPadding
+var (
+	_ fyne.Tappable     = (*messageCard)(nil)
+	_ desktop.Hoverable = (*messageCard)(nil)
+)
 
-	p := &messagePanel{
-		deps:   deps,
-		list:   VBoxNoSpacing(),
-		status: newText(loading, theme.Colors.TimestampText, theme.Sizes.PanelPreviewSize),
+// trailing is the far end of the card: the jump mark, and before it whatever the
+// card can be acted on with.
+//
+// An outlined button rather than a bare mark, in the danger tint, as the invite
+// list's revoke is: the mark is the only thing offering the action, and an icon
+// with nothing round it reads as decoration. It hands its hover back to the
+// card, which is what keeps the card lit while the pointer is on it.
+func (c *messageCard) trailing(unpin func()) fyne.CanvasObject {
+	if unpin == nil {
+		return container.NewCenter(c.jump)
 	}
 
-	// The scroller cannot be asked how tall it wants to be — container.Scroll reports
-	// its own current height as its minimum — so the list is measured and the ceiling
-	// applied here, as the friends list does it.
-	viewport := container.New(
-		&cappedHeightLayout{content: p.list, max: theme.Sizes.PanelListMaxHeight},
-		NewPlainVScroll(p.list))
+	tint := theme.Colors.SwiftActionDanger
+	button := NewOutlinedIconButton(tintedIcon(assets.SystemUnpinnedIcon, tint), tint, unpin).
+		reporting(c.setHovered)
 
-	inner := VBoxNoSpacing(p.status, viewport)
-	if extra != nil {
-		inner = VBoxNoSpacing(extra, VerticalSpacer(pad), p.status, viewport)
+	return HBoxNoSpacing(
+		container.NewCenter(button),
+		HorizontalSpacer(theme.Sizes.IslandCardGap),
+		container.NewCenter(c.jump),
+	)
+}
+
+func (c *messageCard) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(c.content)
+}
+
+func (c *messageCard) MouseIn(*desktop.MouseEvent) { c.setHovered(true) }
+func (c *messageCard) MouseOut()                   { c.setHovered(false) }
+
+func (c *messageCard) setHovered(on bool) {
+	c.background.FillColor = theme.Colors.IslandCardBg
+	c.jump.Translucency = iconRestTranslucency
+
+	if on {
+		c.background.FillColor = theme.Colors.IslandCardHoverBg
+		c.jump.Translucency = 0
 	}
 
-	body := VBoxNoSpacing(dialogHeader(title, onClose), NewInset(inner, 0, pad, pad, pad))
-
-	// Fixed rather than minimum width: every row shortens to what it is given, so no
-	// name and no preview can widen the panel.
-	content := newTapSink(NewFixedWidthContainer(theme.Sizes.PanelDialogWidth,
-		container.NewStack(newDialogCard(), body)))
-
-	return p, content
+	c.background.Refresh()
+	c.jump.Refresh()
 }
 
-// setRows replaces the whole list and says empty when it is. The panel is centred
-// and sized from its own minimum, so the caller repositions the overlay
-// afterwards. Call on the UI thread.
-func (p *messagePanel) setRows(rows []fyne.CanvasObject, empty string) {
-	p.list.Objects = rows
-	p.list.Refresh()
+// paint sets what the pointer does not change. A card whose message names this
+// account wears the mention amber as its edge rather than a badge: it is the one
+// property of a message that is about the reader, and an edge says so without
+// taking a slot from what the message actually carries.
+func (c *messageCard) paint() {
+	Outline(c.background)
+	if c.mentioned {
+		c.background.StrokeColor = solidColor(theme.Colors.IslandCardMentioned)
+	}
 
-	p.setStatus(empty, len(rows) == 0)
+	c.setHovered(false)
 }
 
-// say replaces the list with one line — a reason there is nothing, or a request
-// in flight. Call on the UI thread.
-func (p *messagePanel) say(reason string) {
-	p.list.Objects = nil
-	p.list.Refresh()
+// messageBadges is the strip under a card saying what the message carries.
+// Counts are drawn only past one: "1" beside a paperclip is the paperclip twice.
+func messageBadges(entry MessageCard) fyne.CanvasObject {
+	var badges []fyne.CanvasObject
 
-	p.setStatus(reason, true)
+	add := func(res fyne.Resource, label string) {
+		if len(badges) > 0 {
+			badges = append(badges, HorizontalSpacer(theme.Sizes.IslandCardGap))
+		}
+
+		badges = append(badges, messageBadge(res, label))
+	}
+
+	if files := entry.Attachments - entry.Images; files > 0 {
+		add(assets.SearchAttachmentIcon, badgeCount(files))
+	}
+	if entry.Images > 0 {
+		add(assets.SearchImageIcon, badgeCount(entry.Images))
+	}
+	if entry.Links {
+		add(assets.SearchLinkIcon, "")
+	}
+	if entry.Reactions > 0 {
+		add(assets.SearchReactionIcon, badgeCount(entry.Reactions))
+	}
+	if entry.Pinned {
+		add(assets.SystemPinnedIcon, "Pinned")
+	}
+	if entry.Edited {
+		add(assets.ActionEditIcon, "Edited")
+	}
+
+	if badges == nil {
+		return nil
+	}
+
+	return HBoxNoSpacing(badges...)
 }
 
-// setStatus labels the line above the list and shows it only when it is wanted.
-func (p *messagePanel) setStatus(text string, show bool) {
-	p.status.Text = text
-	p.status.Refresh()
+func badgeCount(count int) string {
+	if count < 2 {
+		return ""
+	}
 
-	showIf(p.status, show)
+	return strconv.Itoa(count)
+}
+
+// messageBadge is one mark and what it counts, dimmed: the badges describe the
+// message, and reading as brightly as its own line would put them in competition
+// with it.
+func messageBadge(res fyne.Resource, label string) fyne.CanvasObject {
+	mark := newScaledIcon(tintedIcon(res, theme.Colors.IslandBadgeText), theme.Sizes.IslandBadgeGlyph)
+	mark.Translucency = iconRestTranslucency
+
+	if label == "" {
+		return container.NewCenter(mark)
+	}
+
+	return HBoxNoSpacing(
+		container.NewCenter(mark),
+		HorizontalSpacer(theme.Sizes.IslandBadgeGap),
+		container.NewCenter(newText(label, theme.Colors.IslandBadgeText, theme.Sizes.IslandBadgeTextSize)),
+	)
+}
+
+// authorFill is the colour a name is drawn in, falling back to the card's own
+// text where no coloured role applies.
+func authorFill(fill color.Color) color.Color {
+	if fill == nil {
+		return theme.Colors.TextPrimary
+	}
+
+	return fill
 }
 
 /* The pinned-messages panel */
@@ -170,123 +493,83 @@ func (p *messagePanel) setStatus(text string, show bool) {
 type PinsDialog struct {
 	Content fyne.CanvasObject
 
-	panel *messagePanel
+	island *messageIsland
 }
 
 // NewPinsDialog builds the panel for a channel, showing that it is loading.
 // channel names it in the heading; onClose dismisses the layer.
 func NewPinsDialog(deps Deps, channel string, onClose func()) *PinsDialog {
-	panel, content := newMessagePanel(deps, "Pinned in "+channel, "Loading pinned messages...", nil, onClose)
+	island, content := newMessageIsland(deps, islandParts{
+		Mark:    assets.SystemPinnedIcon,
+		Title:   "Pinned",
+		Where:   "in " + channel,
+		OnClose: onClose,
+	})
+	island.reset("Loading what is pinned here...")
 
-	return &PinsDialog{Content: content, panel: panel}
+	return &PinsDialog{Content: content, island: island}
 }
 
 // SetEntries replaces the whole list. Call on the UI thread.
-func (d *PinsDialog) SetEntries(entries []PinEntry) {
-	rows := make([]fyne.CanvasObject, 0, len(entries))
-	for _, entry := range entries {
-		rows = append(rows, messageRow(d.panel.deps, entry.MessageEntry, unpinSlot(entry.Unpin)))
-	}
-
-	d.panel.setRows(rows, "Nothing is pinned here yet.")
+func (d *PinsDialog) SetEntries(entries []MessageCard) {
+	d.island.fill(entries, "pinned message", "Nothing is pinned here yet.")
 }
 
 // Fail replaces the list with a reason it is not there. Call on the UI thread.
-func (d *PinsDialog) Fail(reason string) { d.panel.say(reason) }
-
-// unpinSlot is the trailing end of a row: the button, or nothing where the
-// account cannot take a pin off. The empty case is still a child, so the row's
-// fill slot is at the same index either way.
-func unpinSlot(unpin func()) fyne.CanvasObject {
-	if unpin == nil {
-		return HorizontalSpacer(0)
-	}
-
-	return HBoxNoSpacing(
-		HorizontalSpacer(theme.Sizes.PanelGap),
-		container.NewCenter(NewIconButton(assets.SystemUnpinnedIcon, unpin, nil)),
-	)
-}
-
-/* Channel search */
-
-// SearchDialog searches one channel for what is typed in it. Unlike the pins
-// panel it asks for nothing until it is told to: Revolt's search is a request
-// per query, so it runs on submit rather than on every keystroke.
-type SearchDialog struct {
-	Content fyne.CanvasObject
-
-	// Entry is the field to focus once the panel is up — a search that has to be
-	// clicked into before it can be typed into is a click nobody meant to spend.
-	Entry fyne.Focusable
-
-	panel *messagePanel
-}
-
-// NewSearchDialog builds the panel for a channel. onSearch receives the query as
-// typed, the controller deciding what an empty one means; onClose dismisses the
-// layer.
-func NewSearchDialog(deps Deps, channel string, onSearch func(query string), onClose func()) *SearchDialog {
-	d := &SearchDialog{}
-
-	// The field handles Escape itself — see modalEntry.
-	entry := newModalEntry(onClose)
-	entry.SetPlaceHolder("Search messages")
-	entry.OnSubmitted = onSearch
-	d.Entry = entry
-
-	d.panel, d.Content = newMessagePanel(deps, "Search in "+channel,
-		"Type something and press Enter.", WithCaret(entry), onClose)
-
-	return d
-}
-
-// SetEntries replaces the results. Call on the UI thread.
-func (d *SearchDialog) SetEntries(entries []MessageEntry) {
-	rows := make([]fyne.CanvasObject, 0, len(entries))
-	for _, entry := range entries {
-		rows = append(rows, messageRow(d.panel.deps, entry, HorizontalSpacer(0)))
-	}
-
-	d.panel.setRows(rows, "Nothing matched that.")
-}
-
-// Searching says a request is out, replacing whatever the last one found: a list
-// left standing under a new query reads as a result for it.
-func (d *SearchDialog) Searching() { d.panel.say("Searching...") }
+func (d *PinsDialog) Fail(reason string) { d.island.reset(reason) }
 
 /* The mention inbox */
 
 // MentionsDialog lists every message naming the account, wherever it is. It is
-// the third panel and the only one not about a channel: the rows come from as
-// many as the account is in, so each carries where it is from and there is no
-// heading that could say it for them.
+// the one surface that is not about a channel: the cards come from as many as
+// the account is in, so each carries where it is from and there is no heading
+// that could say it for them.
 type MentionsDialog struct {
 	Content fyne.CanvasObject
 
-	panel *messagePanel
+	island *messageIsland
 }
 
 // NewMentionsDialog builds the panel, showing that it is loading. onClose
 // dismisses the layer.
 func NewMentionsDialog(deps Deps, onClose func()) *MentionsDialog {
-	panel, content := newMessagePanel(deps, "Mentions", "Loading mentions...", nil, onClose)
+	island, content := newMessageIsland(deps, islandParts{
+		Mark:    assets.MentionIcon,
+		Title:   "Mentions",
+		Where:   "everywhere you are",
+		OnClose: onClose,
+	})
+	island.reset("Looking for what named you...")
 
-	return &MentionsDialog{Content: content, panel: panel}
+	return &MentionsDialog{Content: content, island: island}
 }
 
 // SetEntries replaces the whole list. Call on the UI thread.
-func (d *MentionsDialog) SetEntries(entries []MessageEntry) {
-	rows := make([]fyne.CanvasObject, 0, len(entries))
-	for _, entry := range entries {
-		rows = append(rows, messageRow(d.panel.deps, entry, HorizontalSpacer(0)))
-	}
-
-	d.panel.setRows(rows, "Nobody has mentioned you.")
+func (d *MentionsDialog) SetEntries(entries []MessageCard) {
+	d.island.fill(entries, "mention", "Nobody has mentioned you.")
 }
 
 // Fail replaces the list with a reason it is not there. Call on the UI thread.
-func (d *MentionsDialog) Fail(reason string) { d.panel.say(reason) }
+func (d *MentionsDialog) Fail(reason string) { d.island.reset(reason) }
 
-// Fail replaces the results with a reason there are none. Call on the UI thread.
-func (d *SearchDialog) Fail(reason string) { d.panel.say(reason) }
+// fill is what both panels do with an answer: the cards, the count, and the line
+// that speaks where there are none. Channel search does not use it — its count
+// says what the filters took away as well as what came back.
+func (d *messageIsland) fill(entries []MessageCard, noun, empty string) {
+	cards := make([]fyne.CanvasObject, 0, len(entries))
+	for _, entry := range entries {
+		cards = append(cards, newMessageCard(d.deps, entry))
+	}
+
+	d.setCards(cards)
+
+	if len(entries) == 0 {
+		d.setCount("")
+		d.say(empty)
+
+		return
+	}
+
+	d.setCount(plural(len(entries), noun))
+	d.say("")
+}

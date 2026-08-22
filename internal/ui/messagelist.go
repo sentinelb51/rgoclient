@@ -889,10 +889,27 @@ func (l *MessageList) bodyWidth() float32 {
 		theme.Sizes.MessageAvatarColumnWidth - theme.Sizes.MessageContentPadding
 }
 
+// glyphWidths memoises the average glyph estimateLines works from, per text
+// size. Every row in the window is estimated on every change to it, and Fyne's
+// own measurement cache is keyed on an interface holding the whole string — a
+// hash of 27 characters, per row, for an answer that moves only with the theme.
+// UI thread only, hence unsynchronised.
+var glyphWidths = map[float32]float32{}
+
+func glyphWidth(textSize float32) float32 {
+	w, ok := glyphWidths[textSize]
+	if !ok {
+		w = fyne.MeasureText("abcdefghijklmnopqrstuvwxyz ", textSize, fyne.TextStyle{}).Width / 27
+		glyphWidths[textSize] = w
+	}
+
+	return w
+}
+
 // estimateLines guesses how many lines text wraps into at width, from an average
 // glyph — markdown and proportional widths make anything exact a layout.
 func estimateLines(text string, width float32) int {
-	glyph := fyne.MeasureText("abcdefghijklmnopqrstuvwxyz ", fynetheme.TextSize(), fyne.TextStyle{}).Width / 27
+	glyph := glyphWidth(fynetheme.TextSize())
 	perLine := max(int(width/max(glyph, 1)), 1)
 
 	lines := 0

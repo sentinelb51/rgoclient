@@ -6,7 +6,9 @@ package app
 //
 // Nothing is fetched: Ready carries every server's emoji and revoltgo files
 // create/delete into State on the way past, so Store.Emojis is already the whole
-// set and already current. That is also why no gateway handler here follows one.
+// set and already current. What the gateway handler below is left to do is
+// re-take the *copy* of it the composer holds — the pop-up walks the store each
+// time it opens, the ":" list does not.
 
 import (
 	"slices"
@@ -15,6 +17,17 @@ import (
 
 	"RGOClient/internal/ui"
 )
+
+// onEmojisChanged follows an emoji being added to or removed from a server the
+// account is in. Only the composer's list needs it: without one an emoji added
+// minutes ago is uncompletable, and a deleted one still completes to a token
+// that draws as a broken picture.
+//
+// Queued rather than taken here — uploading a dozen emoji is a dozen events, and
+// this is a walk of every emoji the account can reach. Call on the UI thread.
+func (a *App) onEmojisChanged() {
+	a.queueRefresh(refreshEmojis)
+}
 
 // OnPickEmoji opens the picker beside anchor. Call on the UI thread.
 func (a *App) OnPickEmoji(anchor fyne.CanvasObject, onPick func(ui.EmojiChoice)) {
@@ -81,19 +94,28 @@ func (a *App) emojiGroups() []ui.EmojiGroup {
 		}
 		seen[serverID] = true
 
-		groups = append(groups, ui.EmojiGroup{Title: a.emojiGroupTitle(serverID), Choices: choices})
+		groups = append(groups, a.emojiGroup(serverID, choices))
 	}
 
 	return append(groups, ui.EmojiGroup{Title: "Emoji", Choices: ui.UnicodeEmoji})
 }
 
-// emojiGroupTitle names a group. A server the store cannot answer for still gets
-// a heading: its emoji are usable either way, and an uncaptioned group would read
-// as belonging to the one above.
-func (a *App) emojiGroupTitle(serverID string) string {
-	if server, ok := a.store.Server(serverID); ok && server.Name != "" {
-		return server.Name
+// emojiGroup heads one server's emoji with the server: its name for the caption,
+// its icon for the rail that jumps between groups. A server the store cannot
+// answer for still gets a heading — its emoji are usable either way, and an
+// uncaptioned group would read as belonging to the one above.
+func (a *App) emojiGroup(serverID string, choices []ui.EmojiChoice) ui.EmojiGroup {
+	group := ui.EmojiGroup{ServerID: serverID, Title: "Server", Choices: choices}
+
+	server, ok := a.store.Server(serverID)
+	if !ok {
+		return group
 	}
 
-	return "Server"
+	if server.Name != "" {
+		group.Title = server.Name
+	}
+	group.IconID, group.IconURL = server.IconID, server.IconURL
+
+	return group
 }

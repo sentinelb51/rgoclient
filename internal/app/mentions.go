@@ -267,11 +267,14 @@ func (a *App) showMentioned(messages []*domain.Message) {
 		return strings.Compare(b.ID, a.ID)
 	})
 
-	entries := make([]ui.MessageEntry, 0, len(messages))
+	// The mention edge is dropped: this panel is the set of messages naming the
+	// account, so an amber card would be every card.
+	entries := make([]ui.MessageCard, 0, len(messages))
 	for _, message := range messages {
-		entry := a.messageEntry(message)
-		entry.Where = a.mentionWhere(message.ChannelID)
-		entries = append(entries, entry)
+		card := a.messageCard(message)
+		card.Where = a.mentionWhere(message.ChannelID)
+		card.Mentioned = false
+		entries = append(entries, card)
 	}
 	a.inbox.SetEntries(entries)
 

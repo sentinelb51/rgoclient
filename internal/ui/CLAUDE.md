@@ -9,7 +9,10 @@ naming and the test policy.
 - **Innermost object wins.** Fyne delivers hover and pointer events to the
   deepest object that accepts them. Do *not* implement `desktop.Hoverable` with
   no-op methods — an inner widget that accepts hover steals it from its parent
-  row (why `ui.Avatar` isn't hoverable). Anything interactive inside a message
+  row (why `ui.Avatar` isn't hoverable). A control that *has* to sit inside a
+  hovering card hands the hover back: the pins card's unpin button re-lights the
+  card through `OutlinedIconButton.reporting`, or the card goes out from under
+  the hand reaching for it. Anything interactive inside a message
   row is passed `MessageWidget.TappedSecondary` at construction: the avatar, each
   attachment, the reply preview, the embed title. The body is the awkward one — a
   selectable `widget.Label` mounts an unexported selection overlay that answers
@@ -54,8 +57,11 @@ naming and the test policy.
   wears Fyne's own menu background and no border; the member menu's roles and
   timeout spans are the two that use one, both being lists too long to flatten
   into the menu itself.
-- **One card is elevated.** `ui.Elevate` casts a `canvas.Shadow` and only the
-  composer dock carries one. `DropShadow` follows the corner radius and paints
+- **Two cards are elevated.** `ui.Elevate` casts a `canvas.Shadow`: the composer
+  dock, and the emoji picker's island over the plain panel Fyne draws behind any
+  pop-up (`ColorNameOverlayBackground` at `SizeNamePopupRadius`, which the island
+  covers with its own wider corner — what the shadow falls on is the couple of
+  pixels that leaves). `DropShadow` follows the corner radius and paints
   nothing under the fill, so a translucent shadow can't dirty the card.
   `CardShadowBlur` overruns `ComposerDockMargin` on purpose: what it has to
   darken is the message passing *underneath*, and a halo stopping inside the
@@ -194,6 +200,15 @@ naming and the test policy.
   and `dayLabel` are derived from its neighbours in the model (`rederive`), so a
   prepend, trim or delete re-decides only the rows at the seam, and a mounted row
   whose header came or went is rebuilt rather than patched.
+- **The member model points at its members.** `MemberEntry.Member` is a
+  `*domain.Member` into the slice `NewMemberModel` was given, not a copy: one is
+  nearly 200 bytes, the model is rebuilt on every presence change, and copying
+  each into the flat list cost four times what the flattening did (831µs/4.33MB
+  → 202µs/0.81MB over 20,000). What that asks of the caller is that the slice
+  outlive the model and never be written into — `App.memberCache` is published
+  under exactly that rule, a change publishing a new slice rather than editing
+  one. A row still keeps nothing but what it draws, so the pointer does not
+  outlive `SetMember`.
 - **A recycled widget must own nothing it captured.** `ui.MemberRow` is reused
   for a different person as the list scrolls, so every callback on it reads the
   field it needs at the moment it fires rather than closing over a value — a menu
@@ -344,6 +359,12 @@ naming and the test policy.
   A widget therefore should not start work it has nothing to do: `viewerText`
   answers an attachment with no URL itself rather than sending a fetch that can
   only fail.
+- **`widget.Entry`'s typing methods refresh for themselves.** `TypedRune` and
+  `TypedKey` both end in `e.Refresh()`, so a `MessageInput` refreshing after one
+  re-wrapped the composer and dirtied the whole window a second time per
+  keystroke. The branches that return early inside Entry — backspace at the start
+  of an empty composer — changed nothing to draw, so they want no refresh either.
+  `TypedShortcut` is left alone: what it dispatches to does not all refresh.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.
 - **One shell draws both settings pages.** `settings_shell.go` owns the surface —
   the layer, the rail, the pane, the group offsets, the flash, the popover — and
@@ -369,12 +390,25 @@ naming and the test policy.
   goes back, and the editor's group captions become the rail's sub-entries the
   way any other section's do. The way in is `showRole`, and it must be re-derived
   on every build: a role can be deleted, or moved above this account's own rank,
-  while its editor is open. The drilldown says so **three** ways, because a rail
-  entry that is also a back button is not obvious on its own: the pane's title is
-  a breadcrumb (`sectionTitle`), the first card is captioned for what is open, and
-  its first row offers Back. `mount` is therefore handed the groups *before* the
-  title is computed — a build that finds the role gone leaves the drilldown on the
-  way past, and the title has to name where the reader ended up.
+  while its editor is open. What says so is the **back button above the title**
+  (`backLink`, `settingsBackLink`): `mount` is a section and empties it,
+  `mountUnder` is something standing inside one and fills it, and there is no
+  third way to write the pane — a way back outliving what it led out of would tap
+  into somewhere the reader is not. So `paneTitle` names one thing and the button
+  over it names where that lives; the results page, which the rail marks nothing
+  for, takes the same button out to All settings and empties the field on the way,
+  `onQuery` being what puts the section back. `mountUnder` is handed the groups
+  *before* the title and the link are computed — a build that finds the role gone
+  leaves the drilldown on the way past, and both have to name where the reader
+  ended up. The button is the pane's **top left**, mirroring the close button's
+  top right, and it is the one thing in the header that `centred` does not cap —
+  so it stands at the pane's own edge while the title stays with the cards, and
+  the two read diagonally rather than as a stack. Which is also why the padding
+  above and below belongs to the heading *column*: hung on the title, a hidden
+  back row would take the top of the header away with itself. It is a plain
+  `ui.Button` in everything that can be seen — fill, hairline, radius, hover lift,
+  label — and a widget of its own only because `Button` has nowhere to put the
+  mark saying which way it goes.
   A card of forty rows is read by its **markers**, not its controls:
   `markPermission` paints the same bar `boolRow` uses in the accent for a grant
   and the danger tone for a denial, so a role's shape is legible without reading

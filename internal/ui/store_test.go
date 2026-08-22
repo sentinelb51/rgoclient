@@ -1,6 +1,8 @@
 package ui
 
 import (
+	"slices"
+
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
 )
@@ -25,6 +27,8 @@ type fakeStore struct {
 	hoisted       map[string][]domain.Role   // serverID
 	serverRoles   map[string][]domain.Role   // serverID
 
+	participants map[string][]domain.VoiceParticipant // channelID
+
 	permissions       domain.Permission
 	serverPermissions domain.Permission
 	memberPermissions domain.Permission
@@ -44,6 +48,12 @@ func (s *fakeStore) UserName(userID string) string { return s.users[userID].Name
 
 func (s *fakeStore) Relationships() []domain.User { return s.related }
 
+func (s *fakeStore) HasIncomingRequest() bool {
+	return slices.ContainsFunc(s.related, func(user domain.User) bool {
+		return user.Relationship == domain.RelationshipIncoming
+	})
+}
+
 func (s *fakeStore) HasUser(userID string) bool {
 	_, ok := s.users[userID]
 	return ok
@@ -61,6 +71,10 @@ func (s *fakeStore) HasMember(serverID, userID string) bool {
 
 func (s *fakeStore) Members(serverID string) []domain.Member {
 	return s.serverMembers[serverID]
+}
+
+func (s *fakeStore) VoiceParticipants(channelID string) []domain.VoiceParticipant {
+	return s.participants[channelID]
 }
 
 func (s *fakeStore) MemberRoles(serverID, userID string) []domain.Role {

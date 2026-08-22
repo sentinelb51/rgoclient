@@ -416,14 +416,22 @@ DAG and conventions.
     `EmojiChoice.Keywords` is what a character answers to besides its name,
     searched and never drawn — "no" has to reach 👎 without the label over it
     reading "thumbs down no".
-    That label is the only thing naming a cell, the grid being pictures, and it is
-    a **tooltip** over the hovered square rather than a caption under the grid: a
-    name read off the far end of the pop-up had nothing beside it saying which
-    square it belonged to. It is the picker's *own* `ui.Tooltip`
-    (`Tooltip.ShowAbove`, which centres it on the cell and keeps it inside the
-    pop-up's width) — the app's is a layer in the window's content, and a pop-up is
-    a canvas overlay drawn over all of that, so one mounted there would be covered
-    by the grid it names. The grid scrolls in an `ObservableVScroll` held off the
+    What names a cell is the **header**, the grid being pictures: the hovered
+    emoji redrawn at `EmojiPickerPreviewSize` beside its name and the group it
+    came from, which is the rendition a 34-unit square cannot show. With nothing
+    hovered it stands at what Enter would take, so it is also where a query that
+    matched nothing says so — the grid below simply collapses, and `fill` resizes
+    the pop-up to what is left (a pop-up takes its size once, as it opens).
+    Which group is on screen is the **rail**, one server icon per drawn section
+    down the leading edge, marked and jumped like the settings rail
+    (`markSectionAt`, `jumpTo`); it is what `app.emojiGroup` fills `IconID` /
+    `IconURL` for. A section's offset is read off the laid-out block rather than
+    summed from minimums — a wrapping grid answers `MinSize` with one cell. The
+    rail is drawn only where there are two groups to move between, decided as the
+    picker opens: one appearing as a query narrowed would re-wrap the grid under
+    the pointer. It carries the picker's *own* `ui.Tooltip` for the server names —
+    the app's is a layer in the window's content, and a pop-up is a canvas overlay
+    drawn over all of that. The grid scrolls in an `ObservableVScroll` held off the
     right edge by the indicator's own width, so the bar lands in a gutter rather
     than on the last cell of every row.
 16. **Role colours.** A Revolt role colour is a CSS value, and the server's own
@@ -533,8 +541,19 @@ DAG and conventions.
     already ordered them (tie-broken on user ID so it is total) and bucketing is
     stable. An **offline member never appears in their hoisted role's section** — a
     hoisted section is a list of who is here — and an empty bucket emits no header.
-    Presence is the only event that reorders, so `PresenceChanged` goes through the
-    refresh queue (item 22) while `UserUpdated` repaints one row in place.
+    Presence is the only event that resections, and it is queued **as its own
+    target** (`refreshPresence`, item 22) rather than as a rebuild: it moves a
+    member between sections and moves nothing they are ordered by, so the
+    membership the last walk resolved still stands. `App.memberCache` is that
+    membership, published for the server it was walked for and never written
+    into; `refreshMemberPresence` copies it, re-resolves only the people named in
+    `App.presenceDirty` and hands the copy to the model. The copy is what lets it
+    run off the UI thread against no lock at all, and `App.memberWorking` is the
+    single flight that keeps two of them from both starting at the previous
+    answer — a rebuild landing re-queues whatever arrived while it held the claim
+    (`memberRebuilt`). A walk clears `presenceDirty` on the way out, having
+    resolved everybody's presence itself. `UserUpdated` still repaints one row in
+    place.
     Following presence at all is a setting; so are hoisting, hiding the offline
     half, hiding members with no role, the settling window and the overscan. The
     two hiding settings meet in `MemberListOptions.hides`, asked by both branches
@@ -654,18 +673,18 @@ DAG and conventions.
     `Client.PinnedMessages` searches the channel (`ChannelSearch(Pinned: true)`,
     the only route that enumerates them). What comes back stays out of the message
     cache for the reason item 5 keeps a quote out of it, and out of `a.uncached`
-    too — a row is a flattened summary, not a mounted message, so nothing here
+    too — a card is a flattened summary, not a mounted message, so nothing here
     resolves a quote. The search carries its own users, so the leftovers are
     resolved in the same worker rather than through `ensureAuthor`'s queue: a
     webhook or somebody departed would otherwise be a raw ID filling in a moment
     later.
     The panel is a **snapshot** — `App.pinned` for as long as it is up — so a pin
     made anywhere while it is open does not reflect. `App.pinsChannelID` is what
-    drops an answer that lands after the reader has moved on. A row leads to its
+    drops an answer that lands after the reader has moved on. A card leads to its
     message through `OnJumpToMessage` and closes the panel on the way, a jump
     moving the column underneath it; unpinning goes through `App.setPinned` — the
     shared half of `OnPin`, with a hook, since the message a pin is taken off here
-    need not be mounted at all — and the row is dropped only once the server has
+    need not be mounted at all — and the card is dropped only once the server has
     agreed. It is the one destructive-looking action not confirmed: repeating it
     puts the pin back.
 22. **Events that only name what moved, and the refresh queue.** `ServerUpdated`,
@@ -674,8 +693,11 @@ DAG and conventions.
     right by the time ours run. So a handler's whole job is to decide which surface
     is now wrong and let the rebuild re-read the store.
     Those rebuilds are **queued**, not made: `App.queueRefresh` sets bits in
-    `App.dirty` (`refreshServers` | `refreshChannels` | `refreshMembers`) and arms
-    one timer; `flushRefresh` runs each at most once, outermost column first. The
+    `App.dirty` (`refreshServers` | `refreshChannels` | `refreshMembers` |
+    `refreshEmojis` | `refreshPresence`) and arms one timer; `flushRefresh` runs
+    each at most once, outermost column first. `refreshPresence` is skipped when
+    `refreshMembers` ran in the same flush — the walk answered it on the way
+    past — the same way `refreshEmojis` is skipped behind `refreshServers`. The
     window is armed by the *first* event of a burst and deliberately **not**
     restarted by the ones behind it — presence on a large server arrives faster
     than any window worth having, so a renewing one would never elapse. It is one
@@ -697,6 +719,12 @@ DAG and conventions.
     decide, which repainting in place cannot express. `ChannelRead` is the only
     event that exists because of *another client*; our own acks echo through it
     onto a mark already cleared.
+    `VoiceChanged` is the same shape for a call, and the same rebuild: who is in a
+    voice channel is drawn as rows under it, so `App.callRows` builds them with
+    that channel's row and hands them to the category **with** it, a collapse
+    otherwise leaving participants hanging under nothing. The handler is guarded on
+    `App.drawsCall` — the open server, and not the home view — because voice events
+    arrive for every server the account is in and a call elsewhere draws nothing.
     Two leaves are announced to everyone **except** as a deletion to the one who
     left, so both are recognised by their own user ID: `MembersChanged` for our own
     member *is* `ServerLeft` (revoltgo evicts the server from `State` on the
@@ -901,17 +929,33 @@ DAG and conventions.
     by the first placing — and `MessageWidget.Flash` marks it; see the ui note on
     why a wash is an animation and not state. Hovering stops it, the pointer
     arriving being the reader having found the row.
-29. **Channel search** is the pins panel with a query, and `search.go` is what is
-    left once that is said: the same `ChannelSearch` route (`Client.SearchMessages`,
-    the two being mutually exclusive on the wire — Revolt refuses `query` and
-    `pinned` together), the same rows through `messageEntry`, the same refusal to
-    cache what comes back, and the same author resolution in the fetching worker.
+29. **Channel search** shares the pins panel's route (`Client.SearchMessages`, the
+    two being mutually exclusive on the wire — Revolt refuses `query` and `pinned`
+    together), its refusal to cache what comes back and its author resolution in
+    the fetching worker. All three draw the same `ui.MessageCard` on the same island
+    (`App.messageCard`), each dropping what its own subject already said — pins
+    the pinned badge, the inbox the mention edge. What is search's alone is the
+    field, the run of filter chips and the three orders.
     It asks for **nothing** until Enter: a search is a request per query, so the
     field reports on submit rather than on every keystroke, and `App.searchQuery`
     is what drops the answer to a superseded one — a second Enter while the first
     is still out is the ordinary case, and the two can land in either order.
-    `refillSearch` wraps every change to the panel in a `repositionOverlay`, unlike
-    the pins one: replacing a list of results with "Searching..." is a change of
+    The island reports **every** change through one hook (`App.onSearchChanged`)
+    and decides nothing: which of them costs a request is answered here, because
+    the answer is held here. `App.searchFound` is the messages the last request
+    returned, kept while the island is up, and `ui.SearchQuery.SameRequest` is what
+    tells a chip from the two things the route is actually asked with — so
+    toggling a filter re-runs `drawSearchResults` over what is already in hand and
+    changing the order asks again. The filters *have to differ* for that fast path,
+    which is what keeps a second Enter on an unchanged query a real request rather
+    than a redraw. `App.searchAnswered` distinguishes "nothing came back" from
+    "nothing has been asked", which an empty slice cannot, and is what makes a chip
+    toggled mid-flight do nothing: the pending answer is drawn through the filters
+    standing when it lands.
+    Every filter is a property of the message the route cannot be asked about
+    (`matchesSearch`), so the count line carries both numbers — see the known gap.
+    `refillSearch` wraps every change to the island in a `repositionOverlay`,
+    unlike the pins panel: replacing cards with "Searching..." is a change of
     height, and a centred card sized from its own minimum re-places for neither.
 30. **Creating a server** is `ui.PromptDialog` — one field, because a name is all
     Revolt takes at creation — and it *replaces* the join dialog rather than
@@ -1042,6 +1086,30 @@ DAG and conventions.
     sidebar is the point of having made one and it is behind the page. The channel
     itself arrives as `ChannelCreated`, already handled; the response is spent on
     the ID alone.
+    **An invite is four facts and Invites draws all of them**: the code, the channel
+    it opens and who made it, the fourth being the server the page is already about.
+    There is no expiry, no use count and no date, and a code is not a ULID, so
+    nothing can say when one was made or how long it has left. Most creators are
+    accounts this client has never drawn — an invite outlives the reason anybody
+    looked at one — so `loadServerInvites` batches the unknown ones through
+    `ResolveAuthors` on its own worker before building the rows, and prefers the
+    membership for the name, picture **and role colour**. The row names one with
+    `ui.NewUserChip` — a role chip's shape with an avatar where the dot goes, in
+    that colour rather than the mention colour, a person and a role being the two
+    things this client draws as chips. It is its own anchor for `OnUserTapped`: the
+    profile card mounts on the modal layer, which is above this page.
+    Invites are the one list here drawn as **a card per entry, two to a row**
+    (`newIsland` + `pairedRows`, each cell built at `halfCardWidth`) rather than as
+    rows sharing one card: an invite is a thing handed out and revoked on its own,
+    and a code and two buttons do not need half the page. The section itself is a
+    `bareGroupOf` — one card behind them all would be a surface saying they belong
+    together — so it has no rectangle to wash and a jump to it does not flash. What
+    stands between two rows is then a gap rather than a hairline (`spaceRows`, on
+    `settingsShell.islands`, since a late answer refills a body it did not build).
+    Inside a cell the code sits in `entryColumn` with the channel beside it and the
+    chip on the line below, so code, channel and chip each line up down both
+    columns; `SettingsPairGutter` and `SettingsIslandGap` are equal, and both beat
+    the padding inside a card, or the grid reads as rows again.
     **Roles** is the one section drawn from the store rather than fetched — Ready
     carries every role and the three role events keep them current — so it has no
     `cachedList` and nothing to expire. It is also the only section that *drills*:

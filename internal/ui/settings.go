@@ -187,6 +187,11 @@ type SettingsPage struct {
 	// empty the field.
 	searching bool
 
+	// field is the box itself, kept so the results page's back line can empty it.
+	// Leaving results is the one exit that has to move the field as well as the
+	// pane, the query being what put them there.
+	field *searchEntry
+
 	// index is every setting the search can find, built once per open and lazily —
 	// most opens never search. See settings_search.go.
 	index []settingsHit
@@ -235,6 +240,7 @@ func (p *SettingsPage) Close() {
 	p.account = accountRows{}
 	p.query = ""
 	p.searching = false
+	p.field = nil
 	p.index = nil
 }
 

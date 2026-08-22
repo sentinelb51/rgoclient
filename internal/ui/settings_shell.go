@@ -23,6 +23,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
+	"fyne.io/fyne/v2/driver/desktop"
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
@@ -71,6 +72,11 @@ type settingsShell struct {
 	pane  *fyne.Container
 	title *canvas.Text
 
+	// backSlot is the line over the title, empty for anything reached from the
+	// rail. Every mount fills or empties it, so the way out cannot outlive what it
+	// led out of.
+	backSlot *fyne.Container
+
 	// paneScroll is what a rail sub-entry moves and what reports the movement back,
 	// so the entry marked open follows the reader rather than the last tap.
 	paneScroll *ObservableScroll
@@ -98,6 +104,11 @@ type settingsShell struct {
 	// flash is the wash marking the group a jump landed on. One at a time — a
 	// second jump hands the first one's card back before starting its own.
 	flash *fyne.Animation
+
+	// islands marks the list on screen as a card per entry rather than rows sharing
+	// one, which is what stands between two of its rows. Set as the list is built,
+	// since a late answer refills a body it did not build — see spaceRows.
+	islands bool
 
 	// indexing marks the throwaway pass that walks the sections for their names: a
 	// row answers with what it is called rather than with anything to draw, and a
@@ -135,6 +146,7 @@ func (p *settingsShell) resetShell() {
 	p.subButtons = nil
 	p.navGroups = nil
 	p.paneScroll = nil
+	p.backSlot = nil
 }
 
 /* The floating slot */
@@ -216,17 +228,128 @@ func (p *settingsShell) centred(content fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewHBox(layout.NewSpacer(), body, layout.NewSpacer())
 }
 
-// buildHeader is the pane's title and close button. The title is centred with the
-// cards; the button is anchored to the pane's top right through overlayLayout,
+// buildHeader is the pane's heading and close button. The heading is centred with
+// the cards; the button is anchored to the pane's top right through overlayLayout,
 // which reports no minimum and so cannot pull the title off centre.
 func (p *settingsShell) buildHeader() fyne.CanvasObject {
 	padding := theme.Sizes.SettingsPagePadding
 
-	title := p.centred(NewInset(p.title, padding, theme.Sizes.SettingsGroupGap, padding, padding))
+	// Hidden rather than absent: mount fills and empties it, and a container the
+	// header never laid out is one nothing can fill.
+	p.backSlot = VBoxNoSpacing()
+	p.backSlot.Hide()
+
+	// The title is capped and centred with the cards; the back row is not, so it
+	// stands at the pane's own left edge and the two sit diagonally rather than
+	// stacked. The padding above and below is the column's, not the title's — a
+	// hidden back row would otherwise take the top of it away with itself.
+	heading := NewInset(VBoxNoSpacing(
+		p.backSlot,
+		p.centred(NewInset(p.title, 0, 0, padding, padding)),
+	), padding, theme.Sizes.SettingsGroupGap, 0, 0)
+
 	dismiss := container.New(&overlayLayout{yOffset: padding, rightOffset: padding},
 		NewCloseButton(p.onClose))
 
-	return container.NewStack(title, dismiss)
+	return container.NewStack(heading, dismiss)
+}
+
+/* The way back */
+
+// backLink is the way out of something mounted inside a section: what is being
+// left, and what leaving it does. A zero one is a section — reached from the rail,
+// which is already saying where the reader is — so mount takes none and only a
+// drilldown passes one.
+type backLink struct {
+	label string
+	onTap func()
+}
+
+// showBack fills or empties the line over the title. Only mount calls it: what the
+// pane holds and the way out of it are one change, and a page setting either
+// alone would leave a way back to somewhere it is no longer standing.
+func (p *settingsShell) showBack(back backLink) {
+	if p.backSlot == nil {
+		return // reset, or a page whose surface has not been built yet
+	}
+
+	if back.label == "" || back.onTap == nil {
+		p.backSlot.Objects = nil
+		p.backSlot.Hide()
+		p.backSlot.Refresh()
+
+		return
+	}
+
+	// Boxed rather than laid in the column: the column stretches a child to its
+	// width, and a button as wide as the pane would answer taps a long way from
+	// anything it draws.
+	padding := theme.Sizes.SettingsPagePadding
+
+	p.backSlot.Objects = []fyne.CanvasObject{
+		NewInset(HBoxNoSpacing(newSettingsBackLink(back.label, back.onTap)),
+			0, theme.Sizes.SettingsBackGap, padding, padding),
+	}
+	p.backSlot.Show()
+	p.backSlot.Refresh()
+}
+
+// settingsBackLink is that button, and the whole of the shell's breadcrumb: there
+// is one drilldown and its path is two segments, the second of which is the title
+// below. It is a plain ui.Button in every respect that can be seen — the same
+// fill, hairline, radius, hover lift and label — and a widget of its own only
+// because Button has nowhere to put the mark that says which way it goes.
+type settingsBackLink struct {
+	tapBase
+
+	content    fyne.CanvasObject
+	background *canvas.Rectangle
+}
+
+var (
+	_ fyne.Tappable     = (*settingsBackLink)(nil)
+	_ desktop.Hoverable = (*settingsBackLink)(nil)
+)
+
+func newSettingsBackLink(label string, onTap func()) *settingsBackLink {
+	side := theme.Sizes.SettingsIconSize
+	line := glyphLine(theme.Colors.SettingsBackText, side/20)
+
+	mark := container.NewGridWrap(fyne.NewSize(side, side),
+		container.NewWithoutLayout(line(12, 5, 7, 10), line(7, 10, 12, 15)))
+
+	background := canvas.NewRectangle(theme.Colors.ButtonBg)
+	background.CornerRadius = theme.Sizes.ButtonRadius
+	Outline(background)
+
+	body := HBoxNoSpacing(
+		mark,
+		HorizontalSpacer(theme.Sizes.SettingsBackMarkGap),
+		vcenter(newBoldText(label, theme.Colors.ButtonText, theme.Sizes.ButtonTextSize)),
+	)
+
+	l := &settingsBackLink{background: background}
+	l.content = NewMinHeightContainer(theme.Sizes.ButtonMinHeight,
+		container.NewStack(background,
+			NewInset(body, theme.Sizes.ButtonPaddingV, theme.Sizes.ButtonPaddingV,
+				theme.Sizes.ButtonPaddingH, theme.Sizes.ButtonPaddingH)))
+	l.onTap = onTap
+	l.ExtendBaseWidget(l)
+
+	return l
+}
+
+func (l *settingsBackLink) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(l.content)
+}
+
+func (l *settingsBackLink) MouseIn(*desktop.MouseEvent) { l.fill(theme.Colors.ButtonHoverBg) }
+
+func (l *settingsBackLink) MouseOut() { l.fill(theme.Colors.ButtonBg) }
+
+func (l *settingsBackLink) fill(colour color.Color) {
+	l.background.FillColor = colour
+	l.background.Refresh()
 }
 
 // buildRailColumn is the rail, whatever the page pins at either end of it, and
@@ -316,10 +439,17 @@ func (p *settingsShell) navigable() int {
 	return count
 }
 
-// mount puts one set of groups in the pane and re-heads it. The one path a
-// section and a page of results both arrive by. The rail is left to the caller:
-// what it lists is the page's, and both callers rebuild it from what this sets.
+// mount puts one set of groups in the pane and re-heads it, with no way back —
+// what the rail reaches. The rail itself is left to the caller: what it lists is
+// the page's, and every caller rebuilds it from what this sets.
 func (p *settingsShell) mount(groups []settingsGroup, title string) {
+	p.mountUnder(groups, title, backLink{})
+}
+
+// mountUnder is mount for something standing inside a section rather than being
+// one — a role's editor, a page of search results — which needs a line saying
+// what it is inside of and answering a tap to leave.
+func (p *settingsShell) mountUnder(groups []settingsGroup, title string, back backLink) {
 	p.closePopover() // its anchor is about to stop existing
 	p.stopFlash()    // as is the card it was washing
 
@@ -342,6 +472,7 @@ func (p *settingsShell) mount(groups []settingsGroup, title string) {
 		p.paneScroll.ScrollToOffset(fyne.Position{})
 	}
 
+	p.showBack(back)
 	p.title.Text = title
 	p.title.Refresh()
 }
@@ -351,7 +482,7 @@ func (p *settingsShell) mount(groups []settingsGroup, title string) {
 // the reader back at the top of a page they had scrolled, and rebuild every other
 // card to redraw one.
 func (p *settingsShell) refill(body *fyne.Container, rows []fyne.CanvasObject) {
-	body.Objects = separateRows(rows)
+	body.Objects = p.spaceRows(rows)
 	body.Refresh()
 	p.measureGroups() // the card is a different height, and the rail scrolls by these
 
@@ -495,6 +626,34 @@ func (p *settingsShell) groupOf(caption, detail string, body *fyne.Container) se
 		return p.record(caption, body.Objects)
 	}
 
+	card := newSettingsCard()
+
+	return settingsGroup{
+		caption: caption,
+		object:  VBoxNoSpacing(append(p.groupHeader(caption, detail), container.NewStack(card, body))...),
+		card:    card,
+	}
+}
+
+// bareGroupOf is the same caption and explanation over a body that carries its
+// own surfaces — a list drawn as a card per entry, where one card behind them all
+// would be a second surface saying they belong together, which is the opposite of
+// what a card each says. It has no rectangle to wash, so a jump to it scrolls and
+// does not flash.
+func (p *settingsShell) bareGroupOf(caption, detail string, body *fyne.Container) settingsGroup {
+	if p.indexing {
+		return p.record(caption, body.Objects)
+	}
+
+	return settingsGroup{
+		caption: caption,
+		object:  VBoxNoSpacing(append(p.groupHeader(caption, detail), body)...),
+	}
+}
+
+// groupHeader is the caption and the explanation above a group, and the gap that
+// separates it from the group before.
+func (p *settingsShell) groupHeader(caption, detail string) []fyne.CanvasObject {
 	header := []fyne.CanvasObject{VerticalSpacer(theme.Sizes.SettingsGroupGap)}
 	if caption != "" {
 		label := newBoldText(strings.ToUpper(caption), theme.Colors.CategoryText, theme.Sizes.SettingsCaptionSize)
@@ -507,10 +666,30 @@ func (p *settingsShell) groupOf(caption, detail string, body *fyne.Container) se
 			NewInset(note, 0, theme.Sizes.SettingsPreviewGap, theme.Sizes.SettingsRowPaddingH, 0))
 	}
 
-	card := newSettingsCard()
-	header = append(header, container.NewStack(card, body))
+	return header
+}
 
-	return settingsGroup{caption: caption, object: VBoxNoSpacing(header...), card: card}
+// spaceRows puts between two rows of the list on screen whatever stands between
+// them: the hairline of a shared card, or the gap between two cards of their own.
+// Which it is was decided when the list was built and is read again here, a late
+// answer refilling a body it did not build.
+func (p *settingsShell) spaceRows(rows []fyne.CanvasObject) []fyne.CanvasObject {
+	if !p.islands {
+		return separateRows(rows)
+	}
+
+	spaced := make([]fyne.CanvasObject, 0, max(len(rows)*2-1, 0))
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if len(spaced) > 0 {
+			spaced = append(spaced, VerticalSpacer(theme.Sizes.SettingsIslandGap))
+		}
+		spaced = append(spaced, row)
+	}
+
+	return spaced
 }
 
 // separateRows drops the rows that were not built — one refused for an unknown
@@ -614,6 +793,31 @@ func (p *settingsShell) rowOf(name fyne.CanvasObject, detail, control fyne.Canva
 // about it, and however many buttons the entry offers. The lead is what separates
 // a list of people or channels from a column of switches at a glance.
 func (p *settingsShell) entryRow(lead fyne.CanvasObject, label, detail string, controls ...fyne.CanvasObject) fyne.CanvasObject {
+	if detail == "" {
+		return p.entryRowWith(lead, label, nil, controls...)
+	}
+
+	return p.entryRowWith(lead, label,
+		func(width float32) fyne.CanvasObject { return rowDetail(detail, width) }, controls...)
+}
+
+// entryRowWith is entryRow with the second line built rather than written: an
+// invite's names the channel and carries a chip for whoever made it. The line is
+// asked for at the width the row has left, which is what the plain one wraps at
+// and the only thing a caller cannot work out for itself.
+func (p *settingsShell) entryRowWith(lead fyne.CanvasObject, label string,
+	detail func(width float32) fyne.CanvasObject, controls ...fyne.CanvasObject) fyne.CanvasObject {
+
+	return p.entryRowIn(cardWidth(), lead, label, detail, controls...)
+}
+
+// entryRowIn is entryRowWith in a card of the given width rather than the page's
+// own — what a row *paired* with another is built at, each taking half. Every
+// width inside the row is derived from it, so a half row is the same shape and
+// not a narrower one with the same numbers in it.
+func (p *settingsShell) entryRowIn(card float32, lead fyne.CanvasObject, label string,
+	detail func(width float32) fyne.CanvasObject, controls ...fyne.CanvasObject) fyne.CanvasObject {
+
 	if p.indexing {
 		return newIndexRow(label)
 	}
@@ -621,7 +825,7 @@ func (p *settingsShell) entryRow(lead fyne.CanvasObject, label, detail string, c
 	gap := theme.Sizes.SettingsRowPaddingH
 	buttons := HBoxNoSpacing(controls...)
 
-	width := rowTextWidth(buttons) - gap
+	width := card - gap - buttons.MinSize().Width - gap
 	if lead != nil {
 		width -= lead.MinSize().Width + gap
 	}
@@ -632,8 +836,8 @@ func (p *settingsShell) entryRow(lead fyne.CanvasObject, label, detail string, c
 	text := []fyne.CanvasObject{
 		NewEllipsisText(newText(label, theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)),
 	}
-	if detail != "" {
-		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), rowDetail(detail, width))
+	if detail != nil {
+		text = append(text, VerticalSpacer(theme.Sizes.SettingsEntryLineGap), detail(width))
 	}
 
 	// The text column is what stretches, so it is the fill slot: second when
@@ -675,7 +879,7 @@ func (p *settingsShell) stackedRow(label, detail string, control fyne.CanvasObje
 
 	text := []fyne.CanvasObject{rowLabel(label, cardWidth())}
 	if detail != "" {
-		text = append(text, VerticalSpacer(theme.Sizes.ChipSpacing), rowDetail(detail, cardWidth()))
+		text = append(text, VerticalSpacer(theme.Sizes.SettingsEntryLineGap), rowDetail(detail, cardWidth()))
 	}
 	text = append(text, VerticalSpacer(theme.Sizes.SettingsControlGap), control)
 
@@ -710,6 +914,78 @@ func (p *settingsShell) block(content fyne.CanvasObject) fyne.CanvasObject {
 // label into the middle of the row and collapses a slider to its thumb.
 func vcenter(obj fyne.CanvasObject) fyne.CanvasObject {
 	return container.NewVBox(layout.NewSpacer(), obj, layout.NewSpacer())
+}
+
+// entryColumn is the slot the first field of an entry row's second line sits in,
+// so whatever follows it starts in the same place down the whole list. The slot
+// is reserved whether or not the field is there: a row the store could not name
+// that half of must not pull the rest of its line left past the rows around it.
+//
+// Pass a field that shortens rather than wraps — the slot is a ceiling as well as
+// a floor, and a wrapped one would take a second line and move the row.
+func entryColumn(field fyne.CanvasObject, width float32) fyne.CanvasObject {
+	column := entryColumnWidth(width)
+	if field == nil {
+		return HorizontalSpacer(column)
+	}
+
+	return NewFixedWidthContainer(column, field)
+}
+
+// entryColumnWidth is that slot's width, for a caller laying out what follows it
+// as well. A share of the row rather than the theme's width outright, so what
+// comes after the slot keeps its room in a row half the card wide: the theme's
+// width is what a full row can afford and a ceiling everywhere else.
+func entryColumnWidth(width float32) float32 {
+	return min(theme.Sizes.SettingsEntryColumnWidth, width*entryColumnShare)
+}
+
+// entryColumnShare is how much of a row's text width the slot may take. Just
+// under half: the field in it is the *lesser* of the two things on the line —
+// where an invite lands, against who made it — and a slot past half would read as
+// the line's subject.
+const entryColumnShare = 0.45
+
+// pairedRows lays cells out two to a row, which is what a list of short entries
+// is worth: an invite is a code and two buttons, and one per row spends the whole
+// card on it and scrolls twice as far. Each cell is built at halfCardWidth, so the
+// two share their geometry and every column in the card lines up across both.
+//
+// An odd cell keeps its half rather than stretching: a last row twice as wide as
+// the ones above it reads as a different kind of entry.
+func pairedRows(cells []fyne.CanvasObject) []fyne.CanvasObject {
+	half := halfCardWidth() + 2*theme.Sizes.SettingsRowPaddingH
+
+	rows := make([]fyne.CanvasObject, 0, (len(cells)+1)/2)
+	for i := 0; i < len(cells); i += 2 {
+		pair := []fyne.CanvasObject{NewFixedWidthContainer(half, cells[i])}
+		if i+1 < len(cells) {
+			pair = append(pair,
+				HorizontalSpacer(theme.Sizes.SettingsPairGutter),
+				NewFixedWidthContainer(half, cells[i+1]))
+		}
+
+		rows = append(rows, HBoxNoSpacing(pair...))
+	}
+
+	return rows
+}
+
+// newIsland is one entry standing on a surface of its own, for a list where each
+// is its own thing rather than a line of a table — an invite, which is a code
+// somebody hands out and revokes on its own.
+func newIsland(body fyne.CanvasObject) fyne.CanvasObject {
+	card := newSettingsCard()
+	card.StrokeColor = theme.Colors.SettingsIslandOutline
+	Elevate(card)
+
+	return container.NewStack(card, body)
+}
+
+// halfCardWidth is the card one cell of a paired row is built in: half of what is
+// left once the gutter is taken out, less the padding the cell's own frame adds.
+func halfCardWidth() float32 {
+	return (cardWidth()-theme.Sizes.SettingsPairGutter)/2 - theme.Sizes.SettingsRowPaddingH
 }
 
 // note is a row of prose on its own — the line that says a change waits for a

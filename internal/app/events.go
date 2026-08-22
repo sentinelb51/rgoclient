@@ -26,17 +26,25 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 
 // refreshTarget names a whole surface a gateway event can invalidate. Each is a
 // rebuild that walks something — every server icon, every channel against its
-// permissions, every member — so none is worth making once per event.
+// permissions, every member, every emoji — so none is worth making once per
+// event.
 //
-// Deliberately only these three. What an event changes about the *open* thing — a
+// Deliberately only these five. What an event changes about the *open* thing — a
 // header, the channel glyph, whether the composer takes a message — is a setter
 // and a lookup, and deferring those would feel slow to save nothing.
+//
+// refreshPresence is refreshMembers' cheap half: the same sidebar, rebuilt from
+// the membership already resolved rather than from a fresh walk. Presence moves
+// a member between sections and nothing else — not their name, so not the order
+// — which is what lets the two be different amounts of work.
 type refreshTarget uint8
 
 const (
 	refreshServers refreshTarget = 1 << iota
 	refreshChannels
 	refreshMembers
+	refreshEmojis
+	refreshPresence
 )
 
 // refreshDelay is how long a queued rebuild waits for more of the same burst.
@@ -85,6 +93,18 @@ func (a *App) flushRefresh() {
 	}
 	if targets&refreshMembers != 0 {
 		a.refreshMemberList()
+	} else if targets&refreshPresence != 0 {
+		// Only when the walk did not run: it resolved everybody's presence on the
+		// way past, so patching the same people again would be the cheap half of a
+		// rebuild that has already happened.
+		a.refreshMemberPresence()
+	}
+
+	// Last, and skipped when the rail was rebuilt: which servers the account is in
+	// is also which emoji it may type, so refreshServerList re-takes these itself
+	// and a flush that ran it has already paid for this walk.
+	if targets&refreshEmojis != 0 && targets&refreshServers == 0 {
+		a.refreshEmojiCandidates()
 	}
 }
 
@@ -120,6 +140,8 @@ func (a *App) dispatch(event client.Event) {
 		a.doOnUI(func() { a.onServerUpdated(e) }, false)
 	case client.RolesChanged:
 		a.doOnUI(func() { a.onRolesChanged(e) }, false)
+	case client.EmojisChanged:
+		a.doOnUI(a.onEmojisChanged, false)
 	case client.ChannelCreated:
 		a.doOnUI(func() { a.onChannelCreated(e) }, false)
 	case client.ChannelUpdated:
@@ -144,6 +166,8 @@ func (a *App) dispatch(event client.Event) {
 		a.doOnUI(func() { a.onPresenceChanged(e) }, false)
 	case client.TypingChanged:
 		a.doOnUI(func() { a.onTypingChanged(e) }, false)
+	case client.VoiceChanged:
+		a.doOnUI(func() { a.onVoiceChanged(e) }, false)
 	}
 }
 
@@ -613,11 +637,15 @@ func (a *App) onRelationshipChanged(event client.RelationshipChanged) {
 }
 
 // onPresenceChanged moves somebody between the member list's sections. The one
-// event a busy server produces continuously *and* the one that reorders, so it is
-// queued: the rebuild walks the whole membership, and a thousand-member server
-// raises dozens a second. Following presence at all is a setting, the cheapest
-// answer on the largest servers being not to. HasMember decides whether it is our
-// business, and exists so that asking allocates nothing.
+// event a busy server produces continuously *and* the one that resections, so it
+// is queued: a thousand-member server raises dozens a second. Following presence
+// at all is a setting, the cheapest answer on the largest servers being not to.
+// HasMember decides whether it is our business, and exists so that asking
+// allocates nothing.
+//
+// It names who moved rather than queueing the walk, because presence is the one
+// change a membership already resolved can absorb: nobody's name moves, so the
+// order stands and only these people need resolving again.
 func (a *App) onPresenceChanged(event client.PresenceChanged) {
 	if !config.Current().Behaviour.LiveMemberPresence || a.currentServerID == "" {
 		return
@@ -626,7 +654,12 @@ func (a *App) onPresenceChanged(event client.PresenceChanged) {
 		return
 	}
 
-	a.queueRefresh(refreshMembers)
+	if a.presenceDirty == nil {
+		a.presenceDirty = make(map[string]bool)
+	}
+	a.presenceDirty[event.UserID] = true
+
+	a.queueRefresh(refreshPresence)
 }
 
 // onMemberUpdated repaints the member sidebar and that author's mounted messages,
@@ -646,4 +679,31 @@ func (a *App) onMemberUpdated(event client.MemberUpdated) {
 		a.queueRefresh(targets)
 	}
 	a.refreshAuthorMessages(event.UserID)
+}
+
+// onVoiceChanged redraws the channel sidebar when a call gained or lost somebody,
+// or when a participant's camera or screen share went on or off: those people are
+// rows under their voice channel, so who is in a call is part of what a rebuild of
+// that column draws.
+//
+// Guarded on the server rather than the channel, and on both ends of a move: a
+// call in a server that is not open draws nothing here, and voice events arrive
+// for every server the account is in.
+func (a *App) onVoiceChanged(event client.VoiceChanged) {
+	if !a.drawsCall(event.ChannelID) && !a.drawsCall(event.FromChannelID) {
+		return
+	}
+
+	a.queueRefresh(refreshChannels)
+}
+
+// drawsCall reports whether a voice channel's participants are on screen — the
+// channel sidebar's, so the open server's and not the home view's, which lists
+// conversations rather than voice channels.
+func (a *App) drawsCall(channelID string) bool {
+	if channelID == "" || a.homeSelected || a.currentServerID == "" {
+		return false
+	}
+
+	return a.channelServerID(channelID) == a.currentServerID
 }

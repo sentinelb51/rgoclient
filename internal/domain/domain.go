@@ -183,6 +183,21 @@ type Message struct {
 	Reactions []Reaction
 }
 
+// MessageSort is the order a channel search asks its answer back in. It lives
+// here rather than in the client because both ends need it: the widget offering
+// the choice and the request carrying it, and neither may name the other's type.
+//
+// Relevance is the route's own ranking and cannot be reproduced from what comes
+// back, which is why the sort is part of the request rather than something the
+// controller does to the answer.
+type MessageSort int
+
+const (
+	SortRelevance MessageSort = iota
+	SortNewest
+	SortOldest
+)
+
 // Reaction is one emoji on a message and everybody who chose it. Emoji is a
 // literal unicode emoji or a custom one's ULID — Revolt uses one field for both.
 //
@@ -448,6 +463,30 @@ type Channel struct {
 	LastMessageID string
 	Active        bool
 	NSFW          bool
+}
+
+// VoiceParticipant is somebody connected to a voice channel's call, resolved the
+// way the sidebar draws them under that channel's row: the per-server nickname,
+// avatar and role colour a Member carries, plus what their end of the call is
+// sharing.
+//
+// The two flags are the only voice state that is a plain fact about a
+// participant. Revolt also reports whether one is publishing and receiving,
+// which is a media session's own bookkeeping rather than "muted" and "deafened",
+// so neither is carried here — a mark that says the wrong thing is worse than no
+// mark at all.
+type VoiceParticipant struct {
+	UserID string
+
+	Name      string
+	AvatarURL string
+	Color     color.Color // most-senior coloured role; nil when none applies
+
+	/* Flags */
+
+	Bot           bool
+	Camera        bool
+	Screensharing bool
 }
 
 /* Servers */

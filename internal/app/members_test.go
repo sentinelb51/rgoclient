@@ -116,3 +116,122 @@ func TestMemberStatusFor(t *testing.T) {
 		}
 	}
 }
+
+// memberStub answers the one read patchedMembers makes. Its misses are the
+// interesting half: a member the store has forgotten is one whose row must stand.
+type memberStub struct {
+	domain.Store
+	members map[string]domain.Member // userID -> what the store says now
+}
+
+func (s memberStub) Member(_, userID string) (domain.Member, bool) {
+	member, ok := s.members[userID]
+
+	return member, ok
+}
+
+// summarise is what a member is worth to these tests. Not a struct comparison:
+// domain.Member holds a color.Color, which a role gradient makes uncomparable.
+func summarise(members []domain.Member) []string {
+	out := make([]string, len(members))
+	for i, member := range members {
+		out[i] = member.UserID + "/" + member.Name + "/" + member.Presence.Label()
+	}
+
+	return out
+}
+
+func sameSummary(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// TestPatchedMembers pins what a presence flush may and may not touch. Every one
+// of these fails silently — the sidebar redraws either way, with somebody's dot
+// on somebody else's row — which is the whole reason the picking is a function
+// rather than four lines inside the worker.
+//
+// The store deliberately disagrees about a member nobody named: a walk would take
+// its answer, and taking it here would mean the flush had quietly become one.
+func TestPatchedMembers(t *testing.T) {
+	previous := []domain.Member{
+		{UserID: "01ADA", Name: "Ada", Presence: domain.PresenceOnline},
+		{UserID: "01BRIAN", Name: "Brian", Presence: domain.PresenceOffline},
+		{UserID: "01ZOE", Name: "Zoe", Presence: domain.PresenceOnline},
+	}
+
+	store := memberStub{members: map[string]domain.Member{
+		// Named, and the whole value is taken: Brian is idle *and* renamed.
+		"01BRIAN": {UserID: "01BRIAN", Name: "Bri", Presence: domain.PresenceIdle},
+		// Not named. A walk would file Ada under Offline; this must not.
+		"01ADA": {UserID: "01ADA", Name: "Ada", Presence: domain.PresenceOffline},
+		// Named, and not in the membership at all — they joined after it was
+		// resolved, so they belong to the next walk rather than to this copy.
+		"01CARA": {UserID: "01CARA", Name: "Cara", Presence: domain.PresenceOnline},
+	}}
+
+	// 01ZOE is named and the store has forgotten them, which must leave the row
+	// standing rather than blanking it.
+	changed := map[string]bool{"01BRIAN": true, "01ZOE": true, "01CARA": true}
+
+	got := summarise(patchedMembers(store, "01SERVER", previous, changed))
+	want := []string{
+		"01ADA/Ada/Online",
+		"01BRIAN/Bri/Idle",
+		"01ZOE/Zoe/Online",
+	}
+
+	if !sameSummary(got, want) {
+		t.Errorf("patched %v, want %v", got, want)
+	}
+}
+
+// TestPatchedMembersLeavesPreviousAlone is the invariant the whole design rests
+// on: the membership handed in is published, and another worker may be reading it
+// while this one runs. Patching in place would be correct on screen and a data
+// race underneath, which no other test here would notice.
+func TestPatchedMembersLeavesPreviousAlone(t *testing.T) {
+	previous := []domain.Member{
+		{UserID: "01ADA", Name: "Ada", Presence: domain.PresenceOnline},
+		{UserID: "01BRIAN", Name: "Brian", Presence: domain.PresenceOffline},
+	}
+	before := summarise(previous)
+
+	store := memberStub{members: map[string]domain.Member{
+		"01ADA":   {UserID: "01ADA", Name: "Ada", Presence: domain.PresenceOffline},
+		"01BRIAN": {UserID: "01BRIAN", Name: "Brian", Presence: domain.PresenceOnline},
+	}}
+
+	patched := patchedMembers(store, "01SERVER", previous, map[string]bool{"01ADA": true, "01BRIAN": true})
+
+	if after := summarise(previous); !sameSummary(after, before) {
+		t.Errorf("the published membership moved: %v, was %v", after, before)
+	}
+	if &patched[0] == &previous[0] {
+		t.Error("patchedMembers handed back the slice it was given")
+	}
+}
+
+// TestPatchedMembersNothingNamed covers the flush that finds its people already
+// current — a burst coalesced onto somebody whose presence came back where it
+// started. It must still hand back a copy, the caller publishing what it returns.
+func TestPatchedMembersNothingNamed(t *testing.T) {
+	previous := []domain.Member{{UserID: "01ADA", Name: "Ada", Presence: domain.PresenceOnline}}
+
+	got := patchedMembers(memberStub{}, "01SERVER", previous, map[string]bool{"01NOBODY": true})
+
+	if want := summarise(previous); !sameSummary(summarise(got), want) {
+		t.Errorf("patched %v, want %v", summarise(got), want)
+	}
+	if &got[0] == &previous[0] {
+		t.Error("patchedMembers handed back the slice it was given")
+	}
+}

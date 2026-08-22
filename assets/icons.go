@@ -31,6 +31,12 @@ var voiceSVG []byte
 //go:embed search.svg
 var searchSVG []byte
 
+//go:embed camera.svg
+var cameraSVG []byte
+
+//go:embed screenshare.svg
+var screenshareSVG []byte
+
 //go:embed forbidden.svg
 var forbiddenSVG []byte
 
@@ -63,6 +69,15 @@ var systemIcons embed.FS
 //
 //go:embed action-*.svg
 var actionIcons embed.FS
+
+// The marks the channel-search island filters and labels a result by. A set of
+// their own because they say what a message *carries* — a file, a picture, a
+// link, a reaction — where every other set here says what something *is* or what
+// tapping it would do. The three sort marks are in it for the same reason: they
+// are read against the filters beside them, not against a settings rail.
+//
+//go:embed search-*.svg
+var searchIcons embed.FS
 
 // The marks on a profile's two dates. They are a set of their own rather than
 // borrowed from the system events, because these say what the line beside them
@@ -97,6 +112,11 @@ var (
 
 	// SearchIcon opens the channel-search panel from the message header.
 	SearchIcon fyne.Resource = fyne.NewStaticResource("search.svg", searchSVG)
+
+	// CameraIcon and ScreenshareIcon mark what somebody in a voice channel is
+	// sharing, on their row under that channel in the sidebar.
+	CameraIcon      fyne.Resource = fyne.NewStaticResource("camera.svg", cameraSVG)
+	ScreenshareIcon fyne.Resource = fyne.NewStaticResource("screenshare.svg", screenshareSVG)
 
 	// ForbiddenIcon leads the line the composer draws in place of its entry where
 	// the account may not write.
@@ -181,6 +201,22 @@ var (
 	ProfileJoinedIcon  = profileIcon("profile-joined.svg")
 )
 
+// The channel-search island's marks: what a result carries, where a row leads,
+// and the three orders a search can be asked for. Mentions, authorship and pins
+// are not here — MentionIcon, AccountIcon and SystemPinnedIcon already say those
+// three, and a second drawing of each would be the same thing twice in one row.
+var (
+	SearchAttachmentIcon = searchIcon("search-attachment.svg")
+	SearchImageIcon      = searchIcon("search-image.svg")
+	SearchLinkIcon       = searchIcon("search-link.svg")
+	SearchReactionIcon   = searchIcon("search-reaction.svg")
+	SearchJumpIcon       = searchIcon("search-jump.svg")
+
+	SearchRelevanceIcon = searchIcon("search-relevance.svg")
+	SearchNewestIcon    = searchIcon("search-newest.svg")
+	SearchOldestIcon    = searchIcon("search-oldest.svg")
+)
+
 // settingsIcon reads one of the embedded section marks. The file list is a
 // compile-time embed, so a name that is not there is a build error rather than
 // something to report at runtime.
@@ -191,6 +227,11 @@ func settingsIcon(name string) fyne.Resource {
 // systemIcon reads one of the embedded system-event marks.
 func systemIcon(name string) fyne.Resource {
 	return embedded(systemIcons, name)
+}
+
+// searchIcon reads one of the embedded channel-search marks.
+func searchIcon(name string) fyne.Resource {
+	return embedded(searchIcons, name)
 }
 
 // actionIcon reads one of the embedded message-action marks.

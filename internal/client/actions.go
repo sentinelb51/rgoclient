@@ -8,6 +8,7 @@ package client
 import (
 	"errors"
 	"log"
+	"maps"
 	"net/http"
 	"os"
 	"slices"
@@ -529,7 +530,7 @@ func oldestFirst(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) 
 //
 // Nothing is written to the message cache, for the reason messagePage gives.
 func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
-	return c.search(channelID, revoltgo.ChannelSearchParams{
+	return c.search(channelID, domain.SortNewest, revoltgo.ChannelSearchParams{
 		Limit:  limit,
 		Pinned: true,
 	})
@@ -539,33 +540,42 @@ func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message,
 // refuses a query and pinned together — and the only way to reach a message by
 // what it says. An empty query is a request nothing comes back from, so it is
 // not made. Cache and authors are as PinnedMessages leaves them.
-func (c *Client) SearchMessages(channelID, query string, limit int) ([]*domain.Message, error) {
+//
+// sort is part of the request rather than something done to the answer: the
+// route selects which limit messages come back before it orders them, so asking
+// for the oldest hundred and asking for the newest hundred reversed are two
+// different sets, and Relevance is a ranking nothing in the response carries.
+func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort, limit int) ([]*domain.Message, error) {
 	query = trimTo(query, maxSearchQuery)
 	if query == "" {
 		return nil, nil
 	}
 
-	return c.search(channelID, revoltgo.ChannelSearchParams{
+	return c.search(channelID, sort, revoltgo.ChannelSearchParams{
 		Limit: limit,
 		Query: query,
 	})
 }
 
-// search is the request both share, newest first. Sort is named here because the
-// route's default is Relevance, which for a list read as a channel's history —
-// and with no query, relevant to nothing — is an order nobody chose. IncludeUsers
-// is named here for the same reason it is on a history page: the users come back
-// with the messages and land in State, so the caller's author resolution is left
-// with only what no response carries.
+// search is the request both share. IncludeUsers is named here for the same
+// reason it is on a history page: the users come back with the messages and land
+// in State, so the caller's author resolution is left with only what no response
+// carries.
+//
+// The route's default sort is Relevance, which for a list read as a channel's
+// history — and with no query, relevant to nothing — is an order nobody chose,
+// so a caller names one. Only the two chronological orders are re-sorted here:
+// Relevance is a ranking the response does not carry, and re-sorting it would
+// throw away the one thing that was asked for.
 //
 // Unguarded by c.fetching: a search comes from a keystroke rather than a scroll,
 // and writes nothing two answers could interleave in.
-func (c *Client) search(channelID string, params revoltgo.ChannelSearchParams) ([]*domain.Message, error) {
+func (c *Client) search(channelID string, sort domain.MessageSort, params revoltgo.ChannelSearchParams) ([]*domain.Message, error) {
 	session := c.session.Load()
 	if session == nil {
 		return nil, ErrNoSession
 	}
-	params.Sort = revoltgo.ChannelMessagesParamsSortTypeLatest
+	params.Sort = wireSort(sort)
 	params.IncludeUsers = true
 
 	page, err := session.ChannelSearch(channelID, params)
@@ -574,9 +584,27 @@ func (c *Client) search(channelID string, params revoltgo.ChannelSearchParams) (
 	}
 
 	messages := toMessages(page.Messages)
-	slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
+	switch sort {
+	case domain.SortNewest:
+		slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
+	case domain.SortOldest:
+		slices.SortFunc(messages, oldestFirst)
+	}
 
 	return messages, nil
+}
+
+// wireSort names the order in the route's own vocabulary. Newest is Revolt's
+// "Latest"; the client says newest because the choice sits beside "oldest".
+func wireSort(sort domain.MessageSort) revoltgo.ChannelMessagesParamsSortType {
+	switch sort {
+	case domain.SortOldest:
+		return revoltgo.ChannelMessagesParamsSortTypeOldest
+	case domain.SortRelevance:
+		return revoltgo.ChannelMessagesParamsSortTypeRelevance
+	}
+
+	return revoltgo.ChannelMessagesParamsSortTypeLatest
 }
 
 // claim reserves key in one of the in-flight guards, reporting false when
@@ -1820,6 +1848,17 @@ func (c *Client) relationshipWith(user *revoltgo.User) domain.Relationship {
 	}
 
 	return toRelationship(user.Relationship)
+}
+
+// knownRelations copies what the gateway has said about relationships. A walk of
+// every cached account would otherwise take the lock once per account, and what
+// it copies is a handful of entries: only an announced change is filed here, the
+// rest being a field on the account itself.
+func (c *Client) knownRelations() map[string]domain.Relationship {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return maps.Clone(c.relations)
 }
 
 // setRelationship records a relationship, for the gateway handler and for an

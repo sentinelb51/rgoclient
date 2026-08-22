@@ -157,6 +157,7 @@ func (a *App) serverSettingsHooks() ui.ServerSettingsHooks {
 		LoadInvites:  a.loadServerInvites,
 		CopyInvite:   a.copyInviteLink,
 		RevokeInvite: a.revokeInvite,
+		OpenProfile:  a.OnUserTapped,
 
 		LoadBans: a.loadServerBans,
 		LiftBan:  a.liftBan,
@@ -595,10 +596,15 @@ func (a *App) deleteRole(roleID string) {
 
 /* Invites */
 
-// loadServerInvites fetches the server's invites and resolves the two names each
-// row shows. The resolution happens on the worker with the fetch — Store.Channel
-// and Store.UserName are safe off the UI thread — so the callback lands with
-// nothing left to do.
+// loadServerInvites fetches the server's invites and resolves what each row shows
+// around the code: the channel it opens, and the account that made it. The
+// resolution happens on the worker with the fetch — the store is safe off the UI
+// thread — so the callback lands with nothing left to do.
+//
+// An invite outlives the reason anybody looked at its creator, so most of them
+// name somebody this client has never drawn: they are fetched here rather than
+// left blank, which is what the lazy author path does for a message nobody has
+// scrolled to. One batch, because the fetch it joins is single-flighted already.
 func (a *App) loadServerInvites(onLoaded func([]ui.ServerInviteEntry, error)) {
 	serverID, epoch := a.serverSettingsID, a.epoch
 
@@ -607,13 +613,15 @@ func (a *App) loadServerInvites(onLoaded func([]ui.ServerInviteEntry, error)) {
 
 		var entries []ui.ServerInviteEntry
 		if err == nil {
+			a.resolveInviteCreators(serverID, invites)
+
 			entries = make([]ui.ServerInviteEntry, len(invites))
 			for i, invite := range invites {
-				entries[i] = ui.ServerInviteEntry{
-					Code:    invite.Code,
-					Channel: a.store.ChannelName(invite.ChannelID),
-					Creator: a.store.UserName(invite.CreatorID),
-				}
+				creator := a.inviteCreator(serverID, invite.CreatorID)
+				creator.Code = invite.Code
+				creator.Channel = a.store.ChannelName(invite.ChannelID)
+				creator.CreatorID = invite.CreatorID
+				entries[i] = creator
 			}
 		} else {
 			log.Printf("fetch invites for server %s: %v", serverID, err)
@@ -627,6 +635,53 @@ func (a *App) loadServerInvites(onLoaded func([]ui.ServerInviteEntry, error)) {
 			onLoaded(entries, err)
 		}, false)
 	}()
+}
+
+// resolveInviteCreators pulls in the accounts behind a list of invites that this
+// client cannot name yet, one batch for the whole list. Blocking, and called from
+// the worker the fetch runs on.
+//
+// A creator already known is skipped whether or not this server has a membership
+// for them: somebody who made an invite and left is the common case, and asking
+// for a membership that does not exist is a request per row that answers 404.
+func (a *App) resolveInviteCreators(serverID string, invites []domain.ServerInvite) {
+	var refs []client.AuthorRef
+
+	seen := make(map[string]bool, len(invites))
+	for _, invite := range invites {
+		if invite.CreatorID == "" || seen[invite.CreatorID] || a.store.HasUser(invite.CreatorID) {
+			continue
+		}
+
+		seen[invite.CreatorID] = true
+		refs = append(refs, client.AuthorRef{ServerID: serverID, UserID: invite.CreatorID})
+	}
+
+	if len(refs) == 0 {
+		return
+	}
+
+	a.client.ResolveAuthors(refs)
+}
+
+// inviteCreator fills in whoever made an invite, preferring the membership — a
+// nickname, a per-server avatar and a role colour are what this server knows
+// somebody by, and none of the three exists outside it. An account that could not
+// be fetched answers empty, and the row drops the chip rather than drawing a
+// nameless one.
+func (a *App) inviteCreator(serverID, userID string) ui.ServerInviteEntry {
+	if member, ok := a.store.Member(serverID, userID); ok {
+		return ui.ServerInviteEntry{
+			Creator:          member.Name,
+			CreatorAvatarURL: member.AvatarURL,
+			CreatorColor:     member.Color,
+		}
+	}
+	if user, ok := a.store.User(userID); ok {
+		return ui.ServerInviteEntry{Creator: user.Name, CreatorAvatarURL: user.AvatarURL}
+	}
+
+	return ui.ServerInviteEntry{}
 }
 
 // copyInviteLink puts one on the clipboard, the link rather than the code —

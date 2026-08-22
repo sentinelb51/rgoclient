@@ -248,6 +248,7 @@ func (a *App) refreshChannelList() {
 		if w := a.newChannelRow(channelID, animate); w != nil {
 			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 			rows = append(rows, w)
+			rows = append(rows, a.callRows(w.Channel)...)
 		}
 	}
 
@@ -263,6 +264,7 @@ func (a *App) refreshChannelList() {
 			if w := a.newChannelRow(channelID, animate); w != nil {
 				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 				under = append(under, w)
+				under = append(under, a.callRows(w.Channel)...)
 			}
 		}
 
@@ -297,6 +299,33 @@ func (a *App) newChannelRow(channelID string, animate bool) *ui.ChannelWidget {
 	w.Menu = func() []*fyne.MenuItem { return a.channelMenu(channelID) }
 
 	return w
+}
+
+// callRows is who is in a voice channel's call, as the rows that hang under its
+// own. Empty for anything that is not a voice channel, and for one nobody is in:
+// a call with no participants is a channel row and nothing beneath it.
+//
+// They go in with the channel rather than beside it so a collapsed category takes
+// them with it — a CategoryWidget hides the objects it was handed, and a
+// participant left behind would hang under nothing.
+func (a *App) callRows(channel domain.Channel) []fyne.CanvasObject {
+	if channel.Kind != domain.ChannelVoice {
+		return nil
+	}
+
+	participants := a.store.VoiceParticipants(channel.ID)
+	if len(participants) == 0 {
+		return nil
+	}
+
+	deps := a.deps()
+
+	rows := make([]fyne.CanvasObject, 0, len(participants))
+	for _, participant := range participants {
+		rows = append(rows, ui.NewVoiceParticipantRow(deps, participant))
+	}
+
+	return rows
 }
 
 // setChannelGroup fills the block pinned above the channel list, or empties it

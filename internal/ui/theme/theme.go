@@ -39,7 +39,9 @@ var Colors = struct {
 	SwiftActionBg          color.Color
 	SwiftActionHoverBg     color.Color
 	SessionCardBg          color.Color
+	SettingsIslandOutline  color.Color
 	SettingsJumpBackground color.Color
+	SettingsBackText       color.Color
 	TooltipBg              color.Color
 	NoticeBg               color.Color
 	OverlayBackdrop        color.Color
@@ -136,6 +138,11 @@ var Colors = struct {
 	MemberSectionText color.Color
 	MemberStatusText  color.Color
 
+	/* Voice participants */
+
+	VoiceParticipantName color.Color
+	VoiceParticipantMark color.Color
+
 	/* Bot mark */
 
 	// BotMark is the glyph following the name of an account Revolt marks as a
@@ -191,6 +198,22 @@ var Colors = struct {
 	// question. It sits below the body it follows, being an aside rather than part
 	// of what is being asked.
 	ConfirmHint color.Color
+
+	/* The message islands: pins, mentions and channel search */
+
+	IslandBg            color.Color
+	IslandWellBg        color.Color
+	IslandCardBg        color.Color
+	IslandCardHoverBg   color.Color
+	IslandCardMentioned color.Color
+	IslandChipBg        color.Color
+	IslandChipHoverBg   color.Color
+	IslandChipOnBg      color.Color
+	IslandChipText      color.Color
+	IslandChipOnText    color.Color
+	IslandCountText     color.Color
+	IslandBadgeText     color.Color
+	IslandHintText      color.Color
 }{
 	// Cool blue-slate ramp, darkest to lightest.
 	ServerListBackground:   color.RGBA{R: 19, G: 21, B: 28, A: 255}, // #13151C
@@ -228,15 +251,24 @@ var Colors = struct {
 	SwiftActionBg:          color.RGBA{R: 35, G: 40, B: 56, A: 255},   // #232838
 	SwiftActionHoverBg:     color.RGBA{R: 46, G: 53, B: 72, A: 255},   // #2E3548
 	SessionCardBg:          color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330
+	// The rim on a card standing alone, and the one edge in the client that is
+	// *lighter* than what it surrounds. Outline is a groove between two surfaces
+	// that meet; an island meets nothing, and a groove around one against a page
+	// barely darker than it is an edge nobody sees.
+	SettingsIslandOutline: color.RGBA{R: 52, G: 60, B: 80, A: 255}, // #343C50
 	// What a jump from the rail or the search washes the group card it landed on
 	// with. The accent again, as a message jump takes it, and against a lighter
 	// surface than a message row — a card the same colour as the wash says nothing.
 	SettingsJumpBackground: color.RGBA{R: 48, G: 60, B: 100, A: 255}, // #303C64
-	TooltipBg:              color.RGBA{R: 8, G: 9, B: 12, A: 240},    // darker than any column it floats over
-	NoticeBg:               color.RGBA{R: 43, G: 49, B: 66, A: 250},  // #2B3142, lifted off whatever it floats over
-	OverlayBackdrop:        color.RGBA{R: 8, G: 9, B: 12, A: 200},    // dim behind a modal
-	ViewerCardBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},  // #1F2330, the modal card
-	ViewerBodyBg:           color.RGBA{R: 19, G: 21, B: 28, A: 255},  // #13151C, inset well
+	// The mark on the back button, which is dimmer than the word beside it: the
+	// word is what is read, and a chevron at a label's own brightness is a second
+	// thing competing with it at the corner of the page.
+	SettingsBackText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	TooltipBg:        color.RGBA{R: 8, G: 9, B: 12, A: 240},      // darker than any column it floats over
+	NoticeBg:         color.RGBA{R: 43, G: 49, B: 66, A: 250},    // #2B3142, lifted off whatever it floats over
+	OverlayBackdrop:  color.RGBA{R: 8, G: 9, B: 12, A: 200},      // dim behind a modal
+	ViewerCardBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card
+	ViewerBodyBg:     color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well
 
 	// The composer card fills with the entry's own input background so the entry's
 	// box disappears into it; the outline draws the boundary instead, and lights up
@@ -409,6 +441,14 @@ var Colors = struct {
 	MemberNameOffline: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
 	MemberSectionText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 
+	// Somebody in a call, on their row under the voice channel in the sidebar.
+	// Pitched between the channel labels above them and the category headers over
+	// those: a name is a person rather than a heading, but a row nobody tapped to
+	// get to must not outweigh the channel it hangs off. A role colour overrides it
+	// where the member has one, as it does in the member list.
+	VoiceParticipantName: color.RGBA{R: 150, G: 158, B: 175, A: 255}, // #969EAF
+	VoiceParticipantMark: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
+
 	// What the sidebar says when it has no rows to say it with. Pitched at the
 	// section headers rather than at a name: it is furniture, not a member.
 	MemberStatusText: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
@@ -468,6 +508,30 @@ var Colors = struct {
 	NoticeDanger:  color.RGBA{R: 199, G: 62, B: 66, A: 255},  // #C73E42
 
 	ConfirmHint: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+
+	// An island is three surfaces deep — island, well, card — so each has to be a
+	// visible step off the one under it or the cards read as a list drawn straight
+	// onto the modal. The well is darker than the island it is sunk into and the
+	// cards lift back out of it, which is what makes a result a thing rather than
+	// a row.
+	IslandBg:            color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, the modal card
+	IslandWellBg:        color.RGBA{R: 19, G: 21, B: 28, A: 255},   // #13151C, sunk into it
+	IslandCardBg:        color.RGBA{R: 35, G: 40, B: 56, A: 255},   // #232838, lifted back out
+	IslandCardHoverBg:   color.RGBA{R: 46, G: 53, B: 72, A: 255},   // #2E3548
+	IslandCardMentioned: color.RGBA{R: 214, G: 150, B: 38, A: 255}, // #D69626, the mention amber as an edge
+
+	// A filter chip is off far more often than it is on, so the lit state is a
+	// wash of the accent rather than another slate: the row has to be readable at
+	// a glance as "these two, of eight".
+	IslandChipBg:      color.RGBA{R: 35, G: 40, B: 56, A: 255},    // #232838
+	IslandChipHoverBg: color.RGBA{R: 46, G: 53, B: 72, A: 255},    // #2E3548
+	IslandChipOnBg:    color.NRGBA{R: 91, G: 124, B: 250, A: 70},  // accent tint
+	IslandChipText:    color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	IslandChipOnText:  color.RGBA{R: 195, G: 206, B: 255, A: 255}, // #C3CEFF, accent lifted for text
+
+	IslandCountText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	IslandBadgeText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	IslandHintText:  color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 }
 
 // Sizes is the application's size table. Never express one size as an offset
@@ -507,8 +571,23 @@ var Sizes = struct {
 	MemberSectionTopPad   float32
 	MemberSectionTextSize float32
 
-	MemberPresenceDotSize float32
-	MemberPresenceDotRing float32
+	// The bar on a member row's left edge, coloured by presence — the member
+	// list's only presence mark. Its own width rather than the channel unread
+	// bar's: the two say different things and a colour needs more of the edge
+	// than a state does.
+	MemberPresenceBarWidth float32
+
+	/* Voice participants */
+
+	// A row under a voice channel: shorter than the channel it hangs off, so a
+	// call reads as part of that row rather than as more channels. The indent is
+	// what puts the avatar under the channel's *name* rather than under its glyph.
+	VoiceRowHeight  float32
+	VoiceRowIndent  float32
+	VoiceAvatarSize float32
+	VoiceNameSize   float32
+	VoiceMarkSize   float32
+	VoiceMarkGap    float32
 
 	// The strip drawn over the list while a membership is on its way or after it
 	// failed to arrive. The mark is the client's own sweeping line, so its width
@@ -575,6 +654,12 @@ var Sizes = struct {
 	EmojiPickerEmojiSize          float32
 	EmojiPickerCaptionSize        float32
 	EmojiPickerGap                float32
+	EmojiPickerRadius             float32
+	EmojiPickerPreviewSize        float32
+	EmojiPickerPreviewNameSize    float32
+	EmojiPickerRailWidth          float32
+	EmojiPickerRailIconSize       float32
+	EmojiPickerRailRowHeight      float32
 	SystemMessageTextSize         float32
 	SystemMessageIconSize         float32
 	SystemMessagePadding          float32
@@ -744,6 +829,10 @@ var Sizes = struct {
 	ChipDotSize  float32
 	ChipDotGap   float32
 
+	// ChipAvatarSize is the picture a chip naming somebody leads with, where a role
+	// chip leads with a dot.
+	ChipAvatarSize float32
+
 	/* Anchored popovers */
 
 	PopoverGap    float32
@@ -820,16 +909,41 @@ var Sizes = struct {
 	FriendsPadding       float32
 	FriendsGap           float32
 
-	/* Message panels: the pins list and channel search */
+	/* The message islands: pins, mentions and channel search */
 
-	PanelDialogWidth   float32
-	PanelListMaxHeight float32
-	PanelRowHeight     float32
-	PanelAvatarSize    float32
-	PanelNameSize      float32
-	PanelPreviewSize   float32
-	PanelPadding       float32
-	PanelGap           float32
+	IslandWidth   float32
+	IslandRadius  float32
+	IslandPadding float32
+	IslandGap     float32
+
+	SearchFieldHeight float32
+	SearchFieldRadius float32
+	SearchFieldGlyph  float32
+
+	IslandChipHeight   float32
+	IslandChipRadius   float32
+	IslandChipPaddingH float32
+	IslandChipGap      float32
+	IslandChipGlyph    float32
+	IslandChipTextSize float32
+
+	IslandWellRadius    float32
+	IslandWellPadding   float32
+	IslandListMaxHeight float32
+	IslandCountTextSize float32
+
+	IslandCardRadius    float32
+	IslandCardPadding   float32
+	IslandCardGap       float32
+	IslandCardSpacing   float32
+	IslandAvatarSize    float32
+	IslandNameSize      float32
+	IslandTimeSize      float32
+	IslandPreviewSize   float32
+	IslandBadgeGlyph    float32
+	IslandBadgeTextSize float32
+	IslandBadgeGap      float32
+	IslandJumpGlyph     float32
 
 	/* Settings */
 
@@ -840,6 +954,8 @@ var Sizes = struct {
 	SettingsPagePadding    float32
 	SettingsHeaderSize     float32
 	SettingsCaptionSize    float32
+	SettingsBackGap        float32
+	SettingsBackMarkGap    float32
 	SettingsRowHeight      float32
 	SettingsRowPaddingH    float32
 	SettingsRowPaddingV    float32
@@ -867,6 +983,25 @@ var Sizes = struct {
 	SettingsNoteMarkSize   float32
 	SettingsNoteMarkRadius float32
 	SettingsNoteMarkGap    float32
+
+	// SettingsEntryColumnWidth is the slot the first field of an entry row's second
+	// line is given, so whatever follows it starts in the same place down the list
+	// however long that field is. Content wider than the slot is shortened.
+	SettingsEntryColumnWidth float32
+
+	// SettingsPairGutter is the space between two cells sharing a row and
+	// SettingsIslandGap the space between one row and the next, where a list is
+	// drawn as a card per entry rather than as rows of one card. Both have to beat
+	// the padding inside a card, or the eye pairs one card's buttons with the next
+	// card's name.
+	SettingsPairGutter float32
+	SettingsIslandGap  float32
+
+	// SettingsEntryLineGap separates the two lines of a row that has two — a name
+	// and what is said about it. Its own entry rather than a chip's spacing, which
+	// is what it used to borrow: the lines are not chips and the two numbers move
+	// for different reasons.
+	SettingsEntryLineGap float32
 }{
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
@@ -891,8 +1026,14 @@ var Sizes = struct {
 	MemberSectionTopPad:   8,
 	MemberSectionTextSize: 12,
 
-	MemberPresenceDotSize: 10,
-	MemberPresenceDotRing: 2,
+	MemberPresenceBarWidth: 2,
+
+	VoiceRowHeight:  26,
+	VoiceRowIndent:  31,
+	VoiceAvatarSize: 18,
+	VoiceNameSize:   13,
+	VoiceMarkSize:   13,
+	VoiceMarkGap:    6,
 
 	MemberStatusTextSize: 12,
 	MemberStatusMarkSize: 24,
@@ -947,12 +1088,22 @@ var Sizes = struct {
 	// only thing deciding how many fit on a row. The cell is a target rather than a
 	// glyph, hence larger than the emoji it holds — which is itself larger than a
 	// chip's, being the thing being aimed at rather than a label.
-	EmojiPickerWidth:       324,
+	EmojiPickerWidth:       372,
 	EmojiPickerMaxHeight:   260,
 	EmojiPickerCellSize:    34,
 	EmojiPickerEmojiSize:   22,
 	EmojiPickerCaptionSize: 11,
 	EmojiPickerGap:         6,
+	// The island's own corner, wider than the pop-up Fyne draws behind it: the
+	// picker is a card that floats rather than a menu that drops.
+	EmojiPickerRadius:          12,
+	EmojiPickerPreviewSize:     40,
+	EmojiPickerPreviewNameSize: 13,
+	// The rail is a column of server icons, so it is sized against the icon and not
+	// against the cells beside it.
+	EmojiPickerRailWidth:     46,
+	EmojiPickerRailIconSize:  26,
+	EmojiPickerRailRowHeight: 36,
 	// A system line is one line whatever it says, so its margin is its own rather
 	// than the gap that separates two people speaking: a run of joins is a block,
 	// not a page. The mark is sized against that line, not against the avatar
@@ -1174,6 +1325,8 @@ var Sizes = struct {
 	ChipDotSize:  8,
 	ChipDotGap:   5,
 
+	ChipAvatarSize: 16,
+
 	PopoverGap:    10,
 	PopoverMargin: 12,
 
@@ -1236,14 +1389,41 @@ var Sizes = struct {
 	FriendsPadding:       12,
 	FriendsGap:           6,
 
-	PanelDialogWidth:   480,
-	PanelListMaxHeight: 420,
-	PanelRowHeight:     54,
-	PanelAvatarSize:    32,
-	PanelNameSize:      14,
-	PanelPreviewSize:   12,
-	PanelPadding:       12,
-	PanelGap:           6,
+	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
+	// narrower and the heading shortens a name to fit a date beside it.
+	IslandWidth:   620,
+	IslandRadius:  14,
+	IslandPadding: 14,
+	IslandGap:     10,
+
+	SearchFieldHeight: 38,
+	SearchFieldRadius: 10,
+	SearchFieldGlyph:  16,
+
+	IslandChipHeight:   26,
+	IslandChipRadius:   13,
+	IslandChipPaddingH: 9,
+	IslandChipGap:      6,
+	IslandChipGlyph:    13,
+	IslandChipTextSize: 11,
+
+	IslandWellRadius:    10,
+	IslandWellPadding:   8,
+	IslandListMaxHeight: 400,
+	IslandCountTextSize: 11,
+
+	IslandCardRadius:    9,
+	IslandCardPadding:   9,
+	IslandCardGap:       9,
+	IslandCardSpacing:   6,
+	IslandAvatarSize:    34,
+	IslandNameSize:      13,
+	IslandTimeSize:      11,
+	IslandPreviewSize:   12,
+	IslandBadgeGlyph:    12,
+	IslandBadgeTextSize: 11,
+	IslandBadgeGap:      4,
+	IslandJumpGlyph:     15,
 
 	SettingsRailWidth:     210,
 	SettingsRailRowHeight: 34,
@@ -1254,6 +1434,11 @@ var Sizes = struct {
 	SettingsPagePadding: 24,
 	SettingsHeaderSize:  22,
 	SettingsCaptionSize: 11,
+	// Under the back button, and between its mark and its word. The button wears a
+	// text button's own fill, outline, radius and label size — it is one, with a
+	// mark in front — so only what Button has no room for is named here.
+	SettingsBackGap:     12,
+	SettingsBackMarkGap: 6,
 	SettingsRowHeight:   52,
 	SettingsRowPaddingH: 14,
 	// Chosen against SettingsInputHeight: the two together are the row height, so
@@ -1286,6 +1471,12 @@ var Sizes = struct {
 	SettingsPaletteSize:  22,
 	SettingsPaletteGap:   6,
 	SettingsPreviewGap:   10,
+	// Wide enough for a channel name of about eighteen characters at the detail
+	// size, which is where a name stops being read and starts being recognised.
+	SettingsEntryColumnWidth: 140,
+	SettingsPairGutter:       16,
+	SettingsIslandGap:        16,
+	SettingsEntryLineGap:     6,
 	// The badge a note is filed under: a box wide enough for a letter, and a
 	// corner just off square, so it reads as a mark rather than as a button.
 	SettingsNoteMarkSize:   16,
@@ -1301,7 +1492,8 @@ var selectionTint color.Color = color.RGBA{R: 91, G: 124, B: 250, A: 90}
 // noShadow removes Fyne's only other edge treatment. A scroll paints it as a
 // gradient along whichever edge has more content past it — a smear rather than a
 // line, which read as a bar welded under the message area once the composer
-// floated free. Outline is the single edge in the client.
+// floated free. Outline is the edge in the client, and SettingsIslandOutline the
+// one exception: a card standing on its own rather than against another surface.
 var noShadow = color.Transparent
 
 // AppTheme applies the palette to Fyne's built-in widgets so they match the

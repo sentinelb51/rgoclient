@@ -15,22 +15,23 @@ not offered.
 The gateway events still unregistered are the ones nothing here has to do about:
 `EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
 `State`, and the picker reads `State` as it opens, so a handler here would have
-nothing left to arrange), the webhook, voice and report events, and
+nothing left to arrange), the webhook and report events, and
 `EventUserSettingsUpdate` (revoltgo flags its msgp tuples as undecodable).
 Everything a server, role, member or channel can do is handled.
 
 Where something is limited by revoltgo or Fyne rather than by effort:
 
 - **A voice channel is a text channel here.** It is recognised — its own speaker
-  glyph in the sidebar and the header, and a standing note under that header
-  saying so — and everything a text channel does works in it, Revolt keeping
-  messages in one all the same. What is missing is the call: joining one is a
-  WebRTC session against Revolt's media server, so the signalling revoltgo
-  already models (`EventVoiceChannelJoin`/`Leave`/`Move`, the channel's voice
-  token) is the small half, and the audio devices and the media stack behind it
-  are not something Fyne offers any part of. Nobody's voice state is drawn
-  either, for the same reason: a list of who is in a call this client cannot
-  join is an invitation to a dead end.
+  glyph in the sidebar and the header, a standing note under that header saying
+  so, and who is connected drawn as rows under it in the channel sidebar — and
+  everything a text channel does works in it, Revolt keeping messages in one all
+  the same. What is missing is the call itself: joining one is a WebRTC session
+  against Revolt's media server, so the signalling revoltgo models (the voice
+  events, the channel's voice token) is the small half, and the audio devices and
+  the media stack behind it are not something Fyne offers any part of. What a
+  participant's own end is doing is drawn only as far as it is a plain fact — a
+  camera and a screen share; `is_publishing` / `is_receiving` are a media
+  session's bookkeeping rather than muted and deafened, so neither is shown.
 
 - **There is no desktop notification, and Revolt's own push is unreachable.**
   `/push/subscribe` takes a `WebPushSubscription` — a browser service worker's
@@ -105,17 +106,22 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   capped at the hundred newest pins, Revolt's own ceiling on a search, with no way
   to page past it, and a row is a flattened one-line summary — a body with no text
   says what it carries instead of quoting nothing.
-- **Channel search is that panel with a query and inherits every one of those
-  limits**, plus two of its own. It searches the **open channel** only: Revolt's
-  route is per channel, so there is no search across a server, let alone across
-  the account. And the matching is MongoDB's full-text search rather than a
-  substring scan — words, not fragments, with what counts as a word decided by
-  the server — so half a word finds nothing and there is no way to ask for a
-  phrase. A query is 1–64 characters (a longer one is cut before it is sent), it
-  runs on Enter rather than as you type since each one is a request, and results
-  come back newest first: `Relevance` is the route's default and is not asked for,
-  a list that leads into a channel's history reading better in the order that
-  history has.
+- **Channel search inherits that hundred-result ceiling and adds three limits of
+  its own.** It searches the **open channel** only: Revolt's route is per channel,
+  so there is no search across a server, let alone across the account. The
+  matching is MongoDB's full-text search rather than a substring scan — words, not
+  fragments, with what counts as a word decided by the server — so half a word
+  finds nothing and there is no way to ask for a phrase. A query is 1–64
+  characters (a longer one is cut before it is sent) and runs on Enter rather than
+  as you type, each one being a request.
+- **Search filters narrow the answer, not the request.** `DataMessageSearch` takes
+  a query, an order, a limit and a `pinned` flag that cannot be sent beside a
+  query — there is no author, attachment, mention or reaction filter on the wire —
+  so the island's chips are applied to the hundred that came back. Narrowing by
+  author finds that author's messages *among those hundred*, not their hundred,
+  which is why the count line reports both numbers. The three orders **are** sent
+  (`Relevance`, `Latest`, `Oldest`), so changing one is a fresh request while
+  toggling a chip is free.
 - **The mention inbox lists what Revolt has kept, which is not everything that
   ever named you.** The set is the `mentions` array on each unread marker, so it
   holds only what is still *unread*: acknowledging a channel prunes it, and there
@@ -350,6 +356,10 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   wrong about somebody *else's* revoked invite or lifted ban is that TTL, and it
   closes on the next tap into the section rather than on a timer: a list left on
   screen untouched keeps showing what it last fetched, however long that is.
+  **An invite is a code, a channel and a creator** — Revolt stores no expiry, no
+  use count and no date, and a code is not a ULID, so a duration is not something
+  this client has left out. The creator is fetched where the account is unknown,
+  which most are; only one whose account is gone is left unnamed.
   Overview sets the name, the description, the icon and the banner — that last
   one drawn nowhere in this client, an invite card being where it shows — and
   states the rest. There is no member count, since `Store.Members` answers with

@@ -99,6 +99,7 @@ func (a *App) resetSessionState() {
 	}
 	a.dirty = 0
 	a.memberStale = false
+	a.dropMemberCache()
 	a.fetchedMembers = make(map[string]bool)
 	a.memberFailed = make(map[string]bool)
 	a.memberLoading = ""

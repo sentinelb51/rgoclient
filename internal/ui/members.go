@@ -42,11 +42,17 @@ const (
 )
 
 // MemberEntry is one line of the list: a section header, or a member.
+//
+// The member is *pointed at*, not carried: one is nearly 200 bytes and the model
+// is rebuilt for every presence change, so copying each into the flattened list
+// cost more than the flattening did. The slice NewMemberModel is given must
+// therefore outlive the model and never be written into — which is what the
+// controller publishes it as.
 type MemberEntry struct {
 	Kind MemberEntryKind
 
-	Title  string        // section only, e.g. "Moderators — 12"
-	Member domain.Member // row only
+	Title  string         // section only, e.g. "Moderators — 12"
+	Member *domain.Member // row only
 }
 
 // MemberListOptions is what the settings decide about the shape of the list.
@@ -59,6 +65,11 @@ type MemberListOptions struct {
 	// FallbackToAll draws everybody when the two hiding settings between them
 	// have left nothing at all — see NewMemberModel.
 	FallbackToAll bool
+
+	// SelfID is this account. Drawn first, under a heading of its own where the
+	// list has headings at all, and never hidden by the two hiding settings.
+	// Empty files it with everybody else.
+	SelfID string
 }
 
 // NewMemberModel flattens members into the order the list draws them: each
@@ -72,36 +83,50 @@ type MemberListOptions struct {
 //
 // A server whose members are all hidden by the settings comes back empty, and an
 // empty sidebar reads exactly like a failed fetch. FallbackToAll draws everybody
-// instead — reached only when the first pass produced nothing *and* a setting was
-// hiding somebody, so a server that really is empty stays empty.
+// instead — reached only when the first pass produced nobody *else* and a setting
+// was hiding somebody, so a server that really is empty stays empty. SelfID is
+// exempt from the hiding, so it cannot answer for the list having drawn anything:
+// that is what memberModel reports separately.
 func NewMemberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
 	if len(members) == 0 {
 		return nil
 	}
 
-	entries := memberModel(members, hoisted, opts)
-	if len(entries) > 0 || !opts.FallbackToAll || !(opts.HideOffline || opts.HideRoleless) {
+	entries, others := memberModel(members, hoisted, opts)
+	if others || !opts.FallbackToAll || !(opts.HideOffline || opts.HideRoleless) {
 		return entries
 	}
 
 	opts.HideOffline, opts.HideRoleless = false, false
+	entries, _ = memberModel(members, hoisted, opts)
 
-	return memberModel(members, hoisted, opts)
+	return entries
 }
 
 // memberModel is the flattening itself, with the hiding settings taken as given.
-func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) []MemberEntry {
-	// Ungrouped is one run with no headers and no hoisting.
+// It also reports whether anybody *besides* this account was drawn, which is what
+// NewMemberModel's fallback turns on.
+func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberListOptions) ([]MemberEntry, bool) {
+	self := selfIndex(members, opts.SelfID)
+
+	// Ungrouped is one run with no headers and no hoisting, so this account is
+	// simply first: a lone heading over a headerless list would be the only one.
 	if !opts.GroupByPresence {
 		entries := make([]MemberEntry, 0, len(members))
-		for i := range members {
-			if opts.hides(members[i]) {
-				continue
-			}
-			entries = append(entries, MemberEntry{Kind: MemberEntryRow, Member: members[i]})
+		if self >= 0 {
+			entries = append(entries, MemberEntry{Kind: MemberEntryRow, Member: &members[self]})
 		}
 
-		return entries
+		others := false
+		for i := range members {
+			if i == self || opts.hides(members[i]) {
+				continue
+			}
+			entries = append(entries, MemberEntry{Kind: MemberEntryRow, Member: &members[i]})
+			others = true
+		}
+
+		return entries, others
 	}
 
 	titles, index := memberSections(hoisted, opts)
@@ -116,7 +141,7 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 	size := 0
 
 	for i := range members {
-		if opts.hides(members[i]) {
+		if i == self || opts.hides(members[i]) {
 			filed[i] = hiddenMember
 			continue
 		}
@@ -141,8 +166,15 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 			size++
 		}
 	}
-	if size == 0 {
-		return nil
+	if size == 0 && self < 0 {
+		return nil, false
+	}
+
+	// The You section is a header and one row, ahead of every bucket. No count on
+	// the header: it is always one, and "You — 1" reads as a tally of yourself.
+	others := size > 0
+	if self >= 0 {
+		size += 2
 	}
 
 	// cursors is where each bucket's next row goes, so the second pass can place a
@@ -151,6 +183,12 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 	entries := make([]MemberEntry, size)
 	cursors := make([]int, len(titles))
 	at := 0
+
+	if self >= 0 {
+		entries[0] = MemberEntry{Kind: MemberEntrySection, Title: selfSectionTitle}
+		entries[1] = MemberEntry{Kind: MemberEntryRow, Member: &members[self]}
+		at = 2
+	}
 
 	for i, count := range counts {
 		if count == 0 {
@@ -172,15 +210,35 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 			continue
 		}
 
-		entries[cursors[bucket]] = MemberEntry{Kind: MemberEntryRow, Member: members[i]}
+		entries[cursors[bucket]] = MemberEntry{Kind: MemberEntryRow, Member: &members[i]}
 		cursors[bucket]++
 	}
 
-	return entries
+	return entries, others
+}
+
+// selfIndex is where this account sits in members, or -1 for no You section. A
+// scan rather than an index: it runs once per rebuild against two walks of the
+// same slice, and the answer is one member.
+func selfIndex(members []domain.Member, selfID string) int {
+	if selfID == "" {
+		return -1
+	}
+
+	for i := range members {
+		if members[i].UserID == selfID {
+			return i
+		}
+	}
+
+	return -1
 }
 
 // hiddenMember marks a member the settings leave out, filed under no bucket.
 const hiddenMember = -1
+
+// selfSectionTitle heads the row this account is drawn as.
+const selfSectionTitle = "You"
 
 // hides is whether a member is left out altogether, asked before anything decides
 // where they would have gone. Both branches of the model ask it, so the two
@@ -380,7 +438,7 @@ func (w *MemberList) Reset() {
 // RefreshMember redraws one member in place, for a change that does not move
 // them. Somebody unmounted is a no-op: their row is built from the store's value
 // when it scrolls into view.
-func (w *MemberList) RefreshMember(member domain.Member) {
+func (w *MemberList) RefreshMember(member *domain.Member) {
 	if row, ok := w.rows[member.UserID]; ok {
 		row.SetMember(member)
 	}
@@ -483,7 +541,7 @@ func (w *MemberList) acquire(i int) fyne.CanvasObject {
 }
 
 // draw points a row at a member and keeps the by-user index in step.
-func (w *MemberList) draw(row *MemberRow, member domain.Member) {
+func (w *MemberList) draw(row *MemberRow, member *domain.Member) {
 	if row.userID != "" && row.userID != member.UserID && w.rows[row.userID] == row {
 		delete(w.rows, row.userID)
 	}
@@ -672,8 +730,8 @@ func showIf(obj fyne.CanvasObject, visible bool) {
 
 /* Rows */
 
-// MemberRow is one person: avatar with a presence dot, name in their role's
-// colour, bot mark. A widget with an in-place updater because the list recycles
+// MemberRow is one person: a presence bar on the left edge, avatar, name in
+// their role's colour, bot mark. A widget with an in-place updater because the list recycles
 // it — see the file comment. Every field below records what is currently *drawn*,
 // so SetMember touches only what moved.
 type MemberRow struct {
@@ -683,9 +741,9 @@ type MemberRow struct {
 	onMenu func(userID string) []*fyne.MenuItem
 
 	background  *canvas.Rectangle
+	presenceBar *canvas.Rectangle
 	avatar      *fyne.Container
 	placeholder *canvas.Circle // the one the slot falls back to; see newAvatarSlot
-	dot         *canvas.Circle
 	name        *canvas.Text
 	nameBox     *fyne.Container
 	botMark     fyne.CanvasObject
@@ -728,9 +786,9 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 		deps:        deps,
 		onMenu:      onMenu,
 		background:  canvas.NewRectangle(color.Transparent),
+		presenceBar: canvas.NewRectangle(color.Transparent),
 		avatar:      avatar,
 		placeholder: placeholder,
-		dot:         newPresenceDot(),
 		name:        name,
 		nameBox:     NewEllipsisText(name),
 		botMark:     NewBotMark(theme.Sizes.MemberBotMarkSize),
@@ -742,9 +800,16 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 	}
 	w.botMark.Hide()
 
+	// The bar is flush with the sidebar's left edge, the way the channel rows' own
+	// markers are, and with the rows themselves — entries are laid out edge to edge,
+	// so a run of present members reads as one column. Its width comes from the
+	// minimum rather than the HBox, which hands a rectangle no width of its own.
+	w.presenceBar.SetMinSize(fyne.NewSize(theme.Sizes.MemberPresenceBarWidth, 0))
+
 	leading := HBoxNoSpacing(
+		w.presenceBar,
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(container.New(&memberPresenceLayout{}, w.avatar, w.dot)),
+		container.NewCenter(w.avatar),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
@@ -778,7 +843,10 @@ func (w *MemberRow) CreateRenderer() fyne.WidgetRenderer {
 // SetMember draws member, touching only what moved. Not polish: a whole-model
 // repaint calls this once per mounted row, and a scroll once per row the window
 // still holds.
-func (w *MemberRow) SetMember(member domain.Member) {
+//
+// Nothing of the member is kept but what is drawn from it — the row is recycled
+// and the pointer is into a model it outlives.
+func (w *MemberRow) SetMember(member *domain.Member) {
 	w.userID = member.UserID
 
 	w.setName(member.Name, memberNameColor(member))
@@ -823,8 +891,8 @@ func (w *MemberRow) setPresence(presence domain.Presence) {
 	}
 
 	w.presence = presence
-	w.dot.FillColor = presenceColor(presence)
-	w.dot.Refresh()
+	w.presenceBar.FillColor = presenceBarColor(presence)
+	w.presenceBar.Refresh()
 }
 
 func (w *MemberRow) setBot(bot bool) {
@@ -906,7 +974,7 @@ func (w *MemberRow) MouseOut() {
 
 // memberNameColor is a member's most-senior coloured role, dimmed to one grey
 // while offline — which is what lets a single list hold both halves.
-func memberNameColor(member domain.Member) color.Color {
+func memberNameColor(member *domain.Member) color.Color {
 	if !member.Presence.IsOnline() {
 		return theme.Colors.MemberNameOffline
 	}
@@ -917,34 +985,15 @@ func memberNameColor(member domain.Member) color.Color {
 	return theme.Colors.TextPrimary
 }
 
-// newPresenceDot is the filled circle over the avatar's corner, ringed in the
-// list's own background rather than the shared hairline so it reads as punched
-// out of the avatar rather than laid on it.
-func newPresenceDot() *canvas.Circle {
-	dot := canvas.NewCircle(presenceColor(domain.PresenceOffline))
-	dot.StrokeColor = theme.Colors.MemberListBackground
-	dot.StrokeWidth = theme.Sizes.MemberPresenceDotRing
+// presenceBarColor is the edge bar's fill. Offline draws nothing rather than the
+// offline grey: rows are flush, so the bars form one column, and a grey behind
+// every offline member would read as a border the sidebar had grown.
+func presenceBarColor(presence domain.Presence) color.Color {
+	if !presence.IsOnline() {
+		return color.Transparent
+	}
 
-	return dot
-}
-
-// memberPresenceLayout stacks the dot on the avatar's bottom-right corner. Placed
-// rather than centred: a row layout stretches, and a stretched circle is an ellipse.
-type memberPresenceLayout struct{}
-
-func (l *memberPresenceLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	avatar, dot := objects[0], objects[1]
-
-	avatar.Resize(size)
-	avatar.Move(fyne.Position{})
-
-	side := theme.Sizes.MemberPresenceDotSize
-	dot.Resize(fyne.NewSize(side, side))
-	dot.Move(fyne.NewPos(size.Width-side, size.Height-side))
-}
-
-func (l *memberPresenceLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
-	return objects[0].MinSize()
+	return presenceColor(presence)
 }
 
 /* Section headers */

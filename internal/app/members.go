@@ -212,6 +212,7 @@ func (a *App) refreshMemberList() {
 	serverID := a.currentServerID
 	if serverID == "" {
 		a.memberStale = false
+		a.dropMemberCache()
 		a.memberList.Reset()
 		a.setMentionCandidates(ui.MentionUser, nil)
 		a.updateMemberStatus()
@@ -227,7 +228,12 @@ func (a *App) refreshMemberList() {
 	a.memberSeq++
 	seq := a.memberSeq
 	epoch := a.epoch
-	options := memberListOptions()
+	options := a.memberListOptions()
+
+	// The walk resolves everybody's presence on the way past, so whatever is
+	// waiting to be patched is about to be answered by this instead.
+	a.presenceDirty = nil
+	a.memberWorking = true
 
 	go func() {
 		members := a.store.Members(serverID)
@@ -239,9 +245,12 @@ func (a *App) refreshMemberList() {
 		}
 
 		a.doOnUI(func() {
+			a.memberRebuilt()
 			if a.stale(epoch) || a.memberSeq != seq || a.currentServerID != serverID {
 				return
 			}
+
+			a.memberCache, a.memberCacheServer = members, serverID
 
 			a.setMentionCandidates(ui.MentionUser, candidates)
 			if visible {
@@ -250,6 +259,119 @@ func (a *App) refreshMemberList() {
 			}
 		}, false)
 	}()
+}
+
+// refreshMemberPresence redraws the sidebar for the people who came or went,
+// without asking the store for anybody else. Presence moves a member between the
+// list's sections and changes nothing they are ordered by, so the membership the
+// last walk resolved still stands: this copies it, re-resolves only who moved and
+// hands the copy to the model.
+//
+// That copy is what keeps it off the UI thread and free of a lock. The published
+// membership is never written into, so a worker reading one an older flush
+// published is reading something nothing will change under it — which is also why
+// two of these must not overlap, the second having started from the first's
+// source rather than from its answer. Call on the UI thread.
+func (a *App) refreshMemberPresence() {
+	changed := a.presenceDirty
+	a.presenceDirty = nil
+
+	if a.memberList == nil || len(changed) == 0 {
+		return
+	}
+
+	serverID := a.currentServerID
+	if serverID == "" || serverID != a.memberCacheServer || a.memberCache == nil {
+		a.refreshMemberList() // nothing resolved to patch
+		return
+	}
+
+	// A rebuild in flight is about to publish a membership this would have copied
+	// the previous one of. Its own landing re-queues these.
+	if a.memberWorking {
+		a.presenceDirty = changed
+		return
+	}
+
+	// Nothing on screen and nothing to feed: the picker takes its candidates from
+	// a member's name, which is not what moved.
+	if a.memberSidebar != nil && !a.memberSidebar.Visible() {
+		a.memberStale = true
+		return
+	}
+
+	previous := a.memberCache
+	hoisted := a.store.HoistedRoles(serverID)
+	options := a.memberListOptions()
+
+	a.memberSeq++
+	seq := a.memberSeq
+	epoch := a.epoch
+	a.memberWorking = true
+
+	go func() {
+		members := patchedMembers(a.store, serverID, previous, changed)
+		entries := ui.NewMemberModel(members, hoisted, options)
+
+		a.doOnUI(func() {
+			a.memberRebuilt()
+			if a.stale(epoch) || a.memberSeq != seq || a.currentServerID != serverID {
+				return
+			}
+
+			a.memberCache = members
+			a.memberList.SetModel(entries)
+			a.updateMemberStatus()
+		}, false)
+	}()
+}
+
+// patchedMembers is a copy of previous with everybody named in changed resolved
+// again, in the order they were already in — presence being the only thing that
+// moved and the order being by name. Apart from the rebuild so the picking can be
+// tested without a session or a widget, as memberStatusFor is.
+//
+// A copy rather than a write, because previous is published: a worker still
+// reading it must not see it move. Somebody the store has since forgotten keeps
+// the value that was drawn for them, which is what the next walk is for; somebody
+// changed who is not in previous at all is not added — they arrived after this
+// membership was resolved, so they are the next walk's too.
+//
+// One pass over the membership rather than a lookup per name: an index over
+// thousands of members costs more to build than the walk costs to make.
+func patchedMembers(store domain.Store, serverID string, previous []domain.Member, changed map[string]bool) []domain.Member {
+	members := make([]domain.Member, len(previous))
+	copy(members, previous)
+
+	for i := range members {
+		if !changed[members[i].UserID] {
+			continue
+		}
+		if member, ok := store.Member(serverID, members[i].UserID); ok {
+			members[i] = member
+		}
+	}
+
+	return members
+}
+
+// memberRebuilt releases the single-flight claim and picks up whatever arrived
+// while it was held. Called by both rebuilds whether or not their answer was
+// still wanted — a claim outliving its worker stops the sidebar following
+// presence for the rest of the session. Call on the UI thread.
+func (a *App) memberRebuilt() {
+	a.memberWorking = false
+
+	if len(a.presenceDirty) > 0 {
+		a.queueRefresh(refreshPresence)
+	}
+}
+
+// dropMemberCache forgets the resolved membership, so the next presence event
+// walks rather than patching something that is no longer the open server's. Call
+// on the UI thread.
+func (a *App) dropMemberCache() {
+	a.memberCache, a.memberCacheServer, a.presenceDirty = nil, "", nil
 }
 
 /* What the sidebar says when its rows cannot */
@@ -346,17 +468,24 @@ func (a *App) stopMemberWatchdog() {
 // memberListOptions is what the settings say the list should look like, read per
 // rebuild so a change applies to the next one. Hoisting only means anything
 // alongside the presence split — an ungrouped list has no sections to hoist into
-// — and the model reads it that way.
-func memberListOptions() ui.MemberListOptions {
+// — and the model reads it that way. A method because the You section needs this
+// account's ID.
+func (a *App) memberListOptions() ui.MemberListOptions {
 	settings := config.Current().Behaviour
 
-	return ui.MemberListOptions{
+	options := ui.MemberListOptions{
 		GroupByPresence: settings.GroupByPresence,
 		HoistRoles:      settings.HoistRoles,
 		HideOffline:     settings.HideOfflineMembers,
 		HideRoleless:    settings.HideRolelessMembers,
 		FallbackToAll:   settings.MemberListFallback,
 	}
+
+	if settings.ShowSelfFirst {
+		options.SelfID = a.store.SelfID()
+	}
+
+	return options
 }
 
 // refreshMemberRow redraws one member in place, for a change that does not move
@@ -368,7 +497,7 @@ func (a *App) refreshMemberRow(userID string) {
 	}
 
 	if member, ok := a.store.Member(a.currentServerID, userID); ok {
-		a.memberList.RefreshMember(member)
+		a.memberList.RefreshMember(&member)
 	}
 }
 

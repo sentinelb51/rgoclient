@@ -415,6 +415,9 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 			p.toggleRow("Give roles their own section",
 				"Lists roles such as Moderator above everyone else. Needs the section above.",
 				settings.HoistRoles, func(s *config.Settings, on bool) { s.Behaviour.HoistRoles = on }),
+			p.toggleRow("Show yourself at the top",
+				"Lists you first, under a You heading.",
+				settings.ShowSelfFirst, func(s *config.Settings, on bool) { s.Behaviour.ShowSelfFirst = on }),
 			p.toggleRow("Hide offline members",
 				"Leaves offline members out of the list.",
 				settings.HideOfflineMembers, func(s *config.Settings, on bool) { s.Behaviour.HideOfflineMembers = on }),
@@ -1122,7 +1125,7 @@ func (p *SettingsPage) sidebarPreview() fyne.CanvasObject {
 	// The member list places its rows itself, so a lone row has to be given the
 	// height it would have had — which is the size this preview is here to show.
 	member := newMemberRow(deps, nil)
-	member.SetMember(domain.Member{UserID: "preview", Name: "Someone", Presence: domain.PresenceOnline})
+	member.SetMember(&domain.Member{UserID: "preview", Name: "Someone", Presence: domain.PresenceOnline})
 
 	rows := VBoxNoSpacing(
 		NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, NewChannelWidget(deps, channel, func() {})),

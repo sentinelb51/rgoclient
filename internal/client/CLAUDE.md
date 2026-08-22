@@ -63,6 +63,14 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   every voice channel under text, and nothing looks wrong, the glyph is simply
   the other one — and every text-channel test elsewhere (`store.Permissions`)
   covers voice by saying nothing about it.
+- **The voice cache is revoltgo's, not this package's.** `State` tracks who is
+  in which call by default: `TrackVoice` puts `voice_states` in the open query,
+  Ready seeds it, and the default handlers apply join, leave, move and
+  `UserVoiceStateUpdate` before ours run. So `registerVoice` only *names* the
+  channel that moved and `store.VoiceParticipants` reads `State.VoiceStates`
+  back — nothing here mirrors the participants. A move arrives as one event
+  naming both ends, never a leave/join pair, and `EventUserMoveVoiceChannel` is
+  the same move sent only to the account that was moved.
 - **`State.ChannelPermissions`/`ServerPermissions`/`UserPermissions` agree with
   the backend now** — rewritten against `calculate_*_permissions` in
   `core/permissions/src/impl.rs` — and `client/store.go` still does the whole

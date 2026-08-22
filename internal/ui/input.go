@@ -386,7 +386,12 @@ func (m *MessageInput) KeyUp(key *fyne.KeyEvent) {
 // TypedKey sends on Enter, newlines on Shift+Enter, cancels pending
 // replies/attachments on Escape — or reports the Escape when there is nothing to
 // cancel — edits the last own message on Up in an empty composer, and otherwise
-// defers to the entry, refreshing so MinSize recomputes.
+// defers to the entry.
+//
+// Nothing here refreshes: widget.Entry's own TypedKey and TypedRune end in one,
+// and a second is a second re-wrap of the text and a second whole-window repaint
+// per keystroke. The branches that return early inside Entry — backspace at the
+// start of an empty composer — changed nothing to draw.
 //
 // Which of Enter and Ctrl+Enter sends is a setting; Shift+Enter is a newline
 // either way. An open mention picker gets first refusal on the navigation keys,
@@ -416,12 +421,10 @@ func (m *MessageInput) TypedKey(key *fyne.KeyEvent) {
 	case key.Name == fyne.KeyBackspace || key.Name == fyne.KeyDelete:
 		m.Entry.TypedKey(key)
 		m.reportKeystroke(KeystrokeErase)
-		m.Refresh()
 	case key.Name != fyne.KeyReturn && key.Name != fyne.KeyEnter:
 		m.Entry.TypedKey(key)
 	case m.shiftPressed || !m.sends():
 		m.TypedRune('\n')
-		m.Refresh()
 	default:
 		m.reportKeystroke(KeystrokeSend)
 		if m.OnSubmit != nil {
@@ -443,7 +446,6 @@ func (m *MessageInput) sends() bool {
 
 func (m *MessageInput) TypedRune(r rune) {
 	m.Entry.TypedRune(r)
-	m.Refresh()
 	m.syncMentions()
 	m.reportTyping()
 

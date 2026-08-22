@@ -360,6 +360,121 @@ func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
 
 func (w *ChannelWidget) MouseOut() { w.refreshAppearance() }
 
+/* Voice participants */
+
+// VoiceParticipantRow is one person in a voice channel's call, drawn under that
+// channel's row in the sidebar: their avatar, their name in whatever colour their
+// most senior role gives it, and a mark for a camera or a screen share. Tapping
+// one opens their profile, as tapping them in the member sidebar does.
+//
+// Built per rebuild rather than recycled the way a MemberRow is: the channel
+// column is replaced wholesale on every refresh, and a call holds a handful of
+// people where the member list scrolls hundreds.
+type VoiceParticipantRow struct {
+	tapBase
+
+	deps   Deps
+	userID string
+
+	background *canvas.Rectangle
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*VoiceParticipantRow)(nil)
+	_ desktop.Hoverable = (*VoiceParticipantRow)(nil)
+)
+
+// NewVoiceParticipantRow draws one participant. The name is already resolved —
+// the store hands back the nickname and role colour the member sidebar would
+// draw them with.
+func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *VoiceParticipantRow {
+	w := &VoiceParticipantRow{
+		deps:       deps,
+		userID:     participant.UserID,
+		background: canvas.NewRectangle(color.Transparent),
+	}
+
+	side := theme.Sizes.VoiceAvatarSize
+	avatar := circularAvatar(deps.Images, participant.AvatarURL, fyne.NewSize(side, side))
+
+	name := newText(participant.Name, voiceNameColor(participant), theme.Sizes.VoiceNameSize)
+	name.Alignment = fyne.TextAlignLeading
+
+	leading := HBoxNoSpacing(
+		HorizontalSpacer(theme.Sizes.VoiceRowIndent),
+		container.NewCenter(avatar),
+		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
+	)
+
+	// The name takes the leftover width in a Border's centre, as it does on a
+	// member row: an HBox would hand the ellipsis box, which reports zero, zero.
+	w.content = container.NewStack(w.background, container.NewBorder(nil, nil, leading,
+		voiceMarks(participant), NewEllipsisText(name)))
+
+	w.onTap = func() { deps.Actions.OnUserTapped(participant.UserID, w) }
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *VoiceParticipantRow) CreateRenderer() fyne.WidgetRenderer {
+	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.VoiceRowHeight))
+
+	return widget.NewSimpleRenderer(w.content)
+}
+
+func (w *VoiceParticipantRow) MouseIn(*desktop.MouseEvent) {
+	w.background.FillColor = theme.Colors.ChannelHoverBackground
+	w.background.Refresh()
+}
+
+func (w *VoiceParticipantRow) MouseOut() {
+	w.background.FillColor = color.Transparent
+	w.background.Refresh()
+}
+
+// voiceMarks is what a participant is sharing, at the trailing end of their row.
+// A bot mark rides with them: the same account is marked as one wherever it is
+// drawn, and a call is one more place a bot turns up.
+func voiceMarks(participant domain.VoiceParticipant) fyne.CanvasObject {
+	marks := HBoxNoSpacing()
+
+	if participant.Bot {
+		marks.Add(container.NewCenter(NewBotMark(theme.Sizes.VoiceMarkSize)))
+		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
+	}
+	if participant.Screensharing {
+		marks.Add(container.NewCenter(voiceMark(assets.ScreenshareIcon)))
+		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
+	}
+	if participant.Camera {
+		marks.Add(container.NewCenter(voiceMark(assets.CameraIcon)))
+		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
+	}
+	marks.Add(HorizontalSpacer(theme.Sizes.ChannelLeftPadding))
+
+	return marks
+}
+
+// voiceMark is one of those marks, tinted the way the sidebar's other glyphs are.
+func voiceMark(res fyne.Resource) fyne.CanvasObject {
+	side := theme.Sizes.VoiceMarkSize
+
+	return newScaledIcon(tintedIcon(res, theme.Colors.VoiceParticipantMark), side)
+}
+
+// voiceNameColor colours a participant's name: their role's, or the row's own
+// quieter default. Presence is deliberately not part of it — somebody in a call
+// is in it whatever their account says it is doing.
+func voiceNameColor(participant domain.VoiceParticipant) color.Color {
+	if participant.Color != nil {
+		return participant.Color
+	}
+
+	return theme.Colors.VoiceParticipantName
+}
+
 /* Channel categories */
 
 // CategoryWidget is a collapsible category header, toggling the channel widgets

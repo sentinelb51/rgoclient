@@ -247,7 +247,7 @@ func TestLiveCall(t *testing.T) {
 	// sine where there is no microphone.
 	var source voice.PCMSource = &tone{}
 	if os.Getenv("RGO_LIVE") != "tone" {
-		capture, err := audio.OpenInput("", audio.InputConfig{Sensitivity: 35, Gain: 1, Suppress: true})
+		capture, err := audio.OpenInput("", audio.InputConfig{Sensitivity: 35, Gain: 1, HighPass: true})
 		if err != nil {
 			t.Logf("no microphone (%v); falling back to a sine", err)
 		} else {

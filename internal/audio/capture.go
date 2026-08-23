@@ -80,10 +80,13 @@ type InputConfig struct {
 	// Gain scales the signal after the gate, 0-2.
 	Gain float32
 
-	// Suppress turns the noise reduction stages on. The gate runs either way —
-	// it is what the sensitivity slider means — so this is the filtering in front
-	// of it rather than the gate itself.
-	Suppress bool
+	// HighPass runs the ~90 Hz filter in front of the gate: mains hum, fan
+	// rumble, desk knocks. It is *not* noise suppression — nothing here touches
+	// hiss or background sound inside the voice range, and a frame the gate passes
+	// is sent with whatever noise was on it.
+	//
+	// The gate runs either way, that being what the sensitivity slider means.
+	HighPass bool
 
 	// PushToTalk hands the decision to SetTransmitting instead of the gate.
 	PushToTalk bool
@@ -128,7 +131,7 @@ func OpenInput(id string, cfg InputConfig) (*Capture, error) {
 	c.sensitivity.Store(int64(cfg.Sensitivity))
 	c.push.Store(cfg.PushToTalk)
 
-	if cfg.Suppress {
+	if cfg.HighPass {
 		c.chain = append(c.chain, newHighPass(90))
 	}
 	c.chain = append(c.chain, c.gate)

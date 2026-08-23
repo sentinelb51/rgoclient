@@ -82,7 +82,7 @@ func (a *App) joinCall(channelID string) {
 		capture, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
 			Sensitivity: settings.Sensitivity,
 			Gain:        float32(settings.InputVolume) / 100,
-			Suppress:    settings.NoiseSuppression,
+			HighPass:    settings.HighPass,
 		})
 		if err != nil {
 			return err
@@ -674,7 +674,7 @@ func (a *App) startInputMonitor(report func(level float32)) {
 		opened, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
 			Sensitivity: settings.Sensitivity,
 			Gain:        float32(settings.InputVolume) / 100,
-			Suppress:    settings.NoiseSuppression,
+			HighPass:    settings.HighPass,
 		})
 		if err != nil {
 			log.Printf("open microphone for the level meter: %v", err)

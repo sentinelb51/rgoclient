@@ -258,9 +258,10 @@ type Voice struct {
 	// takes a raised voice.
 	Sensitivity int `json:"sensitivity"`
 
-	// NoiseSuppression puts the filtering in front of the gate. The gate itself
-	// runs either way — it is what Sensitivity means.
-	NoiseSuppression bool `json:"noise_suppression"`
+	// HighPass runs the ~90 Hz filter in front of the gate, which is the whole of
+	// what this client does to a frame's *content*. The gate runs either way — it
+	// is what Sensitivity means.
+	HighPass bool `json:"high_pass"`
 
 	// InputVolume scales the microphone, 0-200.
 	InputVolume int `json:"input_volume"`
@@ -384,11 +385,11 @@ func Default() Settings {
 			// slider is for. Both volumes at unity, and joining neither muted nor
 			// deafened — a reader who wants either can say so, and a client that
 			// joins silent with no obvious reason reads as broken.
-			Mode:             VoiceModeActivity,
-			Sensitivity:      35,
-			NoiseSuppression: true,
-			InputVolume:      100,
-			OutputVolume:     100,
+			Mode:         VoiceModeActivity,
+			Sensitivity:  35,
+			HighPass:     true,
+			InputVolume:  100,
+			OutputVolume: 100,
 
 			// On: a clean stream decodes at exactly the same price either way, so
 			// the only machine that pays is one already losing packets, which is the

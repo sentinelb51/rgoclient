@@ -61,9 +61,10 @@ func (p *SettingsPage) microphoneRows(settings config.Voice) []fyne.CanvasObject
 	rows = append(rows,
 		p.numberRow("Input volume", "", settings.InputVolume, 0, 200, "%",
 			func(s *config.Settings, v int) { s.Voice.InputVolume = v }),
-		p.toggleRow("Noise reduction", "Filters out steady sound below the voice range.",
-			settings.NoiseSuppression,
-			func(s *config.Settings, on bool) { s.Voice.NoiseSuppression = on }),
+		p.toggleRow("Rumble filter",
+			"Removes hum and rumble from below the voice range. Steady hiss and background sound are unaffected.",
+			settings.HighPass,
+			func(s *config.Settings, on bool) { s.Voice.HighPass = on }),
 	)
 
 	if !PushToTalkSupported {

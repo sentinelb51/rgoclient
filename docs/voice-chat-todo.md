@@ -305,9 +305,13 @@ done on real hardware.
   hears itself. `audio.Processor` is the seam and `Engine` owns both directions
   precisely so the playback reference is reachable. This is the single biggest
   quality gap for anyone not wearing headphones.
-- **No real noise suppression.** "Noise reduction" is a one-pole high-pass in
-  front of the gate. RNNoise was the original plan (vendored Xiph C, ~85 KB
-  model) and still fits behind `Processor`.
+- **No real noise suppression.** The only thing done to a frame's content is a
+  one-pole high-pass in front of the gate, and the setting is named for that —
+  "Rumble filter", `config.Voice.HighPass`. It was called "Noise reduction",
+  which cost a live test to find out was untrue: a gate silences the frames
+  between words and does nothing to static while somebody is talking. RNNoise
+  was the original plan (vendored Xiph C, ~85 KB model) and still fits behind
+  `Processor`.
 - **Push-to-talk is Windows-only** (`ui.KeyHeld` → `GetAsyncKeyState`). X11 needs
   `XQueryKeymap` on a display connection the client does not own; macOS needs an
   Accessibility grant. `PushToTalkSupported` is false there and the mode is left

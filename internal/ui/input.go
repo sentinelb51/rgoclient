@@ -545,6 +545,16 @@ func (m *MessageInput) reportTyping() {
 // Keystroke is which kind of key a composer keystroke was — as much as anything
 // listening needs to tell one click from another, and no more. Navigation keys
 // are not among them: nothing moves in the composer, so nothing should sound.
+// AudioDevice is one input or output the settings page may offer. `ui` must not
+// import `audio`, so a device crosses as a value the way a Keystroke does — the
+// controller converts, and the widget only draws.
+type AudioDevice struct {
+	ID   string // "" is the system default
+	Name string
+
+	Default bool
+}
+
 type Keystroke int
 
 const (

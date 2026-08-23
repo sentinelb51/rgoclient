@@ -56,6 +56,34 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   both arrive on the wire meaning nothing to a cache; revoltgo no-ops both.
   `CanReceive`/`CanPublish` are the other trap: non-nullable server-side, so
   clearing one resets it to **true** — un-deafened, un-muted — not to unset.
+- **`ServerMemberEditParams` carries the three voice fields**, `CanPublish`,
+  `CanReceive` and `VoiceChannel`, so the four voice moderation actions are
+  ordinary `editMember` calls. Un-muting is `CanPublish: &true` and **not** a
+  remove, for the reason above — the one pair in that file whose negative case is
+  not a `Remove`.
+- **`join_call` is the whole of joining, and there is no leave.** `POST
+  /channels/{id}/join_call` answers with a voice node URL and a token minted
+  against this session (`Client.JoinCall`). Its `force_disconnect` is not
+  optional in practice: Stoat refuses a second connection for one account, so a
+  client that crashed mid-call cannot rejoin without it. Nothing hangs up —
+  neither revoltgo nor Stoat has a route — leaving *is* disconnecting from the
+  voice server, after which the gateway announces it as a voice-state leave.
+- **`node` is required, and an empty one is not "you pick".** `voice_join.rs`
+  answers a blank node with **400 `UnknownNode`**, so a client that does not name
+  one cannot join at all — verified against the live instance, not read off the
+  spec, where `node` looks optional. The list is the instance config's `livekit`
+  block — `revoltgo.InstanceConfigFeatures.LiveKit`, read through
+  `Session.Instance`. `Client.pickVoiceNode` caches the answer for the session,
+  the node list being instance configuration. With more than one node the choice
+  is *measured*: `nearestVoiceNode` dials them all and takes the first handshake
+  to complete, the coordinates each node carries being useless without the
+  reader's own. stoat.chat publishes exactly one, `hel1`, which is taken without
+  a probe.
+- **The LiveKit token's `sub` is the Revolt user ID**, and its `video.room` is
+  the channel ID — one room per voice channel. Everything per-person in the
+  client is keyed on the first of those, so `voice.Call` logs a line if the room
+  ever disagrees; it is a check rather than a fix, but the symptom otherwise is
+  audio filed under the wrong name, which is invisible from this end.
 - **A voice channel does not say so in its type.** Stoat dropped the
   `VoiceChannel` variant and revoltgo no longer defines the constant: a voice
   channel is a **`TextChannel` carrying a `voice` object** (`Channel.Voice`). So

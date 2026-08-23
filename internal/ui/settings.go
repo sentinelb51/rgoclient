@@ -27,6 +27,7 @@ const (
 	SectionStyles
 	SectionBehaviour
 	SectionNotifications
+	SectionVoice
 	SectionCache
 	SectionPerformance
 	SectionAdvanced
@@ -39,6 +40,7 @@ var railEntries = []railEntry{
 	{int(SectionStyles), "Styles", assets.StylesIcon},
 	{int(SectionBehaviour), "Behaviour", assets.BehaviourIcon},
 	{int(SectionNotifications), "Notifications", assets.NotifyIcon},
+	{int(SectionVoice), "Voice", assets.MicIcon},
 	{int(SectionCache), "Cache", assets.CacheIcon},
 	{int(SectionPerformance), "Performance", assets.PerformanceIcon},
 	{int(SectionAdvanced), "Advanced", assets.AdvancedIcon},
@@ -66,6 +68,29 @@ type SettingsHooks struct {
 
 	Version string
 	Build   string
+
+	/* Voice */
+
+	// InputDevices and OutputDevices enumerate what the machine offers. Both walk
+	// the audio backend, so both are stubbed out for the index pass.
+	InputDevices  func() []AudioDevice
+	OutputDevices func() []AudioDevice
+
+	// StartInputMonitor opens the microphone and reports its level until
+	// StopInputMonitor. The controller samples — a level arrives off the audio
+	// thread and each repaint is the whole window — so this is called at a rate a
+	// meter can be drawn at rather than at the device's.
+	//
+	// Opening a device is why it must never run during the index pass, and why
+	// stopping it belongs to both showSection and Close.
+	StartInputMonitor func(report func(level float32))
+	StopInputMonitor  func()
+
+	// GateRatio is where a sensitivity setting falls on the meter's scale, 0-1.
+	// The meter draws a level and a threshold on one bar and the two have to agree
+	// about decibels; the mapping belongs to the audio package, which ui does not
+	// import, so it crosses as a plain ratio like the level itself.
+	GateRatio func(sensitivity int) float32
 
 	/* Account */
 
@@ -208,6 +233,11 @@ type SettingsPage struct {
 	// dragged slider is answered at once: the client behind the page is covered, so
 	// they are the only thing that can answer.
 	previews []settingsPreview
+
+	// meter is the Voice section's input level bar, and the one control on this
+	// page that owns a *device*. It is stopped by both showSection and Close — the
+	// page has no unmount hook, and a discarded widget hears nothing.
+	meter *voiceLevelMeter
 }
 
 // settingsPreview is a sample of the real widgets, and how to build it again.
@@ -235,6 +265,7 @@ func (p *SettingsPage) Open() {
 // Close hides the page and drops what it built, so nothing it mounted keeps a
 // widget or an image alive. Call on the UI thread.
 func (p *SettingsPage) Close() {
+	p.stopMeter()
 	p.resetShell()
 	p.previews = nil
 	p.account = accountRows{}
@@ -357,6 +388,7 @@ func (p *SettingsPage) showSection(section SettingsSection) {
 		section = SectionInterface
 	}
 
+	p.stopMeter() // the Voice section holds a microphone open; leaving it must not
 	p.section = section
 	p.searching = false
 	p.account = accountRows{} // a profile landing after this has nothing left to fill
@@ -379,6 +411,8 @@ func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 		return p.behaviourSection()
 	case SectionNotifications:
 		return p.notificationsSection()
+	case SectionVoice:
+		return p.voiceSection()
 	case SectionCache:
 		return p.cacheSection()
 	case SectionPerformance:

@@ -35,6 +35,7 @@ type Settings struct {
 	Styles        Styles        `json:"styles"`
 	Behaviour     Behaviour     `json:"behaviour"`
 	Notifications Notifications `json:"notifications"`
+	Voice         Voice         `json:"voice"`
 	Cache         Cache         `json:"cache"`
 	Performance   Performance   `json:"performance"`
 }
@@ -235,6 +236,56 @@ type Performance struct {
 	VSync bool `json:"vsync"`
 }
 
+// Voice is the call: which devices it uses, what it does to the microphone on
+// the way out, and what state it joins in.
+//
+// Every field here is read at its use site rather than captured. A device name
+// is read once when the device is opened; the gate reads Sensitivity from
+// config.Current per frame, which is an atomic snapshot rather than a lock.
+type Voice struct {
+	/* Devices */
+
+	// An empty identifier is the system default, which is also what a device that
+	// has since been unplugged falls back to.
+	InputDevice  string `json:"input_device"`
+	OutputDevice string `json:"output_device"`
+
+	/* Capture */
+
+	Mode string `json:"mode"` // VoiceModeActivity or VoiceModePush
+
+	// Sensitivity is where the gate opens, 0-100: 0 passes almost anything, 100
+	// takes a raised voice.
+	Sensitivity int `json:"sensitivity"`
+
+	// NoiseSuppression puts the filtering in front of the gate. The gate itself
+	// runs either way — it is what Sensitivity means.
+	NoiseSuppression bool `json:"noise_suppression"`
+
+	// InputVolume scales the microphone, 0-200.
+	InputVolume int `json:"input_volume"`
+
+	// PushToTalkKey is the key held to speak in VoiceModePush.
+	PushToTalkKey string `json:"push_to_talk_key"`
+
+	/* Playback */
+
+	// OutputVolume scales every remote participant, 0-100. Notification sounds
+	// have their own and are deliberately not scaled by it.
+	OutputVolume int `json:"output_volume"`
+
+	// DeepPLC reconstructs a lost packet with libopus's neural model instead of
+	// extrapolating the last pitch period. It costs nothing on a clean stream —
+	// the work happens only while something is actually being concealed — so it is
+	// on by default, and it is a setting because it is the reader's machine.
+	DeepPLC bool `json:"deep_plc"`
+
+	/* On joining */
+
+	JoinMuted    bool `json:"join_muted"`
+	JoinDeafened bool `json:"join_deafened"`
+}
+
 /* Enumerated values */
 
 // Density presets. Each names a bundle of size overrides the Interface section
@@ -251,6 +302,14 @@ const (
 const (
 	TimeFormat12 = "12h"
 	TimeFormat24 = "24h"
+)
+
+// How the microphone decides it is being spoken into. Activity is the gate
+// deciding; Push is a key being held, and the gate then only shapes what it
+// passes.
+const (
+	VoiceModeActivity = "activity"
+	VoiceModePush     = "push"
 )
 
 /* Defaults */
@@ -318,6 +377,23 @@ func Default() Settings {
 			PlayConnection:    true,
 
 			TypingVolume: 45,
+		},
+		Voice: Voice{
+			// Voice activity rather than push-to-talk: it is what a client with no
+			// key captured yet can actually do, and the gate is what the sensitivity
+			// slider is for. Both volumes at unity, and joining neither muted nor
+			// deafened — a reader who wants either can say so, and a client that
+			// joins silent with no obvious reason reads as broken.
+			Mode:             VoiceModeActivity,
+			Sensitivity:      35,
+			NoiseSuppression: true,
+			InputVolume:      100,
+			OutputVolume:     100,
+
+			// On: a clean stream decodes at exactly the same price either way, so
+			// the only machine that pays is one already losing packets, which is the
+			// machine that wants it.
+			DeepPLC: true,
 		},
 		Cache: Cache{
 			ImageDiskMiB:       512,

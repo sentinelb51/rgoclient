@@ -1443,7 +1443,7 @@ var permissionCategories = []permissionCategory{
 	},
 	{
 		caption: "Voice",
-		detail:  "What can be done in a voice channel. This client joins none of them yet.",
+		detail:  "What can be done in a voice channel.",
 		entries: []permissionEntry{
 			{"Connect", "Join a voice channel.", domain.PermissionConnect},
 			{"Speak", "Be heard once connected.", domain.PermissionSpeak},

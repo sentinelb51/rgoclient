@@ -805,7 +805,8 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 
 	leading := HBoxNoSpacing(
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(container.New(&memberRingLayout{}, w.ring, w.avatar)),
+		container.NewCenter(container.New(
+			&memberRingLayout{band: theme.Sizes.MemberPresenceRing}, w.ring, w.avatar)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
@@ -994,7 +995,7 @@ func memberNameColor(member *domain.Member) color.Color {
 // memberRingLayout draws the band at full size with the avatar centred on it, so
 // the ring is what the picture is inset from. Placed rather than stacked: a Stack
 // stretches every child, and a stretched circle is an ellipse.
-type memberRingLayout struct{}
+type memberRingLayout struct{ band float32 }
 
 func (l *memberRingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	ring, avatar := objects[0], objects[1]
@@ -1009,7 +1010,7 @@ func (l *memberRingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 
 func (l *memberRingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	side := objects[1].MinSize()
-	band := 2 * theme.Sizes.MemberPresenceRing
+	band := 2 * l.band
 
 	return fyne.NewSize(side.Width+band, side.Height+band)
 }

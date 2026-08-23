@@ -143,6 +143,23 @@ var Colors = struct {
 	VoiceParticipantName color.Color
 	VoiceParticipantMark color.Color
 
+	// VoiceSpeaking is the ring around a participant who is talking. It is drawn
+	// over the row's hover fill as well as over its rest state, so it has to read
+	// against both.
+	VoiceSpeaking color.Color
+
+	/* The call dock */
+
+	// The strip at the foot of the channel column while this account is in a call.
+	// The two state colours are the connection's health, and the danger tint is
+	// what hanging up wears — an outlined button carries its own tint in its
+	// hairline, so nothing else has to say which button that is.
+	CallDockBackground color.Color
+	CallDockText       color.Color
+	CallDockStateGood  color.Color
+	CallDockStatePoor  color.Color
+	CallDockDanger     color.Color
+
 	/* Bot mark */
 
 	// BotMark is the glyph following the name of an account Revolt marks as a
@@ -450,6 +467,18 @@ var Colors = struct {
 	VoiceParticipantName: color.RGBA{R: 150, G: 158, B: 175, A: 255}, // #969EAF
 	VoiceParticipantMark: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
 
+	// Bright enough to carry against the hover fill, which is the harder of the
+	// two backgrounds it is drawn over.
+	VoiceSpeaking: color.RGBA{R: 61, G: 214, B: 140, A: 255}, // #3DD68C
+
+	// The dock sits below the channel list and above nothing, so it is a shade
+	// darker than the column rather than lighter: it reads as a floor.
+	CallDockBackground: color.RGBA{R: 26, G: 29, B: 36, A: 255},    // #1A1D24
+	CallDockText:       color.RGBA{R: 214, G: 219, B: 229, A: 255}, // #D6DBE5
+	CallDockStateGood:  color.RGBA{R: 61, G: 214, B: 140, A: 255},  // #3DD68C
+	CallDockStatePoor:  color.RGBA{R: 232, G: 179, B: 84, A: 255},  // #E8B354
+	CallDockDanger:     color.RGBA{R: 226, G: 92, B: 92, A: 255},   // #E25C5C
+
 	// What the sidebar says when it has no rows to say it with. Pitched at the
 	// section headers rather than at a name: it is furniture, not a member.
 	MemberStatusText: color.RGBA{R: 122, G: 130, B: 147, A: 255}, // #7A8293
@@ -588,6 +617,27 @@ var Sizes = struct {
 	VoiceNameSize   float32
 	VoiceMarkSize   float32
 	VoiceMarkGap    float32
+
+	// The speaking ring's band. The row has to be tall enough for the avatar plus
+	// twice this or the ring clips at the top and bottom.
+	VoiceSpeakingRing float32
+
+	/* The call dock */
+
+	// The strip at the foot of the channel column. None of these is derived from
+	// the channel sidebar's own padding: a size expressed as an offset from an
+	// unrelated one cannot be edited without moving something nobody asked to
+	// move, and the settings page reaches this table by reflection anyway.
+	CallDockHeight    float32
+	CallDockPaddingV  float32
+	CallDockPaddingH  float32
+	CallDockGap       float32
+	CallDockNameSize  float32
+	CallDockStateSize float32
+
+	// No button size: an OutlinedIconButton fixes its own square at
+	// IconButtonSize, so a second number here would be one nothing reads.
+	CallDockButtonGap float32
 
 	// The strip drawn over the list while a membership is on its way or after it
 	// failed to arrive. The mark is the client's own sweeping line, so its width
@@ -983,6 +1033,8 @@ var Sizes = struct {
 	SettingsSliderTrack    float32
 	SettingsSliderKnob     float32
 	SettingsUsageHeight    float32
+	SettingsLevelHeight    float32
+	SettingsLevelMarker    float32
 	SettingsPaletteSize    float32
 	SettingsPaletteGap     float32
 	SettingsPreviewGap     float32
@@ -1034,12 +1086,23 @@ var Sizes = struct {
 
 	MemberPresenceRing: 2,
 
-	VoiceRowHeight:  26,
+	VoiceRowHeight:  28,
 	VoiceRowIndent:  31,
 	VoiceAvatarSize: 18,
 	VoiceNameSize:   13,
 	VoiceMarkSize:   13,
 	VoiceMarkGap:    6,
+
+	// 18 + 2x2 is 22 against a row of 28, so the ring has its headroom.
+	VoiceSpeakingRing: 2,
+
+	CallDockHeight:    52,
+	CallDockPaddingV:  8,
+	CallDockPaddingH:  10,
+	CallDockGap:       2,
+	CallDockNameSize:  12,
+	CallDockStateSize: 11,
+	CallDockButtonGap: 4,
 
 	MemberStatusTextSize: 12,
 	MemberStatusMarkSize: 24,
@@ -1478,6 +1541,8 @@ var Sizes = struct {
 	SettingsSliderTrack:  4,
 	SettingsSliderKnob:   14,
 	SettingsUsageHeight:  8,
+	SettingsLevelHeight:  10,
+	SettingsLevelMarker:  2,
 	SettingsPaletteSize:  22,
 	SettingsPaletteGap:   6,
 	SettingsPreviewGap:   10,

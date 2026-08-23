@@ -7,9 +7,12 @@ package client
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"maps"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strconv"
@@ -795,18 +798,48 @@ func (c *Client) ResolveMessages(targets []MessageRef) (resolved []*domain.Messa
 // text. A wording it stops using reads as no status at all, which is the safe
 // answer: a caller that forgets what is gone forgets nothing instead.
 func answeredGone(err error) bool {
+	status, ok := statusOf(err)
+
+	return ok && (status == http.StatusNotFound || status == http.StatusForbidden)
+}
+
+// statusOf digs the HTTP status back out of a revoltgo error. ok is false when
+// the error is not one of those at all — a dial, a timeout, a reset — which is
+// what tells a network failure from an answer.
+func statusOf(err error) (int, bool) {
 	rest, ok := strings.CutPrefix(err.Error(), "bad status code ")
 	if !ok {
-		return false
+		return 0, false
 	}
 
 	code, _, _ := strings.Cut(rest, ":")
-	status, err := strconv.Atoi(code)
-	if err != nil {
+
+	status, convErr := strconv.Atoi(code)
+	if convErr != nil {
+		return 0, false
+	}
+
+	return status, true
+}
+
+// Transient reports whether an error is worth trying the same request again.
+//
+// Anything that is not an HTTP answer is: a dial that timed out or a connection
+// that was reset says nothing about whether the request was acceptable. A 5xx is
+// the server failing rather than refusing, so it counts too. A 4xx does not —
+// asking a second time gets the same refusal — and neither does having no
+// session, which no amount of waiting fixes.
+func Transient(err error) bool {
+	if err == nil || errors.Is(err, ErrNoSession) {
 		return false
 	}
 
-	return status == http.StatusNotFound || status == http.StatusForbidden
+	status, ok := statusOf(err)
+	if !ok {
+		return true
+	}
+
+	return status >= 500
 }
 
 /* Conversations */
@@ -988,6 +1021,163 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 	_, err := session.ChannelEdit(channelID, params)
 
 	return err
+}
+
+/* Calls */
+
+// voiceNodeProbe bounds how long the media servers are given to answer when
+// there is more than one to choose between. A node that has not completed a TCP
+// handshake by then is not the one to dial anyway.
+const voiceNodeProbe = 2 * time.Second
+
+// pickVoiceNode resolves the node join_call has to be asked for. **Not
+// optional**: Stoat's voice_join refuses an empty node with UnknownNode rather
+// than choosing one, so a client that does not name one cannot join at all.
+//
+// The answer is cached for the session — the node list is instance
+// configuration and does not change under a running client.
+func (c *Client) pickVoiceNode(session *revoltgo.Session) (string, error) {
+	c.mu.Lock()
+	cached := c.voiceNodeName
+	c.mu.Unlock()
+
+	if cached != "" {
+		return cached, nil
+	}
+
+	config, err := session.Instance()
+	if err != nil {
+		return "", fmt.Errorf("instance config: %w", err)
+	}
+
+	live := config.Features.LiveKit
+	if !live.Enabled || len(live.Nodes) == 0 {
+		return "", errors.New("this instance offers no voice servers")
+	}
+
+	name := nearestVoiceNode(live.Nodes)
+	if name == "" {
+		return "", errors.New("the instance named no voice server")
+	}
+
+	c.mu.Lock()
+	c.voiceNodeName = name
+	c.mu.Unlock()
+
+	return name, nil
+}
+
+// nearestVoiceNode picks which media server to dial. The nodes carry
+// coordinates, but the reader's own position is not something this client knows
+// or has any business asking for, so nearness is measured rather than computed:
+// every node is dialled at once and the first handshake to complete wins.
+//
+// One node is the common case — stoat.chat publishes only hel1 — and is taken
+// without a probe, so this costs nothing on the instance anybody is using. If
+// none of several answers within voiceNodeProbe the first named one is returned:
+// a join against a slow node beats no join.
+func nearestVoiceNode(nodes []revoltgo.InstanceConfigVoiceNode) string {
+	named := slices.DeleteFunc(slices.Clone(nodes), func(node revoltgo.InstanceConfigVoiceNode) bool {
+		return node.Name == ""
+	})
+
+	if len(named) == 0 {
+		return ""
+	}
+
+	if len(named) == 1 {
+		return named[0].Name
+	}
+
+	// Buffered for every candidate, so a probe that finishes after the winner has
+	// been taken still sends and returns rather than leaking its goroutine.
+	fastest := make(chan string, len(named))
+
+	for _, node := range named {
+		address := voiceNodeAddress(node.PublicURL)
+		if address == "" {
+			continue
+		}
+
+		go func() {
+			conn, err := net.DialTimeout("tcp", address, voiceNodeProbe)
+			if err != nil {
+				return
+			}
+
+			conn.Close()
+			fastest <- node.Name
+		}()
+	}
+
+	select {
+	case name := <-fastest:
+		return name
+	case <-time.After(voiceNodeProbe):
+		log.Printf("no voice node answered in %v; taking %s", voiceNodeProbe, named[0].Name)
+
+		return named[0].Name
+	}
+}
+
+// voiceNodeAddress is the host:port a node is probed on. LiveKit publishes a
+// wss:// URL, whose port is implied by the scheme rather than written down.
+func voiceNodeAddress(public string) string {
+	parsed, err := url.Parse(public)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+
+	if parsed.Port() != "" {
+		return parsed.Host
+	}
+
+	if parsed.Scheme == "ws" || parsed.Scheme == "http" {
+		return net.JoinHostPort(parsed.Host, "80")
+	}
+
+	return net.JoinHostPort(parsed.Host, "443")
+}
+
+// JoinCall asks a voice channel for the node to dial and a token good on it.
+// The credentials are minted per call and expire, so this is asked again on
+// every join rather than remembered.
+//
+// force maps to the route's force_disconnect, which tears down whatever this
+// account already has open elsewhere. Stoat refuses a second connection
+// otherwise, so a client that crashed mid-call cannot rejoin without it — pass
+// true on a retry.
+//
+// There is no matching leave route, here or in Stoat: leaving is disconnecting
+// from the voice server, after which the gateway announces it.
+func (c *Client) JoinCall(channelID string, force bool) (domain.CallCredentials, error) {
+	session := c.session.Load()
+	if session == nil {
+		return domain.CallCredentials{}, ErrNoSession
+	}
+
+	// The node is required — an empty one is UnknownNode, not "you pick" — and is
+	// resolved from the instance config once per session. Recipients rings a DM or
+	// group and has no meaning in a server channel.
+	node, err := c.pickVoiceNode(session)
+	if err != nil {
+		return domain.CallCredentials{}, err
+	}
+
+	call, err := session.ChannelsJoinCall(channelID, revoltgo.ChannelJoinCallParams{
+		Node:            node,
+		ForceDisconnect: force,
+	})
+	if err != nil {
+		return domain.CallCredentials{}, err
+	}
+
+	// A 200 carrying neither field must not become a dial to "".
+	if call.URL == "" || call.Token == "" {
+		return domain.CallCredentials{}, errors.New("no call credentials returned")
+	}
+
+	return domain.CallCredentials{URL: call.URL, Token: call.Token}, nil
 }
 
 /* Servers and members */
@@ -1525,6 +1715,52 @@ func (c *Client) editMember(serverID, userID string, edit revoltgo.ServerMemberE
 	_, err := session.ServerMemberEdit(serverID, userID, edit)
 
 	return err
+}
+
+/* Voice moderation */
+
+// SetMemberVoiceMuted takes a member's microphone away server-wide, under
+// MuteMembers. Revolt spells muted as can_publish: false.
+//
+// Un-muting sends can_publish: true rather than a remove. The field is not
+// nullable server-side and clearing it resets it to *true* — which is right by
+// accident here and wrong everywhere else, so the two voice flags are the one
+// pair in this file whose negative case is not a Remove.
+func (c *Client) SetMemberVoiceMuted(serverID, userID string, muted bool) error {
+	publish := !muted
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{CanPublish: &publish})
+}
+
+// SetMemberVoiceDeafened stops a member hearing the call server-wide, under
+// DeafenMembers. can_receive: false, and un-deafening sends true for the same
+// reason SetMemberVoiceMuted does.
+func (c *Client) SetMemberVoiceDeafened(serverID, userID string, deafened bool) error {
+	receive := !deafened
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{CanReceive: &receive})
+}
+
+// MoveMember drags somebody already in a call into another voice channel, under
+// MoveMembers. A member who is in no call is unaffected.
+func (c *Client) MoveMember(serverID, userID, channelID string) error {
+	if channelID == "" {
+		return errors.New("no channel to move to")
+	}
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{VoiceChannel: channelID})
+}
+
+// DisconnectMember kicks a member out of whatever call they are in, under
+// MoveMembers.
+//
+// Clearing VoiceChannel is not a nullable field being emptied but the route's
+// own way of spelling a disconnect, which is why this is the one voice edit that
+// sends a remove.
+func (c *Client) DisconnectMember(serverID, userID string) error {
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+		Remove: []revoltgo.ServerMemberClearType{revoltgo.ServerMemberClearVoiceChannel},
+	})
 }
 
 /* Roles */

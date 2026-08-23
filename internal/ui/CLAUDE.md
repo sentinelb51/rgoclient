@@ -501,3 +501,46 @@ naming and the test policy.
   *setting*-shaped row inside the role editor keeps labelled `Up`/`Down` buttons
   instead, which is the same split as everywhere else here: `entryRow` takes
   marks, `row` takes words.
+- **A control that owns a *device* must be stopped by `showSection` *and*
+  `Close`.** The settings page has no unmount hook, and "a discarded widget hears
+  nothing" is merely wasteful for an animation and a real leak for a microphone:
+  the Voice section's level meter (`settings_voice.go`) holds an open capture
+  stream, so `stopMeter` is called from both, exactly where `p.previews` and
+  `p.account` are cleared. The controller stops it a third time in
+  `resetSessionState`, signing out not being something that closes the page.
+  The same rule bites one level further out: `buildSettingsIndex` builds **every
+  section twice** on the first keystroke in the search box, so a hook that opens a
+  device is nil'd there beside `LoadProfile` and `CacheStats`, and the row stays
+  findable by returning a `newIndexRow` instead of a built one — the shape
+  `p.preview` already uses.
+  The meter is a row *inside* the Microphone group, directly under Sensitivity,
+  because it is not a reading — it is the other half of that control, and a
+  threshold in decibels set by a number from 0 to 100 cannot be aimed without it.
+  The level and the threshold arrive as **ratios on one scale** (what
+  `StartInputMonitor` reports, and `SettingsHooks.GateRatio`): the scale is
+  decibels and belongs to `internal/audio`, which `ui` does not import, so a
+  second copy of the mapping here would be free to drift from the gate's own. A
+  linear bar is what that replaced — speech sits at 0.05 of full scale and the
+  default threshold at 0.0024, so both drew on the floor.
+- **The speaking ring needs headroom or it clips.** `VoiceParticipantRow`'s ring
+  is built like the presence ring — the circle exists from construction at
+  `color.Transparent` and only its `FillColor` moves, nothing being added to a
+  container after the fact — and shares `memberRingLayout`, which now carries its
+  band rather than reading `MemberPresenceRing` directly. `VoiceRowHeight` has to
+  clear `VoiceAvatarSize + 2 × VoiceSpeakingRing`; it was 26 against an 18 px
+  avatar and is 28, which is why that row got taller when calls arrived.
+  `SetSpeaking` no-ops on an unchanged value, the contract `MemberRow.SetMember`
+  and `ChannelWidget.SetState` already keep — see `internal/app/CLAUDE.md` item 36
+  for why anything else is a full window repaint per syllable.
+- **`ui.CallDock` is a fourth kind of surface**, and not any of the three it looks
+  like. Not a `messageIsland` (the modal layer's surface for the three message
+  lists), not a composer dock badge (everything in that stack is about the *open
+  channel*, and a call outlives leaving the channel and the server), not a
+  `ChannelNote` (which is about the channel being read). It goes in the channel
+  column's bottom slot, follows `channelTop`'s rules — outside the list's padding,
+  full column width, its own `NewRowDivider`, hidden when there is no call — and
+  every `Show`/`Hide` is followed by `Relayout`, hiding a child reclaiming nothing.
+  Its two toggles **replace** their buttons rather than recolouring them:
+  `OutlinedIconButton` bakes its mark, its tint and its `disabled()` state at
+  construction, so a slot with a rebuilt button is the only way to change any of
+  the three.

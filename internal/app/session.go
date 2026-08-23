@@ -130,6 +130,13 @@ func (a *App) resetSessionState() {
 	// concerned, and an announcement of our own has no socket left to take back.
 	a.resetTyping()
 
+	// The call's token was minted against a session that no longer exists, and a
+	// microphone must not stay open across a sign-out. The settings page is not
+	// closed by signing out, so its level meter is stopped here as well rather than
+	// left holding the input device for the rest of the run.
+	a.leaveCall()
+	a.forgetInputMonitor()
+
 	a.resetInvites()
 
 	// A server's settings are about a server the account signing out is in, and the
@@ -145,6 +152,7 @@ func (a *App) resetSessionState() {
 
 	a.unreadChannels = make(map[string]bool)
 	a.mentions = make(map[string][]string)
+	a.dismissedMentions = make(map[string]bool)   // another account's mentions are not these
 	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise
 	a.serverIDs = nil
 	a.currentServerID = ""

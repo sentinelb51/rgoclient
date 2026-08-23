@@ -24,19 +24,30 @@ written against the domain. The dependency graph is a strict DAG:
 
 ```
 domain, markdown, config       no internal dependencies
-audio                          no internal dependencies    (+ oto, go-mp3)
+audio                          no internal dependencies    (+ malgo, go-mp3)
+voice      -> domain                         (+ lksdk, gopus)
 util       -> config
 cache      -> domain
 client     -> cache, config, domain          (+ revoltgo)
 ui         -> cache, config, domain, markdown, util
-app        -> audio, cache, client, config, domain, ui, util
+app        -> audio, voice, cache, client, config, domain, ui, util
 ```
 
 `config` is a leaf so everything above can read a setting. `cache` and `audio`
 deliberately do *not* import it — budgets, directories, volumes and file paths
 arrive as arguments, so either builds in a test with no settings file anywhere.
 `ui` does not import `audio` either: the composer names the *kind* of keystroke
-(`ui.Keystroke`) and `app` decides what it sounds like.
+(`ui.Keystroke`) and `app` decides what it sounds like. A device list crosses the
+same way, as `ui.AudioDevice`, and so does the microphone meter's scale — the
+level and the gate's threshold both arrive as ratios, decibels being `audio`'s.
+
+`voice` declares `PCMSource` / `PCMSink` **structurally** and never imports
+`audio`, so `app` is the only package importing both and therefore the only place
+that can hand an `*audio.Capture` to a `voice.Call`. Nothing in its surface
+mentions Revolt, LiveKit or miniaudio: it is shaped to lift into
+`sentinelb51/revoltgo-voice` as package `rvoice` without a line changing above
+it, which is the whole reason the transport lives behind `Jitter` rather than
+being written into the call.
 
 The seam is not tidiness: `revoltgo.State`'s caches are unexported and
 `newState()` is package-private, so nothing holding a `*revoltgo.Session` can be
@@ -83,6 +94,9 @@ change in `markdown/` does not pay for the Fyne footguns:
 - `internal/ui/CLAUDE.md` — the Fyne footguns.
 - `docs/known-gaps.md` — what is not built, and what revoltgo or Fyne prevents
   rather than effort.
+- `docs/voice-chat-todo.md` — the voice work queue: what is missing, what is
+  compromised, and what was measured and left alone. Read it before touching
+  `internal/voice`, `internal/audio` or the call half of `internal/app`.
 - `docs/performance.md` — what a frame costs, which levers are reachable and
   which need a fork of Fyne. Read it before optimising anything.
 
@@ -126,7 +140,22 @@ internal/
   client/                client.go, auth.go, convert.go, store.go, events.go,
                          actions.go
   cache/                 cache.go (LRU + TextCache), message.go, image.go
-  audio/                 audio.go (the engine, one device, a voice pool per sound),
+  audio/                 both directions of the machine's sound, on miniaudio (malgo).
+                         audio.go (the engine and the one playback device),
+                         mix.go (what the device callback runs: notification sounds
+                         and the call's per-participant lanes, summed without
+                         allocating — and the wake it sends afterwards, which is
+                         the clock the whole receive path is paced by),
+                         ring.go (the wait-free SPSC queue every
+                         hand-off across that callback is made of), sink.go (the
+                         call's lanes; Want is how deep they are kept and is what
+                         stops a decoder running ahead of the speakers),
+                         capture.go + process.go (the microphone and
+                         the chain that gates it — a Capture outlives its device,
+                         which its own supervisor reopens, falls back to the
+                         default, or swaps on SetDevice, none of it visible to the
+                         reader inside Read), device.go (enumeration and the
+                         process's one miniaudio context),
                          decode.go (WAV + MP3 -> the device's format),
                          synth.go (the built-in sounds, rendered rather than shipped)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
@@ -140,6 +169,18 @@ internal/
                          profile.go, friends.go, panels.go, notice.go, settings*.go,
                          theme/, titlebar_*.go, filedialog*.go (the OS picker —
                          Fyne's is drawn in the canvas and is not used)
+  voice/                 the media half of a call: voice.go (Call, its own event
+                         set with an unexported marker, so app's switch is
+                         exhaustive), publish.go (microphone -> Opus -> one
+                         LiveKit track; opusTuning is the assertion that lights
+                         up FEC/DTX where the binding has them), subscribe.go
+                         (RTP -> jitter -> decode -> sink: a reader goroutine per
+                         participant, and one playLanes for all of them, woken by
+                         the speakers rather than by a ticker so playout cannot
+                         drift against the device), jitter.go (the Jitter interface
+                         and the adaptive buffer behind it — what is left of
+                         mouth-to-ear latency lives here, which is why it is
+                         replaceable)
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
                          over each block's whole text
@@ -419,7 +460,7 @@ and use Fyne's software driver, so no display is involved. Only Windows takes
 `-H windowsgui`; passing it to any other linker is an error, not a no-op.
 Ubuntu installs the cgo headers its image lacks (`libgl1-mesa-dev xorg-dev
 libwayland-dev libxkbcommon-dev libasound2-dev` — GL/X11 for GLFW and the
-clipboard, xkbcommon for the keymap, ALSA for oto, and Wayland because glfw v3.4
+clipboard, xkbcommon for the keymap, ALSA for miniaudio, and Wayland because glfw v3.4
 compiles *both* display backends unless built with `-tags x11`, as does Fyne's
 driver). Nothing is signed or notarised.
 

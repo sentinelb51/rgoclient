@@ -31,6 +31,14 @@ import (
 // from the page has to draw over it. Only one of the two pages is ever up: a
 // server's is opened from the sidebar the client's own covers.
 func (a *App) buildUI() fyne.CanvasObject {
+	// Built before the columns, the channel column mounting it in its bottom slot.
+	a.callDock = ui.NewCallDock(ui.CallDockActions{
+		OnMute:    a.toggleMute,
+		OnDeafen:  a.toggleDeafen,
+		OnHangUp:  a.leaveCall,
+		OnChannel: func() { a.OnChannelTapped(a.callChannelID) },
+	})
+
 	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
 		a.buildChannelList(),
@@ -166,7 +174,11 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	// width, which is what says it is not one of the rows below, and it does not
 	// scroll away from what it leads to.
 	header := ui.VBoxNoSpacing(container.NewPadded(title), a.channelTop)
-	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
+
+	// The dock hangs under the list in both views, and is the one fixed block
+	// there besides the pinned group: the column is not rebuilt by a channel-list
+	// refresh, and a call outlives leaving the channel and the server.
+	a.channelColumn = container.NewBorder(header, a.callDock, nil, nil, scroll)
 
 	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background,
 		ui.NewFillRow(0, a.channelColumn, ui.NewColumnDivider()))
@@ -322,7 +334,19 @@ func (a *App) callRows(channel domain.Channel) []fyne.CanvasObject {
 
 	rows := make([]fyne.CanvasObject, 0, len(participants))
 	for _, participant := range participants {
-		rows = append(rows, ui.NewVoiceParticipantRow(deps, participant))
+		row := ui.NewVoiceParticipantRow(deps, participant)
+
+		// Built when the click arrives rather than captured: what the menu may offer
+		// depends on permissions a role change can move under a standing sidebar.
+		row.Menu = func() []*fyne.MenuItem {
+			return a.voiceParticipantMenu(channel.ID, participant.UserID)
+		}
+
+		// A rebuilt row is a new object and knows nothing of who was talking when
+		// the old one was dropped.
+		row.SetSpeaking(a.speaking[participant.UserID])
+
+		rows = append(rows, row)
 	}
 
 	return rows
@@ -405,6 +429,28 @@ func leadWithMarkRead(items []*fyne.MenuItem, unread bool, mark func()) []*fyne.
 	}, items...)
 }
 
+// leadWithCall puts joining or leaving a call at the head of a voice channel's
+// menu, and changes nothing for any other kind. Placed above Copy channel ID the
+// way marking read leads, so a call is reachable from the sidebar without
+// leaving whatever is being read.
+func (a *App) leadWithCall(items []*fyne.MenuItem, channelID string) []*fyne.MenuItem {
+	if a.callChannelID == channelID {
+		return append([]*fyne.MenuItem{
+			fyne.NewMenuItemWithIcon("Disconnect", ui.CautionMark(assets.CallEndIcon), a.leaveCall),
+			fyne.NewMenuItemSeparator(),
+		}, items...)
+	}
+
+	if !a.canJoinCall(channelID) {
+		return items
+	}
+
+	return append([]*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("Join call", assets.MicIcon, func() { a.joinCall(channelID) }),
+		fyne.NewMenuItemSeparator(),
+	}, items...)
+}
+
 // channelMenu builds the items a channel row offers on right-click. A DM row is
 // a channel like any other here, so the home view needs no special case.
 func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
@@ -441,8 +487,11 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 	}
 
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
+	items = leadWithMarkRead(items, unread, func() { a.markChannelRead(channelID) })
 
-	return leadWithMarkRead(items, unread, func() { a.markChannelRead(channelID) })
+	// Above everything else, the way marking read leads: a call is joinable
+	// without leaving the channel being read.
+	return a.leadWithCall(items, channelID)
 }
 
 // closeChannelLabel names what closing a conversation means for its kind: a
@@ -474,6 +523,14 @@ func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 	if len(edits) > 0 {
 		items = append(items, fyne.NewMenuItemSeparator())
 		items = append(items, edits...)
+	}
+
+	// Between the roles and the timeout: each is undone by doing the opposite, so
+	// they are caution rather than danger, and they belong above the kick and ban
+	// the separator below leads.
+	if voice := a.memberVoiceItems(serverID, userID); len(voice) > 0 {
+		items = append(items, fyne.NewMenuItemSeparator())
+		items = append(items, voice...)
 	}
 
 	timeout := a.memberTimeoutItems(serverID, userID)
@@ -617,31 +674,41 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	return server, true
 }
 
-// OnChannelTapped follows a rendered #mention. What it names need not be in the
-// open server, or in a server at all, so the sidebars move to wherever it lives
-// before it is selected. Saying a channel is unavailable beats a click that does
-// nothing.
-func (a *App) OnChannelTapped(channelID string) {
+// openChannel moves the sidebars to wherever a channel lives and selects it,
+// reporting whether it could. What it names need not be in the open server, or
+// in a server at all: following a rendered #mention and following a card in the
+// mention inbox are the same walk, the inbox's cards coming from as many servers
+// as the account is in.
+func (a *App) openChannel(channelID string) bool {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canViewChannel(channel) {
-		a.notify(ui.ToneWarning, "That channel isn't available.")
-		return
+		return false
 	}
 
 	// A conversation lives in the home view, which knows how to open one its list
 	// has not caught up with.
 	if channel.ServerID == "" {
 		a.showConversation(channelID)
-		return
+
+		return true
 	}
 
 	if a.homeSelected || a.currentServerID != channel.ServerID {
 		if _, ok := a.enterServer(channel.ServerID); !ok {
-			a.notify(ui.ToneWarning, "That channel isn't available.")
-			return
+			return false
 		}
 	}
 	a.selectChannel(channelID)
+
+	return true
+}
+
+// OnChannelTapped follows a rendered #mention. Saying a channel is unavailable
+// beats a click that does nothing.
+func (a *App) OnChannelTapped(channelID string) {
+	if !a.openChannel(channelID) {
+		a.notify(ui.ToneWarning, "That channel isn't available.")
+	}
 }
 
 // OnServerTapped goes to a server the account is already in, as an invite card's

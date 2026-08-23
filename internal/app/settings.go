@@ -22,6 +22,7 @@ import (
 	"fyne.io/fyne/v2/storage"
 	fynetheme "fyne.io/fyne/v2/theme"
 
+	"RGOClient/internal/audio"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
@@ -118,6 +119,12 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 		a.forgetSelfTyping()
 	}
 	a.refreshTyping()
+
+	// The voice settings are read where they are used, so a slider dragged during a
+	// call has to reach the devices already open rather than waiting for the next
+	// join — and the output picker has to reach the engine whether or not there is
+	// a call at all.
+	a.applyVoiceSettings()
 	a.syncChannelList()
 
 	applyPacing()
@@ -226,6 +233,12 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 
 		Version: a.info.Version,
 		Build:   a.info.Build,
+
+		InputDevices:      a.inputDevices,
+		OutputDevices:     a.outputDevices,
+		StartInputMonitor: a.startInputMonitor,
+		StopInputMonitor:  a.forgetInputMonitor,
+		GateRatio:         audio.GateRatio,
 
 		Sessions:         settingsSessions,
 		ForgetSession:    a.forgetSession,

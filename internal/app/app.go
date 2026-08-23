@@ -27,6 +27,7 @@ import (
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
+	"RGOClient/internal/voice"
 )
 
 const (
@@ -96,6 +97,12 @@ type App struct {
 	collapsedCategories map[string]bool // "serverID:categoryID" -> collapsed
 	unreadChannels      map[string]bool
 
+	// dismissedMentions is what the reader has waved off, by message ID. Revolt has
+	// no route dropping a single mention, so a reconnect hands the whole set back
+	// and this is what keeps a dismissed one dismissed — for as long as the client
+	// runs, that being the honest bound on a decision nothing records.
+	dismissedMentions map[string]bool
+
 	// mentions is which messages name this account, by channel and oldest first,
 	// which is what the sidebar counts and the inbox is a rendering of. See
 	// mentions.go.
@@ -108,16 +115,17 @@ type App struct {
 	notices         *ui.NoticeStack // the transient messages floating over it too
 	serverList      *fyne.Container
 	channelColumn   *fyne.Container // header + pinned group over the list; relaid out when the group changes
+	callDock        *ui.CallDock    // the strip at its foot while a call is running
 	channelTop      *fyne.Container // that group: what is pinned above the channels, full column width
 	channelList     *fyne.Container
-	memberList      *ui.MemberList    // virtualised: it mounts only the rows on screen
-	memberSidebar   *fyne.Container   // the member column itself, hidden by its header toggle
-	messages        *ui.MessageList   // virtualised: the window is data, only what is on screen has a widget
-	messageHeader   *fyne.Container   // the channel's name row
-	messageColumn   *fyne.Container   // header + note + dock; relaid out when the note appears
-	channelNote     fyne.CanvasObject // the standing caption under that header, shown in a voice channel
-	composerDock    *fyne.Container   // badge row + jump bar + card: what the message column runs under
-	floatingDock    *fyne.Container   // that stack hung over messages; relaid out when either appears
+	memberList      *ui.MemberList  // virtualised: it mounts only the rows on screen
+	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
+	messages        *ui.MessageList // virtualised: the window is data, only what is on screen has a widget
+	messageHeader   *fyne.Container // the channel's name row
+	messageColumn   *fyne.Container // header + note + dock; relaid out when the note appears
+	channelNote     *ui.ChannelNote // the standing caption under that header, shown in a voice channel
+	composerDock    *fyne.Container // badge row + jump bar + card: what the message column runs under
+	floatingDock    *fyne.Container // that stack hung over messages; relaid out when either appears
 	input           *ui.MessageInput
 	composerEntry   *fyne.Container     // the entry row, hidden where the account may not write
 	composerNotice  *ui.ComposerNotice  // what stands in its place then
@@ -182,8 +190,11 @@ type App struct {
 	// inbox is the panel on the modal layer, if any. inboxSeq counts its openings,
 	// so a fill arriving for one already closed and reopened is dropped — every row
 	// is a request, and the panel holds no snapshot of its own between them.
-	inbox    *ui.MentionsDialog
-	inboxSeq uint64
+	// mentioned is what those requests answered with, kept while the panel is up so
+	// that dismissing one card redraws the rest without asking again.
+	inbox     *ui.MentionsDialog
+	inboxSeq  uint64
+	mentioned []*domain.Message
 
 	/* Channel search, see search.go */
 
@@ -280,6 +291,61 @@ type App struct {
 	lastTypedAt     time.Time
 	typingIdleTimer *time.Timer
 
+	/* The call, see voice.go */
+
+	// call is the media session and capture is the microphone feeding it. Both are
+	// nil outside a call, and callChannelID is what the dock names — held apart
+	// from call because it is set the moment a join starts, before there is one.
+	call          *voice.Call
+	capture       *audio.Capture
+	callChannelID string
+
+	// callJoining single-flights the join. A plain bool rather than a sync.Once:
+	// the point is "not again *yet*", and a second tap must not open a second
+	// microphone.
+	callJoining bool
+
+	// callGen retires an in-flight join. dropCall bumps it and joinCall captures
+	// it, so a join whose connection lands *after* the reader gave up is closed
+	// rather than installed — otherwise it would be a live call with an open
+	// microphone and no dock to leave it from.
+	callGen uint64
+
+	// callRetry counts how many times running the reconnect has already made, and
+	// callRetryFor names the channel the sequence belongs to — a join of anywhere
+	// else abandons it. callRetryTimer is the wait between attempts, nil when none
+	// is pending. Only a drop the voice server was not asked for starts one:
+	// leaving a call cancels the sequence rather than being reconnected.
+	// callRetryAfterDrop separates the two sequences that share this machinery: a
+	// call that was up and dropped, which is worth fighting for and says
+	// "Reconnecting", and a join that never landed, which the reader is waiting on
+	// and gets fewer, quieter attempts.
+	callRetry          int
+	callRetryFor       string
+	callRetryAfterDrop bool
+	callRetryTimer     *time.Timer
+
+	// speaking is who the voice server last said was talking, so a sidebar rebuilt
+	// mid-call can re-mark its new rows. muted and deafened mirror the call's own,
+	// which is what the dock is drawn from.
+	speaking        map[string]bool
+	muted, deafened bool
+
+	// monitor is what the settings page's level meter reads. It is the call's own
+	// capture where there is a call — one device, one stream, which is the only
+	// thing an exclusive-mode backend will grant — and a capture of its own
+	// otherwise; monitorOwned is which. Closing monitorDone ends the sampler, and
+	// monitorReport is the bar it feeds, kept so the meter can be moved between
+	// the two when a call starts or ends. All four are zero when nothing is open.
+	monitor       *audio.Capture
+	monitorOwned  bool
+	monitorDone   chan struct{}
+	monitorReport func(level float32)
+
+	// pushDone stops the push-to-talk key poll. Non-nil only while a call is up in
+	// that mode.
+	pushDone chan struct{}
+
 	/* Invite cards, see overlay.go */
 
 	// invites is what a code resolved to, kept because a card is rebuilt every time
@@ -369,6 +435,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
 		mentions:            make(map[string][]string),
+		dismissedMentions:   make(map[string]bool),
 		fetchedAuthors:      make(map[string]bool),
 		fetchedMembers:      make(map[string]bool),
 		memberFailed:        make(map[string]bool),

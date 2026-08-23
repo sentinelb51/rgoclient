@@ -65,10 +65,12 @@ DAG and conventions.
    a mark would decorate an apology.
    `syncChannelKind` is what the header owes each switch: the prefix glyph, and
    the note under it that only a **voice** channel draws. Revolt keeps messages in
-   a voice channel like any other and this client cannot join the call, so nothing
-   about mounting one differs — the glyph and that strip are the whole of what says
-   so. The strip is built once and shown per channel, and hiding a child reclaims
-   nothing on its own, hence the `ui.Relayout` either way.
+   a voice channel like any other, so nothing about *mounting* one differs — the
+   glyph and that strip are the whole of what says so. The strip is built once and
+   shown per channel, and hiding a child reclaims nothing on its own, hence the
+   `ui.Relayout` either way. It is also the primary way into the call (item 36):
+   `syncVoiceNote` gives it a caption and a button per state, joining never being
+   a side effect of selecting.
 5. **Author resolution.** A message carries only an author ID. `ensureAuthor`
    checks `HasUser`/`HasMember` (which exist so this allocates nothing — it runs
    per mounted message) and queues gaps; `authorTimer` fires `authorFetchDelay`
@@ -725,6 +727,8 @@ DAG and conventions.
     otherwise leaving participants hanging under nothing. The handler is guarded on
     `App.drawsCall` — the open server, and not the home view — because voice events
     arrive for every server the account is in and a call elsewhere draws nothing.
+    Joining and leaving are what that rebuild is right for; **speaking is not**,
+    and does not come through here at all — see item 36.
     Two leaves are announced to everyone **except** as a deletion to the one who
     left, so both are recognised by their own user ID: `MembersChanged` for our own
     member *is* `ServerLeft` (revoltgo evicts the server from `State` on the
@@ -900,6 +904,14 @@ DAG and conventions.
     construction. A line that resolved to nothing leads nowhere: everything a
     mounted reply names has been asked for by the time it is drawn, so one still
     unresolved was deleted.
+    An island card goes through `App.jumpToMessageIn` instead, which opens the
+    channel first (`openChannel`, the walk `OnChannelTapped` is now one line of)
+    and then asks the same three. The inbox is why: its cards come from as many
+    servers as the account is in. Entering a channel that way puts *two* requests
+    out — that channel's first page and the window around the message — so
+    `loadChannelMessages` drops its answer when `App.jumped` is already set, the
+    window being what the reader asked for. Every caller shows a status line
+    first, which clears the flag, so a set one can only be a jump made since.
     None of the three page routes writes to the message cache, for the reason item
     5 keeps a quote out of it, and what comes back is held in the same
     `App.uncached` — which is what lets a quote *inside* a jump window resolve
@@ -1047,8 +1059,24 @@ DAG and conventions.
     The **inbox** is the third, and the only one that costs anything: the client
     holds IDs, so every row is a `Client.ResolveMessages` fetch — bounded by
     `inboxLimit`, newest first. `App.inboxSeq` drops a fill for a panel already
-    closed and reopened, there being no snapshot between requests the way
-    `App.pinned` is one.
+    closed and reopened; `App.mentioned` is what came back, kept while the panel
+    is up exactly as `App.pinned` is, so dismissing one card redraws the rest
+    without asking again.
+    Its cards arrive **gathered by server** (`ui.MentionGroup`, one line apiece
+    counting what follows), each group placed the first time one of its channels
+    appears — so the groups are ordered by their newest mention as the cards
+    inside them are. A card then addresses only its channel: the group's line said
+    the server, and a DM says nothing at all, its author being the person it is
+    with. `Dismiss` replaces the jump mark on those cards rather than sitting
+    beside it — the card is already the way to the message — and drops the mention
+    from `App.mentions` and the panel both.
+    Nothing is **sent**: Revolt clears the array on an ack and on nothing else, and
+    acking would mark everything before the message read as well. So the ID goes
+    into `App.dismissedMentions` and `keepDismissed` filters every later `Ready`
+    through it — otherwise re-reading the account's whole read state is exactly
+    what would hand a dismissed mention back. It is cleared on sign-out and not
+    persisted; opening the channel acks it for real, and a restart before that is
+    what forgets the decision. See the known gap.
 34. **A server's settings.** `ui.ServerSettingsPage` is the client's own settings
     shell (item 13) filled with one server: Overview, Channels, Invites, Bans. It
     is the **second** layer in the content stack beside `settings.Layer`, and only
@@ -1161,3 +1189,136 @@ DAG and conventions.
     than a flag, since nothing announces the expiry. `canTimeoutMember` asks
     `Store.MemberServerPermissions` about the *target*, that being the one refusal
     the route makes that permissions of ours cannot predict.
+36. **The call.** Two halves that never meet in one package: `internal/audio` is
+    the devices, `internal/voice` is the media session, and `app` is the only
+    thing importing both — which is what lets `voice` name its microphone
+    structurally (`PCMSource`) and never import `audio`. `app/voice.go` is the
+    whole controller half.
+    **Joining is never a side effect of selecting.** Revolt keeps messages in a
+    voice channel, and a tap that opens a microphone is not a tap anybody expects,
+    so `selectChannel` is untouched. There are two ways in: the button on the
+    strip under the message header (`syncVoiceNote`, the one surface already drawn
+    only for a voice channel), and "Join call" on the channel's own menu
+    (`leadWithCall`, above Copy channel ID the way marking read leads). **Not** the
+    participant row's tap — that opens a profile and must keep doing so.
+    `joinCall` runs **entirely on the worker** — the REST call, `audio.OpenInput`
+    and `voice.Join` alike — with `installCall` as the single hop back. `voice.Join`
+    blocks for the whole connection handshake, so putting it in `backgroundThen`'s
+    `then`, which runs inside `doOnUI`, froze the window for five or six seconds
+    whenever a voice node did not answer. The epoch check therefore happens *after*
+    the dial, in `installCall`: a call that connected into a session that has since
+    gone is closed rather than never made, the same way the microphone already was.
+    `a.background` rather than `a.backgroundThen`, because the latter runs neither
+    branch when the worker succeeds into a stale session — which would leak a live
+    call. `callJoining` is the
+    single flight, a plain bool because the point is "not again *yet*": a second
+    tap must not open a second microphone. `force_disconnect` is passed always —
+    Stoat refuses a second connection for one account, so a client that crashed
+    mid-call could not otherwise rejoin. The join is also cancellable: `dropCall`
+    bumps `callGen`, and a connection landing after the reader gave up is closed
+    rather than installed — otherwise it is a live call with an open microphone
+    and no dock to leave it from.
+    **Three ways out, and they are not the same.** `dropCall` releases the media
+    and *keeps* `callChannelID`, which is what a call being reconnected looks
+    like: the dock stays on screen saying so. `hangUp` is that plus giving the
+    channel up. `leaveCall` is `hangUp` plus `cancelRejoin`, and is what every
+    surface a reader can reach is bound to — the dock, the channel menu, the note
+    under the header, a moderator disconnect, and signing out. A call somebody
+    left must not reconnect itself, which is the whole distinction.
+    **A drop is rejoined, not reported.** lksdk recovers a transient blip on its
+    own (`OnReconnecting`/`OnReconnected`), so a `CallEnded` carrying an error
+    means the room is gone and a fresh token is needed — `JoinCall` again, with
+    `force_disconnect`. `scheduleRejoin` doubles the wait per attempt to a
+    30 s ceiling and gives up after five, `callRetryFor` naming the channel the
+    sequence belongs to so a join of anywhere else abandons it. A rejoin that
+    *itself* fails keeps the sequence going (`failedJoin`) — a voice server that
+    is down is exactly what the wait is for — and a `Connected` retires it. This
+    is also why `joinCall`'s "already in this one" guard asks for a call as well
+    as a channel: between a drop and its rejoin the channel is still named, and
+    that gap is when the retry has to be let through.
+    A *first* join that fails is retried on the same machinery, `hel1` being
+    measurably flaky — a 5 s signal timeout and a `500` from `join_call` in the
+    same five minutes as a clean call. `client.Transient` is what decides:
+    anything that is not an HTTP answer is worth asking again, a 5xx is the server
+    failing rather than refusing, a 4xx or `ErrNoSession` is an answer.
+    `callRetryAfterDrop` separates the two sequences — five attempts and
+    "Reconnecting" for a call that was up, three and "Connecting" for one that
+    never landed — and only the last failure is said out loud, so a join that
+    succeeds on the second attempt is silent.
+    **Being moved is followed.** A moderator dragging this account into another
+    voice channel arrives as an ordinary `VoiceChanged`, and the media session
+    knows nothing about it — so `followVoiceMove` compares where the store now
+    says we are against `callChannelID` and rejoins, or hangs up where we are in
+    no call at all. It runs *before* `drawsCall`'s guard, a move out of the open
+    server being exactly the case that guard drops.
+    **Settings apply to a call already running.** `applyVoiceSettings` pushes
+    sensitivity, input gain, call volume and the output device onto whatever is
+    open, and re-arms the push-to-talk poll; without it each is read once at join
+    and a slider dragged mid-call does nothing, which reads as a broken setting
+    rather than a deferred one. The input *device* included: `Capture.SetDevice`
+    opens the new microphone on the capture's own goroutine and keeps feeding the
+    same ring, so the publisher inside a blocking `Read` sees a period of quiet
+    rather than a stream closing under it.
+    **The level meter borrows the call's microphone.** Two captures on one device
+    is a second open, which WASAPI shared mode grants and a device somebody holds
+    exclusively refuses — and a reader adjusting the gate mid-call is when the
+    meter matters most. `startInputMonitor` takes `a.capture` where there is one
+    and opens its own otherwise (`monitorOwned` is which); `monitorReport` is kept
+    so `restartInputMonitor` can move the bar between the two as a call starts and
+    ends. `stopInputMonitor` closes only a stream it opened; `forgetInputMonitor`
+    is the page's own exit, which drops the bar as well.
+    **Push-to-talk is a poll, not a key handler.** `ui.KeyHeld` asks the platform
+    directly (`GetAsyncKeyState`), because `desktop.Canvas`'s key hooks fire only
+    while nothing holds canvas focus and the composer holds it for most of the
+    client's life. `armPushToTalk` runs a 16 ms ticker for as long as a call is up
+    in that mode and writes an atomic the capture reads from its own `Read` — no
+    UI hop, 60 of those a second being a window repaint's worth of scheduling for
+    a bool.
+    **The speakers are opened before the dial.** `Engine.open` is reached from
+    `play()` and nowhere else, so the playback device used to open on the first
+    *notification sound* — a call joined before anything had rung wrote remote
+    audio into lanes no callback was rendering, and was silent with nothing saying
+    so. `joinCall` calls `Engine.StartOutput` first. It is load-bearing rather than
+    tidy: the callback is also what asks `voice` for the next frame, so a closed
+    device does not even decode.
+    **Deep PLC is a switch, not a build.** libopus gates its neural concealer on
+    the decoder's complexity being ≥ 5 and defaults it to 0, so the model is
+    compiled in and asked for per decoder. `config.Voice.DeepPLC` → `voice.Options`
+    at join, `Call.SetDeepPLC` from `applyVoiceSettings` after. The call holds an
+    atomic and the filler pushes it onto a decoder when it changes, because libopus
+    decoder state is per stream and must not be reconfigured from under a decode.
+    **A second pump, not `dispatch`.** `client.Event`'s marker is unexported so a
+    voice event cannot be one, and that channel *blocks rather than drops*, so
+    speaking updates would stall the gateway reader behind them. `pumpCall` is
+    modelled on `pumpEvents`, one `doOnUI` hop per event, ending when
+    `Call.Close()` closes the channel. `onCallEvent` drops anything from a call
+    that is no longer `a.call` — the same check `armTypingTimer` makes.
+    `leaveCall` is in `resetSessionState` beside `resetTyping`: the token was
+    minted against a session that no longer exists, and a microphone must not stay
+    open across a sign-out. There is no leave route — leaving *is* disconnecting.
+    **Speaking must not rebuild the column.** `Canvas.dirty` is one bool, so any
+    Refresh repaints the whole window; a call of eight people talking over each
+    other would be eight full repaints a second through
+    `queueRefresh(refreshChannels)`. Two mitigations, both needed: `voice` emits on
+    a *transition* against its own last-reported set, and `onSpeakingChanged` diffs
+    `App.speaking` again and touches only the rows for that user
+    (`voiceRows`, beside `channelRows`; `VoiceParticipantRow.SetSpeaking` no-ops on
+    an unchanged value and moves one circle's fill). `callRows` re-applies
+    `a.speaking` as it builds, a rebuilt row being a new object that knows nothing
+    of who was talking.
+    **The dock** (`ui.CallDock`) is in the channel column's bottom slot and no
+    other: that column is in both the server and home views, is not rebuilt by
+    `refreshChannelList`, and a call outlives leaving the channel *and* the server.
+    `syncCall` is the pair — the dock, plus the header strip when the open channel
+    is the call's.
+    **The settings meter owns a device**, which is the one thing on that page that
+    does. It is its own `audio.Capture`, not the call's, so adjusting the gate
+    mid-call is not two things fighting over the microphone; it is sampled at
+    `meterInterval` rather than per callback, because a level arrives 100 times a
+    second and each repaint is the whole window. It is stopped from
+    `SettingsPage.showSection` **and** `Close` **and** `resetSessionState` — the
+    page has no unmount hook, signing out does not close it, and either hole holds
+    the microphone open for the rest of the run. The index pass
+    (`buildSettingsIndex`) stubs all four voice hooks to nil for the same reason
+    `LoadProfile` and `CacheStats` are stubbed: it builds every section twice on
+    the first keystroke in the search box, and `StartInputMonitor` opens a device.

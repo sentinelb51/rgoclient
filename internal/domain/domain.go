@@ -375,6 +375,15 @@ const (
 	PermissionUploadFiles        Permission = 1 << 27
 	PermissionReact              Permission = 1 << 29
 	PermissionBypassSlowmode     Permission = 1 << 39
+
+	// Joining a call asks Connect and publishing a microphone asks Speak. Video
+	// and Listen are the same scope and are named beside them, though nothing
+	// asks either yet: this client has no camera, and a subscriber that may not
+	// listen is refused by the voice server rather than by a button here.
+	PermissionConnect Permission = 1 << 30
+	PermissionSpeak   Permission = 1 << 31
+	PermissionVideo   Permission = 1 << 32
+	PermissionListen  Permission = 1 << 36
 )
 
 // Server-scoped permissions, asked of Store.ServerPermissions.
@@ -388,6 +397,13 @@ const (
 	PermissionAssignRoles       Permission = 1 << 9
 	PermissionChangeNickname    Permission = 1 << 10
 	PermissionManageNicknames   Permission = 1 << 11
+
+	// Voice moderation. Revolt files these in the same bit space as the channel
+	// permissions above, but each is asked *of a member* from the member menu,
+	// which is a server question.
+	PermissionMuteMembers   Permission = 1 << 33
+	PermissionDeafenMembers Permission = 1 << 34
+	PermissionMoveMembers   Permission = 1 << 35
 )
 
 // The rest of what Revolt defines, which the role editor lists rather than asks.
@@ -400,13 +416,6 @@ const (
 	PermissionManageWebhooks      Permission = 1 << 24
 	PermissionSendEmbeds          Permission = 1 << 26
 	PermissionMasquerade          Permission = 1 << 28
-	PermissionConnect             Permission = 1 << 30
-	PermissionSpeak               Permission = 1 << 31
-	PermissionVideo               Permission = 1 << 32
-	PermissionMuteMembers         Permission = 1 << 33
-	PermissionDeafenMembers       Permission = 1 << 34
-	PermissionMoveMembers         Permission = 1 << 35
-	PermissionListen              Permission = 1 << 36
 	PermissionMentionEveryone     Permission = 1 << 37
 	PermissionMentionRoles        Permission = 1 << 38
 	PermissionViewAuditLogs       Permission = 1 << 40
@@ -487,6 +496,17 @@ type VoiceParticipant struct {
 	Bot           bool
 	Camera        bool
 	Screensharing bool
+}
+
+// CallCredentials is what the join_call route answers with: the voice node to
+// dial and the token that authorises this account on it. Not "ticket" — that
+// already means the MFA login ticket.
+//
+// The token is short-lived and minted against one session, so it is never
+// stored: a call is rejoined by asking again.
+type CallCredentials struct {
+	URL   string
+	Token string
 }
 
 /* Servers */

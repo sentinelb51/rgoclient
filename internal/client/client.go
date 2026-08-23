@@ -66,8 +66,13 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
-	mu       sync.Mutex      // guards the three maps below
+	mu       sync.Mutex      // guards the maps below and voiceNodeName
 	fetching map[string]bool // channelID -> a page request is already in flight
+
+	// voiceNodeName is the media server join_call has to be asked for, resolved
+	// from the instance config on the first call and kept for the session — it is
+	// instance configuration and cannot change under a running client.
+	voiceNodeName string
 
 	// fetchingMembers is fetching's counterpart for FetchMembers. A map of its own
 	// rather than a shared one because the key spaces are different — these are

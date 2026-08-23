@@ -201,7 +201,7 @@ func (a *App) messageCard(message *domain.Message) ui.MessageCard {
 
 		Jump: func() {
 			a.closeOverlay()
-			a.OnJumpToMessage(channelID, messageID)
+			a.jumpToMessageIn(channelID, messageID)
 		},
 	}
 }

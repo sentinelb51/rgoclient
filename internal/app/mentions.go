@@ -30,9 +30,10 @@ const (
 	// stay counted in the sidebar rather than costing a request apiece.
 	inboxLimit = 40
 
-	// whereRunes bounds the address on a row. It shares the line with the author,
-	// and the author is what the row is *about*: unbounded, one long server name
-	// takes the width and leaves the name it was found under as two letters.
+	// whereRunes bounds the address on a row and the name of the group it is
+	// filed under. A row's shares its line with the author, and the author is what
+	// the row is *about*: unbounded, one long channel name takes the width and
+	// leaves the name it was found under as two letters.
 	whereRunes = 30
 )
 
@@ -54,6 +55,25 @@ func (a *App) recordMention(message *domain.Message) {
 
 	a.mentions[channelID] = append(a.mentions[channelID], message.ID)
 	a.syncMentionMarks()
+}
+
+// keepDismissed is a set of mentions with what the reader has waved off taken
+// back out of it. Ready carries the account's whole read state and Revolt keeps
+// no record of a dismissal, so re-reading that set is exactly when a dismissed
+// mention would come back. Call on the UI thread.
+func (a *App) keepDismissed(mentions map[string][]string) map[string][]string {
+	kept := make(map[string][]string, len(mentions))
+
+	for channelID, messageIDs := range mentions {
+		ids := slices.DeleteFunc(slices.Clone(messageIDs), func(id string) bool {
+			return a.dismissedMentions[id]
+		})
+		if len(ids) > 0 {
+			kept[channelID] = ids
+		}
+	}
+
+	return kept
 }
 
 // clearMentions forgets a channel's mentions outright, for the two acts that
@@ -215,6 +235,7 @@ func (a *App) showMentions() {
 	a.showOverlay(dialog.Content)
 	a.inbox = dialog // after showOverlay, which clears whatever was there
 	a.inboxSeq++
+	a.mentioned = nil
 
 	a.loadMentions()
 }
@@ -223,6 +244,7 @@ func (a *App) showMentions() {
 // one thing at a time, so anything else opening takes this one down.
 func (a *App) closeMentions() {
 	a.inbox = nil
+	a.mentioned = nil
 }
 
 // loadMentions resolves the newest mentions and fills the panel. inboxSeq drops
@@ -231,7 +253,7 @@ func (a *App) closeMentions() {
 func (a *App) loadMentions() {
 	targets, channels := a.mentionTargets()
 	if len(targets) == 0 {
-		a.inbox.SetEntries(nil)
+		a.inbox.SetGroups(nil)
 		a.repositionOverlay()
 
 		return
@@ -271,7 +293,8 @@ func (a *App) loadMentions() {
 				return
 			}
 
-			a.showMentioned(messages)
+			a.mentioned = messages
+			a.showMentioned()
 		}, false)
 	}()
 }
@@ -345,49 +368,108 @@ func (a *App) unknownMentionAuthors(messages []*domain.Message, channels map[str
 	return targets
 }
 
-// showMentioned fills the open panel, newest first. Call on the UI thread.
-func (a *App) showMentioned(messages []*domain.Message) {
-	slices.SortFunc(messages, func(a, b *domain.Message) int {
+// showMentioned fills the open panel from what was resolved, newest first and
+// gathered by the server the mention is in. A reader with an unread mention in
+// four servers is being told four things, not one list of forty, and the server
+// then only has to be said once rather than on every card. Call on the UI thread.
+func (a *App) showMentioned() {
+	if a.inbox == nil {
+		return
+	}
+
+	slices.SortFunc(a.mentioned, func(a, b *domain.Message) int {
 		return strings.Compare(b.ID, a.ID)
 	})
 
-	// The mention edge is dropped: this panel is the set of messages naming the
-	// account, so an amber card would be every card.
-	entries := make([]ui.MessageCard, 0, len(messages))
-	for _, message := range messages {
-		card := a.messageCard(message)
-		card.Where = a.mentionWhere(message.ChannelID)
-		card.Mentioned = false
-		entries = append(entries, card)
+	// A server takes its place the first time one of its channels appears, so the
+	// groups are ordered by the newest mention in each as the cards inside them are.
+	var (
+		order = make([]string, 0, len(a.mentioned))
+		cards = make(map[string][]ui.MessageCard, len(a.mentioned))
+	)
+	for _, message := range a.mentioned {
+		serverID := a.channelServerID(message.ChannelID)
+		if _, seen := cards[serverID]; !seen {
+			order = append(order, serverID)
+		}
+
+		cards[serverID] = append(cards[serverID], a.mentionCard(message))
 	}
-	a.inbox.SetEntries(entries)
+
+	groups := make([]ui.MentionGroup, 0, len(order))
+	for _, serverID := range order {
+		groups = append(groups, ui.MentionGroup{Where: a.mentionSource(serverID), Entries: cards[serverID]})
+	}
+	a.inbox.SetGroups(groups)
 
 	// The card is centred and sized from its own minimum, which a row gained or lost
 	// changes; neither re-runs on its own.
 	a.repositionOverlay()
 }
 
-// mentionWhere addresses a row: the channel, prefixed by its server where it has
-// one. A direct message is named after the person it is with, who is also the
-// author of anything in it that could name this account — so it says what kind of
-// place it is instead, the row's own name having said which one.
+// mentionCard is one message as the inbox draws it. The mention edge is dropped:
+// this panel is the set of messages naming the account, so an amber card would be
+// every card.
+func (a *App) mentionCard(message *domain.Message) ui.MessageCard {
+	channelID, messageID := message.ChannelID, message.ID
+
+	card := a.messageCard(message)
+	card.Where = a.mentionWhere(channelID)
+	card.Mentioned = false
+	card.Dismiss = func() { a.dismissMention(channelID, messageID) }
+
+	return card
+}
+
+// mentionSource names a group: the server its cards are from, or the home view,
+// which is one place to the reader however many conversations are in it.
+func (a *App) mentionSource(serverID string) string {
+	if serverID == "" {
+		return "your direct messages"
+	}
+
+	server, ok := a.store.Server(serverID)
+	if !ok {
+		return "another server"
+	}
+
+	return util.Truncate(server.Name, whereRunes)
+}
+
+// mentionWhere addresses a row inside its group: the channel alone, the group's
+// own line having named the server. A direct message says nothing — the group
+// said it is one, and the author is the person it is with.
 func (a *App) mentionWhere(channelID string) string {
 	channel, ok := a.store.Channel(channelID)
-	if !ok {
+	if !ok || channel.Kind == domain.ChannelDM {
 		return ""
 	}
 
-	switch {
-	case channel.Kind == domain.ChannelDM:
-		return "Direct message"
-	case channel.ServerID == "":
+	if channel.ServerID == "" {
 		return util.Truncate(channel.Name, whereRunes)
 	}
 
-	name := "#" + channel.Name
-	if server, ok := a.store.Server(channel.ServerID); ok {
-		name = server.Name + " " + name
+	return util.Truncate("#"+channel.Name, whereRunes)
+}
+
+/* Being done with one */
+
+// dismissMention takes one mention off: the mark it put in the sidebar, and the
+// card in the panel. Nothing is sent — Revolt has no route dropping a single
+// mention, an account's record being cleared by acknowledging a message, which
+// would mark everything before it read as well. The ID is remembered instead, so
+// that a reconnect handing the set back does not undo it; opening the channel
+// acknowledges it for real, and a restart is what forgets the decision.
+// Call on the UI thread.
+func (a *App) dismissMention(channelID, messageID string) {
+	a.dismissedMentions[messageID] = true
+
+	if a.forgetMentions(channelID, []string{messageID}) {
+		a.refreshChannelRow(channelID)
 	}
 
-	return util.Truncate(name, whereRunes)
+	a.mentioned = slices.DeleteFunc(a.mentioned, func(message *domain.Message) bool {
+		return message.ID == messageID
+	})
+	a.showMentioned()
 }

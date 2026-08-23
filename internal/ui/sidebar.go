@@ -376,7 +376,14 @@ type VoiceParticipantRow struct {
 	deps   Deps
 	userID string
 
+	// Menu is what a right-click offers: per-person volume and, where the
+	// permissions allow it, the voice moderation. Read at the moment of the click
+	// rather than captured, the way ChannelWidget and ServerWidget read theirs.
+	Menu func() []*fyne.MenuItem
+
 	background *canvas.Rectangle
+	ring       *canvas.Circle
+	speaking   bool
 	content    fyne.CanvasObject
 }
 
@@ -393,6 +400,11 @@ func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *Voi
 		deps:       deps,
 		userID:     participant.UserID,
 		background: canvas.NewRectangle(color.Transparent),
+
+		// The ring exists from construction and only its fill moves. Adding a
+		// circle to a container when somebody starts talking would be a layout per
+		// syllable, where a colour change is a repaint.
+		ring: canvas.NewCircle(color.Transparent),
 	}
 
 	side := theme.Sizes.VoiceAvatarSize
@@ -403,7 +415,8 @@ func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *Voi
 
 	leading := HBoxNoSpacing(
 		HorizontalSpacer(theme.Sizes.VoiceRowIndent),
-		container.NewCenter(avatar),
+		container.NewCenter(container.New(
+			&memberRingLayout{band: theme.Sizes.VoiceSpeakingRing}, w.ring, avatar)),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
@@ -412,10 +425,41 @@ func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *Voi
 	w.content = container.NewStack(w.background, container.NewBorder(nil, nil, leading,
 		voiceMarks(participant), NewEllipsisText(name)))
 
+	// Tapping opens the profile, as it does in the member sidebar. Joining a call
+	// is deliberately not on this row: it is how you look somebody up, and a tap
+	// that opens a microphone is not a tap anybody expects.
 	w.onTap = func() { deps.Actions.OnUserTapped(participant.UserID, w) }
+	w.onSecondaryTap = func(event *fyne.PointEvent) {
+		if w.Menu == nil {
+			return
+		}
+
+		showMenuHook(w, w.Menu, event)
+	}
 	w.ExtendBaseWidget(w)
 
 	return w
+}
+
+// UserID is who the row is drawing, so the controller can find the one to mark
+// without capturing anything per rebuild.
+func (w *VoiceParticipantRow) UserID() string { return w.userID }
+
+// SetSpeaking rings the avatar, or takes the ring away. A no-op on an unchanged
+// value: this is called for every participant on every speaking change, and
+// Canvas.dirty is one bool — any Refresh repaints the whole window, so the
+// cheapest of these is the one that does not happen.
+func (w *VoiceParticipantRow) SetSpeaking(speaking bool) {
+	if w.speaking == speaking {
+		return
+	}
+	w.speaking = speaking
+
+	w.ring.FillColor = color.Transparent
+	if speaking {
+		w.ring.FillColor = theme.Colors.VoiceSpeaking
+	}
+	w.ring.Refresh()
 }
 
 func (w *VoiceParticipantRow) CreateRenderer() fyne.WidgetRenderer {

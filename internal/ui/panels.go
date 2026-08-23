@@ -74,6 +74,13 @@ type MessageCard struct {
 	// all — a disabled one on every card says only that the reader is not a
 	// moderator.
 	Unpin func()
+
+	// Dismiss takes the card off the surface listing it, for the inbox: a mention
+	// is something the reader deals with rather than something they own, so the
+	// card carries the way to be done with it. It stands where the jump mark
+	// otherwise is — the whole card is already the way to the message, and a mark
+	// beside it says the same thing twice.
+	Dismiss func()
 }
 
 /* The island the three surfaces share */
@@ -234,7 +241,8 @@ const emptyWellShare = 0.25
 
 /* Filling it */
 
-// setCards replaces the well's contents. Call on the UI thread.
+// setCards replaces the well's contents, one gap between each. Call on the UI
+// thread.
 func (d *messageIsland) setCards(cards []fyne.CanvasObject) {
 	spaced := make([]fyne.CanvasObject, 0, 2*len(cards))
 	for _, card := range cards {
@@ -245,7 +253,13 @@ func (d *messageIsland) setCards(cards []fyne.CanvasObject) {
 		spaced = append(spaced, card)
 	}
 
-	d.list.Objects = spaced
+	d.setBlocks(spaced)
+}
+
+// setBlocks replaces the well's contents with a column already spaced, for a
+// surface whose runs are not all one gap apart. Call on the UI thread.
+func (d *messageIsland) setBlocks(blocks []fyne.CanvasObject) {
+	d.list.Objects = blocks
 	d.list.Refresh()
 }
 
@@ -289,9 +303,7 @@ func newMessageCard(deps Deps, entry MessageCard) fyne.CanvasObject {
 
 	card := &messageCard{
 		background: canvas.NewRectangle(theme.Colors.IslandCardBg),
-		jump: newScaledIcon(tintedIcon(assets.SearchJumpIcon, theme.Colors.IslandHintText),
-			theme.Sizes.IslandJumpGlyph),
-		mentioned: entry.Mentioned,
+		mentioned:  entry.Mentioned,
 	}
 	card.onTap = entry.Jump
 	card.background.CornerRadius = theme.Sizes.IslandCardRadius
@@ -332,7 +344,7 @@ func newMessageCard(deps Deps, entry MessageCard) fyne.CanvasObject {
 		HorizontalSpacer(gap),
 		VBoxNoSpacing(column...),
 		HorizontalSpacer(gap),
-		card.trailing(entry.Unpin),
+		card.trailing(entry),
 	)
 
 	card.content = container.NewStack(card.background, NewInset(row, pad, pad, pad, pad))
@@ -353,8 +365,12 @@ type messageCard struct {
 	tapBase
 
 	background *canvas.Rectangle
-	jump       *canvas.Image
 	content    fyne.CanvasObject
+
+	// jump is the mark at the far end, nil on a card that puts an action there
+	// instead. The card is the way to the message either way, so nothing else
+	// depends on it being drawn.
+	jump *canvas.Image
 
 	mentioned bool
 }
@@ -364,27 +380,45 @@ var (
 	_ desktop.Hoverable = (*messageCard)(nil)
 )
 
-// trailing is the far end of the card: the jump mark, and before it whatever the
-// card can be acted on with.
+// trailing is the far end of the card: what it can be acted on with, and the
+// jump mark where nothing has taken its place.
 //
-// An outlined button rather than a bare mark, in the danger tint, as the invite
-// list's revoke is: the mark is the only thing offering the action, and an icon
-// with nothing round it reads as decoration. It hands its hover back to the
-// card, which is what keeps the card lit while the pointer is on it.
-func (c *messageCard) trailing(unpin func()) fyne.CanvasObject {
-	if unpin == nil {
-		return container.NewCenter(c.jump)
+// Dismissing is the exception that takes it: the mark and the button would be
+// two ends of the same card offering the two things the reader can do with a
+// mention, and only one of them needs a target — the card itself is the other.
+func (c *messageCard) trailing(entry MessageCard) fyne.CanvasObject {
+	switch {
+	case entry.Dismiss != nil:
+		return container.NewCenter(c.action(assets.ActionSaveIcon, theme.Colors.SwiftActionConfirm, entry.Dismiss))
+
+	case entry.Unpin != nil:
+		return HBoxNoSpacing(
+			container.NewCenter(c.action(assets.SystemUnpinnedIcon, theme.Colors.SwiftActionDanger, entry.Unpin)),
+			HorizontalSpacer(theme.Sizes.IslandCardGap),
+			container.NewCenter(c.jumpMark()),
+		)
+
+	default:
+		return container.NewCenter(c.jumpMark())
 	}
+}
 
-	tint := theme.Colors.SwiftActionDanger
-	button := NewOutlinedIconButton(tintedIcon(assets.SystemUnpinnedIcon, tint), tint, unpin).
-		reporting(c.setHovered)
+// action is one button at the far end of a card. An outlined button rather than
+// a bare mark, as the invite list's revoke is: the mark is the only thing
+// offering the action, and an icon with nothing round it reads as decoration. It
+// hands its hover back to the card, which is what keeps the card lit while the
+// pointer is on it.
+func (c *messageCard) action(res fyne.Resource, tint color.Color, do func()) fyne.CanvasObject {
+	return NewOutlinedIconButton(tintedIcon(res, tint), tint, do).reporting(c.setHovered)
+}
 
-	return HBoxNoSpacing(
-		container.NewCenter(button),
-		HorizontalSpacer(theme.Sizes.IslandCardGap),
-		container.NewCenter(c.jump),
-	)
+// jumpMark is the arrow the card lifts under the pointer, built here rather than
+// with the card so that one putting an action in its place never makes it.
+func (c *messageCard) jumpMark() fyne.CanvasObject {
+	c.jump = newScaledIcon(tintedIcon(assets.SearchJumpIcon, theme.Colors.IslandHintText),
+		theme.Sizes.IslandJumpGlyph)
+
+	return c.jump
 }
 
 func (c *messageCard) CreateRenderer() fyne.WidgetRenderer {
@@ -396,14 +430,19 @@ func (c *messageCard) MouseOut()                   { c.setHovered(false) }
 
 func (c *messageCard) setHovered(on bool) {
 	c.background.FillColor = theme.Colors.IslandCardBg
-	c.jump.Translucency = iconRestTranslucency
-
 	if on {
 		c.background.FillColor = theme.Colors.IslandCardHoverBg
-		c.jump.Translucency = 0
+	}
+	c.background.Refresh()
+
+	if c.jump == nil {
+		return
 	}
 
-	c.background.Refresh()
+	c.jump.Translucency = iconRestTranslucency
+	if on {
+		c.jump.Translucency = 0
+	}
 	c.jump.Refresh()
 }
 
@@ -530,10 +569,18 @@ func (d *PinsDialog) Fail(reason string) { d.island.reset(reason) }
 
 /* The mention inbox */
 
+// MentionGroup is the mentions from one place, drawn under a line naming it.
+// Where is what that line ends with — a server, or the reader's own
+// conversations — and the count in front of it is how many cards follow.
+type MentionGroup struct {
+	Where   string
+	Entries []MessageCard
+}
+
 // MentionsDialog lists every message naming the account, wherever it is. It is
 // the one surface that is not about a channel: the cards come from as many as
-// the account is in, so each carries where it is from and there is no heading
-// that could say it for them.
+// the account is in, so they arrive gathered by where they are from and each
+// says only which channel of that place it was in.
 type MentionsDialog struct {
 	Content fyne.CanvasObject
 
@@ -554,17 +601,63 @@ func NewMentionsDialog(deps Deps, onClose func()) *MentionsDialog {
 	return &MentionsDialog{Content: content, island: island}
 }
 
-// SetEntries replaces the whole list. Call on the UI thread.
-func (d *MentionsDialog) SetEntries(entries []MessageCard) {
-	d.island.fill(entries, "mention", "Nobody has mentioned you.")
+// SetGroups replaces the whole list. Call on the UI thread.
+func (d *MentionsDialog) SetGroups(groups []MentionGroup) {
+	total := 0
+	blocks := make([]fyne.CanvasObject, 0, 2*len(groups))
+	for _, group := range groups {
+		if len(group.Entries) == 0 {
+			continue
+		}
+		if len(blocks) > 0 {
+			blocks = append(blocks, VerticalSpacer(theme.Sizes.IslandGap))
+		}
+
+		total += len(group.Entries)
+		blocks = append(blocks, newMentionGroup(d.island.deps, group))
+	}
+
+	if total == 0 {
+		d.island.reset("Nobody has mentioned you.")
+
+		return
+	}
+
+	d.island.setBlocks(blocks)
+	d.island.setCount(plural(total, "mention"))
+	d.island.say("")
+}
+
+// newMentionGroup is one place's mentions: the line saying which, and the cards
+// under it. The line is drawn as the island's own count is — this is the same
+// answer given per place, and a heading in the card's own weight would compete
+// with the names in them.
+func newMentionGroup(deps Deps, group MentionGroup) fyne.CanvasObject {
+	heading := newText(plural(len(group.Entries), "mention")+" in "+group.Where,
+		theme.Colors.IslandCountText, theme.Sizes.IslandCountTextSize)
+
+	column := []fyne.CanvasObject{
+		NewEllipsisText(heading),
+		VerticalSpacer(theme.Sizes.IslandCardSpacing),
+	}
+	for i, entry := range group.Entries {
+		if i > 0 {
+			column = append(column, VerticalSpacer(theme.Sizes.IslandCardSpacing))
+		}
+
+		column = append(column, newMessageCard(deps, entry))
+	}
+
+	return VBoxNoSpacing(column...)
 }
 
 // Fail replaces the list with a reason it is not there. Call on the UI thread.
 func (d *MentionsDialog) Fail(reason string) { d.island.reset(reason) }
 
-// fill is what both panels do with an answer: the cards, the count, and the line
-// that speaks where there are none. Channel search does not use it — its count
-// says what the filters took away as well as what came back.
+// fill is what a flat surface does with an answer: the cards, the count, and the
+// line that speaks where there are none. Channel search does not use it — its
+// count says what the filters took away as well as what came back — and neither
+// does the inbox, whose cards come in runs under a line apiece.
 func (d *messageIsland) fill(entries []MessageCard, noun, empty string) {
 	cards := make([]fyne.CanvasObject, 0, len(entries))
 	for _, entry := range entries {

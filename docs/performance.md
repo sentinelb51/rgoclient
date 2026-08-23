@@ -266,3 +266,49 @@ from; run it before and after touching the column. Beyond that:
   each carries a pprof label, so one reads as the action that started it.
 - The thing worth watching during a scroll is **mounted object count**, not FPS.
   Traversal is what grows; fill rate is bounded by the viewport already.
+
+## The audio callback
+
+`mixer.render` (`internal/audio/mix.go`) runs on miniaudio's own thread, once
+every 10 ms, and is the one place in the client with a hard real-time budget: a
+period missed is an audible dropout, not a dropped frame. It **must not
+allocate, lock, log, or call anything that might** — a Go allocation there can
+trip a GC assist, and a mutex there can be held by a goroutine the scheduler has
+parked.
+
+Everything crossing into it does so through `ring` (wait-free SPSC) or an
+atomic. The accumulator, the voice pool and the lane array are fixed-size fields
+on the mixer, allocated once at construction, which is why a period is rendered
+in `chunkFrames` passes rather than against a slice sized by whatever the
+backend asks for.
+
+The rule is cheap to assert and worth asserting: `testing.AllocsPerRun` over
+`Sink.Write` plus `render` must report **zero**. Anything that makes it nonzero
+is a dropout under load even when it benchmarks fine.
+
+`render` also sends on `mixer.wake` once a period, which is what paces the whole
+receive path — decode happens on `voice.Call.playLanes`, woken by that send, not
+on this thread. That placement is the point: decoding here would put
+`adaptiveJitter`'s mutex and a cgo call into libopus inside the callback, which
+is every rule above broken at once. The send is non-blocking and only made when a
+lane is open, so it costs nothing outside a call.
+
+The arrangement bounds something that used to be unbounded. Playout ran on a
+20 ms `time.Ticker` per participant, which drifts against the audio clock; a lane
+the ticker outran was trimmed back **to** `laneBacklog`, so it parked at 120 ms of
+buffered audio and stayed there — pure mouth-to-ear latency that nothing took
+out again. Now the writer asks `Sink.Want` and supplies only that, so occupancy is
+`laneTarget` (40 ms) plus at most one frame. Measured with `render` driven flat
+out against a producer that would run ahead: peak **50 ms**, never near the
+120 ms threshold.
+
+Two costs are miniaudio's rather than ours and cannot be removed here: malgo
+takes a package-level mutex in its own callback trampoline to find the Go
+function for the device, and it leaks the C allocation behind a device
+identifier — `deviceIDPointer` memoises those, so the leak is one per device
+ever opened rather than one per open.
+
+Measured on WASAPI shared mode: the microphone negotiates `IAudioClient3` at a
+480-frame period with **passthrough** — no resample, no format conversion —
+because the capture device is opened at exactly 48 kHz mono f32. Asking for
+anything else puts a converter in the path for nothing.

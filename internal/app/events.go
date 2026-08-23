@@ -191,10 +191,9 @@ func (a *App) onReady(event client.Ready) {
 	}
 	// Taken wholesale rather than merged: Ready is the account's whole read state,
 	// and a reconnect must not carry over a mention the reader has since cleared.
-	a.mentions = event.MentionIDs
-	if a.mentions == nil {
-		a.mentions = make(map[string][]string)
-	}
+	// The one thing carried over is what was dismissed — Revolt keeps no record of
+	// that, so re-reading its set is exactly when it would come back.
+	a.mentions = a.keepDismissed(event.MentionIDs)
 
 	a.showMainUI()
 
@@ -703,6 +702,11 @@ func (a *App) onMemberUpdated(event client.MemberUpdated) {
 // call in a server that is not open draws nothing here, and voice events arrive
 // for every server the account is in.
 func (a *App) onVoiceChanged(event client.VoiceChanged) {
+	// Checked before the drawing guard below: being moved matters wherever it
+	// happens, and a move out of the open server is exactly the case that guard
+	// would drop.
+	a.followVoiceMove()
+
 	if !a.drawsCall(event.ChannelID) && !a.drawsCall(event.FromChannelID) {
 		return
 	}

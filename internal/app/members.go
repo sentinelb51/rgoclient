@@ -895,3 +895,152 @@ func (a *App) removeTimeout(serverID, userID string) {
 		"Could not end %s's timeout.", "%s may write again.", name,
 	)
 }
+
+/* Voice moderation */
+
+// memberVoiceItems is what the member menu offers about somebody's voice: the
+// two server-wide holds and the two ways out of a channel. Each is gated on its
+// own permission **and** on the member actually being in a call — an item that
+// can never do anything is worse than no item, which is the rule
+// canTimeoutMember follows.
+//
+// Muting and deafening are caution rather than danger: each is undone by doing
+// the opposite.
+func (a *App) memberVoiceItems(serverID, userID string) []*fyne.MenuItem {
+	if serverID == "" || userID == "" || userID == a.store.SelfID() {
+		return nil
+	}
+
+	channelID, inCall := a.voiceChannelOf(serverID, userID)
+	if !inCall {
+		return nil
+	}
+
+	permissions := a.store.ServerPermissions(serverID)
+
+	var items []*fyne.MenuItem
+
+	if permissions.Has(domain.PermissionMuteMembers) {
+		items = append(items, fyne.NewMenuItemWithIcon("Server mute",
+			ui.CautionMark(assets.MicOffIcon),
+			func() { a.setMemberVoiceMuted(serverID, userID, true) }))
+	}
+
+	if permissions.Has(domain.PermissionDeafenMembers) {
+		items = append(items, fyne.NewMenuItemWithIcon("Server deafen",
+			ui.CautionMark(assets.HeadphonesOffIcon),
+			func() { a.setMemberVoiceDeafened(serverID, userID, true) }))
+	}
+
+	if permissions.Has(domain.PermissionMoveMembers) {
+		if move := a.memberMoveItems(serverID, userID, channelID); move != nil {
+			items = append(items, move)
+		}
+
+		items = append(items, fyne.NewMenuItemWithIcon("Disconnect",
+			ui.CautionMark(assets.CallEndIcon),
+			func() { a.disconnectMember(serverID, userID) }))
+	}
+
+	return items
+}
+
+// voiceChannelOf finds the call a member is in, so the menu can be built around
+// what is actually true. The store answers per channel rather than per member —
+// Revolt files a call on the channel — so this is a walk of the server's voice
+// channels, of which there are a handful.
+func (a *App) voiceChannelOf(serverID, userID string) (channelID string, ok bool) {
+	server, found := a.store.Server(serverID)
+	if !found {
+		return "", false
+	}
+
+	for _, id := range server.Channels {
+		channel, found := a.store.Channel(id)
+		if !found || channel.Kind != domain.ChannelVoice {
+			continue
+		}
+
+		for _, participant := range a.store.VoiceParticipants(id) {
+			if participant.UserID == userID {
+				return id, true
+			}
+		}
+	}
+
+	return "", false
+}
+
+// memberMoveItems is the submenu of voice channels somebody may be dragged into,
+// copied from memberRoleItems: a list too long to flatten into the menu itself.
+// The channel they are already in is left out, a move to it being nothing.
+func (a *App) memberMoveItems(serverID, userID, currentID string) *fyne.MenuItem {
+	server, found := a.store.Server(serverID)
+	if !found {
+		return nil
+	}
+
+	var items []*fyne.MenuItem
+
+	for _, id := range server.Channels {
+		channel, found := a.store.Channel(id)
+		if !found || channel.Kind != domain.ChannelVoice || id == currentID {
+			continue
+		}
+		if !a.canViewChannel(channel) {
+			continue
+		}
+
+		items = append(items, fyne.NewMenuItem(channel.Name,
+			func() { a.moveMember(serverID, userID, id) }))
+	}
+
+	if len(items) == 0 {
+		return nil
+	}
+
+	parent := fyne.NewMenuItem("Move to", nil)
+	parent.ChildMenu = fyne.NewMenu("", items...)
+
+	return parent
+}
+
+func (a *App) setMemberVoiceMuted(serverID, userID string, muted bool) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.SetMemberVoiceMuted(serverID, userID, muted) },
+		"mute member "+userID+" in server "+serverID,
+		"Could not mute %s.", "%s can no longer speak.", name,
+	)
+}
+
+func (a *App) setMemberVoiceDeafened(serverID, userID string, deafened bool) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.SetMemberVoiceDeafened(serverID, userID, deafened) },
+		"deafen member "+userID+" in server "+serverID,
+		"Could not deafen %s.", "%s can no longer hear the call.", name,
+	)
+}
+
+func (a *App) moveMember(serverID, userID, channelID string) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.MoveMember(serverID, userID, channelID) },
+		"move member "+userID+" in server "+serverID,
+		"Could not move %s.", "%s was moved.", name,
+	)
+}
+
+func (a *App) disconnectMember(serverID, userID string) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.DisconnectMember(serverID, userID) },
+		"disconnect member "+userID+" in server "+serverID,
+		"Could not disconnect %s.", "%s left the call.", name,
+	)
+}

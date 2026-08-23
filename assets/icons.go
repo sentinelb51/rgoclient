@@ -37,6 +37,21 @@ var voiceSVG []byte
 //go:embed search.svg
 var searchSVG []byte
 
+//go:embed mic.svg
+var micSVG []byte
+
+//go:embed mic-off.svg
+var micOffSVG []byte
+
+//go:embed headphones.svg
+var headphonesSVG []byte
+
+//go:embed headphones-off.svg
+var headphonesOffSVG []byte
+
+//go:embed call-end.svg
+var callEndSVG []byte
+
 //go:embed camera.svg
 var cameraSVG []byte
 
@@ -133,6 +148,15 @@ var (
 	// sharing, on their row under that channel in the sidebar.
 	CameraIcon      fyne.Resource = fyne.NewStaticResource("camera.svg", cameraSVG)
 	ScreenshareIcon fyne.Resource = fyne.NewStaticResource("screenshare.svg", screenshareSVG)
+
+	// The call dock's three buttons, each in both of its states. Stroked outlines
+	// with one stroke colour, like every other mark here — tintedIcon rewrites
+	// that colour, and a fill it cannot reach comes back white.
+	MicIcon           fyne.Resource = fyne.NewStaticResource("mic.svg", micSVG)
+	MicOffIcon        fyne.Resource = fyne.NewStaticResource("mic-off.svg", micOffSVG)
+	HeadphonesIcon    fyne.Resource = fyne.NewStaticResource("headphones.svg", headphonesSVG)
+	HeadphonesOffIcon fyne.Resource = fyne.NewStaticResource("headphones-off.svg", headphonesOffSVG)
+	CallEndIcon       fyne.Resource = fyne.NewStaticResource("call-end.svg", callEndSVG)
 
 	// ForbiddenIcon leads the line the composer draws in place of its entry where
 	// the account may not write.

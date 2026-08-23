@@ -21,17 +21,70 @@ Everything a server, role, member or channel can do is handled.
 
 Where something is limited by revoltgo or Fyne rather than by effort:
 
-- **A voice channel is a text channel here.** It is recognised — its own speaker
-  glyph in the sidebar and the header, a standing note under that header saying
-  so, and who is connected drawn as rows under it in the channel sidebar — and
-  everything a text channel does works in it, Revolt keeping messages in one all
-  the same. What is missing is the call itself: joining one is a WebRTC session
-  against Revolt's media server, so the signalling revoltgo models (the voice
-  events, the channel's voice token) is the small half, and the audio devices and
-  the media stack behind it are not something Fyne offers any part of. What a
-  participant's own end is doing is drawn only as far as it is a plain fact — a
-  camera and a screen share; `is_publishing` / `is_receiving` are a media
-  session's bookkeeping rather than muted and deafened, so neither is shown.
+- **A call is audio only.** Joining works — `internal/voice` publishes one Opus
+  track to Stoat's LiveKit node and mixes everybody else — but there is no
+  camera, no screen share and no way to *watch* either, so a participant sharing
+  one is drawn with the mark and nothing behind it. Nothing records a call.
+  What a participant's own end is doing is still drawn only as far as it is a
+  plain fact — `is_publishing` / `is_receiving` are a media session's bookkeeping
+  rather than muted and deafened, so neither is shown. A *remote* speaking ring
+  comes from the voice server's active-speaker report; this account's own comes
+  off the capture gate instead, that report being about other people and landing
+  about half a second late.
+
+- **The voice node is measured, not chosen.** `join_call` requires a node by
+  name; `nearestVoiceNode` dials every node the instance offers and takes the
+  first handshake to complete, caching it for the session. The coordinates each
+  node carries are not used — that would need the reader's own position, which
+  this client neither knows nor should ask for. There is no surface offering the
+  list, so a reader who wants a *particular* node cannot say so. stoat.chat
+  publishes one today, which is taken without a probe.
+
+- **ICE candidates cannot be filtered.** lksdk builds its `webrtc.SettingEngine`
+  privately in `transport.go` and exposes only `IPv6Only` and
+  `DTLSEllipticCurves` on `ConnectParams` — no `SetIPFilter`, no
+  `SetInterfaceFilter`. So pion gathers on every local adapter, including ones
+  that cannot route: an APIPA address left by a NIC with no DHCP lease, or an
+  `fe80::` link-local on a machine with no global IPv6. It still connects, the
+  working adapter's candidate winning, but the dead ones are checked first and
+  logged per pair. Fixing it means a hook upstream in `livekit/server-sdk-go`.
+
+- **No echo cancellation.** The capture chain is a high-pass, a noise gate and a
+  gain; `audio.Processor` is the seam AEC would go in and `Engine` owns both
+  directions precisely so the playback reference is reachable, but nothing
+  implements one. Headphones are assumed — on speakers the far end hears itself.
+  There is no spectral noise suppression either: "noise reduction" is the
+  high-pass in front of the gate, which is what the sensitivity slider drives.
+
+- **Push-to-talk is Windows-only, and binds from a list rather than a captured
+  key.** `ui.KeyHeld` is `GetAsyncKeyState`, which needs no canvas focus — the
+  same route `ShiftHeld` takes, and the reason the mode works at all while the
+  composer holds focus. X11 would need `XQueryKeymap` on a display connection
+  this client does not own and macOS an Accessibility grant, so
+  `PushToTalkSupported` is false there and the settings page leaves the mode out
+  entirely rather than offering one that silently behaves as voice activity.
+  The key comes from a curated list (`pushToTalkKeys`) because *capturing* an
+  arbitrary key still needs focus; the list is the modifiers and mouse buttons
+  people actually bind.
+
+- **DRED and OSCE are not vendored.** `sentinelb51/gopus` vendors libopus 1.5.2
+  plus the `dnn/` sources Deep PLC needs, so neural loss concealment is available
+  and switched by the "Repair dropped audio" setting. What is still out is DRED —
+  redundant copies of past speech stapled to later packets, which recovers a burst
+  loss instead of concealing it — and OSCE's LACE/NoLACE decoder enhancement.
+  DRED is the one worth wanting, and the reason it is not here is that it needs
+  the *sender* to enable it too: against the official web client, or anything else
+  that is not this library, it buys nothing. The two are also 10 MB of model data
+  against Deep PLC's 5.
+  The classic codec's intrinsics are compiled out — SSE, AVX2 and Neon — so celt
+  and silk run their generic C paths, which is what lets one object serve every
+  amd64 and arm64 target. That trade is measured and cheap (see
+  `docs/performance.md`), and it does *not* apply to the neural code: `dnn/vec.h`
+  dispatches on the compiler's own `__SSE2__` and `__ARM_NEON` rather than on
+  libopus's config, so Deep PLC is already vectorised everywhere this builds.
+  The encoder CTLs are reached through `voice.opusTuning`, an interface assertion
+  rather than a direct call, so the client still builds against a binding without
+  them — at the cost of a deeper jitter buffer, and it says so once at join.
 
 - **There is no desktop notification, and Revolt's own push is unreachable.**
   `/push/subscribe` takes a `WebPushSubscription` — a browser service worker's
@@ -134,6 +187,12 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   request, and there is no paging past that; the sidebar still counts the rest.
   Nothing is muted, either: Revolt's per-channel notification settings are user
   settings this client does not read, so a muted channel counts like any other.
+  **Dismissing one lasts as long as the client runs.** Revolt has no route
+  dropping a single mention — the array is cleared by acknowledging a message,
+  which would mark everything before it read as well — so `App.dismissMention`
+  forgets it locally and `App.dismissedMentions` keeps every reconnect's `Ready`
+  from handing it back. Nothing persists it, so a restart before the channel is
+  ever opened brings it back.
 - **A server is created with a name and nothing else.** Revolt takes no icon and
   no description at creation, so the card is one field; both are set afterwards
   from the server's own settings page.

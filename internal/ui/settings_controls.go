@@ -867,6 +867,90 @@ func usageTint(ratio float32) color.Color {
 	return theme.Colors.ServerSelectedBg
 }
 
+/* The input level meter */
+
+// newLevelBar is the microphone meter: a fill for what the microphone is hearing
+// and a marker for where the gate opens, on one scale so the two can be compared
+// by eye. That comparison is the whole point — the sensitivity setting is a
+// threshold in decibels, and a number between 0 and 100 says nothing about
+// whether your own voice clears it.
+//
+// The fill turns as it crosses the marker, which is the answer to the only
+// question being asked of this control: am I being heard right now.
+//
+// It hands back a setter for each, because they move for different reasons and
+// at very different rates — the level on every sample the controller reports,
+// the threshold only when the slider is dragged.
+func newLevelBar() (bar *fyne.Container, setLevel, setThreshold func(ratio float32)) {
+	height := theme.Sizes.SettingsLevelHeight
+
+	track := canvas.NewRectangle(theme.Colors.ChannelSelectedBg)
+	track.CornerRadius = height / 2
+
+	fill := canvas.NewRectangle(theme.Colors.EmbedAccent)
+	fill.CornerRadius = height / 2
+
+	marker := canvas.NewRectangle(theme.Colors.TextPrimary)
+
+	layout := &levelBarLayout{}
+	bar = container.New(layout, track, fill, marker)
+
+	// Redrawn from both setters, since either can change which side of the
+	// threshold the level is on.
+	paint := func() {
+		open := layout.level >= layout.threshold && layout.level > 0
+		if open {
+			fill.FillColor = theme.Colors.PresenceOnline
+		} else {
+			fill.FillColor = theme.Colors.EmbedAccent
+		}
+		fill.Refresh()
+		Relayout(bar)
+	}
+
+	setLevel = func(ratio float32) {
+		layout.level = clamp(ratio, 0, 1)
+		paint()
+	}
+
+	setThreshold = func(ratio float32) {
+		layout.threshold = clamp(ratio, 0, 1)
+		paint()
+	}
+
+	return bar, setLevel, setThreshold
+}
+
+// levelBarLayout stretches the track across the slot, the fill across the level,
+// and stands the marker at the threshold.
+type levelBarLayout struct{ level, threshold float32 }
+
+func (l *levelBarLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if len(objects) != 3 {
+		return
+	}
+
+	height := theme.Sizes.SettingsLevelHeight
+	y := (size.Height - height) / 2
+
+	objects[0].Resize(fyne.NewSize(size.Width, height))
+	objects[0].Move(fyne.NewPos(0, y))
+
+	// No floor under the fill, unlike the usage bar: silence is a real reading
+	// here and drawing a stub for it would say the microphone is hearing
+	// something.
+	objects[1].Resize(fyne.NewSize(size.Width*l.level, height))
+	objects[1].Move(fyne.NewPos(0, y))
+
+	width := theme.Sizes.SettingsLevelMarker
+	objects[2].Resize(fyne.NewSize(width, height))
+	objects[2].Move(fyne.NewPos(min(size.Width*l.threshold, size.Width-width), y))
+}
+
+func (l *levelBarLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(0, theme.Sizes.SettingsLevelHeight)
+}
+
 // usageBarLayout stretches the track across the slot and the fill across its
 // share of it.
 type usageBarLayout struct{ ratio float32 }

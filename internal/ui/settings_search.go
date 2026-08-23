@@ -134,6 +134,15 @@ func buildSettingsIndex(hooks SettingsHooks) []settingsHit {
 	hooks.LoadProfile = func(func(domain.UserProfile)) {}
 	hooks.CacheStats = func(func(cache.ImageStats)) {}
 
+	// The same rule with a device behind it: enumerating is a walk of the audio
+	// backend, and StartInputMonitor *opens a microphone*. Doing either on the
+	// first keystroke in the search box, for a page nobody is looking at, is the
+	// bug. A nil device list is harmless — optionRow records only its label.
+	hooks.InputDevices = nil
+	hooks.OutputDevices = nil
+	hooks.StartInputMonitor = nil
+	hooks.StopInputMonitor = nil
+
 	basic := indexPass(hooks, false)
 
 	shown := make(map[hitKey]bool, len(basic))

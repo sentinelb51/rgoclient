@@ -553,11 +553,15 @@ func (a *App) channelKind() domain.ChannelKind {
 	return channel.Kind
 }
 
-// voiceNote is what the strip under the header says in a voice channel. Revolt's
-// voice channels carry messages like any other, so what is missing is the call —
-// which is the half the sentence has to name, a mark saying "voice" over an empty
-// composer being how a channel that refuses messages looks.
-const voiceNote = "Voice chat isn't supported yet. You can still send messages here."
+// What the strip under the header says in a voice channel, in its three states.
+// Revolt's voice channels carry messages like any other, so each of these names
+// the *call* — a mark saying "voice" over a composer that works would otherwise
+// read as a channel refusing messages.
+const (
+	voiceNote       = "Voice channel. Join the call, or just send messages here."
+	voiceNoteJoined = "You're in this call."
+	voiceNoteClosed = "Voice channel. You cannot join this call."
+)
 
 // syncChannelKind matches the message header to the open channel's type: the
 // prefix mark, so a DM reads "@name" rather than "#name", and the note under it,
@@ -573,6 +577,7 @@ func (a *App) syncChannelKind() {
 	a.channelGlyph.Refresh()
 
 	if kind == domain.ChannelVoice {
+		a.syncVoiceNote()
 		a.channelNote.Show()
 	} else {
 		a.channelNote.Hide()
@@ -618,6 +623,15 @@ func (a *App) loadChannelMessages(channelID string) {
 
 		a.doOnUI(func() {
 			if a.currentChannelID != channelID {
+				return
+			}
+
+			// Entering a channel to jump somewhere in it asks for both this page and the
+			// window around the message, and either can land first. The window is what the
+			// reader asked for, so a page arriving behind it is dropped rather than
+			// snapping the column back to the tail. Every caller shows a status line
+			// first, which clears the flag, so this can only be a jump made since.
+			if a.jumped {
 				return
 			}
 			if count == 0 {
@@ -746,6 +760,24 @@ func (a *App) OnJumpToMessage(channelID, messageID string) {
 	}
 
 	a.loadJumpWindow(channelID, messageID)
+}
+
+// jumpToMessageIn brings a message into view wherever it lives, moving both
+// sidebars first where it is not in the open channel. Only the inbox needs it —
+// a reply and a search result name a message in the channel already open — and
+// it is separate from OnJumpToMessage because that one is an Action the widgets
+// call, which must stay the cheap same-channel answer.
+//
+// The channel's own first page is on its way by the time the jump is asked for,
+// and loadChannelMessages drops it if this lands first. Call on the UI thread.
+func (a *App) jumpToMessageIn(channelID, messageID string) {
+	if channelID != a.currentChannelID && !a.openChannel(channelID) {
+		a.notify(ui.ToneWarning, "That channel isn't available.")
+
+		return
+	}
+
+	a.OnJumpToMessage(channelID, messageID)
 }
 
 // revealMessage centres a message the window already holds and flashes it,

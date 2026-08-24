@@ -3,12 +3,13 @@
 //
 // Two machines have more than one kind of core in a way a program can read
 // rather than guess. Intel's hybrid parts split into performance and efficiency
-// cores and say so per logical processor. AMD's dual-chiplet parts put each
-// chiplet behind its own L3 and, on the parts with stacked cache, a different
-// amount of it — those are reported by the machine's own numbering, CCD0 and
-// CCD1, the numbering being the only honest name a chiplet has. Two chiplets
-// with the same cache differ only in the silicon lottery, so they are reported
-// as one kind and nothing above is offered a choice.
+// cores and say so per logical processor. An AMD part whose cores sit behind
+// exactly two L3 caches is a pair of chiplets, reported by the machine's own
+// numbering — CCD0 and CCD1 — the only name that holds across the range: which
+// chiplet carries the better bins is CPPC's preferred-core ranking, which
+// Windows offers no user-mode read for. The vendor gate keeps the name honest:
+// two L3 domains on anything but an AMD part — a second socket, a hypervisor's
+// invented topology — are not chiplets.
 //
 // Nothing here imports anything else of ours. What the two kinds are *for* is a
 // policy, and it lives with the setting that names it.
@@ -37,9 +38,8 @@ type Topology struct {
 
 	// CCD0 and CCD1 are AMD's chiplets: the machine's two L3 domains in its own
 	// order, CCD0 holding the lowest-numbered processor. The index is the whole of
-	// the name — on the shipping parts the stacked cache goes on CCD0 and the
-	// higher clocks on CCD1, but that is a fact about those parts, not something
-	// read here.
+	// the name — which chiplet carries the stacked cache or the better bins is the
+	// part's own business, read nowhere here.
 	CCD0 []int
 	CCD1 []int
 }

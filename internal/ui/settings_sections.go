@@ -852,7 +852,7 @@ func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject
 				{Label: "CCD1", Value: config.CoresCCD1},
 			}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
 
-			p.note("CCD1 is the default: it is usually the higher-clocking chiplet. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+			p.note("CCD1 is the default: games and heavier apps usually land on CCD0, which carries the stacked cache or the better-binned cores. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
 		}
 	}
 
@@ -862,22 +862,18 @@ func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject
 	return []fyne.CanvasObject{
 		p.optionRow("Run on", detail, coresValue(settings.Cores, cores), []settingsOption{
 			{Label: "All cores", Value: config.CoresAll},
-			{Label: "Automatic", Value: config.CoresAuto},
 			{Label: "Efficiency cores", Value: config.CoresEfficiency},
 			{Label: "Performance cores", Value: config.CoresPerformance},
 		}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
 
-		p.note("Automatic picks the " + strconv.Itoa(cores.Efficiency) +
-			" efficiency cores, and is the default. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+		p.note("Efficiency cores is the default: the client is idle most of the time, and they cost less power. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
 	}
 }
 
 // coresValue is the stored setting as one of the values the row offers on this
-// machine. The file is hand-editable and travels between machines, so a value
-// nobody named — or one naming a side this machine does not have — reads as the
-// default rather than drawing a control with no label. On a chiplet machine the
-// default reads as CCD1, there being no Automatic row for it to read as — the
-// same side the controller's Automatic picks, so the row shows what runs.
+// machine. The controller resolves and writes the setting before this page can
+// open, so the fallbacks only catch a file edited by hand since — and they
+// answer what the controller would: the machine's own default.
 func coresValue(cores string, machine CPUCores) string {
 
 	if machine.CCD0 > 0 {
@@ -894,7 +890,7 @@ func coresValue(cores string, machine CPUCores) string {
 		return cores
 	}
 
-	return config.CoresAuto
+	return config.CoresEfficiency
 }
 
 /* Advanced */

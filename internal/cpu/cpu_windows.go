@@ -146,24 +146,18 @@ func hybrid(all []int, sets []cpuSetInfo) (performance, efficiency []int, split 
 	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
 }
 
-// chiplets splits by L3 domain. Cores sharing a level-3 cache are one chiplet,
-// and exactly two chiplets carrying different amounts of it are a CCD0 and a
-// CCD1, in the order the machine numbers its processors. Equal caches are not a
-// split — two chiplets alike on paper differ only in binning, which nothing
-// here can read, so no side is defensible as a default. A VM is the other
-// reason the gate matters: hypervisors invent L3 domains freely, and equal
-// sizes is what those look like.
+// chiplets splits by L3 domain: an AMD part whose cores sit behind exactly two
+// level-3 caches is a CCD0 and a CCD1, in the order the machine numbers its
+// processors. The vendor gate is not pedantry — two L3 domains on anything
+// else (a second socket, a hypervisor's invented topology) are not chiplets —
+// and a domain of one processor is likewise an invention, not a CCD.
 func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
-	caches := lastLevelCaches()
-	if len(caches) != 2 {
+	if !amd() {
 		return nil, nil, false
 	}
 
-	masks := make([]uintptr, 0, 2)
-	for mask := range caches {
-		masks = append(masks, mask)
-	}
-	if caches[masks[0]] == caches[masks[1]] {
+	masks := lastLevelCaches()
+	if len(masks) != 2 {
 		return nil, nil, false
 	}
 
@@ -178,7 +172,7 @@ func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
 			return nil, nil, false // a core behind no L3 we could find
 		}
 	}
-	if len(groups[0]) == 0 || len(groups[1]) == 0 {
+	if len(groups[0]) < 2 || len(groups[1]) < 2 {
 		return nil, nil, false
 	}
 
@@ -230,8 +224,9 @@ func cpuSets() ([]cpuSetInfo, error) {
 	return sets, nil
 }
 
-// lastLevelCaches maps each level-3 cache's processor mask to its size in bytes.
-func lastLevelCaches() map[uintptr]uint32 {
+// lastLevelCaches reports each level-3 cache as the mask of the logical
+// processors behind it, one entry per distinct cache.
+func lastLevelCaches() []uintptr {
 	var length uint32
 
 	ok, _, err := getLogicalProcessorInfo.Call(0, uintptr(unsafe.Pointer(&length)))
@@ -246,16 +241,48 @@ func lastLevelCaches() map[uintptr]uint32 {
 	}
 
 	record := uint32(unsafe.Sizeof(logicalProcessorInfo{}))
-	caches := make(map[uintptr]uint32)
+	seen := make(map[uintptr]bool)
 
+	var caches []uintptr
 	for offset := uint32(0); offset+record <= length; offset += record {
 		info := *(*logicalProcessorInfo)(unsafe.Pointer(&buffer[offset]))
-		if info.Relationship == relationCache && info.CacheLevel == 3 {
-			caches[info.ProcessorMask] = info.CacheSize
+		if info.Relationship == relationCache && info.CacheLevel == 3 && !seen[info.ProcessorMask] {
+			seen[info.ProcessorMask] = true
+			caches = append(caches, info.ProcessorMask)
 		}
 	}
 
 	return caches
+}
+
+// amd reports whether the processor is AMD's, from the registry's copy of
+// CPUID's vendor string — user mode has no CPUID of its own without assembly,
+// and the kernel writes this key at boot.
+func amd() bool {
+	path, err := syscall.UTF16PtrFromString(`HARDWARE\DESCRIPTION\System\CentralProcessor\0`)
+	if err != nil {
+		return false
+	}
+	name, err := syscall.UTF16PtrFromString("VendorIdentifier")
+	if err != nil {
+		return false
+	}
+
+	var key syscall.Handle
+	if syscall.RegOpenKeyEx(syscall.HKEY_LOCAL_MACHINE, path, 0, syscall.KEY_READ, &key) != nil {
+		return false
+	}
+	defer syscall.RegCloseKey(key)
+
+	var kind uint32
+	var buffer [64]uint16
+	size := uint32(len(buffer) * 2)
+	if syscall.RegQueryValueEx(key, name, nil, &kind,
+		(*byte)(unsafe.Pointer(&buffer[0])), &size) != nil || kind != syscall.REG_SZ {
+		return false
+	}
+
+	return syscall.UTF16ToString(buffer[:]) == "AuthenticAMD"
 }
 
 /* Applying */

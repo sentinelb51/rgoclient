@@ -163,10 +163,37 @@ type SettingsHooks struct {
 	CacheStats     func(onDone func(cache.ImageStats))
 	ClearCache     func()
 
+	/* Performance */
+
+	// CPUCores describes the machine's cores. `ui` must not import `cpu`, so the
+	// counts cross as a value the way an AudioDevice does, and the controller keeps
+	// what a kind of core is *for* on its own side.
+	CPUCores func() CPUCores
+
 	/* About */
 
 	ConfigPath func() string
 	OpenPath   func(path string)
+}
+
+// CPUCores is what the settings page is told about the machine's cores.
+type CPUCores struct {
+	Performance int
+	Efficiency  int
+
+	// Hybrid is which split this is, and the two read nothing alike to somebody
+	// choosing between them: true is Intel's performance and efficiency cores,
+	// where one side is slower on purpose, and false is AMD's chiplets, where one
+	// side clocks higher because it carries less cache.
+	Hybrid bool
+}
+
+// Split reports whether there is anything to choose between. Without it the group
+// is dropped from the page rather than drawn as a control whose four values would
+// all pick the same processors — the same rule the taskbar-flash group follows.
+func (c CPUCores) Split() bool {
+
+	return c.Performance > 0 && c.Efficiency > 0
 }
 
 // SettingsSession is one saved login as the Account section lists it.

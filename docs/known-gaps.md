@@ -319,6 +319,23 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   cache folder is still choosable there, in a dialog that looks like nothing else
   on the machine. GTK/AppKit or the XDG desktop portal is what the other halves
   would take, each a binding of its own.
+- **Pinning to a kind of core is Windows and Linux only, and reads two splits
+  out of the possible many.** `internal/cpu` answers with no split on macOS,
+  which has no affinity API to answer with: `thread_policy_set`'s affinity tag is
+  a hint the scheduler may ignore and does ignore on Apple silicon, so the
+  Processor cores group is left off the page there rather than drawn as a control
+  that would do nothing. Three narrower gaps sit inside the two platforms that do
+  work. A machine past 64 logical processors has more than one processor group,
+  and `SetProcessAffinityMask` names processors within one group only, so such a
+  machine is reported as having no split rather than pinned to a group the
+  indices may not be in. Two chiplets carrying the *same* L3 — a 7950X against a
+  7950X3D — are likewise not a split, there being nothing to read that says which
+  of them clocks higher; pinning to one chiplet anyway, for the fabric hop rather
+  than the clock, is not offered. And on Linux the syscall is per-thread with no
+  process-wide form, so `pin` walks `/proc/self/task` twice and a thread created
+  between the listing and the last call inherits from whichever thread started
+  it — which is the right mask in every case but a vanishing race.
+
 - **CI ships bare binaries, not installable applications.** All three targets
   build and are attached to a release, but nothing is packaged: macOS gets a
   Mach-O rather than a signed, notarised `.app`, so Gatekeeper refuses it until

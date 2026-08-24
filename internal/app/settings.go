@@ -26,6 +26,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
+	"RGOClient/internal/cpu"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -128,6 +129,7 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 	a.syncChannelList()
 
 	applyPacing()
+	applyAffinity()
 }
 
 // applyPacing hands the frame settings to the toolkit. Both are patches to the
@@ -138,6 +140,63 @@ func applyPacing() {
 
 	fyne.SetFrameRate(performance.FrameRate)
 	fyne.SetVSync(performance.VSync)
+}
+
+// applyAffinity restricts the process to the cores the setting names.
+//
+// Unlike the frame settings this is nothing to do with the toolkit: it moves the
+// whole process, so the gateway, the image loaders and miniaudio's callback go
+// wherever the drawing does. That is why the page says as much, and why a machine
+// with one kind of core is never asked.
+func applyAffinity() {
+	topology := cpu.Detect()
+
+	cores := topology.All
+	if topology.Split() {
+		cores = coresFor(config.Current().Performance.Cores, topology)
+	}
+	if len(cores) == 0 {
+		return // a platform that cannot pin, or would not say what it has
+	}
+
+	if err := cpu.Pin(cores); err != nil {
+		log.Printf("pin to %d cores: %v", len(cores), err)
+	}
+}
+
+// coresFor is the policy the setting names: which side of the machine's own
+// asymmetry to take. `cpu` reports the two sides and stays out of the choice, so
+// this is the only place that knows Automatic answers differently on each kind of
+// split — see config.CoresAuto for why.
+func coresFor(mode string, topology cpu.Topology) []int {
+
+	if mode == config.CoresAuto {
+		mode = config.CoresPerformance
+		if topology.Hybrid {
+			mode = config.CoresEfficiency
+		}
+	}
+
+	switch mode {
+	case config.CoresEfficiency:
+		return topology.Efficiency
+	case config.CoresPerformance:
+		return topology.Performance
+	}
+
+	return topology.All
+}
+
+// settingsCPUCores describes the machine's cores to the settings page. The counts
+// are all it draws: which processors they are is this side's business.
+func settingsCPUCores() ui.CPUCores {
+	topology := cpu.Detect()
+
+	return ui.CPUCores{
+		Performance: len(topology.Performance),
+		Efficiency:  len(topology.Efficiency),
+		Hybrid:      topology.Hybrid,
+	}
 }
 
 // applyStyles rebuilds the theme tables from the settings. The client itself is
@@ -265,6 +324,8 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		ChooseCacheDir: a.chooseCacheDir,
 		CacheStats:     a.cacheStats,
 		ClearCache:     a.clearImageCache,
+
+		CPUCores: settingsCPUCores,
 
 		ConfigPath: settingsPath,
 		OpenPath:   a.openPath,

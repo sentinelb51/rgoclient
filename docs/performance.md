@@ -243,6 +243,37 @@ The seam that makes any of these thinkable is the one already enforced: only
 `internal/client` knows revoltgo, only `internal/ui` knows Fyne. Keeping that
 line clean is the cheapest insurance against needing this section.
 
+## Which cores it runs on
+
+`internal/cpu` reports the machine's logical processors split into two kinds and
+pins the process to one of them; the Performance section's **Processor cores**
+row is what picks. Only two splits are read, because only two are legible rather
+than guessed: Intel's hybrid parts publish an `EfficiencyClass` per logical
+processor, and a chiplet part's chiplets carry different amounts of L3, the
+smaller cache being the chiplet without stacked cache and therefore the one that
+clocks higher. Two chiplets with the same cache are **not** a split — what
+separates them is binning, which nothing here can read — so such a machine is
+never offered the choice.
+
+Three things about it are worth knowing before it is trusted:
+
+- **None of it is measured.** There is no benchmark for it and no number below,
+  because both directions are plausible and neither has been shown: efficiency
+  cores are a power argument for a client that is idle most of the time, and one
+  chiplet is a latency argument about work not crossing the fabric. The default
+  is **All cores** for exactly that reason.
+- **It moves the whole process**, not the draw loop. `mixer.render`'s 10 ms
+  deadline (below) is pinned with everything else, so a set of cores too slow for
+  it is a dropout rather than a dropped frame. That is the one failure worth
+  looking for after changing this.
+- **`GOMAXPROCS` moves with it.** The runtime counts its processors once, at
+  startup, and hears nothing about a mask set later; leaving it alone would
+  schedule that many Ps onto however few cores remain. `cpu.Pin` sets both.
+
+The baseline it restores to is the affinity the process *started* with, not every
+core in the machine — `start /affinity` or `taskset` is a decision somebody made,
+and widening past it would overrule them.
+
 ## Measuring
 
 The client itself is not instrumented. `internal/app/virtual_bench_test.go`

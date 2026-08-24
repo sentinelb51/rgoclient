@@ -24,6 +24,7 @@ written against the domain. The dependency graph is a strict DAG:
 
 ```
 domain, markdown, config       no internal dependencies
+cpu                            no internal dependencies    (Win32 / sysfs, no cgo)
 audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
 audio      -> audio/rnnoise                  (+ malgo, go-mp3)
 voice      -> domain                         (+ lksdk, gopus)
@@ -31,7 +32,7 @@ util       -> config
 cache      -> domain
 client     -> cache, config, domain          (+ revoltgo)
 ui         -> cache, config, domain, markdown, util
-app        -> audio, voice, cache, client, config, domain, ui, util
+app        -> audio, voice, cache, client, config, cpu, domain, ui, util
 ```
 
 `config` is a leaf so everything above can read a setting. `cache` and `audio`
@@ -41,6 +42,13 @@ arrive as arguments, so either builds in a test with no settings file anywhere.
 (`ui.Keystroke`) and `app` decides what it sounds like. A device list crosses the
 same way, as `ui.AudioDevice`, and so does the microphone meter's scale — the
 level and the gate's threshold both arrive as ratios, decibels being `audio`'s.
+
+`cpu` crosses the same seam from the other side. It reports which logical
+processors are which and pins the process to a set of them; what a *kind* of core
+is for — that Automatic wants the efficiency cores on a hybrid part and the
+higher-clocking chiplet on a chiplet one — is a policy, and it lives in
+`app.coresFor` beside the setting that names it. The counts reach the settings
+page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 
 `voice` declares `PCMSource` / `PCMSink` **structurally** and never imports
 `audio`, so `app` is the only package importing both and therefore the only place
@@ -164,6 +172,17 @@ internal/
                          (enumeration and the process's one miniaudio context),
                          decode.go (WAV + MP3 -> the device's format),
                          synth.go (the built-in sounds, rendered rather than shipped)
+  cpu/                   which logical processors the client is allowed to run on.
+                         cpu.go (Topology, Detect, Pin — Pin also moves GOMAXPROCS,
+                         the runtime having counted its processors before any of
+                         this), cpu_windows.go (GetSystemCpuSetInformation for the
+                         efficiency classes, GetLogicalProcessorInformation for the
+                         L3 groups and their sizes, one process-wide mask),
+                         cpu_linux.go (the same two answers out of sysfs, and a
+                         per-thread walk of /proc/self/task, that syscall having no
+                         process-wide form), cpu_other.go (macOS: no affinity API
+                         exists, so no split is reported and the setting is not
+                         drawn)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          pins.go, search.go, mentions.go, emoji.go, notify.go,

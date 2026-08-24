@@ -234,6 +234,13 @@ type Performance struct {
 	// input and queued work included. Off, a frame is shown as soon as it is drawn
 	// and a fast scroll can tear.
 	VSync bool `json:"vsync"`
+
+	// Cores is which of the machine's cores the client is allowed to run on:
+	// CoresAll, CoresAuto, CoresEfficiency or CoresPerformance. It reaches the
+	// process rather than the toolkit — everything the client does moves with it,
+	// the call's audio included — and it is inert on a machine whose cores are all
+	// alike.
+	Cores string `json:"cores"`
 }
 
 // Voice is the call: which devices it uses, what it does to the microphone on
@@ -317,6 +324,19 @@ const (
 const (
 	VoiceModeActivity = "activity"
 	VoiceModePush     = "push"
+)
+
+// Which cores the client runs on. Auto takes the machine's own asymmetry at face
+// value and picks the side that asymmetry exists for: the efficiency cores on a
+// hybrid part, where the point of them is spending less power on a client that is
+// idle most of the time; the higher-clocking chiplet on a processor whose
+// chiplets differ, where there is no low-power side to pick and the reason to
+// pick one at all is to stop the work crossing between them.
+const (
+	CoresAll         = "all"
+	CoresAuto        = "auto"
+	CoresEfficiency  = "efficiency"
+	CoresPerformance = "performance"
 )
 
 /* Defaults */
@@ -420,6 +440,7 @@ func Default() Settings {
 		Performance: Performance{
 			FrameRate: 120,
 			VSync:     true,
+			Cores:     CoresAll,
 		},
 	}
 }

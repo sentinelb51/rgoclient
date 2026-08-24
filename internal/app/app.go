@@ -457,6 +457,7 @@ func New(fyneApp fyne.App, info Info) *App {
 // loop.
 func (a *App) Run() {
 	applyPacing()
+	applyAffinity()
 
 	go a.pumpEvents()
 

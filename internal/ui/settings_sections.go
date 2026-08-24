@@ -800,7 +800,7 @@ func fileCount(files int) string {
 func (p *SettingsPage) performanceSection() []settingsGroup {
 	settings := config.Current().Performance
 
-	return []settingsGroup{
+	groups := []settingsGroup{
 		p.group("Drawing", "How the client draws each frame.",
 			p.numberRow("FPS",
 				"The most frames per second the client will try to draw. Higher is smoother to scroll and animate while something moves.",
@@ -812,6 +812,69 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 			p.note("With V-Sync on, FPS is capped to your monitor's refresh rate (Hz)."),
 		),
 	}
+
+	if rows := p.coreRows(settings); len(rows) > 0 {
+		groups = append(groups, p.group("Processor cores",
+			"Which of this machine's cores the client is allowed to run on. Everything it does moves with this, call audio included.",
+			rows...))
+	}
+
+	return groups
+}
+
+// coreRows is the core group, and nothing at all where the machine's cores are
+// all alike — the rule the taskbar-flash group follows, for the same reason.
+//
+// The two sides are named for what they are on the machine in front of the
+// reader. A hybrid processor has efficiency cores, which are slower on purpose. A
+// chiplet processor has no such thing: one side carries more cache and the other
+// clocks higher for carrying less, and calling either of them efficient would be
+// a guess dressed as a fact.
+func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject {
+	if p.hooks.CPUCores == nil {
+		return nil
+	}
+
+	cores := p.hooks.CPUCores()
+	if !cores.Split() {
+		return nil
+	}
+
+	fewer, more := "Cache cores", "Frequency cores"
+	detail := "This processor has " + strconv.Itoa(cores.Efficiency) + " cores with more cache and " +
+		strconv.Itoa(cores.Performance) + " that run at a higher clock."
+	automatic := "Automatic picks the " + strconv.Itoa(cores.Performance) + " higher-clocked cores."
+
+	if cores.Hybrid {
+		fewer, more = "Efficiency cores", "Performance cores"
+		detail = "This processor has " + strconv.Itoa(cores.Performance) + " performance cores and " +
+			strconv.Itoa(cores.Efficiency) + " efficiency cores, which are slower and use less power."
+		automatic = "Automatic picks the " + strconv.Itoa(cores.Efficiency) + " efficiency cores."
+	}
+
+	return []fyne.CanvasObject{
+		p.optionRow("Run on", detail, coresValue(settings.Cores), []settingsOption{
+			{Label: "All cores", Value: config.CoresAll},
+			{Label: "Automatic", Value: config.CoresAuto},
+			{Label: fewer, Value: config.CoresEfficiency},
+			{Label: more, Value: config.CoresPerformance},
+		}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
+
+		p.note(automatic + " Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+	}
+}
+
+// coresValue is the stored setting as one of the four the row offers. The file is
+// hand-editable and nothing sanitises this one, so a value nobody named reads as
+// the default rather than drawing a control with no label.
+func coresValue(cores string) string {
+
+	switch cores {
+	case config.CoresAuto, config.CoresEfficiency, config.CoresPerformance:
+		return cores
+	}
+
+	return config.CoresAll
 }
 
 /* Advanced */

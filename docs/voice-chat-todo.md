@@ -340,6 +340,17 @@ hardware; the code paths were.
   a fresh stop's send drop, and the mismatch read as nothing-to-do — a dead
   microphone nothing recovers. The newest stopped generation now lives in an
   atomic and the channel is a bare signal.
+- **The receive path allocated 1920 B per frame per participant.** gopus's
+  `Decode` allocates its answer, fifty times a second per lane. The fork gains
+  `Decoder.DecodeIn` (a caller's buffer; `Decode` delegates to it, so the two
+  cannot drift) and each lane decodes into a buffer of its own — behind an
+  `opusDecodeIn` assertion like `opusTuning`, so the client builds against
+  either gopus and lights up when the pin carries it.
+- **A rejoin made while the settings meter held the microphone would fail on
+  an exclusive-mode backend** — the meter's open and the join's are two opens
+  of one device. `joinCall` now releases an owned meter before the dial and
+  `installCall`/`failedJoin` put the bar back on whichever capture wins;
+  `startInputMonitor` sits out a join already in flight the same way.
 
 ### Done since this file was written
 
@@ -569,7 +580,9 @@ for. Delete any that earn their keep less than they cost:
   still there.
 - `go.mod` pins `layeh.com/gopus` to a `sentinelb51/gopus` commit on `master`.
   The FEC/DTX commit, the libopus 1.5.2 bump and the Deep PLC vendoring are all
-  merged there. The `opus_shared` build path — link the system libopus instead —
+  merged there. `Decoder.DecodeIn` is the next thing the pin should move for —
+  the client already asserts for it and decodes allocation-free the moment the
+  fork carries it. The `opus_shared` build path — link the system libopus instead —
   has never been compiled on this machine, pkg-config not being installed; the
   `Decoder.SetComplexity` shim was added to both files but only the vendored one
   is proven.

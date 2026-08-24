@@ -52,6 +52,14 @@ func (a *App) joinCall(channelID string) {
 	// A call already running elsewhere is left first: one microphone, one call.
 	a.hangUp()
 
+	// An owned meter holds the input device the worker is about to open, and a
+	// second open is a refusal on a backend in exclusive mode — which would fail
+	// every attempt of a rejoin made while settings is up. The report is kept,
+	// so installCall or failedJoin puts the bar back on whichever capture wins.
+	if a.monitorOwned {
+		a.stopInputMonitor()
+	}
+
 	a.callJoining = true
 	a.callChannelID = channelID
 	a.syncCall()
@@ -139,11 +147,10 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 	a.syncCall()
 	a.armPushToTalk()
 
-	// A meter running on a stream of its own is moved onto this one: two captures
-	// on one device is a second open the backend may refuse.
-	if a.monitor != nil && a.monitorOwned {
-		a.restartInputMonitor()
-	}
+	// A meter that wants to exist is moved onto this capture: an owned one would
+	// be a second open the backend may refuse, and one joinCall released for the
+	// dial has no stream at all until it is restarted here.
+	a.restartInputMonitor()
 
 	go a.pumpCall(call)
 }
@@ -361,6 +368,12 @@ func (a *App) failedJoin(channelID string, epoch, gen uint64, err error) {
 	// since. Nothing to report: they left.
 	if a.callGen != gen {
 		return
+	}
+
+	// joinCall released an owned meter so the dial could open the device. The
+	// attempt is over either way, so the bar comes back until the next one.
+	if !a.stale(epoch) && a.monitorReport != nil && a.monitor == nil {
+		a.restartInputMonitor()
 	}
 
 	if !a.stale(epoch) && a.callRetry < a.retryLimit() && client.Transient(err) {
@@ -677,6 +690,15 @@ func (a *App) startInputMonitor(report func(level float32)) {
 	a.stopInputMonitor()
 
 	capture, owned := a.capture, false
+
+	if capture == nil && a.callJoining {
+		// The join's worker is opening this device right now; a second open is a
+		// refusal on an exclusive-mode backend. The report is kept, and
+		// installCall or failedJoin restarts the meter onto whichever capture
+		// wins the race.
+		a.monitorReport = report
+		return
+	}
 
 	if capture == nil {
 		settings := config.Current().Voice

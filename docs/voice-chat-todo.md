@@ -579,10 +579,9 @@ for. Delete any that earn their keep less than they cost:
 - `voice-test` channel in **Big up testers** was created for testing and is
   still there.
 - `go.mod` pins `layeh.com/gopus` to a `sentinelb51/gopus` commit on `master`.
-  The FEC/DTX commit, the libopus 1.5.2 bump and the Deep PLC vendoring are all
-  merged there. `Decoder.DecodeIn` is the next thing the pin should move for —
-  the client already asserts for it and decodes allocation-free the moment the
-  fork carries it. The `opus_shared` build path — link the system libopus instead —
+  The FEC/DTX commit, the libopus 1.5.2 bump, the Deep PLC vendoring and
+  `Decoder.DecodeIn` are all merged there; the pin carries DecodeIn, so the
+  receive path decodes allocation-free through the `opusDecodeIn` assertion. The `opus_shared` build path — link the system libopus instead —
   has never been compiled on this machine, pkg-config not being installed; the
   `Decoder.SetComplexity` shim was added to both files but only the vendored one
   is proven.

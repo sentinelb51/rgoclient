@@ -135,4 +135,4 @@ replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4
 // this replace needs nothing beside it — the same arrangement as Fyne above. It
 // is a fork rather than upstream for the three encoder CTLs rgoclient asks for
 // through voice.opusTuning: in-band FEC, packet-loss estimate and DTX.
-replace layeh.com/gopus => github.com/sentinelb51/gopus v0.0.0-20260823185915-5aaa4752b64a
+replace layeh.com/gopus => github.com/sentinelb51/gopus v0.0.0-20260824060045-cdf306c4c6d4

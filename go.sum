@@ -233,8 +233,8 @@ github.com/rogpeppe/go-internal v1.15.0 h1:D0RCU5rMAp+SpgkiNdrjfJ+LX4J1M32V2NeCY
 github.com/rogpeppe/go-internal v1.15.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
 github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU=
 github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
-github.com/sentinelb51/gopus v0.0.0-20260823185915-5aaa4752b64a h1:wKup8B409xQOx8MMk1g6yZjyuMj0ccGAf3YVkosCHcc=
-github.com/sentinelb51/gopus v0.0.0-20260823185915-5aaa4752b64a/go.mod h1:yDtyzWZDFCVnva8NGtg38eH2Ns4J0D/6hD+MMeUGdF0=
+github.com/sentinelb51/gopus v0.0.0-20260824060045-cdf306c4c6d4 h1:6XMzPxyf/Z7DjqdDTc9CFFeXw1g75nd9RcJnP4VGtGo=
+github.com/sentinelb51/gopus v0.0.0-20260824060045-cdf306c4c6d4/go.mod h1:yDtyzWZDFCVnva8NGtg38eH2Ns4J0D/6hD+MMeUGdF0=
 github.com/sentinelb51/revoltgo v0.0.0-20260823164409-dd257e3aace5 h1:9KaHxcDD8HhpreQG/CqU33z8tP7oMhLIdU2juuV8OZU=
 github.com/sentinelb51/revoltgo v0.0.0-20260823164409-dd257e3aace5/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4 h1:6DceIgjzWNKwehhm7R015NWENX2ab00QNJ5/P5bqfE4=

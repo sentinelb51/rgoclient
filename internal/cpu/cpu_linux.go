@@ -55,14 +55,13 @@ func detect() Topology {
 	topology := Topology{All: set.cores()}
 
 	// Chiplets before efficiency classes, for the reason given in cpu_windows.go.
-	if performance, efficiency, split := chiplets(topology.All); split {
-		topology.Performance, topology.Efficiency = performance, efficiency
+	if ccd0, ccd1, split := chiplets(topology.All); split {
+		topology.CCD0, topology.CCD1 = ccd0, ccd1
 		return topology
 	}
 
 	if performance, efficiency, split := hybrid(topology.All); split {
 		topology.Performance, topology.Efficiency = performance, efficiency
-		topology.Hybrid = true
 	}
 
 	return topology
@@ -94,61 +93,57 @@ func hybrid(all []int) (performance, efficiency []int, split bool) {
 	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
 }
 
-// chiplets splits by last-level cache size, on the same rule as Windows: cores
-// sharing an L3 are one chiplet, the smaller cache is the chiplet without stacked
-// cache and therefore the faster-clocking one, and equal caches are not a split.
-func chiplets(all []int) (performance, efficiency []int, split bool) {
-	sizes := make(map[int]int64, len(all))
+// chiplets splits by L3 domain, on the same rule as Windows: cores sharing a
+// level-3 cache are one chiplet, exactly two chiplets carrying different
+// amounts of it are a CCD0 and a CCD1 in the order the machine numbers its
+// processors, and equal caches are not a split — cpu_windows.go says why the
+// gate matters.
+func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
+	var keys []string
+	groups := make(map[string][]int, 2)
+	sizes := make(map[string]int64, 2)
 
 	for _, core := range all {
-		size, found := lastLevelCache(core)
+		key, size, found := lastLevelCache(core)
 		if !found {
 			return nil, nil, false
 		}
-		sizes[core] = size
-	}
-
-	var smallest, largest int64
-	for _, size := range sizes {
-		if smallest == 0 || size < smallest {
-			smallest = size
+		if _, seen := groups[key]; !seen {
+			keys = append(keys, key)
+			sizes[key] = size
 		}
-		largest = max(largest, size)
+		groups[key] = append(groups[key], core)
 	}
-	if smallest == largest {
+	if len(keys) != 2 || sizes[keys[0]] == sizes[keys[1]] {
 		return nil, nil, false
 	}
 
-	for _, core := range all {
-		if sizes[core] == smallest {
-			performance = append(performance, core)
-			continue
-		}
-		efficiency = append(efficiency, core)
-	}
-
-	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
+	return groups[keys[0]], groups[keys[1]], true
 }
 
-// lastLevelCache reports the size in bytes of one core's level-3 cache. The
-// index directories are not numbered by level, so the level is read rather than
-// assumed.
-func lastLevelCache(core int) (int64, bool) {
+// lastLevelCache reports which level-3 cache one core sits behind — the kernel's
+// own text for the processors sharing it, an identity to group by rather than
+// parse — and its size. The index directories are not numbered by level, so the
+// level is read rather than assumed.
+func lastLevelCache(core int) (group string, size int64, found bool) {
 	indices, err := filepath.Glob(filepath.Join(sysfsCPU, "cpu"+strconv.Itoa(core), "cache", "index*"))
 	if err != nil {
-		return 0, false
+		return "", 0, false
 	}
 
 	for _, index := range indices {
 		if strings.TrimSpace(readFile(filepath.Join(index, "level"))) != "3" {
 			continue
 		}
-		if size, ok := cacheSize(readFile(filepath.Join(index, "size"))); ok {
-			return size, true
+
+		list := strings.TrimSpace(readFile(filepath.Join(index, "shared_cpu_list")))
+		bytes, sized := cacheSize(readFile(filepath.Join(index, "size")))
+		if list != "" && sized {
+			return list, bytes, true
 		}
 	}
 
-	return 0, false
+	return "", 0, false
 }
 
 // cacheSize parses sysfs's cache size, which carries a unit suffix ("32768K").

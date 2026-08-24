@@ -3,10 +3,12 @@
 //
 // Two machines have more than one kind of core in a way a program can read
 // rather than guess. Intel's hybrid parts split into performance and efficiency
-// cores and say so per logical processor. AMD's dual-chiplet parts carry a
-// different amount of L3 on each chiplet, and the one with less of it clocks
-// higher. Two chiplets with the same cache differ only in the silicon lottery,
-// so they are reported as one kind and nothing above is offered a choice.
+// cores and say so per logical processor. AMD's dual-chiplet parts put each
+// chiplet behind its own L3 and, on the parts with stacked cache, a different
+// amount of it — those are reported by the machine's own numbering, CCD0 and
+// CCD1, the numbering being the only honest name a chiplet has. Two chiplets
+// with the same cache differ only in the silicon lottery, so they are reported
+// as one kind and nothing above is offered a choice.
 //
 // Nothing here imports anything else of ours. What the two kinds are *for* is a
 // policy, and it lives with the setting that names it.
@@ -28,22 +30,26 @@ type Topology struct {
 	// made by somebody.
 	All []int
 
+	// Performance and Efficiency are Intel's hybrid split, where the efficiency
+	// cores trade speed for power and the platform says which is which.
 	Performance []int
 	Efficiency  []int
 
-	// Hybrid names which of the two splits this is. True is Intel's performance
-	// and efficiency cores, where the efficiency ones trade speed for power. False
-	// with a split is AMD's chiplets, where what differs is cache and therefore
-	// clock, and neither side is the low-power one.
-	Hybrid bool
+	// CCD0 and CCD1 are AMD's chiplets: the machine's two L3 domains in its own
+	// order, CCD0 holding the lowest-numbered processor. The index is the whole of
+	// the name — on the shipping parts the stacked cache goes on CCD0 and the
+	// higher clocks on CCD1, but that is a fact about those parts, not something
+	// read here.
+	CCD0 []int
+	CCD1 []int
 }
 
 // Split reports whether the machine has more than one kind of core. Without one
 // there is nothing to choose between, which is what keeps the setting off a page
-// where all four of its values would pick the same processors.
+// where every one of its values would pick the same processors.
 func (t Topology) Split() bool {
 
-	return len(t.Performance) > 0 && len(t.Efficiency) > 0
+	return (len(t.Performance) > 0 && len(t.Efficiency) > 0) || (len(t.CCD0) > 0 && len(t.CCD1) > 0)
 }
 
 var (

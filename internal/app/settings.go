@@ -165,23 +165,39 @@ func applyAffinity() {
 }
 
 // coresFor is the policy the setting names: which side of the machine's own
-// asymmetry to take. `cpu` reports the two sides and stays out of the choice, so
-// this is the only place that knows Automatic answers differently on each kind of
-// split — see config.CoresAuto for why.
+// asymmetry to take. `cpu` reports the sides and stays out of the choice, so
+// this is the only place that knows Automatic answers differently on each kind
+// of split — see config.CoresAuto for why. It is also where a value saved on a
+// different machine collapses back to Automatic rather than pinning to a side
+// this one does not have.
 func coresFor(mode string, topology cpu.Topology) []int {
 
-	if mode == config.CoresAuto {
-		mode = config.CoresPerformance
-		if topology.Hybrid {
-			mode = config.CoresEfficiency
+	switch mode {
+	case config.CoresAll:
+		return topology.All
+	case config.CoresEfficiency:
+		if len(topology.Efficiency) > 0 {
+			return topology.Efficiency
+		}
+	case config.CoresPerformance:
+		if len(topology.Performance) > 0 {
+			return topology.Performance
+		}
+	case config.CoresCCD0:
+		if len(topology.CCD0) > 0 {
+			return topology.CCD0
+		}
+	case config.CoresCCD1:
+		if len(topology.CCD1) > 0 {
+			return topology.CCD1
 		}
 	}
 
-	switch mode {
-	case config.CoresEfficiency:
+	if len(topology.Efficiency) > 0 {
 		return topology.Efficiency
-	case config.CoresPerformance:
-		return topology.Performance
+	}
+	if len(topology.CCD1) > 0 {
+		return topology.CCD1
 	}
 
 	return topology.All
@@ -195,7 +211,8 @@ func settingsCPUCores() ui.CPUCores {
 	return ui.CPUCores{
 		Performance: len(topology.Performance),
 		Efficiency:  len(topology.Efficiency),
-		Hybrid:      topology.Hybrid,
+		CCD0:        len(topology.CCD0),
+		CCD1:        len(topology.CCD1),
 	}
 }
 

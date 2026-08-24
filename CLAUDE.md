@@ -45,8 +45,8 @@ level and the gate's threshold both arrive as ratios, decibels being `audio`'s.
 
 `cpu` crosses the same seam from the other side. It reports which logical
 processors are which and pins the process to a set of them; what a *kind* of core
-is for — that Automatic wants the efficiency cores on a hybrid part and the
-higher-clocking chiplet on a chiplet one — is a policy, and it lives in
+is for — that Automatic wants the efficiency cores on a hybrid part and CCD1 on
+a dual-chiplet one — is a policy, and it lives in
 `app.coresFor` beside the setting that names it. The counts reach the settings
 page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 

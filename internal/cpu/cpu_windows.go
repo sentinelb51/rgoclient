@@ -104,16 +104,15 @@ func detect() Topology {
 	}
 
 	// Chiplets are read before efficiency classes because AMD's own tooling has
-	// been seen to publish a class on parts whose difference is cache, which would
-	// otherwise name the larger-cache, slower-clocking chiplet the performance one.
-	if performance, efficiency, split := chiplets(topology.All, sets); split {
-		topology.Performance, topology.Efficiency = performance, efficiency
+	// been seen to publish a class per chiplet, which would otherwise dress two
+	// chiplets up as a hybrid split and name them things they are not.
+	if ccd0, ccd1, split := chiplets(topology.All); split {
+		topology.CCD0, topology.CCD1 = ccd0, ccd1
 		return topology
 	}
 
 	if performance, efficiency, split := hybrid(topology.All, sets); split {
 		topology.Performance, topology.Efficiency = performance, efficiency
-		topology.Hybrid = true
 	}
 
 	return topology
@@ -147,53 +146,50 @@ func hybrid(all []int, sets []cpuSetInfo) (performance, efficiency []int, split 
 	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
 }
 
-// chiplets splits by last-level cache size. Cores sharing an L3 are one chiplet,
-// and where the chiplets do not carry the same amount of it the smaller one is
-// the part that was not given stacked cache and clocks higher for it. Equal
-// caches are not a split: two chiplets alike on paper differ only in binning,
-// which nothing here can read.
-func chiplets(all []int, sets []cpuSetInfo) (performance, efficiency []int, split bool) {
-	group := make(map[int]uint8, len(sets))
-	for _, set := range sets {
-		group[int(set.LogicalProcessorIndex)] = set.LastLevelCacheIndex
-	}
-
-	sizes := make(map[uint8]uint32)
-	for mask, size := range lastLevelCaches() {
-		for _, core := range maskCores(mask) {
-			if index, found := group[core]; found {
-				sizes[index] = size
-			}
-		}
-	}
-	if len(sizes) < 2 {
+// chiplets splits by L3 domain. Cores sharing a level-3 cache are one chiplet,
+// and exactly two chiplets carrying different amounts of it are a CCD0 and a
+// CCD1, in the order the machine numbers its processors. Equal caches are not a
+// split — two chiplets alike on paper differ only in binning, which nothing
+// here can read, so no side is defensible as a default. A VM is the other
+// reason the gate matters: hypervisors invent L3 domains freely, and equal
+// sizes is what those look like.
+func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
+	caches := lastLevelCaches()
+	if len(caches) != 2 {
 		return nil, nil, false
 	}
 
-	var smallest, largest uint32
-	for _, size := range sizes {
-		if smallest == 0 || size < smallest {
-			smallest = size
-		}
-		largest = max(largest, size)
+	masks := make([]uintptr, 0, 2)
+	for mask := range caches {
+		masks = append(masks, mask)
 	}
-	if smallest == largest {
+	if caches[masks[0]] == caches[masks[1]] {
 		return nil, nil, false
 	}
 
+	var groups [2][]int
 	for _, core := range all {
-		size, found := sizes[group[core]]
-		if !found {
-			return nil, nil, false // a core belonging to no cache we could size
+		switch {
+		case masks[0]&(1<<uint(core)) != 0:
+			groups[0] = append(groups[0], core)
+		case masks[1]&(1<<uint(core)) != 0:
+			groups[1] = append(groups[1], core)
+		default:
+			return nil, nil, false // a core behind no L3 we could find
 		}
-		if size == smallest {
-			performance = append(performance, core)
-			continue
-		}
-		efficiency = append(efficiency, core)
+	}
+	if len(groups[0]) == 0 || len(groups[1]) == 0 {
+		return nil, nil, false
 	}
 
-	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
+	// The enumeration's order is nobody's promise; the machine's numbering is
+	// read off the cores themselves, `all` being ascending.
+	ccd0, ccd1 = groups[0], groups[1]
+	if ccd1[0] < ccd0[0] {
+		ccd0, ccd1 = ccd1, ccd0
+	}
+
+	return ccd0, ccd1, true
 }
 
 /* Enumeration */

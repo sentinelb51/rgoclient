@@ -245,23 +245,27 @@ line clean is the cheapest insurance against needing this section.
 
 ## Which cores it runs on
 
-`internal/cpu` reports the machine's logical processors split into two kinds and
+`internal/cpu` reports the machine's logical processors split into kinds and
 pins the process to one of them; the Performance section's **Processor cores**
 row is what picks. Only two splits are read, because only two are legible rather
 than guessed: Intel's hybrid parts publish an `EfficiencyClass` per logical
-processor, and a chiplet part's chiplets carry different amounts of L3, the
-smaller cache being the chiplet without stacked cache and therefore the one that
-clocks higher. Two chiplets with the same cache are **not** a split — what
-separates them is binning, which nothing here can read — so such a machine is
-never offered the choice.
+processor, and an AMD part whose two L3 domains carry different amounts of cache
+is a stacked-cache pair of chiplets, offered as **CCD0** and **CCD1** in the
+machine's own numbering — an identity, not a claim about which is faster. Two
+chiplets with the *same* cache are **not** a split: what separates them is
+binning, which nothing here can read, and a hypervisor's invented L3 domains
+look exactly like them. The default is **Automatic**: the efficiency cores on a
+hybrid part, and CCD1 on a chiplet one — usually the chiplet without the stacked
+cache and therefore the higher-clocking, and one chiplet either way, so the work
+does not cross between them.
 
 Three things about it are worth knowing before it is trusted:
 
 - **None of it is measured.** There is no benchmark for it and no number below,
-  because both directions are plausible and neither has been shown: efficiency
+  because the defaults rest on arguments rather than measurements: efficiency
   cores are a power argument for a client that is idle most of the time, and one
-  chiplet is a latency argument about work not crossing the fabric. The default
-  is **All cores** for exactly that reason.
+  chiplet is a latency argument about work not crossing the fabric. **All
+  cores** is what to reach for the day either argument turns out wrong here.
 - **It moves the whole process**, not the draw loop. `mixer.render`'s 10 ms
   deadline (below) is pinned with everything else, so a set of cores too slow for
   it is a dropout rather than a dropped frame. That is the one failure worth

@@ -236,9 +236,10 @@ type Performance struct {
 	VSync bool `json:"vsync"`
 
 	// Cores is which of the machine's cores the client is allowed to run on:
-	// CoresAll, CoresAuto, CoresEfficiency or CoresPerformance. It reaches the
-	// process rather than the toolkit — everything the client does moves with it,
-	// the call's audio included — and it is inert on a machine whose cores are all
+	// CoresAll or CoresAuto, plus CoresEfficiency / CoresPerformance on a hybrid
+	// part and CoresCCD0 / CoresCCD1 on a chiplet one. It reaches the process
+	// rather than the toolkit — everything the client does moves with it, the
+	// call's audio included — and it is inert on a machine whose cores are all
 	// alike.
 	Cores string `json:"cores"`
 }
@@ -326,17 +327,20 @@ const (
 	VoiceModePush     = "push"
 )
 
-// Which cores the client runs on. Auto takes the machine's own asymmetry at face
-// value and picks the side that asymmetry exists for: the efficiency cores on a
-// hybrid part, where the point of them is spending less power on a client that is
-// idle most of the time; the higher-clocking chiplet on a processor whose
-// chiplets differ, where there is no low-power side to pick and the reason to
-// pick one at all is to stop the work crossing between them.
+// Which cores the client runs on. The middle two name Intel's hybrid split; the
+// last two name AMD's chiplets by the machine's own numbering. Auto is the
+// default and picks the side each split exists for: the efficiency cores on a
+// hybrid part, where the point of them is spending less power on a client that
+// is idle most of the time; CCD1 on a chiplet part, usually the chiplet without
+// the stacked cache and therefore the higher-clocking one — and staying on one
+// chiplet keeps the work from crossing between them regardless.
 const (
 	CoresAll         = "all"
 	CoresAuto        = "auto"
 	CoresEfficiency  = "efficiency"
 	CoresPerformance = "performance"
+	CoresCCD0        = "ccd0"
+	CoresCCD1        = "ccd1"
 )
 
 /* Defaults */
@@ -440,7 +444,7 @@ func Default() Settings {
 		Performance: Performance{
 			FrameRate: 120,
 			VSync:     true,
-			Cores:     CoresAll,
+			Cores:     CoresAuto,
 		},
 	}
 }

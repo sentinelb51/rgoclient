@@ -825,11 +825,11 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 // coreRows is the core group, and nothing at all where the machine's cores are
 // all alike — the rule the taskbar-flash group follows, for the same reason.
 //
-// The two sides are named for what they are on the machine in front of the
-// reader. A hybrid processor has efficiency cores, which are slower on purpose. A
-// chiplet processor has no such thing: one side carries more cache and the other
-// clocks higher for carrying less, and calling either of them efficient would be
-// a guess dressed as a fact.
+// The two machines are offered different rows because their splits read nothing
+// alike. A hybrid processor has efficiency cores, which are slower on purpose,
+// so its sides are named for what they are. A chiplet processor's sides have no
+// such names — the numbering is the machine's own and claims nothing — so the
+// row says CCD0 and CCD1 and the note carries what is usually true of them.
 func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject {
 	if p.hooks.CPUCores == nil {
 		return nil
@@ -840,41 +840,61 @@ func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject
 		return nil
 	}
 
-	fewer, more := "Cache cores", "Frequency cores"
-	detail := "This processor has " + strconv.Itoa(cores.Efficiency) + " cores with more cache and " +
-		strconv.Itoa(cores.Performance) + " that run at a higher clock."
-	automatic := "Automatic picks the " + strconv.Itoa(cores.Performance) + " higher-clocked cores."
+	if cores.CCD0 > 0 {
+		detail := "This processor has two chiplets: CCD0 with " + strconv.Itoa(cores.CCD0) +
+			" cores and CCD1 with " + strconv.Itoa(cores.CCD1) +
+			". Staying on one keeps the client's work from crossing between them."
 
-	if cores.Hybrid {
-		fewer, more = "Efficiency cores", "Performance cores"
-		detail = "This processor has " + strconv.Itoa(cores.Performance) + " performance cores and " +
-			strconv.Itoa(cores.Efficiency) + " efficiency cores, which are slower and use less power."
-		automatic = "Automatic picks the " + strconv.Itoa(cores.Efficiency) + " efficiency cores."
+		return []fyne.CanvasObject{
+			p.optionRow("Run on", detail, coresValue(settings.Cores, cores), []settingsOption{
+				{Label: "Both CCDs", Value: config.CoresAll},
+				{Label: "CCD0", Value: config.CoresCCD0},
+				{Label: "CCD1", Value: config.CoresCCD1},
+			}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
+
+			p.note("CCD1 is the default: it is usually the higher-clocking chiplet. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+		}
 	}
 
+	detail := "This processor has " + strconv.Itoa(cores.Performance) + " performance cores and " +
+		strconv.Itoa(cores.Efficiency) + " efficiency cores, which are slower and use less power."
+
 	return []fyne.CanvasObject{
-		p.optionRow("Run on", detail, coresValue(settings.Cores), []settingsOption{
+		p.optionRow("Run on", detail, coresValue(settings.Cores, cores), []settingsOption{
 			{Label: "All cores", Value: config.CoresAll},
 			{Label: "Automatic", Value: config.CoresAuto},
-			{Label: fewer, Value: config.CoresEfficiency},
-			{Label: more, Value: config.CoresPerformance},
+			{Label: "Efficiency cores", Value: config.CoresEfficiency},
+			{Label: "Performance cores", Value: config.CoresPerformance},
 		}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
 
-		p.note(automatic + " Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+		p.note("Automatic picks the " + strconv.Itoa(cores.Efficiency) +
+			" efficiency cores, and is the default. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
 	}
 }
 
-// coresValue is the stored setting as one of the four the row offers. The file is
-// hand-editable and nothing sanitises this one, so a value nobody named reads as
-// the default rather than drawing a control with no label.
-func coresValue(cores string) string {
+// coresValue is the stored setting as one of the values the row offers on this
+// machine. The file is hand-editable and travels between machines, so a value
+// nobody named — or one naming a side this machine does not have — reads as the
+// default rather than drawing a control with no label. On a chiplet machine the
+// default reads as CCD1, there being no Automatic row for it to read as — the
+// same side the controller's Automatic picks, so the row shows what runs.
+func coresValue(cores string, machine CPUCores) string {
+
+	if machine.CCD0 > 0 {
+		switch cores {
+		case config.CoresAll, config.CoresCCD0, config.CoresCCD1:
+			return cores
+		}
+
+		return config.CoresCCD1
+	}
 
 	switch cores {
-	case config.CoresAuto, config.CoresEfficiency, config.CoresPerformance:
+	case config.CoresAll, config.CoresEfficiency, config.CoresPerformance:
 		return cores
 	}
 
-	return config.CoresAll
+	return config.CoresAuto
 }
 
 /* Advanced */

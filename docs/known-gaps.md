@@ -328,13 +328,17 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   work. A machine past 64 logical processors has more than one processor group,
   and `SetProcessAffinityMask` names processors within one group only, so such a
   machine is reported as having no split rather than pinned to a group the
-  indices may not be in. Two chiplets carrying the *same* L3 — a 7950X against a
-  7950X3D — are likewise not a split, there being nothing to read that says which
-  of them clocks higher; pinning to one chiplet anyway, for the fabric hop rather
-  than the clock, is not offered. And on Linux the syscall is per-thread with no
-  process-wide form, so `pin` walks `/proc/self/task` twice and a thread created
-  between the listing and the last call inherits from whichever thread started
-  it — which is the right mask in every case but a vanishing race.
+  indices may not be in. The chiplet split is exactly two L3 domains on an AMD
+  part — three or more, a Threadripper, are not offered — and which chiplet
+  carries the better bins is never read: CPPC's preferred-core ranking has no
+  user-mode answer on Windows (Linux publishes it as `amd_pstate`'s
+  `highest_perf`, left unread so the two platforms answer alike), which is why
+  the sides are named CCD0 and CCD1 by the machine's numbering and the default
+  is CCD1 by convention rather than by measurement. And on Linux the syscall is
+  per-thread with no process-wide form, so `pin` walks `/proc/self/task` twice
+  and a thread created between the listing and the last call inherits from
+  whichever thread started it — which is the right mask in every case but a
+  vanishing race.
 
 - **CI ships bare binaries, not installable applications.** All three targets
   build and are attached to a release, but nothing is packaged: macOS gets a

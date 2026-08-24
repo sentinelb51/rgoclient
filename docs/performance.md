@@ -245,23 +245,30 @@ line clean is the cheapest insurance against needing this section.
 
 ## Which cores it runs on
 
-`internal/cpu` reports the machine's logical processors split into two kinds and
+`internal/cpu` reports the machine's logical processors split into kinds and
 pins the process to one of them; the Performance section's **Processor cores**
 row is what picks. Only two splits are read, because only two are legible rather
 than guessed: Intel's hybrid parts publish an `EfficiencyClass` per logical
-processor, and a chiplet part's chiplets carry different amounts of L3, the
-smaller cache being the chiplet without stacked cache and therefore the one that
-clocks higher. Two chiplets with the same cache are **not** a split — what
-separates them is binning, which nothing here can read — so such a machine is
-never offered the choice.
+processor, and an AMD part whose cores sit behind exactly two L3 caches is a
+pair of chiplets, offered as **CCD0** and **CCD1** in the machine's own
+numbering. The numbering is an identity, not a judgement: which chiplet carries
+the better bins is CPPC's preferred-core ranking, which Linux publishes
+(`amd_pstate`'s `highest_perf`) and Windows offers no user-mode read for, so
+neither side is claimed to be the faster one. There is no Automatic setting:
+the first run on a split machine resolves the default against the machine and
+writes it into the settings file (`app.resolveCores`) — the efficiency cores on
+a hybrid part, CCD1 on a chiplet one, CCD0 being where preferred-core
+scheduling and a game's cache steering usually land — so the file and the page
+always name the set that actually runs.
 
 Three things about it are worth knowing before it is trusted:
 
 - **None of it is measured.** There is no benchmark for it and no number below,
-  because both directions are plausible and neither has been shown: efficiency
+  because the defaults rest on arguments rather than measurements: efficiency
   cores are a power argument for a client that is idle most of the time, and one
-  chiplet is a latency argument about work not crossing the fabric. The default
-  is **All cores** for exactly that reason.
+  chiplet is a latency argument about work not crossing the fabric plus staying
+  out of the way of whatever is steered to CCD0. **All cores** is what to reach
+  for the day either argument turns out wrong here.
 - **It moves the whole process**, not the draw loop. `mixer.render`'s 10 ms
   deadline (below) is pinned with everything else, so a set of cores too slow for
   it is a dropout rather than a dropped frame. That is the one failure worth

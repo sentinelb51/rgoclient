@@ -45,9 +45,9 @@ level and the gate's threshold both arrive as ratios, decibels being `audio`'s.
 
 `cpu` crosses the same seam from the other side. It reports which logical
 processors are which and pins the process to a set of them; what a *kind* of core
-is for — that Automatic wants the efficiency cores on a hybrid part and the
-higher-clocking chiplet on a chiplet one — is a policy, and it lives in
-`app.coresFor` beside the setting that names it. The counts reach the settings
+is for — that the default wants the efficiency cores on a hybrid part and CCD1
+on a dual-chiplet one — is a policy, and it lives in
+`app.resolveCores` beside the setting that names it. The counts reach the settings
 page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 
 `voice` declares `PCMSource` / `PCMSink` **structurally** and never imports
@@ -177,12 +177,12 @@ internal/
                          the runtime having counted its processors before any of
                          this), cpu_windows.go (GetSystemCpuSetInformation for the
                          efficiency classes, GetLogicalProcessorInformation for the
-                         L3 groups and their sizes, one process-wide mask),
-                         cpu_linux.go (the same two answers out of sysfs, and a
-                         per-thread walk of /proc/self/task, that syscall having no
-                         process-wide form), cpu_other.go (macOS: no affinity API
-                         exists, so no split is reported and the setting is not
-                         drawn)
+                         L3 groups, the registry for the vendor, one process-wide
+                         mask), cpu_linux.go (the same answers out of sysfs and
+                         /proc/cpuinfo, and a per-thread walk of /proc/self/task,
+                         that syscall having no process-wide form), cpu_other.go
+                         (macOS: no affinity API exists, so no split is reported
+                         and the setting is not drawn)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          pins.go, search.go, mentions.go, emoji.go, notify.go,

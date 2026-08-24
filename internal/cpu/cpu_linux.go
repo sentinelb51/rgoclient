@@ -55,14 +55,13 @@ func detect() Topology {
 	topology := Topology{All: set.cores()}
 
 	// Chiplets before efficiency classes, for the reason given in cpu_windows.go.
-	if performance, efficiency, split := chiplets(topology.All); split {
-		topology.Performance, topology.Efficiency = performance, efficiency
+	if ccd0, ccd1, split := chiplets(topology.All); split {
+		topology.CCD0, topology.CCD1 = ccd0, ccd1
 		return topology
 	}
 
 	if performance, efficiency, split := hybrid(topology.All); split {
 		topology.Performance, topology.Efficiency = performance, efficiency
-		topology.Hybrid = true
 	}
 
 	return topology
@@ -94,86 +93,70 @@ func hybrid(all []int) (performance, efficiency []int, split bool) {
 	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
 }
 
-// chiplets splits by last-level cache size, on the same rule as Windows: cores
-// sharing an L3 are one chiplet, the smaller cache is the chiplet without stacked
-// cache and therefore the faster-clocking one, and equal caches are not a split.
-func chiplets(all []int) (performance, efficiency []int, split bool) {
-	sizes := make(map[int]int64, len(all))
-
-	for _, core := range all {
-		size, found := lastLevelCache(core)
-		if !found {
-			return nil, nil, false
-		}
-		sizes[core] = size
-	}
-
-	var smallest, largest int64
-	for _, size := range sizes {
-		if smallest == 0 || size < smallest {
-			smallest = size
-		}
-		largest = max(largest, size)
-	}
-	if smallest == largest {
+// chiplets splits by L3 domain, on the same rule as Windows: an AMD part whose
+// cores sit behind exactly two level-3 caches is a CCD0 and a CCD1, in the
+// order the machine numbers its processors. The vendor gate is not pedantry —
+// two L3 domains on anything else (a second socket, a hypervisor's invented
+// topology) are not chiplets — and a domain of one processor is likewise an
+// invention, not a CCD.
+func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
+	if !amd() {
 		return nil, nil, false
 	}
 
+	var keys []string
+	groups := make(map[string][]int, 2)
+
 	for _, core := range all {
-		if sizes[core] == smallest {
-			performance = append(performance, core)
-			continue
+		key, found := lastLevelGroup(core)
+		if !found {
+			return nil, nil, false
 		}
-		efficiency = append(efficiency, core)
+		if _, seen := groups[key]; !seen {
+			keys = append(keys, key)
+		}
+		groups[key] = append(groups[key], core)
+	}
+	if len(keys) != 2 || len(groups[keys[0]]) < 2 || len(groups[keys[1]]) < 2 {
+		return nil, nil, false
 	}
 
-	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
+	return groups[keys[0]], groups[keys[1]], true
 }
 
-// lastLevelCache reports the size in bytes of one core's level-3 cache. The
-// index directories are not numbered by level, so the level is read rather than
-// assumed.
-func lastLevelCache(core int) (int64, bool) {
+// lastLevelGroup reports which level-3 cache one core sits behind, as the
+// kernel's own text for the processors sharing it — an identity to group by
+// rather than parse. The index directories are not numbered by level, so the
+// level is read rather than assumed.
+func lastLevelGroup(core int) (string, bool) {
 	indices, err := filepath.Glob(filepath.Join(sysfsCPU, "cpu"+strconv.Itoa(core), "cache", "index*"))
 	if err != nil {
-		return 0, false
+		return "", false
 	}
 
 	for _, index := range indices {
 		if strings.TrimSpace(readFile(filepath.Join(index, "level"))) != "3" {
 			continue
 		}
-		if size, ok := cacheSize(readFile(filepath.Join(index, "size"))); ok {
-			return size, true
+		if list := strings.TrimSpace(readFile(filepath.Join(index, "shared_cpu_list"))); list != "" {
+			return list, true
 		}
 	}
 
-	return 0, false
+	return "", false
 }
 
-// cacheSize parses sysfs's cache size, which carries a unit suffix ("32768K").
-func cacheSize(text string) (int64, bool) {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return 0, false
+// amd reports whether the processor is AMD's, from the kernel's copy of CPUID's
+// vendor string.
+func amd() bool {
+
+	for _, line := range strings.Split(readFile("/proc/cpuinfo"), "\n") {
+		if name, value, found := strings.Cut(line, ":"); found && strings.TrimSpace(name) == "vendor_id" {
+			return strings.TrimSpace(value) == "AuthenticAMD"
+		}
 	}
 
-	scale := int64(1)
-	switch text[len(text)-1] {
-	case 'K':
-		scale, text = 1<<10, text[:len(text)-1]
-	case 'M':
-		scale, text = 1<<20, text[:len(text)-1]
-	case 'G':
-		scale, text = 1<<30, text[:len(text)-1]
-	}
-
-	size, err := strconv.ParseInt(text, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-
-	return size * scale, true
+	return false
 }
 
 // cpuList reads one of sysfs's processor lists ("0-7,16-23").

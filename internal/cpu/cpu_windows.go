@@ -104,16 +104,15 @@ func detect() Topology {
 	}
 
 	// Chiplets are read before efficiency classes because AMD's own tooling has
-	// been seen to publish a class on parts whose difference is cache, which would
-	// otherwise name the larger-cache, slower-clocking chiplet the performance one.
-	if performance, efficiency, split := chiplets(topology.All, sets); split {
-		topology.Performance, topology.Efficiency = performance, efficiency
+	// been seen to publish a class per chiplet, which would otherwise dress two
+	// chiplets up as a hybrid split and name them things they are not.
+	if ccd0, ccd1, split := chiplets(topology.All); split {
+		topology.CCD0, topology.CCD1 = ccd0, ccd1
 		return topology
 	}
 
 	if performance, efficiency, split := hybrid(topology.All, sets); split {
 		topology.Performance, topology.Efficiency = performance, efficiency
-		topology.Hybrid = true
 	}
 
 	return topology
@@ -147,53 +146,44 @@ func hybrid(all []int, sets []cpuSetInfo) (performance, efficiency []int, split 
 	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
 }
 
-// chiplets splits by last-level cache size. Cores sharing an L3 are one chiplet,
-// and where the chiplets do not carry the same amount of it the smaller one is
-// the part that was not given stacked cache and clocks higher for it. Equal
-// caches are not a split: two chiplets alike on paper differ only in binning,
-// which nothing here can read.
-func chiplets(all []int, sets []cpuSetInfo) (performance, efficiency []int, split bool) {
-	group := make(map[int]uint8, len(sets))
-	for _, set := range sets {
-		group[int(set.LogicalProcessorIndex)] = set.LastLevelCacheIndex
-	}
-
-	sizes := make(map[uint8]uint32)
-	for mask, size := range lastLevelCaches() {
-		for _, core := range maskCores(mask) {
-			if index, found := group[core]; found {
-				sizes[index] = size
-			}
-		}
-	}
-	if len(sizes) < 2 {
+// chiplets splits by L3 domain: an AMD part whose cores sit behind exactly two
+// level-3 caches is a CCD0 and a CCD1, in the order the machine numbers its
+// processors. The vendor gate is not pedantry — two L3 domains on anything
+// else (a second socket, a hypervisor's invented topology) are not chiplets —
+// and a domain of one processor is likewise an invention, not a CCD.
+func chiplets(all []int) (ccd0, ccd1 []int, split bool) {
+	if !amd() {
 		return nil, nil, false
 	}
 
-	var smallest, largest uint32
-	for _, size := range sizes {
-		if smallest == 0 || size < smallest {
-			smallest = size
-		}
-		largest = max(largest, size)
-	}
-	if smallest == largest {
+	masks := lastLevelCaches()
+	if len(masks) != 2 {
 		return nil, nil, false
 	}
 
+	var groups [2][]int
 	for _, core := range all {
-		size, found := sizes[group[core]]
-		if !found {
-			return nil, nil, false // a core belonging to no cache we could size
+		switch {
+		case masks[0]&(1<<uint(core)) != 0:
+			groups[0] = append(groups[0], core)
+		case masks[1]&(1<<uint(core)) != 0:
+			groups[1] = append(groups[1], core)
+		default:
+			return nil, nil, false // a core behind no L3 we could find
 		}
-		if size == smallest {
-			performance = append(performance, core)
-			continue
-		}
-		efficiency = append(efficiency, core)
+	}
+	if len(groups[0]) < 2 || len(groups[1]) < 2 {
+		return nil, nil, false
 	}
 
-	return performance, efficiency, len(performance) > 0 && len(efficiency) > 0
+	// The enumeration's order is nobody's promise; the machine's numbering is
+	// read off the cores themselves, `all` being ascending.
+	ccd0, ccd1 = groups[0], groups[1]
+	if ccd1[0] < ccd0[0] {
+		ccd0, ccd1 = ccd1, ccd0
+	}
+
+	return ccd0, ccd1, true
 }
 
 /* Enumeration */
@@ -234,8 +224,9 @@ func cpuSets() ([]cpuSetInfo, error) {
 	return sets, nil
 }
 
-// lastLevelCaches maps each level-3 cache's processor mask to its size in bytes.
-func lastLevelCaches() map[uintptr]uint32 {
+// lastLevelCaches reports each level-3 cache as the mask of the logical
+// processors behind it, one entry per distinct cache.
+func lastLevelCaches() []uintptr {
 	var length uint32
 
 	ok, _, err := getLogicalProcessorInfo.Call(0, uintptr(unsafe.Pointer(&length)))
@@ -250,16 +241,48 @@ func lastLevelCaches() map[uintptr]uint32 {
 	}
 
 	record := uint32(unsafe.Sizeof(logicalProcessorInfo{}))
-	caches := make(map[uintptr]uint32)
+	seen := make(map[uintptr]bool)
 
+	var caches []uintptr
 	for offset := uint32(0); offset+record <= length; offset += record {
 		info := *(*logicalProcessorInfo)(unsafe.Pointer(&buffer[offset]))
-		if info.Relationship == relationCache && info.CacheLevel == 3 {
-			caches[info.ProcessorMask] = info.CacheSize
+		if info.Relationship == relationCache && info.CacheLevel == 3 && !seen[info.ProcessorMask] {
+			seen[info.ProcessorMask] = true
+			caches = append(caches, info.ProcessorMask)
 		}
 	}
 
 	return caches
+}
+
+// amd reports whether the processor is AMD's, from the registry's copy of
+// CPUID's vendor string — user mode has no CPUID of its own without assembly,
+// and the kernel writes this key at boot.
+func amd() bool {
+	path, err := syscall.UTF16PtrFromString(`HARDWARE\DESCRIPTION\System\CentralProcessor\0`)
+	if err != nil {
+		return false
+	}
+	name, err := syscall.UTF16PtrFromString("VendorIdentifier")
+	if err != nil {
+		return false
+	}
+
+	var key syscall.Handle
+	if syscall.RegOpenKeyEx(syscall.HKEY_LOCAL_MACHINE, path, 0, syscall.KEY_READ, &key) != nil {
+		return false
+	}
+	defer syscall.RegCloseKey(key)
+
+	var kind uint32
+	var buffer [64]uint16
+	size := uint32(len(buffer) * 2)
+	if syscall.RegQueryValueEx(key, name, nil, &kind,
+		(*byte)(unsafe.Pointer(&buffer[0])), &size) != nil || kind != syscall.REG_SZ {
+		return false
+	}
+
+	return syscall.UTF16ToString(buffer[:]) == "AuthenticAMD"
 }
 
 /* Applying */

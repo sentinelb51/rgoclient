@@ -280,8 +280,10 @@ DAG and conventions.
     tick, and `applyAffinity` hands the process itself to a set of cores through
     `internal/cpu`. `Run` calls both once at startup. The core setting is the one
     on the page that moves things nothing here draws — the gateway, the image
-    loaders, miniaudio's callback — and `coresFor` is the whole of the policy:
-    `cpu` says which cores are which and never which to take. A style goes through `restyle` →
+    loaders, miniaudio's callback — and `resolveCores` is the whole of the policy
+    (`cpu` says which cores are which and never which to take): an unset or
+    foreign value collapses to the machine's default and is written back, so the
+    file always names an actual set. A style goes through `restyle` →
     `App.applyStyles`, which rebuilds the theme tables and then **defers** the tree
     rebuild while the page is open — the page covers the client, and `SetContent`
     under a slider mid-drag would take the slider with it. `App.stylesDirty`

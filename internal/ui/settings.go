@@ -176,24 +176,25 @@ type SettingsHooks struct {
 	OpenPath   func(path string)
 }
 
-// CPUCores is what the settings page is told about the machine's cores.
+// CPUCores is what the settings page is told about the machine's cores: one
+// pair of counts filled in, naming which split this machine has. Performance
+// and efficiency are Intel's hybrid parts, where one side is slower on purpose;
+// CCD0 and CCD1 are AMD's chiplets, carried by the machine's own numbering
+// because the numbering is all the name claims.
 type CPUCores struct {
 	Performance int
 	Efficiency  int
 
-	// Hybrid is which split this is, and the two read nothing alike to somebody
-	// choosing between them: true is Intel's performance and efficiency cores,
-	// where one side is slower on purpose, and false is AMD's chiplets, where one
-	// side clocks higher because it carries less cache.
-	Hybrid bool
+	CCD0 int
+	CCD1 int
 }
 
 // Split reports whether there is anything to choose between. Without it the group
-// is dropped from the page rather than drawn as a control whose four values would
-// all pick the same processors — the same rule the taskbar-flash group follows.
+// is dropped from the page rather than drawn as a control whose every value would
+// pick the same processors — the same rule the taskbar-flash group follows.
 func (c CPUCores) Split() bool {
 
-	return c.Performance > 0 && c.Efficiency > 0
+	return (c.Performance > 0 && c.Efficiency > 0) || (c.CCD0 > 0 && c.CCD1 > 0)
 }
 
 // SettingsSession is one saved login as the Account section lists it.

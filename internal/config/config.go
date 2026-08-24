@@ -236,10 +236,12 @@ type Performance struct {
 	VSync bool `json:"vsync"`
 
 	// Cores is which of the machine's cores the client is allowed to run on:
-	// CoresAll, CoresAuto, CoresEfficiency or CoresPerformance. It reaches the
-	// process rather than the toolkit — everything the client does moves with it,
-	// the call's audio included — and it is inert on a machine whose cores are all
-	// alike.
+	// CoresAll, plus CoresEfficiency / CoresPerformance on a hybrid part and
+	// CoresCCD0 / CoresCCD1 on a chiplet one. Empty means not yet chosen — the
+	// first run on a machine with a split writes that machine's own default, so
+	// the file always names an actual set. It reaches the process rather than the
+	// toolkit — everything the client does moves with it, the call's audio
+	// included — and it is inert on a machine whose cores are all alike.
 	Cores string `json:"cores"`
 }
 
@@ -326,17 +328,20 @@ const (
 	VoiceModePush     = "push"
 )
 
-// Which cores the client runs on. Auto takes the machine's own asymmetry at face
-// value and picks the side that asymmetry exists for: the efficiency cores on a
-// hybrid part, where the point of them is spending less power on a client that is
-// idle most of the time; the higher-clocking chiplet on a processor whose
-// chiplets differ, where there is no low-power side to pick and the reason to
-// pick one at all is to stop the work crossing between them.
+// Which cores the client runs on. The first two name Intel's hybrid split; the
+// last two name AMD's chiplets by the machine's own numbering. There is
+// deliberately no "automatic" among them: the default is resolved against the
+// machine once and written (app.resolveCores) — CoresEfficiency on a hybrid
+// part, where the point is spending less power on a client that is idle most
+// of the time, and CoresCCD1 on a chiplet one, CCD0 being the chiplet that
+// preferred-core scheduling and a game's cache steering usually favour — so
+// what runs is always exactly what the file says.
 const (
 	CoresAll         = "all"
-	CoresAuto        = "auto"
 	CoresEfficiency  = "efficiency"
 	CoresPerformance = "performance"
+	CoresCCD0        = "ccd0"
+	CoresCCD1        = "ccd1"
 )
 
 /* Defaults */
@@ -440,7 +445,6 @@ func Default() Settings {
 		Performance: Performance{
 			FrameRate: 120,
 			VSync:     true,
-			Cores:     CoresAll,
 		},
 	}
 }

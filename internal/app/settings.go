@@ -153,7 +153,7 @@ func applyAffinity() {
 
 	cores := topology.All
 	if topology.Split() {
-		cores = coresFor(config.Current().Performance.Cores, topology)
+		cores = coresFor(resolveCores(topology), topology)
 	}
 	if len(cores) == 0 {
 		return // a platform that cannot pin, or would not say what it has
@@ -164,24 +164,56 @@ func applyAffinity() {
 	}
 }
 
-// coresFor is the policy the setting names: which side of the machine's own
-// asymmetry to take. `cpu` reports the two sides and stays out of the choice, so
-// this is the only place that knows Automatic answers differently on each kind of
-// split — see config.CoresAuto for why.
-func coresFor(mode string, topology cpu.Topology) []int {
+// resolveCores is the setting with the machine held against it, and the whole
+// of the policy — `cpu` reports the sides and never which to take. A value
+// naming a side this machine has passes through; anything else — empty on a
+// fresh install, or a value saved on a different kind of machine — becomes this
+// machine's default and is written back, so the file and the page always name
+// the set that actually runs. The default is the out-of-the-way side both
+// times: the efficiency cores on a hybrid part, and CCD1 on a chiplet one,
+// CCD0 being the chiplet that preferred-core scheduling and a game's cache
+// steering usually favour. Only meaningful under Split().
+func resolveCores(topology cpu.Topology) string {
+	stored := config.Current().Performance.Cores
 
-	if mode == config.CoresAuto {
-		mode = config.CoresPerformance
-		if topology.Hybrid {
-			mode = config.CoresEfficiency
+	resolved := config.CoresEfficiency
+	if len(topology.CCD1) > 0 {
+		resolved = config.CoresCCD1
+	}
+
+	switch stored {
+	case config.CoresAll:
+		resolved = stored
+	case config.CoresEfficiency, config.CoresPerformance:
+		if len(topology.Efficiency) > 0 {
+			resolved = stored
+		}
+	case config.CoresCCD0, config.CoresCCD1:
+		if len(topology.CCD0) > 0 {
+			resolved = stored
 		}
 	}
+
+	if resolved != stored {
+		config.Update(func(s *config.Settings) { s.Performance.Cores = resolved })
+	}
+
+	return resolved
+}
+
+// coresFor maps the resolved setting to the machine's processors. resolveCores
+// has already collapsed anything foreign, so an unknown value here is All.
+func coresFor(mode string, topology cpu.Topology) []int {
 
 	switch mode {
 	case config.CoresEfficiency:
 		return topology.Efficiency
 	case config.CoresPerformance:
 		return topology.Performance
+	case config.CoresCCD0:
+		return topology.CCD0
+	case config.CoresCCD1:
+		return topology.CCD1
 	}
 
 	return topology.All
@@ -195,7 +227,8 @@ func settingsCPUCores() ui.CPUCores {
 	return ui.CPUCores{
 		Performance: len(topology.Performance),
 		Efficiency:  len(topology.Efficiency),
-		Hybrid:      topology.Hybrid,
+		CCD0:        len(topology.CCD0),
+		CCD1:        len(topology.CCD1),
 	}
 }
 

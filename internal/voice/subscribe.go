@@ -29,7 +29,7 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 		},
 
 		OnParticipantDisconnected: func(p *lksdk.RemoteParticipant) {
-			c.closeLane(p.Identity())
+			c.closeLane(p.Identity(), nil)
 			c.emit(ParticipantChanged{UserID: p.Identity(), Joined: false})
 		},
 
@@ -41,11 +41,18 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnTrackSubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				// Audio only: lksdk subscribes to whatever is published, and a
+				// camera or screen share fed to an Opus decoder would replace the
+				// participant's working audio lane with garbage.
+				if track.Kind() != webrtc.RTPCodecTypeAudio {
+					return
+				}
+
 				c.subscribe(track, rp.Identity())
 			},
 
-			OnTrackUnsubscribed: func(_ *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				c.closeLane(rp.Identity())
+			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				c.closeLane(rp.Identity(), track)
 			},
 		},
 	}
@@ -96,6 +103,10 @@ type lane struct {
 	buffer  Jitter
 	decoder *gopus.Decoder
 
+	// track is which subscription this lane belongs to, so a stale reader's exit
+	// cannot close a lane a re-subscribe has since replaced.
+	track *webrtc.TrackRemote
+
 	// deepPLC is what this decoder was last told, so the setting is pushed on
 	// change rather than on every frame. Touched only by the filler.
 	deepPLC bool
@@ -122,7 +133,7 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 	buffer := newAdaptiveJitter()
 
 	c.mu.Lock()
-	c.lanes[userID] = &lane{buffer: buffer, decoder: decoder}
+	c.lanes[userID] = &lane{buffer: buffer, decoder: decoder, track: track}
 	c.mu.Unlock()
 
 	// The speakers only ask for audio for a lane they can see, so the lane is
@@ -153,7 +164,7 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 				}
 			}
 
-			c.closeLane(userID)
+			c.closeLane(userID, track)
 
 			return
 		}
@@ -291,9 +302,15 @@ func (c *Call) reportLoss() {
 		return
 	}
 
-	worst := 0
+	// Negative is a window not yet measured, and a room with no lanes measures
+	// nothing: either way the encoder keeps what it has — the initial seed at the
+	// start, which exists precisely to cover the window before a measurement.
+	worst := -1
 	for _, l := range c.openLanes() {
 		worst = max(worst, l.buffer.Loss())
+	}
+	if worst < 0 {
+		return
 	}
 
 	p.setLoss(worst)
@@ -341,9 +358,20 @@ func decodeFrame(decoder *gopus.Decoder, payload, next []byte) ([]int16, error) 
 
 // closeLane retires a participant's audio. Idempotent: a track ending and the
 // participant leaving both reach it, and either may be first.
-func (c *Call) closeLane(userID string) {
+//
+// only guards a stale goroutine: after a reconnect resubscribes somebody, the
+// old track's reader is still parked in ReadRTP and errors out well after the
+// new lane is up — keyed on the user alone, that exit would destroy the
+// replacement and leave the participant silent. nil means whatever is there,
+// which is what a participant leaving means.
+func (c *Call) closeLane(userID string, only *webrtc.TrackRemote) {
 	c.mu.Lock()
-	open := c.lanes[userID] != nil
+	l := c.lanes[userID]
+	if only != nil && l != nil && l.track != only {
+		c.mu.Unlock()
+		return
+	}
+	open := l != nil
 	delete(c.lanes, userID)
 	delete(c.speaking, userID)
 	c.mu.Unlock()

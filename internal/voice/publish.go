@@ -34,7 +34,8 @@ const (
 	defaultBitrate = 32000
 
 	// maxPacket bounds one encoded frame. Opus never exceeds this at these
-	// settings, and the buffer is reused rather than allocated per frame.
+	// settings; it is a cap handed to the encoder, which allocates the packet it
+	// returns — gopus offers no caller-supplied buffer.
 	maxPacket = 1275
 )
 
@@ -140,6 +141,12 @@ func newPublisher(room *lksdk.Room, src PCMSource, call *Call, opts Options) (*p
 
 	p.selfID = opts.SelfID
 
+	// The joining state is applied before the loop starts. Options promises no
+	// frame is sent the reader did not mean to send, and the capture ring already
+	// holds audio from before the dial — a loop born unmuted and muted a moment
+	// later has read it, encoded it and sent it.
+	p.setMuted(opts.Muted || opts.Deafened)
+
 	p.stopped.Add(1)
 	go p.run(call)
 
@@ -157,7 +164,6 @@ func (p *publisher) run(call *Call) {
 	defer p.stopped.Done()
 
 	pcm := make([]int16, frameSize)
-	packet := make([]byte, maxPacket)
 
 	for {
 		select {
@@ -191,7 +197,7 @@ func (p *publisher) run(call *Call) {
 		// half a second late, where the gate has already decided.
 		p.reportSpeaking(call, p.source.Voiced())
 
-		encoded, err := p.encoder.Encode(pcm, frameSize, len(packet))
+		encoded, err := p.encoder.Encode(pcm, frameSize, maxPacket)
 		if err != nil {
 			log.Printf("voice: encode: %v", err)
 			continue

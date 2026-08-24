@@ -24,7 +24,8 @@ written against the domain. The dependency graph is a strict DAG:
 
 ```
 domain, markdown, config       no internal dependencies
-audio                          no internal dependencies    (+ malgo, go-mp3)
+audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
+audio      -> audio/rnnoise                  (+ malgo, go-mp3)
 voice      -> domain                         (+ lksdk, gopus)
 util       -> config
 cache      -> domain
@@ -151,11 +152,16 @@ internal/
                          call's lanes; Want is how deep they are kept and is what
                          stops a decoder running ahead of the speakers),
                          capture.go + process.go (the microphone and
-                         the chain that gates it — a Capture outlives its device,
-                         which its own supervisor reopens, falls back to the
-                         default, or swaps on SetDevice, none of it visible to the
-                         reader inside Read), device.go (enumeration and the
-                         process's one miniaudio context),
+                         the chain that cleans and gates it: high-pass, RNNoise,
+                         gate, every stage always present and bypassed rather
+                         than absent so a setting moves mid-call — and a Capture
+                         outlives its device, which its own supervisor reopens,
+                         falls back to the default, or swaps on SetDevice, none
+                         of it visible to the reader inside Read),
+                         rnnoise/ (Xiph's RNNoise v0.1.1 vendored as C, the last
+                         release whose model ships in-tree; symbols rnn_-prefixed
+                         so it coexists with gopus's libopus), device.go
+                         (enumeration and the process's one miniaudio context),
                          decode.go (WAV + MP3 -> the device's format),
                          synth.go (the built-in sounds, rendered rather than shipped)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,

@@ -258,10 +258,16 @@ type Voice struct {
 	// takes a raised voice.
 	Sensitivity int `json:"sensitivity"`
 
-	// HighPass runs the ~90 Hz filter in front of the gate, which is the whole of
-	// what this client does to a frame's *content*. The gate runs either way — it
-	// is what Sensitivity means.
+	// HighPass runs the ~90 Hz filter in front of the rest of the chain: what is
+	// below speech, cut before it can hold the gate open. The gate runs either
+	// way — it is what Sensitivity means.
 	HighPass bool `json:"high_pass"`
+
+	// NoiseSuppression runs RNNoise between that filter and the gate, which is
+	// what removes noise *inside* the voice range while somebody is talking —
+	// hiss, fans, keyboard — where the gate can only silence the gaps between
+	// words.
+	NoiseSuppression bool `json:"noise_suppression"`
 
 	// InputVolume scales the microphone, 0-200.
 	InputVolume int `json:"input_volume"`
@@ -385,9 +391,15 @@ func Default() Settings {
 			// slider is for. Both volumes at unity, and joining neither muted nor
 			// deafened — a reader who wants either can say so, and a client that
 			// joins silent with no obvious reason reads as broken.
-			Mode:         VoiceModeActivity,
-			Sensitivity:  35,
-			HighPass:     true,
+			Mode:        VoiceModeActivity,
+			Sensitivity: 35,
+			HighPass:    true,
+
+			// On: what it costs is ~0.5 % of one core while capturing, and the
+			// microphone that does not want it — a studio interface in a treated
+			// room — is the rare one.
+			NoiseSuppression: true,
+
 			InputVolume:  100,
 			OutputVolume: 100,
 

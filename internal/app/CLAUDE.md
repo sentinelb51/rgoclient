@@ -1215,9 +1215,11 @@ DAG and conventions.
     tap must not open a second microphone. `force_disconnect` is passed always —
     Stoat refuses a second connection for one account, so a client that crashed
     mid-call could not otherwise rejoin. The join is also cancellable: `dropCall`
-    bumps `callGen`, and a connection landing after the reader gave up is closed
+    bumps `callGen`, a connection landing after the reader gave up is closed
     rather than installed — otherwise it is a live call with an open microphone
-    and no dock to leave it from.
+    and no dock to leave it from — and a *failure* landing after they gave up is
+    dropped by the same generation in `failedJoin`, or it would re-arm a rejoin
+    of a call they left.
     **Three ways out, and they are not the same.** `dropCall` releases the media
     and *keeps* `callChannelID`, which is what a call being reconnected looks
     like: the dock stays on screen saying so. `hangUp` is that plus giving the
@@ -1250,12 +1252,16 @@ DAG and conventions.
     knows nothing about it — so `followVoiceMove` compares where the store now
     says we are against `callChannelID` and rejoins, or hangs up where we are in
     no call at all. It runs *before* `drawsCall`'s guard, a move out of the open
-    server being exactly the case that guard drops.
+    server being exactly the case that guard drops. It acts only on an event
+    about this account (`VoiceChanged.UserID`, "" meaning self): right after a
+    join the gateway may not have filed our own voice state yet, and anybody
+    else's event in that window would read the store's empty answer as a
+    disconnect and tear down a call that just connected.
     **Settings apply to a call already running.** `applyVoiceSettings` pushes
-    sensitivity, input gain, call volume and the output device onto whatever is
-    open, and re-arms the push-to-talk poll; without it each is read once at join
-    and a slider dragged mid-call does nothing, which reads as a broken setting
-    rather than a deferred one. The input *device* included: `Capture.SetDevice`
+    sensitivity, input gain, the rumble filter, noise suppression, call volume
+    and the output device onto whatever is open, and re-arms the push-to-talk
+    poll; without it each is read once at join and a slider dragged mid-call
+    does nothing, which reads as a broken setting rather than a deferred one. The input *device* included: `Capture.SetDevice`
     opens the new microphone on the capture's own goroutine and keeps feeding the
     same ring, so the publisher inside a blocking `Read` sees a period of quiet
     rather than a stream closing under it.
@@ -1315,7 +1321,9 @@ DAG and conventions.
     does. It is its own `audio.Capture`, not the call's, so adjusting the gate
     mid-call is not two things fighting over the microphone; it is sampled at
     `meterInterval` rather than per callback, because a level arrives 100 times a
-    second and each repaint is the whole window. It is stopped from
+    second and each repaint is the whole window. An owned capture is also *read*
+    by a loop of its own — `Capture.Level` is stored by `Read` and nothing else
+    reads a monitor the call is not borrowing, so without one the bar never moves. It is stopped from
     `SettingsPage.showSection` **and** `Close` **and** `resetSessionState` — the
     page has no unmount hook, signing out does not close it, and either hole holds
     the microphone open for the rest of the run. The index pass

@@ -273,6 +273,74 @@ to work on a fresh client, and it is load-bearing now rather than incidental:
 under the pull arrangement the callback is also what asks for the next frame, so
 a closed device decodes nothing at all.
 
+### A review pass, adversarially verified — fixed
+
+A multi-agent review of the whole voice path, every finding below confirmed by
+walking the failure path before it was touched. None verified by ear or on real
+hardware; the code paths were.
+
+- **`Call.emit` could panic the process.** A `select` send still panics on a
+  *closed* channel — `default` arms only a full one — and lksdk delivers
+  callbacks on detached goroutines that outlive `Disconnect`, so a late
+  callback racing `close(c.events)` was a crash. `evMu` now orders `emit`
+  against `endEvents`, the one shared close path of `Close` and `fail`.
+- **Deafen permanently silenced everybody.** `SetDeafened(true)` used
+  `sink.Reset()` — the hang-up primitive — which closed every lane; nothing
+  reopened them, `Want` answers 0 for a missing lane, so undeafening heard only
+  people who subscribed *after*. The lanes are reopened empty right after the
+  Reset, which also restores the written-silence cursor-advance the `silence`
+  var exists for.
+- **Joining muted could send a syllable.** The capture opens before the dial,
+  so the ring holds audio by the time the publish loop starts — and the mute
+  was applied *after* `newPublisher` returned. It is now applied inside
+  `newPublisher`, before the loop exists.
+- **A video track would clobber the audio lane.** lksdk auto-subscribes
+  whatever is published and `OnTrackSubscribed` had no kind filter, so a
+  camera or screen share would have replaced a participant's working lane with
+  garbage fed to an Opus decoder. Audio-only now.
+- **A stale track reader could close the wrong lane.** `closeLane` was keyed
+  on the user alone; after a reconnect resubscribes somebody, the old track's
+  reader errors out of `ReadRTP` late and would destroy the replacement lane.
+  It now closes only the lane still belonging to its own track.
+- **`Sink.Write`/`SetGain` resurrected removed lanes.** Both opened a lane on
+  a miss, so a write racing a leave — or the volume menu clicked after one —
+  put the lane back, played the departed tail and leaked the slot until the
+  next Reset. `Open` is now the only opener, which is what the `Want` docs
+  always claimed.
+- **A pause read as starvation, and shrinking never took latency out.** The
+  jitter buffer treated running dry as proof of shallowness: every remote mute
+  or DTX gap deepened it (toward 240 ms over an ordinary conversation), booked
+  phantom loss for FEC to buy against, and dropped the resumed stream's first
+  packet as late. The cursor now *freezes* on empty and the starve verdict is
+  made at refill time — back inside `starveWindow` is jitter, later is a
+  sender that stopped. And a shrink now `drain`s held audio down to the new
+  depth, one packet per clean five seconds, where before it moved only the
+  refill target and occupancy stayed pinned at the worst burst for the rest of
+  the call.
+- **FEC's 5 % seed survived one second.** `reportLoss` sent the worst lane's
+  `Loss()`, which answered 0 before any window had been measured — overwriting
+  the seed during exactly the window it exists for. Unmeasured is now negative
+  and skipped.
+- **The settings meter was dead without a call.** `Capture.Level` is stored by
+  `Read` and nothing read an *owned* monitor capture, so the bar sat on the
+  floor unless a call's publisher happened to be reading — the inverse of the
+  intent. `startInputMonitor` now drives `Read` on captures it opened.
+- **Hanging up during an in-flight join did not stop the retry.**
+  `failedJoin` lacked the `callGen` guard `installCall` has, so a transient
+  failure landing after the reader left silently re-armed a rejoin — and its
+  non-transient branch could clear state under a *different* call joined
+  since. Same guard both sides now.
+- **Anybody's voice event could tear down a fresh join.** `followVoiceMove`
+  read "we are in no call" off a store the gateway had not yet filed our own
+  join into, and any server's event in that window triggered it.
+  `client.VoiceChanged` now carries its subject and only events about this
+  account are followed.
+- **A swap could mask a real device stop.** `Capture.revive` queued the stop's
+  generation in a 1-buffered channel; a stale token parked during a swap made
+  a fresh stop's send drop, and the mismatch read as nothing-to-do — a dead
+  microphone nothing recovers. The newest stopped generation now lives in an
+  atomic and the channel is a bare signal.
+
 ### Done since this file was written
 
 - **Reconnect after a hard disconnect.** A `CallEnded` carrying an error now
@@ -305,13 +373,26 @@ done on real hardware.
   hears itself. `audio.Processor` is the seam and `Engine` owns both directions
   precisely so the playback reference is reachable. This is the single biggest
   quality gap for anyone not wearing headphones.
-- **No real noise suppression.** The only thing done to a frame's content is a
-  one-pole high-pass in front of the gate, and the setting is named for that —
-  "Rumble filter", `config.Voice.HighPass`. It was called "Noise reduction",
-  which cost a live test to find out was untrue: a gate silences the frames
-  between words and does nothing to static while somebody is talking. RNNoise
-  was the original plan (vendored Xiph C, ~85 KB model) and still fits behind
-  `Processor`.
+- **Noise suppression — done.** RNNoise, the original plan, vendored as
+  `internal/audio/rnnoise` (xiph v0.1.1, commit 6cbfd53 — the last release whose
+  ~85 KB model ships *in* the tree; 0.2 fetches 30-78 MB of `rnnoise_data.c` at
+  build time, which is why the older one). That release prefixed every non-API
+  symbol `rnn_`, so its CELT-derived FFT/pitch code cannot collide with the
+  libopus gopus links into the same binary — checked with `nm` before believing
+  it. It sits between the high-pass and the gate (`noiseSuppressor` in
+  `process.go`), so the gate's RMS measures the *cleaned* signal and a fan under
+  the threshold cannot hold it open. All three stages are now always in the
+  chain and bypassed rather than absent, which is what lets
+  `config.Voice.NoiseSuppression` and `HighPass` both move mid-call the way
+  sensitivity does: a flag lands in an atomic and `Read` applies it between
+  frames.
+  Measured offline (CI-class Xeon, not this machine): pink noise −35 dB, synth
+  fan-and-hum −36 dB, mains hum −33 dB, all at VAD ≈ 0; a speech-shaped signal
+  loses 0.1 dB at VAD 0.88. Full-band *white* noise is the one synthetic it
+  barely touches (−1 dB) — out of distribution for the 2018 model, and not what
+  a microphone produces. Cost ~63 µs per 10 ms frame on that Xeon, so well under
+  1 % of a core while capturing.
+  **Not verified by ear** — the numbers say it works; nobody has listened to it.
 - **Push-to-talk is Windows-only** (`ui.KeyHeld` → `GetAsyncKeyState`). X11 needs
   `XQueryKeymap` on a display connection the client does not own; macOS needs an
   Accessibility grant. `PushToTalkSupported` is false there and the mode is left
@@ -464,8 +545,8 @@ Added because they are diagnostics worth keeping, not because they were asked
 for. Delete any that earn their keep less than they cost:
 
 - `internal/voice/jitter_test.go` — ordering, sequence wrap, loss, the FEC
-  hand-off, and the maintained `held` count. These fail for reasons a person
-  would not spot by reading.
+  hand-off, the maintained `held` count, and the pause that must not read as
+  starvation. These fail for reasons a person would not spot by reading.
 - `internal/voice/seam_test.go` — compile-time proof that `*audio.Capture`
   satisfies `voice.PCMSource` and `*audio.Sink` satisfies `voice.PCMSink`.
 - `internal/voice/live_test.go` — **the live call.** Skipped unless `RGO_LIVE` is

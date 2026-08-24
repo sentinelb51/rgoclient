@@ -190,6 +190,13 @@ type Call struct {
 	speaking map[string]bool  // last reported, so only transitions are emitted
 	lanes    map[string]*lane // who has an open lane, so a leave closes exactly one
 
+	// evMu orders emit against the closing of events. A send in a select still
+	// panics on a closed channel — default arms only a *full* one — and lksdk
+	// delivers callbacks on detached goroutines that outlive Disconnect, so a
+	// check-then-send racing the close was a crash with no schedule of its own.
+	evMu     sync.Mutex
+	evClosed bool
+
 	closeOnce sync.Once
 	done      chan struct{}
 }
@@ -230,13 +237,15 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	}
 	c.room = room
 
+	// The joining mute is newPublisher's to apply, before its loop starts: the
+	// capture ring already holds audio from before the dial, so a publisher born
+	// unmuted and muted a moment later has already sent a syllable.
 	publisher, err := newPublisher(room, src, c, opts)
 	if err != nil {
 		room.Disconnect()
 		return nil, err
 	}
 	c.publisher.Store(publisher)
-	publisher.setMuted(c.muted.Load())
 
 	// Everything per-person is keyed on the voice server agreeing that a
 	// participant's identity *is* the Revolt user ID — lane routing, the speaking
@@ -300,6 +309,21 @@ func (c *Call) SetDeafened(deafened bool) {
 			p.setMuted(true)
 		}
 		c.sink.Reset() // whatever is buffered must not be heard through the silence
+
+		// Reset is the hang-up primitive and closed every lane with its contents.
+		// Reopened empty, the filler keeps feeding each one silence — which is
+		// what holds the jitter cursors at playout rate, and the only reason
+		// undeafening hears anybody subscribed before the deafen at all.
+		c.mu.Lock()
+		ids := make([]string, 0, len(c.lanes))
+		for id := range c.lanes {
+			ids = append(ids, id)
+		}
+		c.mu.Unlock()
+
+		for _, id := range ids {
+			c.sink.Open(id)
+		}
 	}
 }
 
@@ -322,12 +346,7 @@ func (c *Call) Close() {
 		close(c.done)
 
 		c.teardown()
-
-		select {
-		case c.events <- CallEnded{}:
-		default:
-		}
-		close(c.events)
+		c.endEvents(CallEnded{})
 	})
 }
 
@@ -337,10 +356,11 @@ func (c *Call) Close() {
 // speaking transition is a stale ring for a moment; a blocked media goroutine is
 // a broken call.
 func (c *Call) emit(event Event) {
-	select {
-	case <-c.done:
+	c.evMu.Lock()
+	defer c.evMu.Unlock()
+
+	if c.evClosed {
 		return
-	default:
 	}
 
 	select {
@@ -350,6 +370,21 @@ func (c *Call) emit(event Event) {
 	}
 }
 
+// endEvents reports the last event and closes the channel behind it, under the
+// same lock emit sends under — the one arrangement in which a late callback
+// cannot send into the close.
+func (c *Call) endEvents(last CallEnded) {
+	c.evMu.Lock()
+	defer c.evMu.Unlock()
+
+	select {
+	case c.events <- last:
+	default:
+	}
+	c.evClosed = true
+	close(c.events)
+}
+
 // fail ends the call because something went wrong rather than because anybody
 // asked. The reader gets CallEnded carrying why.
 func (c *Call) fail(err error) {
@@ -357,12 +392,7 @@ func (c *Call) fail(err error) {
 		close(c.done)
 
 		c.teardown()
-
-		select {
-		case c.events <- CallEnded{Err: err}:
-		default:
-		}
-		close(c.events)
+		c.endEvents(CallEnded{Err: err})
 	})
 }
 

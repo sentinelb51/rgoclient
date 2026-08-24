@@ -80,9 +80,10 @@ func (a *App) joinCall(channelID string) {
 		}
 
 		capture, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
-			Sensitivity: settings.Sensitivity,
-			Gain:        float32(settings.InputVolume) / 100,
-			HighPass:    settings.HighPass,
+			Sensitivity:      settings.Sensitivity,
+			Gain:             float32(settings.InputVolume) / 100,
+			HighPass:         settings.HighPass,
+			NoiseSuppression: settings.NoiseSuppression,
 		})
 		if err != nil {
 			return err
@@ -112,7 +113,7 @@ func (a *App) joinCall(channelID string) {
 		return nil
 	}, func(err error) {
 		a.callJoining = false
-		a.failedJoin(channelID, epoch, err)
+		a.failedJoin(channelID, epoch, gen, err)
 	})
 }
 
@@ -352,7 +353,16 @@ func (a *App) retryLimit() int {
 // second attempt is silent. client.Transient is what decides: a refusal —
 // forbidden, no session — is an answer, and a timed-out dial or a 500 is not.
 // Call on the UI thread.
-func (a *App) failedJoin(channelID string, epoch uint64, err error) {
+func (a *App) failedJoin(channelID string, epoch, gen uint64, err error) {
+	// The reader gave up while the dial was out — dropCall bumped the
+	// generation, the mirror of installCall's check. Retrying would silently
+	// rejoin a call they left, and a hang-up already cleared the state a
+	// failure would otherwise clear, possibly for a *different* call joined
+	// since. Nothing to report: they left.
+	if a.callGen != gen {
+		return
+	}
+
 	if !a.stale(epoch) && a.callRetry < a.retryLimit() && client.Transient(err) {
 		// Either a reconnect still working, or a first join that failed for a reason
 		// asking again can fix. The voice node answers a dial with a timeout often
@@ -672,9 +682,10 @@ func (a *App) startInputMonitor(report func(level float32)) {
 		settings := config.Current().Voice
 
 		opened, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
-			Sensitivity: settings.Sensitivity,
-			Gain:        float32(settings.InputVolume) / 100,
-			HighPass:    settings.HighPass,
+			Sensitivity:      settings.Sensitivity,
+			Gain:             float32(settings.InputVolume) / 100,
+			HighPass:         settings.HighPass,
+			NoiseSuppression: settings.NoiseSuppression,
 		})
 		if err != nil {
 			log.Printf("open microphone for the level meter: %v", err)
@@ -686,6 +697,21 @@ func (a *App) startInputMonitor(report func(level float32)) {
 
 	done := make(chan struct{})
 	a.monitor, a.monitorOwned, a.monitorDone, a.monitorReport = capture, owned, done, report
+
+	// An owned capture has no publisher behind it, and Level is stored by Read
+	// and nowhere else — without a reader the bar never moves. The loop is paced
+	// by the device (Read blocks a frame at a time) and ends when stopInputMonitor
+	// closes the capture; the call's capture is the publisher's to read.
+	if owned {
+		go func() {
+			frame := make([]int16, audio.FrameSamples)
+			for {
+				if _, err := capture.Read(frame); err != nil {
+					return
+				}
+			}
+		}()
+	}
 
 	epoch := a.epoch
 
@@ -838,6 +864,8 @@ func (a *App) applyVoiceSettings() {
 	if a.capture != nil {
 		a.capture.SetSensitivity(settings.Sensitivity)
 		a.capture.SetGain(float32(settings.InputVolume) / 100)
+		a.capture.SetHighPass(settings.HighPass)
+		a.capture.SetNoiseSuppression(settings.NoiseSuppression)
 		a.capture.SetDevice(settings.InputDevice)
 	}
 
@@ -846,6 +874,8 @@ func (a *App) applyVoiceSettings() {
 	if a.monitor != nil && a.monitorOwned {
 		a.monitor.SetSensitivity(settings.Sensitivity)
 		a.monitor.SetGain(float32(settings.InputVolume) / 100)
+		a.monitor.SetHighPass(settings.HighPass)
+		a.monitor.SetNoiseSuppression(settings.NoiseSuppression)
 		a.monitor.SetDevice(settings.InputDevice)
 	}
 
@@ -865,13 +895,24 @@ func (a *App) applyVoiceSettings() {
 // on talking into the room it was moved out of.
 //
 // Called from onVoiceChanged, which already fires for exactly these events.
-func (a *App) followVoiceMove() {
+// subject is who the event was about, "" meaning this account (the one voice
+// event with no user names a move only its subject is sent).
+func (a *App) followVoiceMove(subject string) {
 	if a.call == nil || a.callJoining {
 		return // nothing to follow, or a join is already deciding where we are
 	}
 
 	selfID := a.store.SelfID()
 	if selfID == "" {
+		return
+	}
+
+	// Only an event about this account can have moved where it stands. The
+	// filter is also what closes a race: right after a join the gateway may not
+	// have filed our own voice state yet, and anybody else's event landing in
+	// that window would read the empty answer below as a disconnect and tear
+	// down a call that just connected.
+	if subject != "" && subject != selfID {
 		return
 	}
 

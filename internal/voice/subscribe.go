@@ -29,7 +29,7 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 		},
 
 		OnParticipantDisconnected: func(p *lksdk.RemoteParticipant) {
-			c.closeLane(p.Identity())
+			c.closeLane(p.Identity(), nil)
 			c.emit(ParticipantChanged{UserID: p.Identity(), Joined: false})
 		},
 
@@ -41,11 +41,18 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 
 		ParticipantCallback: lksdk.ParticipantCallback{
 			OnTrackSubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				// Audio only: lksdk subscribes to whatever is published, and a
+				// camera or screen share fed to an Opus decoder would replace the
+				// participant's working audio lane with garbage.
+				if track.Kind() != webrtc.RTPCodecTypeAudio {
+					return
+				}
+
 				c.subscribe(track, rp.Identity())
 			},
 
-			OnTrackUnsubscribed: func(_ *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				c.closeLane(rp.Identity())
+			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				c.closeLane(rp.Identity(), track)
 			},
 		},
 	}
@@ -96,9 +103,28 @@ type lane struct {
 	buffer  Jitter
 	decoder *gopus.Decoder
 
+	// into is the decoder's caller-buffer half where the binding offers one, and
+	// pcm the buffer it fills — one per lane, the filler being its only user.
+	// nil falls back to Decode's per-frame allocation.
+	into opusDecodeIn
+	pcm  []int16
+
+	// track is which subscription this lane belongs to, so a stale reader's exit
+	// cannot close a lane a re-subscribe has since replaced.
+	track *webrtc.TrackRemote
+
 	// deepPLC is what this decoder was last told, so the setting is pushed on
 	// change rather than on every frame. Touched only by the filler.
 	deepPLC bool
+}
+
+// opusDecodeIn is what a binding has to offer for the receive path to decode
+// without allocating: 1920 B per frame per participant, fifty times a second,
+// is otherwise the path's dominant garbage. layeh.com/gopus does not have it;
+// the fork does, and the assertion lights it up without this package knowing
+// which is linked — the same seam opusTuning is.
+type opusDecodeIn interface {
+	DecodeIn(data []byte, frameSize int, pcm []int16, fec bool) (int, error)
 }
 
 // subscribe starts the one goroutine a participant needs — a reader that takes
@@ -121,8 +147,13 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 
 	buffer := newAdaptiveJitter()
 
+	l := &lane{buffer: buffer, decoder: decoder, track: track}
+	if into, ok := any(decoder).(opusDecodeIn); ok {
+		l.into, l.pcm = into, make([]int16, frameSize)
+	}
+
 	c.mu.Lock()
-	c.lanes[userID] = &lane{buffer: buffer, decoder: decoder}
+	c.lanes[userID] = l
 	c.mu.Unlock()
 
 	// The speakers only ask for audio for a lane they can see, so the lane is
@@ -153,7 +184,7 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 				}
 			}
 
-			c.closeLane(userID)
+			c.closeLane(userID, track)
 
 			return
 		}
@@ -247,7 +278,7 @@ func (c *Call) fillLanes() {
 
 			l.applyDeepPLC(c.deepPLC.Load())
 
-			pcm, err := decodeFrame(l.decoder, payload, next)
+			pcm, err := l.decodeFrame(payload, next)
 			if err != nil {
 				log.Printf("voice: decode %s: %v", userID, err)
 				continue
@@ -291,9 +322,15 @@ func (c *Call) reportLoss() {
 		return
 	}
 
-	worst := 0
+	// Negative is a window not yet measured, and a room with no lanes measures
+	// nothing: either way the encoder keeps what it has — the initial seed at the
+	// start, which exists precisely to cover the window before a measurement.
+	worst := -1
 	for _, l := range c.openLanes() {
 		worst = max(worst, l.buffer.Loss())
+	}
+	if worst < 0 {
+		return
 	}
 
 	p.setLoss(worst)
@@ -313,7 +350,8 @@ func (c *Call) openLanes() map[string]*lane {
 }
 
 // decodeFrame turns one playout slot into audio, in the three ways a slot can
-// come out of the jitter buffer.
+// come out of the jitter buffer: the packet itself, a hole recovered out of its
+// successor, or a hole concealed from nothing.
 //
 // The middle case is the whole point of in-band FEC and is easy to get wrong:
 // Opus hides a copy of a frame *inside its successor*, so a hole is recovered by
@@ -321,29 +359,49 @@ func (c *Call) openLanes() map[string]*lane {
 // not by decoding the successor normally. That successor is decoded again, in the
 // ordinary way, on the following tick; this pass only asks it for what it is
 // carrying about the frame before it.
-func decodeFrame(decoder *gopus.Decoder, payload, next []byte) ([]int16, error) {
-	switch {
-	case payload != nil:
-		return decoder.Decode(payload, frameSize, false)
-
-	case next != nil:
-		// The lost frame, recovered out of the one after it.
-		return decoder.Decode(next, frameSize, true)
-
-	default:
-		// Nothing to recover from: libopus conceals from the frame before rather
-		// than leaving a hole.
-		return decoder.Decode(nil, frameSize, false)
+//
+// The answer aliases the lane's own buffer when the binding decodes in place,
+// and is good only until the next decode — the sink copies it in the same
+// breath, which is the whole of why that is enough.
+func (l *lane) decodeFrame(payload, next []byte) ([]int16, error) {
+	data, fec := payload, false
+	if payload == nil && next != nil {
+		// The lost frame, recovered out of the one after it. Both nil stays a
+		// nil decode: libopus conceals from the frame before rather than
+		// leaving a hole.
+		data, fec = next, true
 	}
+
+	if l.into == nil {
+		return l.decoder.Decode(data, frameSize, fec)
+	}
+
+	n, err := l.into.DecodeIn(data, frameSize, l.pcm, fec)
+	if err != nil {
+		return nil, err
+	}
+
+	return l.pcm[:n], nil
 }
 
 /* Lanes */
 
 // closeLane retires a participant's audio. Idempotent: a track ending and the
 // participant leaving both reach it, and either may be first.
-func (c *Call) closeLane(userID string) {
+//
+// only guards a stale goroutine: after a reconnect resubscribes somebody, the
+// old track's reader is still parked in ReadRTP and errors out well after the
+// new lane is up — keyed on the user alone, that exit would destroy the
+// replacement and leave the participant silent. nil means whatever is there,
+// which is what a participant leaving means.
+func (c *Call) closeLane(userID string, only *webrtc.TrackRemote) {
 	c.mu.Lock()
-	open := c.lanes[userID] != nil
+	l := c.lanes[userID]
+	if only != nil && l != nil && l.track != only {
+		c.mu.Unlock()
+		return
+	}
+	open := l != nil
 	delete(c.lanes, userID)
 	delete(c.speaking, userID)
 	c.mu.Unlock()

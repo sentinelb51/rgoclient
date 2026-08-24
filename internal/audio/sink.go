@@ -22,7 +22,10 @@ func newSink(m *mixer) *Sink {
 }
 
 // Write hands one participant's decoded audio to the speakers: 48 kHz mono,
-// signed 16-bit. The first write for a user opens their lane.
+// signed 16-bit. A write for somebody with no lane is dropped: Open is how a
+// lane starts, and a write racing a Remove must not put one back — resurrected,
+// it would play a departed participant's tail and hold the slot until the next
+// Reset, which is the contract Want's zero-for-no-lane exists to keep.
 //
 // A lane that is full drops what does not fit. A writer that asks Want first
 // never reaches that, which is the arrangement: the speakers say how much they
@@ -32,7 +35,7 @@ func (s *Sink) Write(userID string, pcm []int16) {
 		return
 	}
 
-	l := s.lane(userID)
+	l := s.find(userID)
 	if l == nil {
 		return
 	}
@@ -40,10 +43,9 @@ func (s *Sink) Write(userID string, pcm []int16) {
 	l.pcm.PushAll(pcm)
 }
 
-// Open starts a participant's lane before there is anything to put in it. The
-// speakers only ask for audio for a lane they can see, so this is what gets the
-// first frame asked for; Write opens one too, for a caller that has audio in
-// hand already.
+// Open starts a participant's lane, and is the only thing that does: the
+// speakers only ask for audio for a lane they can see, and a lane nothing but
+// Open can create is a lane no late write can resurrect.
 func (s *Sink) Open(userID string) { s.lane(userID) }
 
 // Wake fires when the speakers have rendered a period with a lane open. It is
@@ -86,9 +88,11 @@ func (s *Sink) find(userID string) *lane {
 }
 
 // SetGain scales one participant, 0 to 2. It is about this call and is not
-// persisted: a voice too quiet today is a room, not a preference.
+// persisted: a voice too quiet today is a room, not a preference. Somebody with
+// no lane is left alone — a gain arriving from a menu open across their leave
+// must not conjure a lane back.
 func (s *Sink) SetGain(userID string, gain float64) {
-	if l := s.lane(userID); l != nil {
+	if l := s.find(userID); l != nil {
 		l.gain.Store(floatBits(clampGain(float32(gain))))
 	}
 }
@@ -144,10 +148,11 @@ func (s *Sink) release(index int) {
 	l.pcm.Discard(l.pcm.Cap())
 }
 
-// lane finds a participant's lane, opening one on the first write. A call with
-// more participants than there are lanes drops the ones past the end rather than
-// growing: maxLanes is well past any call this client will be in, and an array
-// the callback can walk without a lock is worth more than the last few.
+// lane finds a participant's lane, opening one for a user who has none — which
+// is Open's job and nobody else's. A call with more participants than there are
+// lanes drops the ones past the end rather than growing: maxLanes is well past
+// any call this client will be in, and an array the callback can walk without a
+// lock is worth more than the last few.
 func (s *Sink) lane(userID string) *lane {
 	s.mu.Lock()
 	defer s.mu.Unlock()

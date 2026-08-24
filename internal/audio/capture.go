@@ -33,11 +33,18 @@ type Capture struct {
 	generation atomic.Uint64
 
 	// swap and revive are the supervisor's inbox, both buffered so neither the UI
-	// thread nor a miniaudio callback ever waits on it. swap carries no value —
-	// wantID is where the answer is — so several rapid changes coalesce into one
-	// reopen.
+	// thread nor a miniaudio callback ever waits on it. Neither carries a value —
+	// wantID and stopped are where the answers are — so several rapid changes
+	// coalesce into one wake that reads the latest.
 	swap   chan struct{}
-	revive chan uint64
+	revive chan struct{}
+
+	// stopped is the newest generation a Stop callback has reported. An atomic
+	// beside the signal rather than a value in it: a queued token would go stale
+	// — during a swap the old device's stop parks one, and a fresh stop hitting
+	// the full channel would then be masked by it, leaving a dead microphone
+	// nothing recovers.
+	stopped atomic.Uint64
 
 	// wake lets Read block without polling. The callback sends into it without
 	// waiting, so a full one — a reader that has not come back yet — costs the
@@ -56,6 +63,14 @@ type Capture struct {
 	// that a Read may be inside of.
 	gate        *noiseGate
 	sensitivity atomic.Int64
+
+	// hp and ns are the other two stages, always in the chain and bypassed rather
+	// than absent, so either setting can move mid-call the way sensitivity does:
+	// the flag lands here and Read applies it between frames.
+	hp       *highPass
+	ns       *noiseSuppressor
+	highpass atomic.Bool
+	suppress atomic.Bool
 
 	// Push-to-talk. push swaps who decides what is sent — the key rather than the
 	// gate — and transmit is whether it is being held. Both are set from outside
@@ -80,13 +95,16 @@ type InputConfig struct {
 	// Gain scales the signal after the gate, 0-2.
 	Gain float32
 
-	// HighPass runs the ~90 Hz filter in front of the gate: mains hum, fan
-	// rumble, desk knocks. It is *not* noise suppression — nothing here touches
-	// hiss or background sound inside the voice range, and a frame the gate passes
-	// is sent with whatever noise was on it.
-	//
-	// The gate runs either way, that being what the sensitivity slider means.
+	// HighPass runs the ~90 Hz filter in front of everything else: mains hum, fan
+	// rumble, desk knocks — what is below speech, cut before it can hold the gate
+	// open. The gate runs either way, that being what the sensitivity slider means.
 	HighPass bool
+
+	// NoiseSuppression runs RNNoise between the filter and the gate, which is
+	// what removes noise *inside* the voice range while somebody is talking —
+	// hiss, fans, keyboard — where the gate can only silence the frames between
+	// words.
+	NoiseSuppression bool
 
 	// PushToTalk hands the decision to SetTransmitting instead of the gate.
 	PushToTalk bool
@@ -121,20 +139,21 @@ func OpenInput(id string, cfg InputConfig) (*Capture, error) {
 		pcm:    newRing[float32](captureDepth),
 		wantID: id,
 		swap:   make(chan struct{}, 1),
-		revive: make(chan uint64, 1),
+		revive: make(chan struct{}, 1),
 		wake:   make(chan struct{}, 1),
 		scrap:  make([]float32, FrameSamples),
 		gate:   newNoiseGate(cfg.Sensitivity),
+		hp:     newHighPass(90),
+		ns:     &noiseSuppressor{},
 		closed: make(chan struct{}),
 	}
 	c.gain.Store(floatBits(clampGain(cfg.Gain)))
 	c.sensitivity.Store(int64(cfg.Sensitivity))
 	c.push.Store(cfg.PushToTalk)
+	c.highpass.Store(cfg.HighPass)
+	c.suppress.Store(cfg.NoiseSuppression)
 
-	if cfg.HighPass {
-		c.chain = append(c.chain, newHighPass(90))
-	}
-	c.chain = append(c.chain, c.gate)
+	c.chain = []Processor{c.hp, c.ns, c.gate}
 
 	if err := c.startDevice(id); err != nil {
 		return nil, err
@@ -162,9 +181,9 @@ func (c *Capture) supervise() {
 
 			c.useDevice(want)
 
-		case generation := <-c.revive:
+		case <-c.revive:
 			// A device already replaced has nothing to say about the current one.
-			if generation == c.generation.Load() {
+			if c.stopped.Load() == c.generation.Load() {
 				c.recoverDevice()
 			}
 		}
@@ -358,9 +377,19 @@ func (c *Capture) onData(_, in []byte, frames uint32) {
 // reopening from here would be reentering miniaudio from inside its own
 // callback.
 func (c *Capture) onStop(generation uint64) {
+	// The highest generation wins: two devices' callbacks can interleave during
+	// a swap, and an older one landing later must not hide that the current
+	// device stopped.
+	for {
+		latest := c.stopped.Load()
+		if generation <= latest || c.stopped.CompareAndSwap(latest, generation) {
+			break
+		}
+	}
+
 	select {
-	case c.revive <- generation:
-	default: // one is already queued; the supervisor re-reads the generation anyway
+	case c.revive <- struct{}{}:
+	default: // one is already queued; the supervisor reads the newest generation anyway
 	}
 }
 
@@ -401,6 +430,8 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 
 	push := c.push.Load()
 
+	c.hp.SetBypass(!c.highpass.Load())
+	c.ns.SetEnabled(c.suppress.Load())
 	c.gate.SetSensitivity(int(c.sensitivity.Load()))
 	c.gate.SetBypass(push)
 
@@ -478,6 +509,14 @@ func (c *Capture) SetGain(gain float32) { c.gain.Store(floatBits(clampGain(gain)
 // leaves the filter alone: Read applies it, so a settings change cannot land in
 // the middle of a frame being gated.
 func (c *Capture) SetSensitivity(sensitivity int) { c.sensitivity.Store(int64(sensitivity)) }
+
+// SetHighPass turns the rumble filter on or off, mid-call included. Applied by
+// Read, like the sensitivity.
+func (c *Capture) SetHighPass(on bool) { c.highpass.Store(on) }
+
+// SetNoiseSuppression turns RNNoise on or off, mid-call included. Applied by
+// Read, like the sensitivity.
+func (c *Capture) SetNoiseSuppression(on bool) { c.suppress.Store(on) }
 
 // Close stops the microphone. Safe from any goroutine, safe to call twice, and
 // safe while a Read is waiting — that Read answers ErrCaptureClosed.

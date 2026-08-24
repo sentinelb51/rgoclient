@@ -1,6 +1,9 @@
 package voice
 
-import "sync"
+import (
+	"sync"
+	"time"
+)
 
 // Jitter is the buffer between the network and the speakers: packets go in as
 // they arrive, and come out in order at the rate they are played.
@@ -25,7 +28,9 @@ type Jitter interface {
 	Pop() (payload, next []byte, ok bool)
 
 	// Loss is the percentage of packets that did not arrive, over a recent
-	// window. It is what retunes the encoder's FEC.
+	// window — or negative while no full window has been measured yet, so a
+	// caller seeding FEC ahead of a measurement is not overwritten with a zero
+	// that measured nothing. It is what retunes the encoder's FEC.
 	Loss() int
 }
 
@@ -47,6 +52,13 @@ const (
 const (
 	cleanRunToShrink = 250 // packets played without running dry, so five seconds
 	lossWindow       = 200 // packets the loss percentage is measured over
+
+	// starveWindow tells a starve from a pause when the buffer refills after
+	// running dry: packets back this soon were late rather than stopped, and
+	// lateness is what depth exists to absorb. A sender that stopped on purpose
+	// — a mute, a DTX gap between sentences — resumes far later, and deepening
+	// for those would ratchet an ordinary conversation to maxDepth.
+	starveWindow = 500 * time.Millisecond
 )
 
 // adaptiveJitter is the default Jitter: a sequence-indexed ring, a playout
@@ -77,12 +89,18 @@ type adaptiveJitter struct {
 	filling  bool
 	cleanRun int
 
+	// emptiedAt is when the buffer last ran dry, so the refill that follows can
+	// tell a starve from a sender that stopped.
+	emptiedAt time.Time
+
 	arrived, expected int // over the loss window
 	lossPercent       int
 }
 
 func newAdaptiveJitter() *adaptiveJitter {
-	return &adaptiveJitter{depth: initialDepth, filling: true}
+	// lossPercent negative until a window completes: zero would read as a
+	// measured clean connection before anything has been measured at all.
+	return &adaptiveJitter{depth: initialDepth, filling: true, lossPercent: -1}
 }
 
 func (j *adaptiveJitter) Push(sequence uint16, payload []byte) {
@@ -128,6 +146,27 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 			return nil, nil, false
 		}
 		j.filling = false
+
+		// Refilled on the heels of running dry: that was a starve — the packets
+		// were merely late, and lateness is what depth absorbs. A refill after a
+		// long quiet is a sender that had stopped, which says nothing about it.
+		if !j.emptiedAt.IsZero() && time.Since(j.emptiedAt) < starveWindow && j.depth < maxDepth {
+			j.depth++
+		}
+	}
+
+	// Nothing at all waiting: the stream has paused — a mute, a DTX gap, or the
+	// network dying. Freeze rather than conceal: the cursor stays on the packet
+	// the sender produces next, so a resumed stream plays from its first packet
+	// instead of losing it as late behind a cursor that walked on, and a pause
+	// is not booked as loss for the encoder to buy FEC against. Whether the
+	// pause *was* a starve is decided above, by how quickly the refill follows.
+	if j.held == 0 {
+		j.cleanRun = 0
+		j.filling = true
+		j.emptiedAt = time.Now()
+
+		return nil, nil, false
 	}
 
 	at := int(j.next) % len(j.slots)
@@ -147,6 +186,7 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 		if j.cleanRun >= cleanRunToShrink && j.depth > minDepth {
 			j.depth--
 			j.cleanRun = 0
+			j.drain()
 		}
 
 		j.rollLoss()
@@ -154,20 +194,10 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 		return payload, nil, true
 	}
 
-	// Nothing was there. Either the packet is lost — recover or conceal it and
-	// carry on — or the buffer has run dry, which is a depth that is too shallow.
-	//
-	// Only the dry case breaks the clean run. A hole with packets still behind it
-	// is loss, and loss says nothing about whether the buffer is deep enough:
-	// counting it would mean any steady loss above one packet in cleanRunToShrink
-	// stops the depth ever shrinking, and the depth then only ever ratchets up.
-	if j.held == 0 {
-		j.cleanRun = 0
-		j.filling = true
-		if j.depth < maxDepth {
-			j.depth++
-		}
-	}
+	// A hole with audio still behind it: loss, not starvation. Recover or
+	// conceal it and carry on — playout is unharmed, so the clean run stands:
+	// counting a hole would mean any steady loss above one packet in
+	// cleanRunToShrink stops the depth ever shrinking.
 
 	// The successor, if it is already here: Opus hid a copy of this frame in it.
 	var next []byte
@@ -178,6 +208,25 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 	j.rollLoss()
 
 	return nil, next, true
+}
+
+// drain drops what stands between the buffer's occupancy and a freshly lowered
+// depth. Without it a shrink moves only the refill target, and the audio
+// already held keeps playout exactly as far behind as the worst burst pushed
+// it, for the rest of the call. One packet per shrink — a 20 ms seam every five
+// clean seconds until the latency is taken back out — and never across a hole,
+// whose recovery belongs to the FEC hand-off.
+func (j *adaptiveJitter) drain() {
+	for j.held > j.depth {
+		at := int(j.next) % len(j.slots)
+		if !j.filled[at] {
+			break
+		}
+
+		j.slots[at], j.filled[at] = nil, false
+		j.held--
+		j.next++
+	}
 }
 
 func (j *adaptiveJitter) Loss() int {
@@ -208,4 +257,5 @@ func (j *adaptiveJitter) reset(sequence uint16) {
 
 	j.next = sequence
 	j.filling = true
+	j.emptiedAt = time.Time{} // a jump is a new stream, not a starve to deepen for
 }

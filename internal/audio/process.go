@@ -1,6 +1,10 @@
 package audio
 
-import "math"
+import (
+	"math"
+
+	"RGOClient/internal/audio/rnnoise"
+)
 
 // Processor is one stage of the capture chain: it rewrites a frame in place and
 // says whether it still holds speech. Stages run in order and the frame each one
@@ -29,6 +33,10 @@ type Processor interface {
 type highPass struct {
 	alpha           float32
 	lastIn, lastOut float32
+
+	// bypass passes every frame through untouched, so the setting can move
+	// mid-call without the chain being rebuilt under a Read.
+	bypass bool
 }
 
 func newHighPass(cutoff float64) *highPass {
@@ -40,11 +48,64 @@ func newHighPass(cutoff float64) *highPass {
 	return &highPass{alpha: float32(rc / (rc + dt))}
 }
 
+// SetBypass turns the filter into a pass-through. Read applies it, like every
+// other stage setting, so it cannot change in the middle of a frame. The memory
+// is cleared on the way out so re-enabling starts settled rather than from the
+// frame it last saw.
+func (h *highPass) SetBypass(bypass bool) {
+	if bypass && !h.bypass {
+		h.lastIn, h.lastOut = 0, 0
+	}
+	h.bypass = bypass
+}
+
 func (h *highPass) Process(frame []float32) bool {
+	if h.bypass {
+		return true
+	}
+
 	for i, in := range frame {
 		out := h.alpha * (h.lastOut + in - h.lastIn)
 		h.lastIn, h.lastOut = in, out
 		frame[i] = out
+	}
+
+	return true
+}
+
+/* Noise suppression */
+
+// noiseSuppressor rewrites a frame with RNNoise, which is what removes noise
+// *inside* speech — hiss, fans, hum, keyboard — where the gate can only silence
+// the frames between words. It sits between the high-pass and the gate: the
+// gate's RMS then measures the cleaned signal, so a fan under the threshold
+// cannot hold it open.
+//
+// It answers true rather than the model's own voice estimate: the gate is the
+// one deciding stage, and its threshold is a setting the reader has tuned
+// against a meter. Two voice detectors with two opinions is a mode nobody can
+// reason about.
+type noiseSuppressor struct {
+	enabled bool
+
+	// dn is created on the first enabled frame rather than at open: its state is
+	// ~100 KB of C memory, and most captures with the setting off never need it.
+	dn *rnnoise.Denoiser
+}
+
+func (n *noiseSuppressor) SetEnabled(enabled bool) { n.enabled = enabled }
+
+func (n *noiseSuppressor) Process(frame []float32) bool {
+	if !n.enabled {
+		return true
+	}
+	if n.dn == nil {
+		n.dn = rnnoise.New()
+	}
+
+	// The model's frame is 10 ms against the chain's 20, so a frame is two calls.
+	for at := 0; at+rnnoise.FrameSize <= len(frame); at += rnnoise.FrameSize {
+		n.dn.Process(frame[at : at+rnnoise.FrameSize])
 	}
 
 	return true

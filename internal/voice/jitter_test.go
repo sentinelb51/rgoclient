@@ -1,6 +1,9 @@
 package voice
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // The jitter buffer is where a wrong answer is least visible: everything it gets
 // wrong sounds like a bad connection. These cover the cases that are wrong
@@ -59,22 +62,60 @@ func TestJitterOffersSuccessorForFEC(t *testing.T) {
 	}
 }
 
-// A hole with nothing behind it has nothing to recover from, and the decoder
-// should be told to conceal rather than handed a wrong frame.
+// A hole whose successor is missing too has nothing to recover from, and the
+// decoder should be told to conceal rather than handed a wrong frame. Audio is
+// still buffered behind the two holes — a buffer with nothing at all waiting is
+// a paused stream, which freezes rather than concealing.
 func TestJitterOffersNothingWhenSuccessorMissing(t *testing.T) {
 	j := newAdaptiveJitter()
 
 	j.Push(20, []byte{1})
 	j.Push(21, []byte{2})
 	j.Push(22, []byte{3})
+	j.Push(25, []byte{6}) // 23 and 24 are both absent
 	j.Pop()
 	j.Pop()
 	j.Pop()
 
-	// 23 and 24 are both absent.
 	payload, next, ok := j.Pop()
 	if !ok || payload != nil || next != nil {
 		t.Fatalf("expected a bare hole, got payload=%v next=%v ok=%v", payload, next, ok)
+	}
+}
+
+// A stream that pauses — a mute, a DTX gap — must not read as starvation: the
+// cursor freezes where the sender stopped, so the resumed stream plays from its
+// first packet, and a refill that long after the drain leaves the depth alone.
+func TestJitterFreezesOnPause(t *testing.T) {
+	j := newAdaptiveJitter()
+
+	for seq := uint16(30); seq < 33; seq++ {
+		j.Push(seq, []byte{byte(seq)})
+	}
+	for range 3 {
+		j.Pop()
+	}
+
+	if _, _, ok := j.Pop(); ok {
+		t.Fatal("an empty buffer produced a frame")
+	}
+	if j.next != 33 {
+		t.Fatalf("the cursor walked on during the pause: %d", j.next)
+	}
+
+	// The sender resumes where it left off; its packets must not be read as late.
+	before := j.depth
+	j.emptiedAt = time.Now().Add(-time.Second) // the pause was long, not a starve
+	for seq := uint16(33); seq < 36; seq++ {
+		j.Push(seq, []byte{byte(seq)})
+	}
+
+	payload, _, ok := j.Pop()
+	if !ok || payload == nil || payload[0] != 33 {
+		t.Fatalf("resumed stream lost its first packet: %v %v", payload, ok)
+	}
+	if j.depth != before {
+		t.Fatalf("a pause deepened the buffer: %d -> %d", before, j.depth)
 	}
 }
 

@@ -705,7 +705,7 @@ func (a *App) onVoiceChanged(event client.VoiceChanged) {
 	// Checked before the drawing guard below: being moved matters wherever it
 	// happens, and a move out of the open server is exactly the case that guard
 	// would drop.
-	a.followVoiceMove()
+	a.followVoiceMove(event.UserID)
 
 	if !a.drawsCall(event.ChannelID) && !a.drawsCall(event.FromChannelID) {
 		return

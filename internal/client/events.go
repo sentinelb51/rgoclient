@@ -227,6 +227,11 @@ type VoiceChanged struct {
 	// FromChannelID is the call somebody left on their way into ChannelID, "" for
 	// anything that is not a move.
 	FromChannelID string
+
+	// UserID is who the event was about. "" means this account: the one event
+	// that carries no user is a moderator move sent only to its subject. The
+	// controller follows its own moves off this, so it must not be dropped.
+	UserID string
 }
 
 func (Ready) isEvent()               {}
@@ -586,23 +591,23 @@ func (c *Client) registerChannels(session *revoltgo.Session, epoch uint64) {
 // moved.
 func (c *Client) registerVoice(session *revoltgo.Session, epoch uint64) {
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelJoin) {
-		c.emit(epoch, VoiceChanged{ChannelID: event.ID})
+		c.emit(epoch, VoiceChanged{ChannelID: event.ID, UserID: event.State.ID})
 	})
 
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelLeave) {
-		c.emit(epoch, VoiceChanged{ChannelID: event.ID})
+		c.emit(epoch, VoiceChanged{ChannelID: event.ID, UserID: event.User})
 	})
 
 	// A move is sent instead of a leave/join pair, so both ends are one event.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventVoiceChannelMove) {
-		c.emit(epoch, VoiceChanged{ChannelID: event.To, FromChannelID: event.From})
+		c.emit(epoch, VoiceChanged{ChannelID: event.To, FromChannelID: event.From, UserID: event.User})
 	})
 
 	// A camera or a screen share going on or off. Whether the participant is
 	// publishing audio arrives the same way and is not drawn — see
 	// domain.VoiceParticipant.
 	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventUserVoiceStateUpdate) {
-		c.emit(epoch, VoiceChanged{ChannelID: event.ChannelID})
+		c.emit(epoch, VoiceChanged{ChannelID: event.ChannelID, UserID: event.ID})
 	})
 
 	// The account itself being moved by a moderator. Everyone else sees the move

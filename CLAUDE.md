@@ -512,7 +512,7 @@ Fyne is **patched**, and the patched copy is a repository of its own —
 `replace` in `go.mod` and fetched like any other module. Nothing is vendored and
 there is no checkout step: a fresh clone builds. The fork keeps the module path
 `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside it. Its
-`PATCHES.md` lists the seven, and `./update-fyne.sh vX.Y.Z` there carries them
+`PATCHES.md` lists the eight, and `./update-fyne.sh vX.Y.Z` there carries them
 onto a new Fyne by rebasing onto a pristine upstream branch. A bare `go get -u`
 floats what that frozen Fyne compiles against, so everything else updates
 through `scripts/update-deps.sh`.

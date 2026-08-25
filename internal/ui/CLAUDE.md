@@ -117,7 +117,7 @@ naming and the test policy.
   preview, attachment row or mention picker growing the dock is accounted for
   without anything noticing; `MessageList.Relayout` re-reads it.
 - **Composer geometry.** A growing entry's height is
-  `lineHeight × rows + InnerPadding × 2` (`composerMinSize`) — the input border
+  `lineHeight × rows + InnerPadding × 2` (`growingMinSize`) — the input border
   is *not* added on top, because `entryRenderer.Layout` pays for it out of the
   text provider's own padding. `rows` is what the text **wraps** into, not its
   newline count: an Entry scrolls whatever overflows its box and
@@ -128,7 +128,11 @@ naming and the test policy.
   `widget.RichText` at the same width, which is the widget an Entry wraps in, and
   memoises per (text, width) since `MinSize` runs on every layout pass. The count
   is taken at the width of the *last* layout, hence `MessageInput.Resize` →
-  `OnResize` → `App.resizeDock` when a width change re-wraps.
+  `OnResize` → `App.resizeDock` when a width change re-wraps. The settings page's
+  prose fields — a profile's About, a server's description — grow the same way
+  (`commitEntry.MinSize`, floored and capped by `SettingsAreaMinLines` /
+  `SettingsAreaMaxLines`) and need no such hook: they sit in an ordinary column,
+  so the driver's `EnsureMinSize` carries the new minimum up a frame later.
   Everything above the entry — the mention picker, the reply cards, the
   attachments — is one `ui.NewGapBlock`: `ComposerRowGap` between the rows and
   around the block, and nothing at all while all three are hidden.
@@ -361,6 +365,32 @@ naming and the test policy.
   layer with the lightbox — and a card *on* that layer draws over the app's
   tooltip, so one that hovers anything mounts a `NewTooltip` of its own in its own
   stack. The emoji picker and the attachment viewer each carry one.
+- **`ModalNotice` is a layer for the same reason, in the middle rather than the
+  corner.** It is what a message worth stopping for is drawn as, and the only
+  thing the login and second-factor screens can report with — the notice stack
+  belongs to a main UI that does not exist until Ready, so `app.mountLogin`
+  stacks this layer over both. Being a layer is what keeps it *floating*: an
+  overlay would take the whole hit test and stop the client answering a click for
+  as long as a message nobody has to answer was up. Only the card takes a tap, and
+  that tap dismisses it. One card at a time, replaced rather than queued.
+  It **fades in and out, in eight steps**. Fyne caches a rendered line of text
+  under a key its *colour* is part of, so every distinct alpha is a texture of its
+  own — quantising means eight of them, shared by every notice the client ever
+  draws, where a smooth ramp would mint a dozen per word per fade. `dissolve`
+  scales every channel and not the alpha alone, `Color.RGBA` being premultiplied
+  (the trap `theme.Fade` names), and everything on the card is scaled together —
+  fill, outline, shadow, mark and text — so it dissolves as one object. The only
+  completion hook a `fyne.Animation` has is the tick reporting exactly 1, which
+  the runner calls once at the end and never again; those ticks run in the
+  driver's loop, on the thread that paints.
+- **A confirmation is one column down the middle.** No tone glyph and no close
+  button: the confirming button already carries the tone as a fill, and a Cancel
+  says everything an X would. A *statement* — a `Confirm` with no `OnConfirm` —
+  takes one button across the whole card, there being nothing to cancel.
+  `newModalBody` is the sentence both it and the centred notice are read by, and
+  it wraps **by hand** (`wrapText`, breaking mid-word where no space will ever
+  break a URL in a transport error): `widget.RichText` is what wraps text in Fyne
+  and it carries a theme colour *name*, which the notice's fade cannot move.
 - **A box layout stretches every child across the row.** `container.NewHBox`
   hands each object its minimum *width* and the row's full height, so an icon
   button in a strip taller than itself is drawn as a tall rectangle — and two

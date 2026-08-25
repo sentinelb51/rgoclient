@@ -40,6 +40,28 @@ func (a *App) notifyNotice(notice ui.Notice) {
 	a.notices.PushNotice(notice)
 }
 
+// notifyModal reports in the middle of the window instead of the corner, for a
+// message the reader must not miss: the outcome of something they are waiting on,
+// or anything said on the login screens, which are drawn before the notice layer
+// exists. It costs the middle of the window for a few seconds, so it is the
+// exception — an ordinary receipt belongs in the corner. Call on the UI thread.
+func (a *App) notifyModal(tone ui.Tone, format string, args ...any) {
+	a.notifyModalNotice(ui.Notice{Tone: tone, Body: fmt.Sprintf(format, args...)})
+}
+
+// notifyModalNotice is notifyModal for a message carrying its own heading — and
+// for one that is *only* a heading, which is what the card is at its shortest:
+// a mark and a word. Call on the UI thread.
+func (a *App) notifyModalNotice(notice ui.Notice) {
+	log.Printf("notice: %s", notice.Body)
+
+	if notice.Tone == ui.ToneDanger || notice.Tone == ui.ToneWarning {
+		a.playSound(audio.Error)
+	}
+
+	a.modal.Show(notice)
+}
+
 // confirm puts a question on the modal layer. The dialog closes itself whichever
 // way it is answered; only the confirming branch calls back.
 //

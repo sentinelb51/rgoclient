@@ -9,7 +9,7 @@ import (
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
-	"layeh.com/gopus"
+	"github.com/sentinelb51/gopus"
 )
 
 // callbacks is the whole of what the room tells this package. Every one of them
@@ -120,9 +120,9 @@ type lane struct {
 
 // opusDecodeIn is what a binding has to offer for the receive path to decode
 // without allocating: 1920 B per frame per participant, fifty times a second,
-// is otherwise the path's dominant garbage. layeh.com/gopus does not have it;
-// the fork does, and the assertion lights it up without this package knowing
-// which is linked — the same seam opusTuning is.
+// is otherwise the path's dominant garbage. Upstream layeh.com/gopus does not
+// have it; sentinelb51/gopus does, and the assertion lights it up without this
+// package knowing which is linked — the same seam opusTuning is.
 type opusDecodeIn interface {
 	DecodeIn(data []byte, frameSize int, pcm []int16, fec bool) (int, error)
 }

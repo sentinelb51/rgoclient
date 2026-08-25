@@ -5,6 +5,7 @@ package ui
 
 import (
 	"bytes"
+	"context"
 	"image"
 	"image/color"
 	"image/png"
@@ -318,7 +319,9 @@ func CopyImageToClipboard(img image.Image) {
 			return
 		}
 
-		clipboard.Write(clipboard.FmtImage, encoded.Bytes())
+		if _, err := clipboard.Write(context.Background(), clipboard.FmtImage, encoded.Bytes()); err != nil {
+			log.Printf("copy image: %v", err)
+		}
 	}()
 }
 

@@ -53,8 +53,11 @@ func (a *App) buildUI() fyne.CanvasObject {
 		a.buildMemberList(),
 	)
 
+	// The modal notice is the topmost of the six: it is what the client says when
+	// it matters most, and it is click-through, so covering a settings page costs
+	// that page nothing.
 	return container.NewStack(a.mainRow, a.callIslandLayer, a.notices.Layer,
-		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer)
+		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer, a.modal.Layer)
 }
 
 /* Server sidebar */

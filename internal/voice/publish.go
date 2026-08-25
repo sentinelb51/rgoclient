@@ -12,7 +12,7 @@ import (
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"layeh.com/gopus"
+	"github.com/sentinelb51/gopus"
 )
 
 // The shape of what this client sends. 48 kHz mono at a 20 ms frame is what
@@ -40,8 +40,9 @@ const (
 )
 
 // opusTuning is what a libopus binding has to offer for the loss tolerance this
-// client wants. layeh.com/gopus does not have these; the fork does, and the
-// assertion lights them up without this package knowing which is linked.
+// client wants. Upstream layeh.com/gopus does not have these; sentinelb51/gopus
+// does, and the assertion lights them up without this package knowing which is
+// linked.
 //
 // Inband FEC is the single most valuable setting here: it is what lets the
 // jitter buffer stay shallow, which is 60-80 % of mouth-to-ear latency.

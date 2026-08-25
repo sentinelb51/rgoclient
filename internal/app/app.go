@@ -113,6 +113,7 @@ type App struct {
 	mainRow         *fyne.Container // the four-column fill row, relaid out by toggleMemberList
 	tooltip         *ui.Tooltip     // the hover label floating over that row
 	notices         *ui.NoticeStack // the transient messages floating over it too
+	modal           *ui.ModalNotice // the one that takes the middle of the window instead
 	callIsland      *ui.CallIsland  // the call pill floating at the top of the window, over every view
 	callIslandLayer *fyne.Container // the layer it hangs on; refreshed when the pill changes width
 	serverList      *fyne.Container
@@ -378,11 +379,10 @@ type App struct {
 
 	/* The login screens, see session.go */
 
-	// loginStatus is the one line the login and second-factor screens report on,
-	// there being no notice layer until the main UI exists; readyTimer is the
-	// watchdog on the gateway snapshot that builds it.
-	loginStatus *ui.StatusLine
-	readyTimer  *time.Timer
+	// readyTimer is the watchdog on the gateway snapshot that builds the main UI.
+	// What either screen reports with is the modal notice above, the notice layer
+	// being part of a UI that does not exist until Ready.
+	readyTimer *time.Timer
 
 	pendingToken string // stashed by a credential login until Ready names the user
 
@@ -390,8 +390,8 @@ type App struct {
 	// with and nothing else does — saved beside it so a restored login can still
 	// tell its own revocation from any other. See domain.AccountSession.
 	pendingSessionID string
-	pendingJoin   bool   // a join is in flight, so its ServerJoined should select
-	pendingRoleID string // a role just created, opened once the event carrying it lands
+	pendingJoin      bool   // a join is in flight, so its ServerJoined should select
+	pendingRoleID    string // a role just created, opened once the event carrying it lands
 
 	/* The mounted window, see messages.go */
 
@@ -447,6 +447,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		channelList:         container.NewVBox(),
 		tooltip:             ui.NewTooltip(),
 		notices:             ui.NewNoticeStack(),
+		modal:               ui.NewModalNotice(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
 		mentions:            make(map[string][]string),

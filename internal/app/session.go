@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -27,8 +28,16 @@ const sessionsFile = ".rgoclient_sessions.json"
 // in..." forever, the one failure that looks like a hang rather than an error.
 const readyTimeout = 20 * time.Second
 
-// loginWindowSize is the compact size used for the login screen.
-var loginWindowSize = fyne.NewSize(300, 320)
+// loginWindowWidth is how wide the screens before Ready are. There is no height
+// beside it: what they measure is what the window is resized to, the saved-session
+// list being as long as it is — a number here is a gap under one screen and a
+// scrollbar on the other.
+const loginWindowWidth = 300
+
+// registerURL is Stoat's signup page. Registration cannot happen in the client:
+// POST /auth/account/create takes an hCaptcha token, which needs a browser to
+// solve, and the verification code arrives by email either way.
+var registerURL = &url.URL{Scheme: "https", Host: "stoat.chat", Path: "/login/create"}
 
 /* Opening a session */
 
@@ -204,7 +213,7 @@ func (a *App) awaitReady() {
 			log.Printf("no ready event after %s", readyTimeout)
 			a.client.Close()
 			a.showLogin()
-			a.reportLogin("Signed in, but your account never arrived. Retry.")
+			a.reportLogin(ui.ToneDanger, "Signed in, but your account never arrived. Retry.")
 		}, false)
 	})
 	a.readyTimer = watchdog
@@ -225,36 +234,60 @@ func (a *App) stopAwaitingReady() {
 // showLogin displays the saved sessions and the credential form.
 func (a *App) showLogin() {
 	a.closeOverlay() // a viewer left open by a dropped session would outlive its window
-	a.window.Resize(loginWindowSize)
 
 	sessions, err := LoadSessions()
 	if err != nil {
 		log.Printf("load sessions: %v", err)
 	}
 
-	// Its own line: the notice layer is part of the main UI, which is not built until
-	// Ready, so until then every outcome has exactly one place to go.
-	a.loginStatus = ui.NewStatusLine()
+	form, focus := a.buildLoginForm()
 
 	content := container.NewVBox(
 		widget.NewLabelWithStyle("Authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
 		widget.NewSeparator(),
 		a.buildSavedSessions(sessions),
 		widget.NewSeparator(),
-		a.buildLoginForm(),
-		a.loginStatus.Content,
+		form,
+		a.buildRegisterLink(),
 	)
-	a.window.SetContent(container.NewPadded(content))
+	a.mountLogin(content, focus)
 }
 
-// reportLogin says why a sign-in did not work, on whichever of the two screens
-// is up. Call on the UI thread, after the screen it reports on has been built.
-func (a *App) reportLogin(message string) {
-	if a.loginStatus == nil {
-		return
-	}
+// mountLogin puts one of the screens before Ready up: the card, the modal notice
+// layer over it, and the window shrunk to what the card measures. That layer is
+// the whole of what either screen reports with — the notice stack belongs to a
+// main UI that does not exist until Ready — and it takes no room, so neither
+// reserves a line for a message that is usually not there.
+//
+// The order is load-bearing twice over: a container reports a minimum only once
+// it holds something, and canvas focus is a property of the tree that is up.
+func (a *App) mountLogin(card fyne.CanvasObject, focus fyne.Focusable) {
+	content := container.NewStack(container.NewPadded(card), a.modal.Layer)
 
-	a.loginStatus.Fail(message)
+	a.window.SetContent(content)
+	a.window.Resize(fyne.NewSize(loginWindowWidth, content.MinSize().Height))
+	a.window.Canvas().Focus(focus)
+}
+
+// buildRegisterLink is the way out to Stoat's signup page, for a reader with no
+// account to sign in with. A link rather than a button: it leads out of the
+// client, and a second target the size of Login above it would read as the other
+// half of a pair.
+func (a *App) buildRegisterLink() fyne.CanvasObject {
+	link := ui.NewLinkTextWith("Create an account", 0, func() {
+		if err := a.fyne.OpenURL(registerURL); err != nil {
+			log.Printf("open %s: %v", registerURL, err)
+			a.reportLogin(ui.ToneDanger, "Couldn't open the browser. Visit "+registerURL.String())
+		}
+	})
+
+	return container.NewCenter(link)
+}
+
+// reportLogin says how a sign-in went, on whichever of the two screens is up.
+// Call on the UI thread, after the screen it reports on has been built.
+func (a *App) reportLogin(tone ui.Tone, message string) {
+	a.notifyModal(tone, "%s", message)
 }
 
 // buildSavedSessions lists the saved sessions as clickable cards.
@@ -277,9 +310,10 @@ func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 	return container.NewVBox(widget.NewLabel("Recent Sessions"), container.NewVBox(cards...))
 }
 
-// buildLoginForm builds the email/password form. On success onReady swaps in the
-// main UI and persists the token; only failures come back here.
-func (a *App) buildLoginForm() fyne.CanvasObject {
+// buildLoginForm builds the email/password form, handing back the field the
+// screen opens focused on. On success onReady swaps in the main UI and persists
+// the token; only failures come back here.
+func (a *App) buildLoginForm() (fyne.CanvasObject, fyne.Focusable) {
 	email := widget.NewEntry()
 	email.SetPlaceHolder("Email")
 
@@ -289,11 +323,11 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 	var login *ui.Button
 	login = ui.NewWeightedButton("Login", ui.ButtonPrimary, func() {
 		if email.Text == "" || password.Text == "" {
-			a.reportLogin("Enter both an email address and a password.")
+			a.reportLogin(ui.ToneWarning, "Enter both an email address and a password.")
 			return
 		}
 
-		a.loginStatus.Clear()
+		a.modal.Clear()
 		login.Disable()
 		login.SetText("Logging in...")
 
@@ -305,7 +339,7 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 				case err != nil:
 					login.Enable()
 					login.SetText("Login")
-					a.reportLogin("Login failed: " + err.Error())
+					a.reportLogin(ui.ToneDanger, "Login failed: "+err.Error())
 				case result.Pending():
 					a.showMFAChallenge(result)
 				default:
@@ -315,14 +349,18 @@ func (a *App) buildLoginForm() fyne.CanvasObject {
 			}, true)
 		}()
 	})
+	// Enter carries down the form rather than submitting an empty half of it.
+	email.OnSubmitted = func(string) { a.window.Canvas().Focus(password) }
 	password.OnSubmitted = func(string) { login.Tap() }
 
-	return container.NewVBox(
+	form := container.NewVBox(
 		widget.NewLabel("Enter credentials"),
 		ui.WithCaret(email),
 		ui.WithCaret(password),
 		login,
 	)
+
+	return form, email
 }
 
 /* The second factor */
@@ -339,16 +377,14 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 	code := widget.NewEntry()
 	code.SetPlaceHolder("Code")
 
-	a.loginStatus = ui.NewStatusLine()
-
 	var submit *ui.Button
 	submit = ui.NewWeightedButton("Verify", ui.ButtonPrimary, func() {
 		if code.Text == "" {
-			a.reportLogin("Enter the code first.")
+			a.reportLogin(ui.ToneWarning, "Enter the code first.")
 			return
 		}
 
-		a.loginStatus.Clear()
+		a.modal.Clear()
 		submit.Disable()
 		submit.SetText("Verifying...")
 
@@ -359,7 +395,7 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 				if err != nil {
 					submit.Enable()
 					submit.SetText("Verify")
-					a.reportLogin("Verification failed: " + err.Error())
+					a.reportLogin(ui.ToneDanger, "Verification failed: "+err.Error())
 
 					return
 				}
@@ -383,11 +419,9 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 		ui.WithCaret(code),
 		submit,
 		ui.NewButton("Cancel", a.showLogin),
-		a.loginStatus.Content,
 	)
 
-	a.window.SetContent(container.NewPadded(container.NewVBox(rows...)))
-	a.window.Canvas().Focus(code)
+	a.mountLogin(container.NewVBox(rows...), code)
 }
 
 // mfaMethodPicker offers the factors this account will accept. The labels are
@@ -460,7 +494,7 @@ func (a *App) loginWithToken(session SavedSession) {
 			log.Printf("token login: %v", err)
 			_ = RemoveSession(session.UserID)
 			a.showLogin()
-			a.reportLogin("That saved login no longer works. Sign in again.")
+			a.reportLogin(ui.ToneDanger, "That saved login no longer works. Sign in again.")
 		}, true)
 	}()
 }

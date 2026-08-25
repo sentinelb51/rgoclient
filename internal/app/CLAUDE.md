@@ -17,12 +17,15 @@ DAG and conventions.
    session — so `showMFAChallenge` *replaces* the login screen rather than
    stacking a dialog on it, there being nothing behind it. Both stages land on
    `Client.Open`, the path a saved token takes.
-   Both screens report on a **`ui.StatusLine` of their own**, not through
-   `dialog.ShowError`: `NoticeStack` belongs to the main UI and does not exist
-   until Ready, and a Fyne dialog is the one surface `AppTheme` does not reach. It
-   is a `widget.Label`, not a `canvas.Text` — a transport error is a sentence that
-   must wrap, and `Importance` colours it without holding a colour a restyle would
-   leave stale.
+   Both screens report through **`ui.ModalNotice`**, not `dialog.ShowError`:
+   `NoticeStack` belongs to the main UI and does not exist until Ready, and a Fyne
+   dialog is the one surface `AppTheme` does not reach. `mountLogin` stacks that
+   layer over either screen and sizes the window to what the card *measures*
+   rather than to a number — the saved-session list is as long as it is. The layer
+   takes no room, so neither screen reserves a line for a message that is usually
+   not there, which is what a `ui.StatusLine` did. The
+   way out for somebody with no account is a `ui.LinkText` to Stoat's signup page
+   (`registerURL`); registration cannot happen here, see `docs/known-gaps.md`.
    **A session that opens and never reports is the failure that looks like a
    hang**, so `awaitReady` watches for the snapshot: `Client.Open` returns once
    the websocket is up, Ready alone names the account, and revoltgo drops an event
@@ -255,7 +258,15 @@ DAG and conventions.
     `refreshSlowmode` calls `App.resizeDock` — Fyne reclaims nothing for a
     shrinking minimum.
 12. **Notices and confirmations.** `App.confirm(ui.Confirm{...})` for anything
-    irreversible, `App.notify(tone, …)` for an outcome the user didn't ask about.
+    irreversible, `App.notify(tone, …)` for an outcome the user didn't ask about,
+    and `App.notifyModal(tone, …)` for one that must not be missed — the same
+    message in the middle of the window instead of the corner, for
+    `config.Notifications.ModalSeconds`. Which of the two a call site takes is its
+    own judgement: the corner is the default and the middle is the exception, so a
+    receipt for something the reader just did stays in the corner. It is also all
+    the login screens have (item 1). The card floats rather than dimming — it is
+    click-through except for itself, a tap on it dismisses it early — so a message
+    nobody has to answer never stops the client answering.
     A `ui.Tone` is the *only* thing deciding colour, icon and button weight.
     Destructive actions share one shape: a `can…` check decides whether to offer
     it, `confirm…` asks, the action fires through `App.background`, and the

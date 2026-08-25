@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"context"
 	"fmt"
 	"image"
 	"image/color"
@@ -319,19 +320,24 @@ func (w *ComposerNotice) Set(reason string) {
 	w.Show()
 }
 
-// composerMinSize sizes a growing entry: one line per *wrapped* row up to
-// ComposerMaxLines, plus InnerPadding above and below and nothing else. The input
-// border is *not* added on top — entryRenderer.Layout pays for that inset out of
-// the text provider's own padding, and counting it twice left dead pixels under
-// the caret.
-func composerMinSize(e *widget.Entry, rows *wrapMeter) fyne.Size {
+// growingMinSize sizes an entry that grows with its text: one line per *wrapped*
+// row, floored at minLines and capped at maxLines, plus InnerPadding above and
+// below and nothing else. The input border is *not* added on top —
+// entryRenderer.Layout pays for that inset out of the text provider's own
+// padding, and counting it twice left dead pixels under the caret.
+func growingMinSize(e *widget.Entry, rows *wrapMeter, minLines, maxLines int) fyne.Size {
 	size := e.MinSize()
-	lines := min(rows.measure(e), int(theme.Sizes.ComposerMaxLines))
+	lines := min(max(rows.measure(e), minLines), max(minLines, maxLines))
 	th := e.Theme()
 	size.Height = lineHeight(th.Size(fynetheme.SizeNameText))*float32(lines) +
 		th.Size(fynetheme.SizeNameInnerPadding)*2
 
 	return size
+}
+
+// composerMinSize is growingMinSize from one line to ComposerMaxLines.
+func composerMinSize(e *widget.Entry, rows *wrapMeter) fyne.Size {
+	return growingMinSize(e, rows, 1, int(theme.Sizes.ComposerMaxLines))
 }
 
 // wrapMeter counts the rows an entry's text *wraps* into, which is the height a
@@ -759,7 +765,7 @@ func cursorPosition(text string, offset int) (row, col int) {
 // whether it consumed the paste.
 func (m *MessageInput) pasteAsAttachment() bool {
 	if clipboard.Init() == nil {
-		if img := clipboard.Read(clipboard.FmtImage); len(img) > 0 {
+		if img, err := clipboard.Read(context.Background(), clipboard.FmtImage); err == nil && len(img) > 0 {
 			path := filepath.Join(os.TempDir(), fmt.Sprintf("%d.png", time.Now().UnixNano()))
 			if os.WriteFile(path, img, 0o644) == nil {
 				return m.AddAttachment(path)

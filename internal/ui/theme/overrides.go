@@ -38,6 +38,10 @@ const selectionAlpha = 90
 // too close to the background to read as a link.
 const accentTint = 0.35
 
+// linkHoverTint is the same lift again, for a link answering the pointer: a word
+// with no fill and no edge has only its own colour to brighten.
+const linkHoverTint = 0.6
+
 // Apply resets both tables to their defaults and writes the named overrides over
 // them. An unknown name or an unparseable value is logged and skipped: the
 // settings file is hand-editable, so it must not be able to stop the client
@@ -160,12 +164,13 @@ var AccentColors = []string{
 	"MentionText",
 	"JumpBarAction",
 	"EmbedTitle",
+	"LinkText",
+	"LinkTextHover",
 }
 
-// AccentOverrides expands an accent into the overrides that carry it. The three
-// text entries are lifted towards white and the reply highlight is dropped to a
-// tint, because those four are drawn against the dark surfaces rather than
-// filling one.
+// AccentOverrides expands an accent into the overrides that carry it. The text
+// entries are lifted towards white and the reply highlight is dropped to a tint,
+// because those are drawn against the dark surfaces rather than filling one.
 func AccentOverrides(accent string) map[string]string {
 	base, ok := ParseHex(accent)
 	if !ok {
@@ -183,6 +188,8 @@ func AccentOverrides(accent string) map[string]string {
 		"MentionText":         text,
 		"JumpBarAction":       text,
 		"EmbedTitle":          text,
+		"LinkText":            text,
+		"LinkTextHover":       Hex(Lighten(base, linkHoverTint)),
 	}
 }
 

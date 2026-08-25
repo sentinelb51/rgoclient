@@ -222,7 +222,8 @@ func (p *SettingsPage) bioRow() fyne.CanvasObject {
 	entry.PlaceHolder = "Say something about yourself"
 	p.account.bio = entry
 
-	return p.stackedRow("About", "Shown on your profile. Clear it to remove it.", wideField(entry))
+	return p.stackedRow("About", "Shown on your profile, saved when you click away. Clear it to remove it.",
+		wideField(entry))
 }
 
 // presenceRow sets how the account appears to everybody else. Nothing is written
@@ -709,6 +710,11 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 			p.adv(p.numberRow("Maximum on screen", "How many notices can stack up at once.",
 				settings.MaxStacked, 1, maxNoticeStack, "",
 				func(s *config.Settings, v int) { s.Notifications.MaxStacked = v })),
+		),
+		p.group("Centre of the window", "The card the client takes the middle of the window with — a login refused, an outcome you are waiting on.",
+			p.numberRow("Hold for", "How long that card stays before it goes.",
+				settings.ModalSeconds, 1, maxModalLifetime, "s",
+				func(s *config.Settings, v int) { s.Notifications.ModalSeconds = v }),
 		),
 		p.group("Show", "",
 			p.toggleRow("Information", "Something happened and nothing is wrong.",
@@ -1495,6 +1501,7 @@ const (
 
 	maxNoticeLifetime = 60
 	maxNoticeStack    = 8
+	maxModalLifetime  = 30
 
 	minCacheMiB       = 16
 	maxDiskMiB        = 8192

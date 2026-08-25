@@ -560,3 +560,11 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   spans the menu lists are the client's own; a member's remaining time is not
   drawn anywhere either — the menu offers to end one, which is the only place a
   standing timeout shows at all.
+- **An account cannot be made here.** The routes exist and revoltgo has them
+  (`AccountCreate`, `VerifyEmail`, `OnboardingComplete`), but stoat.chat runs with
+  `features.captcha.enabled`, so `POST /auth/account/create` takes an hCaptcha
+  token — a widget, and Fyne has no webview to draw one in. The code confirming
+  the address then arrives by email, so the reader leaves the client either way.
+  The login screen offers the signup page instead (`app.registerURL`). Onboarding
+  is the reachable half and is **not** built: a brand-new account signing in here
+  gets `EventErrorOnboardingNotFinished` and no prompt to name itself.

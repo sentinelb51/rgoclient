@@ -93,6 +93,8 @@ var Colors = struct {
 	ReplyMentionActive    color.Color
 	MentionText           color.Color
 	MentionHandleText     color.Color
+	LinkText              color.Color
+	LinkTextHover         color.Color
 	SlowmodeText          color.Color
 	DockBadgeBg           color.Color
 	SlowmodeWaiting       color.Color
@@ -226,12 +228,17 @@ var Colors = struct {
 	NoticeWarning color.Color
 	NoticeDanger  color.Color
 
-	/* Confirmations */
+	/* Modals: the confirmation card and the centred notice */
 
 	// ConfirmHint is the line under the buttons naming the key that skips the
 	// question. It sits below the body it follows, being an aside rather than part
 	// of what is being asked.
 	ConfirmHint color.Color
+
+	// ModalBodyText is the sentence under a modal's title — what is about to
+	// happen, or what just did. Quieter than the title, which is what the card is
+	// read by, and brighter than the hint, which is an aside.
+	ModalBodyText color.Color
 
 	/* The message islands: pins, mentions and channel search */
 
@@ -415,6 +422,11 @@ var Colors = struct {
 	MentionText:        color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
 	MentionHandleText:  color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
 
+	// Text that leads somewhere and is not a button: the accent again, since a
+	// mention and a link are the same promise made about a word.
+	LinkText:      color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF
+	LinkTextHover: color.RGBA{R: 189, G: 202, B: 253, A: 255}, // #BDCAFD, the same lifted under the pointer
+
 	// The composer's slowmode badge. At rest it states a rule and reads as
 	// furniture; once it is counting down it is the reason Enter did nothing, so
 	// it warms to the amber the palette already uses for a holding state.
@@ -594,7 +606,8 @@ var Colors = struct {
 	NoticeWarning: color.RGBA{R: 201, G: 138, B: 42, A: 255}, // #C98A2A
 	NoticeDanger:  color.RGBA{R: 199, G: 62, B: 66, A: 255},  // #C73E42
 
-	ConfirmHint: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	ConfirmHint:   color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	ModalBodyText: color.RGBA{R: 168, G: 176, B: 191, A: 255}, // #A8B0BF
 
 	// An island is three surfaces deep — island, well, card — so each has to be a
 	// visible step off the one under it or the cards read as a list drawn straight
@@ -1020,6 +1033,19 @@ var Sizes = struct {
 	ConfirmRadius     float32
 	ConfirmButtonGap  float32
 	ConfirmHintSize   float32
+	ConfirmTitleSize  float32
+	ConfirmTitleGap   float32
+	ConfirmPadding    float32
+
+	/* The modal notice: one card in the middle of the window, briefly */
+
+	ModalNoticeWidth    float32
+	ModalNoticeRadius   float32
+	ModalNoticePadding  float32
+	ModalNoticeMarkSize float32
+	ModalNoticeMarkGap  float32
+	ModalNoticeTitle    float32
+	ModalNoticeBodyGap  float32
 
 	/* Login */
 
@@ -1186,6 +1212,13 @@ var Sizes = struct {
 	// is what it used to borrow: the lines are not chips and the two numbers move
 	// for different reasons.
 	SettingsEntryLineGap float32
+
+	// SettingsAreaMinLines and SettingsAreaMaxLines bound a prose field — a
+	// profile's About, a server's description — which grows with what is typed
+	// between the two. Lines rather than pixels, the box being sized off the text
+	// size it draws at.
+	SettingsAreaMinLines float32
+	SettingsAreaMaxLines float32
 }{
 	ServerSidebarWidth:    60,
 	ChannelSidebarWidth:   240,
@@ -1438,7 +1471,7 @@ var Sizes = struct {
 	// The padding *inside* the card is deliberately small by contrast: the entry
 	// already carries InnerPadding above and below its text, so the card only
 	// needs a couple of pixels more before it starts looking slack.
-	ComposerMaxLines:    8,
+	ComposerMaxLines:    20,
 	ComposerDockMargin:  8,
 	ComposerRadius:      8,
 	ComposerPaddingV:    3,
@@ -1580,9 +1613,20 @@ var Sizes = struct {
 	NoticeCountdown:   3,
 	NoticeCardSpacing: 8,
 	ConfirmWidth:      360,
-	ConfirmRadius:     6,
-	ConfirmButtonGap:  4,
+	ConfirmRadius:     10,
+	ConfirmButtonGap:  14,
 	ConfirmHintSize:   11,
+	ConfirmTitleSize:  16,
+	ConfirmTitleGap:   8,
+	ConfirmPadding:    18,
+
+	ModalNoticeWidth:    260,
+	ModalNoticeRadius:   10,
+	ModalNoticePadding:  22,
+	ModalNoticeMarkSize: 34,
+	ModalNoticeMarkGap:  14,
+	ModalNoticeTitle:    15,
+	ModalNoticeBodyGap:  6,
 
 	SessionCardAvatarSize: 32,
 	WindowDefaultWidth:    1200,
@@ -1725,6 +1769,10 @@ var Sizes = struct {
 	SettingsPairGutter:       16,
 	SettingsIslandGap:        16,
 	SettingsEntryLineGap:     6,
+	// A floor of six lines is a paragraph on screen at once; the ceiling is where
+	// a field stops being a row in a section and starts being the section.
+	SettingsAreaMinLines: 6,
+	SettingsAreaMaxLines: 16,
 	// The badge a note is filed under: a box wide enough for a letter, and a
 	// corner just off square, so it reads as a mark rather than as a button.
 	SettingsNoteMarkSize:   16,

@@ -148,6 +148,11 @@ type Notifications struct {
 	ShowWarning bool `json:"show_warning"`
 	ShowDanger  bool `json:"show_danger"`
 
+	// ModalSeconds is how long the centred notice holds the middle of the window.
+	// Shorter than a corner card's lifetime by default: that one waits to be read
+	// beside what it is about, where this one is already in front of the reader.
+	ModalSeconds int `json:"modal_seconds"`
+
 	/* Reaching the user outside the window */
 
 	// FlashTaskbar flashes the window's taskbar button. It is the whole of the
@@ -426,6 +431,7 @@ func Default() Settings {
 			ShowInfo:        true,
 			ShowWarning:     true,
 			ShowDanger:      true,
+			ModalSeconds:    3,
 
 			FlashTaskbar:   true,
 			AlertOnMention: true,
@@ -522,6 +528,11 @@ func (b Behaviour) RefreshDelay() time.Duration {
 // Lifetime is how long a notice stays on the layer.
 func (n Notifications) Lifetime() time.Duration {
 	return time.Duration(n.LifetimeSeconds) * time.Second
+}
+
+// ModalLifetime is how long the centred notice holds the middle of the window.
+func (n Notifications) ModalLifetime() time.Duration {
+	return time.Duration(n.ModalSeconds) * time.Second
 }
 
 // ImageDiskBytes is the on-disk budget for cached pictures — the whole of it,
@@ -660,6 +671,7 @@ func (s *Settings) sanitise() {
 
 	floor(&s.Notifications.LifetimeSeconds, 1)
 	floor(&s.Notifications.MaxStacked, 1)
+	floor(&s.Notifications.ModalSeconds, 1)
 
 	// A volume is a percentage the file may name anything at, and a negative one
 	// would be silence reported as a number.

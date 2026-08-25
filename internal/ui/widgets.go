@@ -1809,6 +1809,58 @@ func baselineOffset(large, small float32) float32 {
 	return textAscentRatio * (lineHeight(large) - lineHeight(small))
 }
 
+/* Text links */
+
+// LinkText is a word that leads somewhere and is not a button: the accent, the
+// hand, and a brighter shade under the pointer, with no fill and no edge. A link
+// *inside* a body is a RichText segment (ui/markdown.go); this is one standing on
+// its own, where a button would claim more of the eye than what it offers is
+// worth.
+//
+// Hoverable, unlike most of what embeds tapBase — innermost wins, so this must
+// not go inside a row that draws its own hover.
+type LinkText struct {
+	tapBase
+	text *canvas.Text
+}
+
+var (
+	_ fyne.Tappable      = (*LinkText)(nil)
+	_ desktop.Hoverable  = (*LinkText)(nil)
+	_ desktop.Cursorable = (*LinkText)(nil)
+)
+
+// NewLinkText draws label as a link opening raw in the system browser. A zero
+// text size is the theme's own, as canvas.NewText takes it.
+func NewLinkText(label, raw string, size float32) *LinkText {
+	return NewLinkTextWith(label, size, func() { openURL(raw) })
+}
+
+// NewLinkTextWith is the same word doing something other than opening a page.
+func NewLinkTextWith(label string, size float32, onTap func()) *LinkText {
+	l := &LinkText{text: newText(label, theme.Colors.LinkText, size)}
+	l.onTap = onTap
+	l.ExtendBaseWidget(l)
+
+	return l
+}
+
+func (l *LinkText) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(l.text)
+}
+
+func (l *LinkText) MouseIn(*desktop.MouseEvent) { l.tint(theme.Colors.LinkTextHover) }
+
+func (l *LinkText) MouseOut() { l.tint(theme.Colors.LinkText) }
+
+// tint recolours the word. Two colours over the life of a link, so the two
+// rasters Fyne caches under them are two rather than one per frame — which is
+// what keeps a link off the rule that a colour animation thrashes that cache.
+func (l *LinkText) tint(fill color.Color) {
+	l.text.Color = solidColor(fill)
+	l.text.Refresh()
+}
+
 /* Accented text */
 
 // AccentText is a name drawn in a role's colour. A text object takes one colour,

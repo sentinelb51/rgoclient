@@ -819,7 +819,8 @@ func (p *ServerSettingsPage) descriptionRow(server ServerSummary) fyne.CanvasObj
 	entry := newCommitArea(server.Description, p.hooks.SetDescription)
 	entry.PlaceHolder = "What this server is for"
 
-	return p.stackedRow("Description", "Shown on the invite people join through. Clear it to remove it.",
+	return p.stackedRow("Description",
+		"Shown on the invite people join through, saved when you click away. Clear it to remove it.",
 		wideField(entry))
 }
 

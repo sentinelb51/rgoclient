@@ -715,7 +715,15 @@ Run the client, join `voice-test`, and watch the settings meter move.
 
 - `voice-test` channel in **Big up testers** was created for testing and is
   still there.
-- `go.mod` pins `layeh.com/gopus` to a `sentinelb51/gopus` commit on `master`.
+- `go.mod` requires `github.com/sentinelb51/gopus` at a commit on `master`
+  **directly** — the fork owns that module path, so there is no `replace`. It
+  used to keep upstream's path and be reached through one, which left
+  `layeh.com/gopus v0.0.0-20210501142526` in the require block: a coordinate
+  whose vendored tree is Opus 1.1.2 and which scanners flag for CVE-2017-0381,
+  fixed upstream in 1.1.4 and present in the 1.5.2 this fork carries. A
+  `replace` would have been wrong here anyway — it applies to the main module
+  alone, so it stops working the moment `internal/voice` lifts out as a module
+  of its own.
   The FEC/DTX commit, the libopus 1.5.2 bump, the Deep PLC vendoring and
   `Decoder.DecodeIn` are all merged there; the pin carries DecodeIn, so the
   receive path decodes allocation-free through the `opusDecodeIn` assertion. The `opus_shared` build path — link the system libopus instead —

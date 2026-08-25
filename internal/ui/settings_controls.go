@@ -642,6 +642,11 @@ type commitEntry struct {
 	// nothing when the focus moves off it.
 	committed string
 	onCommit  func(string)
+
+	// area is set on a prose field, which grows with what is typed; wrap is the
+	// row count that growth is measured by, and is unused on a one-line field.
+	area bool
+	wrap wrapMeter
 }
 
 func newCommitEntry(text string, onCommit func(string)) *commitEntry {
@@ -653,20 +658,30 @@ func newCommitEntry(text string, onCommit func(string)) *commitEntry {
 	return e
 }
 
-// bioRows is how much of a description is on screen at once. Enough to read a
-// sentence back without the row taking over the section.
-const bioRows = 4
-
 // newCommitArea is a commitEntry for prose. Enter puts in a newline rather than
 // submitting once an entry is multi-line, so what it reports on is losing the
-// focus alone.
+// focus alone. It grows with what is typed the way the composer does, between
+// SettingsAreaMinLines and SettingsAreaMaxLines: a paragraph read back through a
+// fixed four-row box is read a sentence at a time, and nothing on the box says
+// there is more of it below.
 func newCommitArea(text string, onCommit func(string)) *commitEntry {
 	e := newCommitEntry(text, onCommit)
+	e.area = true
 	e.MultiLine = true
 	e.Wrapping = fyne.TextWrapWord
-	e.SetMinRowsVisible(bioRows)
 
 	return e
+}
+
+// MinSize grows a prose field with its text. A one-line field answers as
+// widget.Entry does.
+func (e *commitEntry) MinSize() fyne.Size {
+	if !e.area {
+		return e.Entry.MinSize()
+	}
+
+	return growingMinSize(&e.Entry, &e.wrap,
+		int(theme.Sizes.SettingsAreaMinLines), int(theme.Sizes.SettingsAreaMaxLines))
 }
 
 // Fill puts in a value that arrived after the field was built — a bio is fetched,

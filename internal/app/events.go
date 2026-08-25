@@ -15,6 +15,7 @@ import (
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
+	"RGOClient/internal/ui"
 )
 
 // ackDelay is the coalescing window for read acknowledgements of the open
@@ -301,7 +302,7 @@ func (a *App) onDisconnected(event client.Disconnected) {
 
 	// The saved login has just been removed, so the one-click card is gone too —
 	// saying why is what tells that from the client forgetting who was signed in.
-	a.reportLogin("The server ended this session. Sign in again.")
+	a.reportLogin(ui.ToneDanger, "The server ended this session. Sign in again.")
 }
 
 /* Messages */

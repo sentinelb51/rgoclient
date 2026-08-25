@@ -237,6 +237,8 @@ github.com/sentinelb51/gopus v0.0.0-20260825173623-036117b03133 h1:hV2oummuilId+
 github.com/sentinelb51/gopus v0.0.0-20260825173623-036117b03133/go.mod h1:AWEx797SwA4yqgOFWVpgapUkTk6MmeoJ+1nTwMt33T8=
 github.com/sentinelb51/revoltgo v0.0.0-20260823164409-dd257e3aace5 h1:9KaHxcDD8HhpreQG/CqU33z8tP7oMhLIdU2juuV8OZU=
 github.com/sentinelb51/revoltgo v0.0.0-20260823164409-dd257e3aace5/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
+github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493 h1:Eyn8j6rmjp41LAAld+nJKhqMSapnWXyofTfArLjVmmE=
+github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.5 h1:1W1LUkRP5C7fNvoe2UFOINCPJxujR5qmtu1PsrbVbMI=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.5/go.mod h1:tLJK7CVtUBOnMiSDR+J88t/quiGuEhwGs09tIVM1RXg=
 github.com/shoenig/test v1.7.0 h1:eWcHtTXa6QLnBvm0jgEabMRN/uJ4DMV3M8xUGgRkZmk=

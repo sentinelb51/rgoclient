@@ -19,7 +19,7 @@ require (
 	// It carries its own module path rather than upstream's, so nothing here
 	// names a module that is not what gets built. See docs/voice-chat-todo.md.
 	github.com/sentinelb51/gopus v0.0.0-20260825173623-036117b03133
-	github.com/sentinelb51/revoltgo v0.0.0-20260823164409-dd257e3aace5
+	github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493
 	golang.design/x/clipboard v0.9.0
 	golang.org/x/image v0.45.0
 )

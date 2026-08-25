@@ -54,9 +54,11 @@ type Capture struct {
 	chain []Processor
 	scrap []float32 // Read's own working frame; never escapes
 
-	gain   atomic.Uint32 // float32 bits
-	level  atomic.Uint32 // float32 bits, the settings meter reads it
 	voiced atomic.Bool
+
+	// soft rounds a peak the gain pushed over the ceiling instead of slicing it
+	// flat. Read once per frame, outside the loop it decides.
+	soft atomic.Bool
 
 	// gate is Read's own, like the rest of the chain. A sensitivity change arrives
 	// as a number here and is applied by Read, so nothing outside touches a filter
@@ -64,13 +66,18 @@ type Capture struct {
 	gate        *noiseGate
 	sensitivity atomic.Int64
 
-	// hp and ns are the other two stages, always in the chain and bypassed rather
-	// than absent, so either setting can move mid-call the way sensitivity does:
-	// the flag lands here and Read applies it between frames.
+	// hp and ns are the other two filtering stages, always in the chain and
+	// bypassed rather than absent, so either setting can move mid-call the way
+	// sensitivity does: the flag lands here and Read applies it between frames.
 	hp       *highPass
 	ns       *noiseSuppressor
 	highpass atomic.Bool
 	suppress atomic.Bool
+
+	// pre is the gain, and holds the level the meter reads. It carries its own
+	// atomics rather than being set through Read, having nothing a frame boundary
+	// protects: a gain that changes mid-frame is a gain that changes mid-frame.
+	pre *preamp
 
 	// Push-to-talk. push swaps who decides what is sent — the key rather than the
 	// gate — and transmit is whether it is being held. Both are set from outside
@@ -86,14 +93,23 @@ type Capture struct {
 	closed    chan struct{}
 }
 
-// InputConfig is what opening a microphone takes. The zero value is a usable
-// default: the system device, unity gain and a middling gate.
+// InputConfig is what opening a microphone takes. Every field is what its own
+// setter means, so a capture can be reconfigured to anything it could have been
+// opened as — except Gain, whose zero is silence rather than unity and which
+// therefore has to be set.
 type InputConfig struct {
 	// Sensitivity is the gate's threshold, 0-100.
 	Sensitivity int
 
-	// Gain scales the signal after the gate, 0-2.
+	// Gain scales the signal in front of the gate, 0 to maxGain: it is what the
+	// gate then measures, so it is also what decides whether a quiet microphone
+	// opens one at all. Unity is 1, and 0 is silence.
 	Gain float32
+
+	// SoftClip rounds a peak the gain pushed over the ceiling rather than slicing
+	// it flat. Off in the zero value, which is the hard clamp this had before the
+	// gain range grew far enough to need the curve.
+	SoftClip bool
 
 	// HighPass runs the ~90 Hz filter in front of everything else: mains hum, fan
 	// rumble, desk knocks — what is below speech, cut before it can hold the gate
@@ -145,15 +161,19 @@ func OpenInput(id string, cfg InputConfig) (*Capture, error) {
 		gate:   newNoiseGate(cfg.Sensitivity),
 		hp:     newHighPass(90),
 		ns:     &noiseSuppressor{},
+		pre:    newPreamp(cfg.Gain),
 		closed: make(chan struct{}),
 	}
-	c.gain.Store(floatBits(clampGain(cfg.Gain)))
 	c.sensitivity.Store(int64(cfg.Sensitivity))
 	c.push.Store(cfg.PushToTalk)
 	c.highpass.Store(cfg.HighPass)
 	c.suppress.Store(cfg.NoiseSuppression)
+	c.soft.Store(cfg.SoftClip)
 
-	c.chain = []Processor{c.hp, c.ns, c.gate}
+	// The gain is inside the chain and in front of the gate: the gate's threshold
+	// is then compared against the signal that is actually sent, and RNNoise ahead
+	// of it still sees the level the microphone delivered.
+	c.chain = []Processor{c.hp, c.ns, c.pre, c.gate}
 
 	if err := c.startDevice(id); err != nil {
 		return nil, err
@@ -438,10 +458,9 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 	frame := c.scrap
 	c.pcm.PopAll(frame)
 
-	// Measured before the chain, so the settings meter shows what the microphone
-	// is hearing rather than what survived the gate.
-	c.level.Store(floatBits(rms(frame)))
-
+	// The preamp inside the chain takes the meter's measurement, after the gain
+	// and before the gate: the bar then shows what the gate is deciding about
+	// rather than what the microphone delivered, and the two cannot disagree.
 	voiced := true
 	for _, stage := range c.chain {
 		voiced = stage.Process(frame)
@@ -452,9 +471,18 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 	}
 	c.voiced.Store(voiced)
 
-	gain := bitsFloat(c.gain.Load())
+	// Hoisted rather than branched per sample, and the setting cannot change
+	// inside a frame anyway.
+	if c.soft.Load() {
+		for i, sample := range frame {
+			pcm[i] = floatToSample(softClip(sample))
+		}
+
+		return FrameSamples, nil
+	}
+
 	for i, sample := range frame {
-		pcm[i] = floatToSample(sample * gain)
+		pcm[i] = floatToSample(sample)
 	}
 
 	return FrameSamples, nil
@@ -498,12 +526,19 @@ const frameTimeout = 40 * time.Millisecond
 // anybody is speaking.
 func (c *Capture) Voiced() bool { return c.voiced.Load() }
 
-// Level is the microphone's level before the gate, 0-1, for the settings meter.
-// Safe from any goroutine and cheap enough to poll.
-func (c *Capture) Level() float32 { return bitsFloat(c.level.Load()) }
+// Level is the microphone's level after the gain and before the gate, 0-1, for
+// the settings meter — the same measurement the gate's threshold is compared
+// against, so the bar and the mark on it mean one thing. Safe from any goroutine
+// and cheap enough to poll.
+func (c *Capture) Level() float32 { return c.pre.Level() }
 
-// SetGain scales the captured signal, 0-2.
-func (c *Capture) SetGain(gain float32) { c.gain.Store(floatBits(clampGain(gain))) }
+// SetGain scales the captured signal, 0 to maxGain. Applied by the preamp on the
+// next frame it processes, mid-call included.
+func (c *Capture) SetGain(gain float32) { c.pre.SetGain(gain) }
+
+// SetSoftClip picks how a boosted peak meets the ceiling: rounded, or sliced
+// flat. Applied by Read, like the sensitivity.
+func (c *Capture) SetSoftClip(on bool) { c.soft.Store(on) }
 
 // SetSensitivity moves the gate's threshold, 0-100. It records the number and
 // leaves the filter alone: Read applies it, so a settings change cannot land in

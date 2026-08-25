@@ -44,6 +44,12 @@ type Disconnected struct {
 	Fatal bool
 }
 
+// SessionsChanged reports that the account's own logins moved — one revoked from
+// another client, or all of them at once. It names nothing: the list is a
+// fetched snapshot with no store behind it, so the only thing to do about it is
+// ask again.
+type SessionsChanged struct{}
+
 // MessageCreated is a new message, already cached.
 //
 // Previous is the message it landed after, captured under the cache lock:
@@ -257,6 +263,7 @@ func (RelationshipChanged) isEvent() {}
 func (PresenceChanged) isEvent()     {}
 func (TypingChanged) isEvent()       {}
 func (VoiceChanged) isEvent()        {}
+func (SessionsChanged) isEvent()     {}
 
 /* Registration */
 
@@ -313,6 +320,45 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 
 		c.emit(epoch, Disconnected{Fatal: true})
 	})
+
+	// The multi-session counterpart, which nothing else announces — revoltgo
+	// registers no default handler for it either. It reaches every session of the
+	// account, so most of the time it is about somebody else's device and all it
+	// means is that a fetched list has gone stale.
+	revoltgo.AddHandler(session, func(_ *revoltgo.Session, event *revoltgo.EventAuth) {
+		if c.revokedHere(event) {
+			log.Printf("this session revoked (%s)", event.EventType)
+
+			c.emit(epoch, Disconnected{Fatal: true})
+
+			return
+		}
+
+		c.emit(epoch, SessionsChanged{})
+	})
+}
+
+// revokedHere reports whether an Auth event names *this* session. The comparison
+// is on the ID and nothing else: where this session's own is unknown — a token
+// saved before the client began recording one — there is no way to tell "you
+// were signed out" from "somebody else was", and guessing the wrong way is either
+// a client that keeps running on a dead token or one that signs itself out for no
+// reason. It says nothing instead, and the socket dying is what answers.
+func (c *Client) revokedHere(event *revoltgo.EventAuth) bool {
+	current := c.SessionID()
+	if current == "" {
+		return false
+	}
+
+	switch event.EventType {
+	case revoltgo.EventTypeAuthDeleteSession:
+		return event.SessionID == current
+	case revoltgo.EventTypeAuthDeleteAllSessions:
+		// An empty exclusion is "all of them", this one included.
+		return event.ExcludeSessionID != current
+	}
+
+	return false
 }
 
 // readState derives from a Ready what the account has not caught up with: the

@@ -133,6 +133,7 @@ func buildSettingsIndex(hooks SettingsHooks) []settingsHit {
 	// neither would have anywhere to land.
 	hooks.LoadProfile = func(func(domain.UserProfile)) {}
 	hooks.CacheStats = func(func(cache.ImageStats)) {}
+	hooks.LoadSecurity = func(func(SecurityState, error)) {}
 
 	// The same rule with a device behind it: enumerating is a walk of the audio
 	// backend, and StartInputMonitor *opens a microphone*. Doing either on the

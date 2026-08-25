@@ -321,3 +321,39 @@ func TestCommitEntryReportsOnlyRealChanges(t *testing.T) {
 		t.Errorf("reported %v, want the reverted field to have said nothing more", reported)
 	}
 }
+
+// TestDropdownRowsFillTheirControl covers the one thing about a dropdown that
+// breaks silently: a list of short options is held open to the control it dropped
+// out of, and its rows have to be *laid out* at that width, not merely enclosed by
+// it. Fyne's own menu sizes its items to their longest label whatever the pop-up
+// around them is resized to, which leaves a row highlighting itself the width of
+// its text with the rest of the box dead — nothing looks broken, it just reads as
+// the wrong thing being pointed at.
+func TestDropdownRowsFillTheirControl(t *testing.T) {
+	test.NewApp()
+
+	options := []settingsOption{{Label: "Cosy", Value: "cosy"}, {Label: "Snug", Value: "snug"}}
+	control := newOptionControl("cosy", options, func(string) {})
+
+	win := test.NewWindow(container.NewCenter(control))
+	defer win.Close()
+	win.Resize(fyne.NewSize(400, 200))
+
+	list := newDropdownList(options, win.Canvas(), func(string) {})
+	if list.MinSize().Width >= control.Size().Width {
+		t.Skip("these options are no longer shorter than the control, so nothing is being held open")
+	}
+
+	list.minWidth = control.Size().Width
+	list.ShowAtPosition(AnchorBelow(control))
+	defer list.popUp.Hide()
+
+	if got := list.Size().Width; got < control.Size().Width {
+		t.Fatalf("list came up %v wide under a control %v wide", got, control.Size().Width)
+	}
+	for i, row := range list.rows {
+		if got := row.Size().Width; got < list.Size().Width {
+			t.Errorf("row %d is %v wide in a list %v wide", i, got, list.Size().Width)
+		}
+	}
+}

@@ -71,7 +71,9 @@ func (a *App) closeOverlay() {
 	}
 	a.prompt = nil
 	a.channelDialog = nil
-	a.closeFriends()
+	a.groupDialog = nil
+	a.challengeCard = nil
+	a.secretCard = nil
 	a.closePins()
 	a.closeSearch()
 	a.closeMentions()
@@ -81,6 +83,27 @@ func (a *App) closeOverlay() {
 	// wants the composer back.
 	if a.settings == nil || !a.settings.IsOpen() {
 		a.focusInput()
+	}
+}
+
+// showPrompt raises a field-and-a-button card and focuses its first field. The
+// three lines every caller of it was repeating, in the order that matters: the
+// dialog is recorded *after* showOverlay, which clears whatever was there.
+// Recording it is what lets a refusal be reported back into the card. Call on the
+// UI thread.
+func (a *App) showPrompt(prompt ui.Prompt) {
+	dialog := ui.NewPromptDialog(prompt, a.closeOverlay)
+
+	a.showOverlay(dialog.Content)
+	a.prompt = dialog
+	a.window.Canvas().Focus(dialog.Entry)
+}
+
+// failPrompt reports a refusal on the card that is up, and does nothing where the
+// reader has dismissed it meanwhile. Call on the UI thread.
+func (a *App) failPrompt(message string) {
+	if a.prompt != nil {
+		a.prompt.Fail(message)
 	}
 }
 
@@ -245,7 +268,7 @@ func (a *App) createServer() {
 		return
 	}
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Create a server",
 		Action: "Create",
 		Busy:   "Creating...",
@@ -253,11 +276,7 @@ func (a *App) createServer() {
 		OnSubmit: func(values []string) {
 			a.submitServer(values[0])
 		},
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.prompt = dialog // after showOverlay, which clears the field
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 // submitServer creates the server and leaves the dialog up until it exists. The

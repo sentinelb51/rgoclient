@@ -150,6 +150,29 @@ type ServerRoleEntry struct {
 	Editable bool
 }
 
+// ServerChannelOverrides is one channel's own permissions as its editor draws
+// them: every role the server defines, each carrying what *this channel* changes
+// about it rather than the role's own grant. The default is one of them and is an
+// override here — unlike a server's, which is a plain set — a channel standing
+// under the server rather than under nothing.
+type ServerChannelOverrides struct {
+	ChannelID string
+	Name      string
+
+	Kind domain.ChannelKind
+
+	// Roles is every role plus the default, in the order the Roles section lists
+	// them. Allow and Deny on each are the channel's override, both zero for a
+	// role this channel changes nothing about.
+	Roles []ServerRoleEntry
+
+	// Held is everything this account may do **in this channel**, which is a
+	// different question from what it may do across the server: an override is
+	// exactly what moves the two apart. Both halves of what setting a bit takes
+	// are read off it — ManagePermissions, and holding the bit being handed out.
+	Held domain.Permission
+}
+
 // ServerInviteEntry is one outstanding invite as the list draws it, and the whole
 // of what Revolt keeps about one: a code, the channel it opens and who made it.
 // There is no expiry, no use count and no date — the code is not a ULID either,
@@ -220,6 +243,19 @@ type ServerSettingsHooks struct {
 	// that is what the next place is. As with a role, the route takes the server's
 	// whole arrangement and the controller composes it.
 	MoveChannel func(channelID string, up bool)
+
+	// ChannelOverrides is what one channel changes about the server's permissions,
+	// read from the store like the roles themselves: an override edit comes back as
+	// a channel update, so nothing here is fetched. Answering false is a channel
+	// deleted while its editor was open.
+	ChannelOverrides func(channelID string) (ServerChannelOverrides, bool)
+
+	// The two channel-scope setters, the counterparts of SetRolePermissions and
+	// SetDefaultPermissions. Neither reports back: both return as a channel update
+	// the store answers for. Unlike the server's, a channel's default is an
+	// override too, which is why this one takes both halves.
+	SetChannelRolePermissions    func(channelID, roleID string, allow, deny domain.Permission)
+	SetChannelDefaultPermissions func(channelID string, allow, deny domain.Permission)
 
 	// The category actions. All four publish the same arrangement MoveChannel
 	// does, and none of them reports back: the edit returns as a server update the
@@ -342,6 +378,43 @@ func (c *cachedList[T]) settle(entries []T, err error) {
 // one on its way or one about to be asked for.
 func (c *cachedList[T]) pending() bool { return c.at.IsZero() }
 
+// cachedOne is cachedList for a section drawn from a **single** answer rather
+// than a list of them: the same three rules, the same guards, and a value where
+// the other has entries. The client's own Security section is the caller — its
+// email, its second factors and its logins are three requests it cannot draw
+// without any of, so they are fetched together and held as one.
+type cachedOne[T any] struct {
+	value T
+	err   error
+
+	at       time.Time
+	inflight bool
+}
+
+func (c *cachedOne[T]) fresh() bool {
+	return !c.at.IsZero() && time.Since(c.at) < listTTL
+}
+
+func (c *cachedOne[T]) claim() bool {
+	if c.inflight || c.fresh() {
+		return false
+	}
+	c.inflight = true
+
+	return true
+}
+
+func (c *cachedOne[T]) settle(value T, err error) {
+	c.value, c.err, c.at, c.inflight = value, err, time.Now(), false
+}
+
+func (c *cachedOne[T]) pending() bool { return c.at.IsZero() }
+
+// drop forgets the held answer so the next mount asks again. Every action that
+// changes what it holds calls it — nothing here is announced twice, so a section
+// drawing what it was told before the change is drawing a lie.
+func (c *cachedOne[T]) drop() { *c = cachedOne[T]{} }
+
 // ServerSettingsPage is a server's settings and their state. Unlike the client's
 // own, everything it holds is per opening: it is about one server, and the one it
 // is about can be left while it is up.
@@ -365,6 +438,14 @@ type ServerSettingsPage struct {
 	roleName  string
 	roleAllow domain.Permission
 	roleDeny  domain.Permission
+
+	// channelID is the channel the Channels section is drilled into, "" for its
+	// list, and channelName what the back line out of a role says it was. It is
+	// the page's second level: a channel's overrides are a channel *and* a role,
+	// so the Channels section drills twice where Roles drills once, and roleID
+	// above is the inner one in both.
+	channelID   string
+	channelName string
 
 	// listBody is the open section's list, kept so an answer can refill it in place
 	// rather than remount the section under a reader who has scrolled.
@@ -396,7 +477,7 @@ func NewServerSettingsPage(hooks ServerSettingsHooks) *ServerSettingsPage {
 func (p *ServerSettingsPage) Open() {
 	p.visit++
 	p.section = ServerSectionOverview
-	p.closeRole()
+	p.closeDrilldown()
 	p.mountSurface()
 	p.Layer.Show()
 }
@@ -406,7 +487,7 @@ func (p *ServerSettingsPage) Open() {
 func (p *ServerSettingsPage) Close() {
 	p.resetShell()
 	p.listBody = nil
-	p.closeRole()
+	p.closeDrilldown()
 	p.visit++ // whatever is still in flight has nowhere to land, and nothing to be recorded in
 
 	// The held answers go with the page. They are as good as a fetch only while
@@ -485,7 +566,7 @@ func (p *ServerSettingsPage) showSection(section ServerSettingsSection) {
 	// just stopped being listed must not stay mounted either.
 	if !p.allowed(section) {
 		section = ServerSectionOverview
-		p.closeRole()
+		p.closeDrilldown()
 	}
 
 	p.section = section
@@ -498,9 +579,9 @@ func (p *ServerSettingsPage) showSection(section ServerSettingsSection) {
 	p.mountUnder(groups, p.paneTitle(section), p.paneBack(section))
 
 	p.buildRail(p.railEntries(), int(section), func(picked int) {
-		// A rail tap is the section itself, so it leaves whichever role the Roles
-		// section was drilled into — including a tap on Roles from inside one.
-		p.closeRole()
+		// A rail tap is the section itself, so it leaves whatever the section it
+		// names was drilled into — including a tap on the section already open.
+		p.closeDrilldown()
 		p.showSection(ServerSettingsSection(picked))
 	})
 }
@@ -509,23 +590,31 @@ func (p *ServerSettingsPage) showSection(section ServerSettingsSection) {
 // it was drilled into. Which section that drilldown lives in is the back line's to
 // say, so the title names one thing.
 func (p *ServerSettingsPage) paneTitle(section ServerSettingsSection) string {
-	if section == ServerSectionRoles && p.roleName != "" {
+	if p.roleName != "" && (section == ServerSectionRoles || p.channelID != "") {
 		return p.roleName
+	}
+	if section == ServerSectionChannels && p.channelName != "" {
+		return p.channelName
 	}
 
 	return serverRailTitle(section)
 }
 
-// paneBack is the way out of the one drilldown the page has, and nothing for a
-// section, which the rail already reaches. Keyed on roleID rather than roleName:
-// the ID is what being drilled in *is*, while the name is only what the title
-// says and could be anything.
+// paneBack is the way out of whichever drilldown is open, one level at a time —
+// a role in a channel goes back to that channel, and the channel to the list.
+// Keyed on the IDs rather than the names: an ID is what being drilled in *is*,
+// while a name is only what the line says and could be anything.
 func (p *ServerSettingsPage) paneBack(section ServerSettingsSection) backLink {
-	if section != ServerSectionRoles || p.roleID == "" {
-		return backLink{}
+	switch {
+	case section == ServerSectionRoles && p.roleID != "":
+		return backLink{label: serverRailTitle(ServerSectionRoles), onTap: p.showRoles}
+	case section == ServerSectionChannels && p.channelID != "" && p.roleID != "":
+		return backLink{label: p.channelName, onTap: p.showChannelRoles}
+	case section == ServerSectionChannels && p.channelID != "":
+		return backLink{label: serverRailTitle(ServerSectionChannels), onTap: p.showChannels}
 	}
 
-	return backLink{label: serverRailTitle(ServerSectionRoles), onTap: p.showRoles}
+	return backLink{}
 }
 
 // showRole opens one role's editor inside the Roles section, and showRoles is the
@@ -540,11 +629,43 @@ func (p *ServerSettingsPage) showRoles() {
 	p.showSection(ServerSectionRoles)
 }
 
+// showChannel drills the Channels section into one channel's overrides, and
+// showChannelRole one level further into what a single role changes there.
+// showChannelRoles and showChannels are the two ways back out. Call any of them
+// on the UI thread.
+func (p *ServerSettingsPage) showChannel(overrides ServerChannelOverrides) {
+	p.channelID, p.channelName = overrides.ChannelID, overrides.Name
+	p.closeRole()
+	p.showSection(ServerSectionChannels)
+}
+
+func (p *ServerSettingsPage) showChannelRole(role ServerRoleEntry) {
+	p.roleID, p.roleName = role.ID, role.Name
+	p.showSection(ServerSectionChannels)
+}
+
+func (p *ServerSettingsPage) showChannelRoles() {
+	p.closeRole()
+	p.showSection(ServerSectionChannels)
+}
+
+func (p *ServerSettingsPage) showChannels() {
+	p.closeDrilldown()
+	p.showSection(ServerSectionChannels)
+}
+
 // closeRole forgets which role was open without mounting anything, for a build
 // that finds the role gone and for a rail tap leaving the section entirely.
 func (p *ServerSettingsPage) closeRole() {
 	p.roleID, p.roleName = "", ""
 	p.roleAllow, p.roleDeny = 0, 0
+}
+
+// closeDrilldown is closeRole plus the outer level the Channels section adds, for
+// everything that leaves a section rather than stepping back through it.
+func (p *ServerSettingsPage) closeDrilldown() {
+	p.closeRole()
+	p.channelID, p.channelName = "", ""
 }
 
 // OpenRole drills into a role from outside the page — a role just created, once
@@ -745,6 +866,16 @@ const channelsDetail = "Every channel this account can see, in the order the sid
 // card per category — what the section is about is the order, and an order split
 // across cards reads as several.
 func (p *ServerSettingsPage) channelsSection() []settingsGroup {
+	// A channel drilled into is re-read on every build rather than held: the
+	// channel can be deleted, or its overrides changed from another client, while
+	// its editor is open — and an edit made here comes back as exactly that.
+	if p.channelID != "" {
+		if overrides, ok := p.hooks.ChannelOverrides(p.channelID); ok {
+			return p.channelGroups(overrides)
+		}
+		p.closeDrilldown()
+	}
+
 	groups := []settingsGroup{}
 
 	// A category is the server's structure rather than one channel's, so the row
@@ -817,7 +948,24 @@ func (p *ServerSettingsPage) channelRow(channel ServerChannelEntry,
 		controls = append(controls, spaced(controls, editButton(func() { p.hooks.EditChannel(channel.ID) }))...)
 	}
 
+	// The way into this channel's own permissions, offered to anybody who can see
+	// the row: the grid it opens is read-only per bit for whoever may not move
+	// one, and what a channel takes away from a role is worth being able to read.
+	controls = append(controls, spaced(controls, permissionsButton(func() { p.openChannel(channel.ID) }))...)
+
 	return p.entryRow(ChannelGlyph(channel.Kind), channel.Name, channel.Description, controls...)
+}
+
+// openChannel drills into a channel from its row, asking the controller for what
+// the editor draws before moving: a channel that cannot answer has nothing to
+// mount, and a title naming it would be standing over an empty pane.
+func (p *ServerSettingsPage) openChannel(channelID string) {
+	overrides, ok := p.hooks.ChannelOverrides(channelID)
+	if !ok {
+		return
+	}
+
+	p.showChannel(overrides)
 }
 
 // channelCanMove reports whether a channel has anywhere to go. Leaving a category
@@ -850,6 +998,116 @@ func (p *ServerSettingsPage) confirmDeleteCategory(entry ServerCategoryEntry) {
 		Tone:      ToneDanger,
 		OnConfirm: func() { p.hooks.DeleteCategory(entry.ID) },
 	})
+}
+
+/* One channel's permissions */
+
+const channelOverridesDetail = "What this channel changes about the permissions the server already gives. " +
+	"Inherit is whatever the role holds elsewhere; allowing or denying a bit here decides it for this channel alone."
+
+// channelGroups is one channel's overrides: every role beside what this channel
+// changes about it, or the grid for the one it is drilled into. It is the Roles
+// section's own shape — the same rows, the same Everyone card apart from them —
+// because it is the same question asked one level down, and a reader who has
+// learnt one has learnt both.
+func (p *ServerSettingsPage) channelGroups(overrides ServerChannelOverrides) []settingsGroup {
+	if p.roleID != "" {
+		if role, ok := findRole(overrides.Roles, p.roleID); ok {
+			return p.channelRoleGroups(overrides, role)
+		}
+		p.closeRole()
+	}
+
+	rows := make([]fyne.CanvasObject, 0, len(overrides.Roles))
+	var everyone fyne.CanvasObject
+
+	for _, role := range overrides.Roles {
+		if role.Default {
+			everyone = p.channelRoleRow(role)
+			continue
+		}
+		rows = append(rows, p.channelRoleRow(role))
+	}
+
+	if len(rows) == 0 {
+		rows = append(rows, p.note("This server has no roles, so there is nothing here to override."))
+	}
+
+	groups := []settingsGroup{p.group("Roles", channelOverridesDetail, rows...)}
+
+	if everyone == nil {
+		return groups
+	}
+
+	return append(groups, p.group("Everyone",
+		"What this channel changes for everybody, before any role adds to it or takes it back.",
+		everyone))
+}
+
+// channelRoleRow is one role in that list. Every role is offered its grid, this
+// account's own rank notwithstanding: what a channel takes away from a role is
+// worth reading, and unlike a server's list the row cannot say *which* bits
+// moved — so the way in is the only way to find out.
+func (p *ServerSettingsPage) channelRoleRow(role ServerRoleEntry) fyne.CanvasObject {
+	return p.entryRow(roleDot(role), role.Name, overrideSummary(role),
+		editButton(func() { p.showChannelRole(role) }))
+}
+
+// overrideSummary is what a channel does to a role rather than what the role is:
+// both halves counted, and the words for the one case that is neither. A denial
+// is counted here where a server role's is not — at server scope a role gives and
+// the summary is what it gives, while an override exists to take away.
+func overrideSummary(role ServerRoleEntry) string {
+	allowed, denied := bits.OnesCount64(uint64(role.Allow)), bits.OnesCount64(uint64(role.Deny))
+
+	summary := "Nothing changed here"
+	switch {
+	case allowed > 0 && denied > 0:
+		summary = fmt.Sprintf("%d allowed · %d denied", allowed, denied)
+	case allowed > 0:
+		summary = plural(allowed, "permission") + " allowed"
+	case denied > 0:
+		summary = plural(denied, "permission") + " denied"
+	}
+
+	if !role.Default && !role.Editable {
+		return summary + " · more senior than yours"
+	}
+
+	return summary
+}
+
+// channelRoleGroups is the grid for one role in one channel: what the editor is
+// for, then the bits a channel decides. There is nothing else on it — a role's
+// name, colour and place in the order are the server's, and this page reaches
+// them through the Roles section rather than saying them twice.
+func (p *ServerSettingsPage) channelRoleGroups(overrides ServerChannelOverrides,
+	role ServerRoleEntry) []settingsGroup {
+
+	p.roleAllow, p.roleDeny = role.Allow, role.Deny
+
+	groups := []settingsGroup{p.group(roleCaption(role), "", p.channelRoleNote(overrides, role))}
+
+	return append(groups, p.permissionGroups(p.channelScope(overrides, role))...)
+}
+
+// channelRoleNote says why the grid below reads the way it does — offered, or
+// stated. Two different refusals, and a reader holding neither permission is
+// owed the one that applies rather than a page that simply does nothing.
+func (p *ServerSettingsPage) channelRoleNote(overrides ServerChannelOverrides,
+	role ServerRoleEntry) fyne.CanvasObject {
+
+	switch {
+	case !overrides.Held.Has(domain.PermissionManagePermissions):
+		return p.note("You may not manage permissions in this channel, so this is what it does " +
+			"rather than something to change.")
+	case !role.Editable:
+		return p.note("This role is more senior than yours, so Revolt refuses a change to what it " +
+			"may do here. It is listed for reading.")
+	}
+
+	return p.note("Allow and Deny decide the bit for this channel alone. Inherit leaves it to the " +
+		"role and to the server, which is what a channel changing nothing looks like.")
 }
 
 /* Roles */
@@ -1020,6 +1278,16 @@ func editButton(onTap func()) *OutlinedIconButton {
 	return NewOutlinedIconButton(tintedIcon(assets.ActionEditIcon, tint), tint, onTap)
 }
 
+// permissionsButton is how a channel row offers its own overrides. It wears the
+// Roles section's rail mark rather than one of its own: what it opens *is* that
+// grid aimed at a channel, and a second drawing of the same idea would only have
+// to be learnt separately.
+func permissionsButton(onTap func()) *OutlinedIconButton {
+	tint := theme.Colors.SwiftActionIcon
+
+	return NewOutlinedIconButton(tintedIcon(assets.ServerRolesIcon, tint), tint, onTap)
+}
+
 func findRole(roles []ServerRoleEntry, roleID string) (ServerRoleEntry, bool) {
 	for _, role := range roles {
 		if role.ID == roleID {
@@ -1055,15 +1323,7 @@ func (p *ServerSettingsPage) roleGroups(role ServerRoleEntry, roles []ServerRole
 	p.roleAllow, p.roleDeny = role.Allow, role.Deny
 
 	groups := []settingsGroup{p.group(roleCaption(role), "", p.roleRows(role, roles)...)}
-
-	for _, category := range permissionCategories {
-		rows := make([]fyne.CanvasObject, 0, len(category.entries))
-		for _, entry := range category.entries {
-			rows = append(rows, p.permissionRow(role, entry))
-		}
-
-		groups = append(groups, p.group(category.caption, category.detail, rows...))
-	}
+	groups = append(groups, p.permissionGroups(p.serverScope(role))...)
 
 	if role.Default || !p.hooks.Can(domain.PermissionManageRole) {
 		return groups
@@ -1225,26 +1485,131 @@ func (p *ServerSettingsPage) confirmDeleteRole(role ServerRoleEntry) {
 	})
 }
 
-/* A role's permissions */
+/* A permission grid */
 
-// permissionRow is one bit as this role holds it: three states for a role, whose
-// permissions are an override, and two for the default, which is a plain set with
-// nothing under it to inherit from.
+// permissionScope is what a grid of permission rows is aimed at. Four grids share
+// the rows — a server role, the server's own default, a role inside one channel,
+// and a channel's default — and differ in nothing but these three answers.
+type permissionScope struct {
+	// tri marks an override, three states per bit. The server's own default is the
+	// one grid that is not: nothing stands beneath it to inherit from. A channel's
+	// default is an override like the rest, the channel standing under the server.
+	tri bool
+
+	// mask is which bits this grid draws at all. A channel decides a subset of what
+	// a server does — Revolt keeps one bitfield for both scopes — so an override of
+	// "ban members" would be a control that moves nothing.
+	mask domain.Permission
+
+	// channel marks the channel-scope captions, the cards saying what they are
+	// about rather than repeating a server's wording one level down.
+	channel bool
+
+	// can reports whether one bit may be moved here, which is two questions at
+	// once: the permission to manage permissions at this scope, and holding the bit
+	// being handed out — Revolt refuses an override granting what the actor lacks.
+	can func(permission domain.Permission) bool
+
+	// send publishes the whole override. deny is ignored by the one scope that is
+	// not one.
+	send func(allow, deny domain.Permission)
+}
+
+// serverScope is the grid aimed at a server: a role's own override, or the plain
+// set every member holds before one applies.
+func (p *ServerSettingsPage) serverScope(role ServerRoleEntry) permissionScope {
+	scope := permissionScope{
+		mask: everyPermission,
+		can: func(permission domain.Permission) bool {
+			return p.hooks.Can(domain.PermissionManagePermissions) && p.hooks.Can(permission)
+		},
+	}
+
+	if role.Default {
+		scope.send = func(allow, _ domain.Permission) { p.hooks.SetDefaultPermissions(allow) }
+
+		return scope
+	}
+
+	scope.tri = true
+	scope.send = func(allow, deny domain.Permission) { p.hooks.SetRolePermissions(role.ID, allow, deny) }
+
+	return scope
+}
+
+// channelScope is the same grid aimed at one channel. Everything it asks is
+// resolved *in* the channel rather than across the server — which is the whole
+// point of an override — and a role at or above this account's own rank is drawn
+// read-only, Revolt refusing the edit rather than the reader guessing why.
+func (p *ServerSettingsPage) channelScope(overrides ServerChannelOverrides, role ServerRoleEntry) permissionScope {
+	scope := permissionScope{
+		tri:     true,
+		mask:    channelPermissions,
+		channel: true,
+		can: func(permission domain.Permission) bool {
+			return role.Editable &&
+				overrides.Held.Has(domain.PermissionManagePermissions) &&
+				overrides.Held.Has(permission)
+		},
+	}
+
+	if role.Default {
+		scope.send = func(allow, deny domain.Permission) {
+			p.hooks.SetChannelDefaultPermissions(overrides.ChannelID, allow, deny)
+		}
+
+		return scope
+	}
+
+	scope.send = func(allow, deny domain.Permission) {
+		p.hooks.SetChannelRolePermissions(overrides.ChannelID, role.ID, allow, deny)
+	}
+
+	return scope
+}
+
+// permissionGroups is the grid: one card per category, each holding the bits the
+// scope draws. A category the mask empties is left off entirely rather than drawn
+// as a caption over nothing.
+func (p *ServerSettingsPage) permissionGroups(scope permissionScope) []settingsGroup {
+	groups := make([]settingsGroup, 0, len(permissionCategories))
+
+	for _, category := range permissionCategories {
+		rows := make([]fyne.CanvasObject, 0, len(category.entries))
+		for _, entry := range category.entries {
+			if scope.mask&entry.permission == 0 {
+				continue
+			}
+			rows = append(rows, p.permissionRow(scope, entry))
+		}
+
+		if len(rows) == 0 {
+			continue
+		}
+
+		groups = append(groups, p.group(category.captionIn(scope), category.detailIn(scope), rows...))
+	}
+
+	return groups
+}
+
+// permissionRow is one bit as the scope's subject holds it: three states for an
+// override, two for a plain set.
 //
-// The row computes from what the page holds rather than from the role it was
+// The row computes from what the page holds rather than from the entry it was
 // built with: a second change made before the first has echoed back would
 // otherwise send the first one's absence. A bit this account cannot set is drawn
 // as the state in words — Revolt refuses a change to a bit the actor does not
 // hold themselves, so a grid drawn from `ManagePermissions` alone would offer
 // picks the server would only refuse.
-func (p *ServerSettingsPage) permissionRow(role ServerRoleEntry, entry permissionEntry) fyne.CanvasObject {
-	if role.Default {
-		return p.defaultPermissionRow(entry)
+func (p *ServerSettingsPage) permissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
+	if !scope.tri {
+		return p.setPermissionRow(scope, entry)
 	}
 
 	state := permissionState(p.roleAllow, p.roleDeny, entry.permission)
 
-	if !p.canSetPermission(entry.permission) {
+	if !scope.can(entry.permission) {
 		row, marker := p.markedRow(entry.label, entry.detail, stateText(optionLabel(permissionStates, state)))
 		markPermission(marker, state)
 
@@ -1258,7 +1623,7 @@ func (p *ServerSettingsPage) permissionRow(role ServerRoleEntry, entry permissio
 
 	control = newOptionControl(state, permissionStates, func(picked string) {
 		p.roleAllow, p.roleDeny = setPermissionState(p.roleAllow, p.roleDeny, entry.permission, picked)
-		p.hooks.SetRolePermissions(role.ID, p.roleAllow, p.roleDeny)
+		scope.send(p.roleAllow, p.roleDeny)
 		control.set(picked)
 		markPermission(marker, picked)
 	})
@@ -1270,13 +1635,13 @@ func (p *ServerSettingsPage) permissionRow(role ServerRoleEntry, entry permissio
 	return row
 }
 
-// defaultPermissionRow is the same bit for the default role, which is a switch
-// rather than a choice: there is nothing beneath it to inherit from, so a bit is
-// held or it is not.
-func (p *ServerSettingsPage) defaultPermissionRow(entry permissionEntry) fyne.CanvasObject {
+// setPermissionRow is one bit of a plain set, which is a switch rather than a
+// choice: there is nothing beneath it to inherit from, so a bit is held or it is
+// not. The server's own default is the only scope shaped this way.
+func (p *ServerSettingsPage) setPermissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
 	held := p.roleAllow.Has(entry.permission)
 
-	if !p.canSetPermission(entry.permission) {
+	if !scope.can(entry.permission) {
 		row, marker := p.markedRow(entry.label, entry.detail, stateText(yesNo(held)))
 		markRow(marker, held)
 
@@ -1289,16 +1654,8 @@ func (p *ServerSettingsPage) defaultPermissionRow(entry permissionEntry) fyne.Ca
 			p.roleAllow |= entry.permission
 		}
 
-		p.hooks.SetDefaultPermissions(p.roleAllow)
+		scope.send(p.roleAllow, 0)
 	})
-}
-
-// canSetPermission is both halves of what setting one takes: the permission to
-// manage permissions at all, and holding the bit being handed out — Revolt
-// refuses a role's grant of anything the actor does not have.
-// https://github.com/stoatchat/stoatchat/blob/main/crates/delta/src/routes/servers/permissions_set.rs
-func (p *ServerSettingsPage) canSetPermission(permission domain.Permission) bool {
-	return p.hooks.Can(domain.PermissionManagePermissions) && p.hooks.Can(permission)
 }
 
 // The three states one permission can be in for one role. Inherited is the
@@ -1377,7 +1734,31 @@ func yesNo(on bool) string {
 type permissionCategory struct {
 	caption string
 	detail  string
+
+	// channelCaption and channelDetail are what the card says when the grid is
+	// aimed at a channel rather than at the server. Empty means the two above
+	// stand, which is most of them: only the cards whose wording is about the
+	// server itself have to be said again one level down.
+	channelCaption string
+	channelDetail  string
+
 	entries []permissionEntry
+}
+
+func (c permissionCategory) captionIn(scope permissionScope) string {
+	if scope.channel && c.channelCaption != "" {
+		return c.channelCaption
+	}
+
+	return c.caption
+}
+
+func (c permissionCategory) detailIn(scope permissionScope) string {
+	if scope.channel && c.channelDetail != "" {
+		return c.channelDetail
+	}
+
+	return c.detail
 }
 
 type permissionEntry struct {
@@ -1386,17 +1767,54 @@ type permissionEntry struct {
 	permission domain.Permission
 }
 
+// everyPermission is the whole grid, which is what a server's own scope draws:
+// Revolt keeps one bitfield and a role at server scope can be given any of it.
+const everyPermission = domain.Permission(-1)
+
+// channelPermissions is every bit a channel's override decides. The rest are the
+// server's alone — nothing asks a *channel* whether somebody may ban — and
+// Revolt would store an override of one without anything ever reading it, which
+// is a control that appears to work and does not.
+//
+// ManageChannel and ManagePermissions are in: both are resolved per channel by
+// Stoat itself, which is how a role moderates one channel and not the others.
+// https://github.com/stoatchat/stoatchat/blob/main/crates/core/permissions/src/impl.rs
+const channelPermissions = domain.PermissionManageChannel |
+	domain.PermissionManagePermissions |
+	domain.PermissionViewChannel |
+	domain.PermissionReadMessageHistory |
+	domain.PermissionInviteOthers |
+	domain.PermissionManageWebhooks |
+	domain.PermissionSendMessage |
+	domain.PermissionManageMessages |
+	domain.PermissionSendEmbeds |
+	domain.PermissionUploadFiles |
+	domain.PermissionMasquerade |
+	domain.PermissionReact |
+	domain.PermissionMentionEveryone |
+	domain.PermissionMentionRoles |
+	domain.PermissionBypassSlowmode |
+	domain.PermissionConnect |
+	domain.PermissionSpeak |
+	domain.PermissionVideo |
+	domain.PermissionListen |
+	domain.PermissionMuteMembers |
+	domain.PermissionDeafenMembers |
+	domain.PermissionMoveMembers
+
 // permissionCategories is every bit Revolt defines, in the order the client
 // groups them. What each one covers is
 // https://github.com/stoatchat/stoatchat/blob/main/crates/core/permissions/src/models/channel.rs
 var permissionCategories = []permissionCategory{
 	{
-		caption: "Server",
-		detail:  "What can be changed about the server itself.",
+		caption:        "Server",
+		detail:         "What can be changed about the server itself.",
+		channelCaption: "Channel",
+		channelDetail:  "What can be changed about this channel itself.",
 		entries: []permissionEntry{
-			{"Manage channels", "Create, rename and delete channels.", domain.PermissionManageChannel},
+			{"Manage channels", "Rename and delete channels, and make new ones.", domain.PermissionManageChannel},
 			{"Manage server", "The name, the description and the pictures.", domain.PermissionManageServer},
-			{"Manage permissions", "Change what any role may do, here and per channel.", domain.PermissionManagePermissions},
+			{"Manage permissions", "Change what any role may do.", domain.PermissionManagePermissions},
 			{"Manage roles", "Create, edit and delete roles below their own.", domain.PermissionManageRole},
 			{"Manage customisation", "The server's emoji.", domain.PermissionManageCustomisation},
 			{"View audit log", "Read what other moderators have done.", domain.PermissionViewAuditLogs},
@@ -1417,8 +1835,10 @@ var permissionCategories = []permissionCategory{
 		},
 	},
 	{
-		caption: "Channels",
-		detail:  "What can be reached, before any one channel narrows it.",
+		caption:        "Channels",
+		detail:         "What can be reached, before any one channel narrows it.",
+		channelCaption: "Access",
+		channelDetail:  "Who can reach this channel at all.",
 		entries: []permissionEntry{
 			{"View channels", "See a channel at all. Without it, nothing else here applies.", domain.PermissionViewChannel},
 			{"Read history", "Read what was said before they arrived.", domain.PermissionReadMessageHistory},

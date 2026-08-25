@@ -59,3 +59,51 @@ func TestIndexPassOpensNoDevice(t *testing.T) {
 	}
 	t.Logf("Voice contributes %d searchable rows and opened nothing", found)
 }
+
+// The same rule one layer down, and the one the Security section broke: the
+// section *itself* has to refuse to fetch while indexing, not merely be handed a
+// stub by buildSettingsIndex. Nothing on screen says otherwise if it does — the
+// answer lands in a section nobody is looking at — so what it costs is three
+// requests on the first keystroke in the search box, silently, every time the
+// index is rebuilt.
+//
+// It goes through indexPass rather than buildSettingsIndex deliberately: the
+// stubbing there would hide exactly what this is about.
+func TestIndexPassDoesNotFetchSecurity(t *testing.T) {
+	var asked int
+
+	hooks := SettingsHooks{
+		Deps:    Deps{Store: &fakeStore{}},
+		Version: "test",
+		Build:   "test",
+
+		LoadSecurity: func(func(SecurityState, error)) { asked++ },
+
+		// Everything else the walk reaches has to answer.
+		LoadProfile:   func(func(domain.UserProfile)) {},
+		CacheStats:    func(func(cache.ImageStats)) {},
+		Sessions:      func() []SettingsSession { return nil },
+		Sounds:        func() []SettingsSound { return nil },
+		CacheDir:      func() string { return "" },
+		ConfigPath:    func() string { return "" },
+		InputDevices:  func() []AudioDevice { return nil },
+		OutputDevices: func() []AudioDevice { return nil },
+		GateRatio:     func(int) float32 { return 0 },
+	}
+
+	index := indexPass(hooks, true)
+
+	if asked != 0 {
+		t.Fatalf("the index pass asked for the account's security %d times", asked)
+	}
+
+	var found int
+	for _, hit := range index {
+		if hit.section == SectionSecurity {
+			found++
+		}
+	}
+	if found == 0 {
+		t.Fatal("the Security section is not searchable")
+	}
+}

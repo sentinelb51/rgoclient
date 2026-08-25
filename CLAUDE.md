@@ -96,7 +96,7 @@ This file is the **core**: the DAG, the client's contract, the layout, the
 conventions and the build. The rest is filed beside the code it is about, so a
 change in `markdown/` does not pay for the Fyne footguns:
 
-- `internal/app/CLAUDE.md` — the data flow, items 1-35: what happens in what
+- `internal/app/CLAUDE.md` — the data flow, items 1-38: what happens in what
   order and why each step is where it is.
 - `internal/client/CLAUDE.md` — the revoltgo notes: every bug, missing field
   and route that has to be sent by hand.
@@ -136,8 +136,9 @@ Names say most of it; only the non-obvious placements are annotated.
 cmd/rgoclient/main.go    app ID, fyneDo flag, config.Load + theme.Apply before the
                          first widget. version/build are -X link-time vars
 assets/                  at the root because go:embed can't reach above its own file
-  fonts.go icons.go      Montserrat cuts; the marks. All stroked outlines — that is
-                         what lets ui.tintedIcon colour one
+  fonts.go icons.go      Montserrat cuts; the marks. Stroked outlines but for the
+                         two call handsets, which are solid; either way one colour,
+                         which is what ui.tintedIcon rewrites
 
 internal/
   config/config.go       Settings tree, Default, Load/Save/Path, Current/Update.
@@ -146,22 +147,26 @@ internal/
                          is an atomic.Pointer snapshot; writes debounced
   domain/                domain.go (value types; Embed is one shape for every kind,
                          so renderers branch on what is filled in) + store.go
-  client/                client.go, auth.go, convert.go, store.go, events.go,
-                         actions.go
+  client/                client.go, auth.go, security.go, convert.go, store.go,
+                         events.go, actions.go
   cache/                 cache.go (LRU + TextCache), message.go, image.go
   audio/                 both directions of the machine's sound, on miniaudio (malgo).
                          audio.go (the engine and the one playback device),
                          mix.go (what the device callback runs: notification sounds
                          and the call's per-participant lanes, summed without
                          allocating — and the wake it sends afterwards, which is
-                         the clock the whole receive path is paced by),
+                         the clock the whole receive path is paced by. Also the
+                         gain ceiling and softClip, the curve the *sum* meets it
+                         through, both directions sharing the one definition),
                          ring.go (the wait-free SPSC queue every
                          hand-off across that callback is made of), sink.go (the
                          call's lanes; Want is how deep they are kept and is what
                          stops a decoder running ahead of the speakers),
                          capture.go + process.go (the microphone and
                          the chain that cleans and gates it: high-pass, RNNoise,
-                         gate, every stage always present and bypassed rather
+                         preamp, gate — the gain inside the chain and in front of
+                         the gate, so it is what the gate and the meter both
+                         measure, every stage always present and bypassed rather
                          than absent so a setting moves mid-call — and a Capture
                          outlives its device, which its own supervisor reopens,
                          falls back to the default, or swaps on SetDevice, none
@@ -185,19 +190,27 @@ internal/
                          and the setting is not drawn)
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
-                         pins.go, search.go, mentions.go, emoji.go, notify.go,
-                         alerts.go, settings.go, serversettings.go
+                         groups.go, pins.go, search.go, mentions.go, emoji.go,
+                         notify.go, alerts.go, security.go, settings.go,
+                         serversettings.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
                          embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
-                         profile.go, friends.go, panels.go, notice.go, settings*.go,
-                         theme/, titlebar_*.go, filedialog*.go (the OS picker —
-                         Fyne's is drawn in the canvas and is not used)
+                         profile.go, friends.go, group.go, panels.go, notice.go,
+                         settings*.go, theme/, titlebar_*.go, filedialog*.go (the OS
+                         picker — Fyne's is drawn in the canvas and is not used)
   voice/                 the media half of a call: voice.go (Call, its own event
                          set with an unexported marker, so app's switch is
-                         exhaustive), publish.go (microphone -> Opus -> one
-                         LiveKit track; opusTuning is the assertion that lights
+                         exhaustive; `dial`, which publishes the microphone *in*
+                         the join request over one peer connection and keeps the
+                         two-connection split as the fallback for a node that
+                         cannot; and quietSink, which stops lksdk logging pion's
+                         every failed ICE check through this process's logger),
+                         publish.go (microphone -> Opus -> one
+                         LiveKit track; newMicrophone is split from newPublisher
+                         because the track has to exist before the room does;
+                         opusTuning is the assertion that lights
                          up FEC/DTX where the binding has them), subscribe.go
                          (RTP -> jitter -> decode -> sink: a reader goroutine per
                          participant, and one playLanes for all of them, woken by
@@ -234,7 +247,19 @@ package's own `CLAUDE.md`; this is the map:
   the mention candidates: one `Store.Members` walk feeds all three. It also holds
   what the member menu *does* to a member — nickname, roles, timeout — one route
   under three permissions, filed with the people it is about rather than beside
-  the kick and ban confirmations in `notify.go`.
+  the kick and ban confirmations in `notify.go`. And it holds the other list the
+  sidebar can draw: `refreshRecipients`, a **group's** own participants, filed
+  here rather than in `groups.go` because it is the same sidebar under the same
+  rule — one walk feeding the rows and the mention pool together.
+- `app/groups.go` — making a group and changing who is in it, which is all that a
+  group is beyond a channel: its rows, header, messages and edit card are every
+  channel's, and leaving one is closing a conversation. Both cards are picked from
+  `Store.Relationships`, Revolt taking friends alone.
+- `app/security.go` — the Security section's half: the challenge card every action
+  there begins with, and the half-dozen things a ticket unlocks. Filed apart from
+  `settings.go` because none of it is a setting — nothing here writes to config,
+  and every action is a request Revolt gates behind a proof of identity.
+  `client/security.go` is the other half, and holds which routes those are.
 - `app/pins.go`, `app/search.go`, `app/mentions.go` — the three surfaces listing
   messages. The card all three are drawn from (`messageCard`, `messagePreview`,
   `messageWhen`) lives in pins: one summary, resolved and counted once, that each
@@ -292,8 +317,29 @@ package's own `CLAUDE.md`; this is the map:
   (`renderCodeColumn`) rather than a single widget, the card being block-level —
   the only reason `ui/markdown.go` renders *runs* of blocks.
 - `ui/layouts.go` — every custom layout, `fitWithin`, `Relayout`.
-- `ui/message.go` — also the system line, the day separator, reply previews and
-  `NewChannelNote`, the strip under the header that only a voice channel draws.
+- `ui/message.go` — also the system line, the day separator and reply previews.
+- `ui/callisland.go` — the call card and the layer it floats on, at the top of the
+  window over every view, drawn as the settings page's invite card. Two halves in
+  one widget — the running call, and the voice channel on screen that is not it,
+  each a channel over where it is and led by that place's picture — a server's
+  icon, a group's, or the overlapping faces of the people in a group that has
+  none (`islandIcon`, `facesLayout`) — because they are one card on screen and
+  either can stand alone. The window's own
+  layer is the only slot that works: a call outlives leaving the channel, the
+  server *and* the view. `stateBar` is the strip along the *live* half's bottom
+  edge — the connection as a colour, the word it stands for being what its tooltip
+  answers with — and it ends at the rule, the other half being an offer with no
+  state to report.
+- `ui/friends.go` — the sidebar row *and* the page it opens, which stands where
+  the messages do rather than on the modal layer: four sections of people, each
+  row carrying what can be done about somebody, is a view a reader stays on. Its
+  rows are the settings page's invite island (`newIslandCard`, shared) with what a
+  person's row needs on top: the card *is* the primary action — writing to them,
+  lifted out of the button row so nothing common sits a square from Block — so it
+  answers the pointer, its picture is the way to their profile, and its buttons are
+  marks picked from the action's *name* (`ProfileAction`) rather than at the call
+  site. Every heading folds, and a folded section's cards are not built at all: a
+  section here only ever grows.
 - `ui/reactions.go` — the reaction row end to end, the chip and the emoji in it.
   What *adds* one is `ui/emoji.go`, the one picker, which the composer opens too.
 - `ui/emoji.go` — that picker: what can be picked (`EmojiChoice`, and `Value` /
@@ -307,6 +353,11 @@ package's own `CLAUDE.md`; this is the map:
   a message has one. `NewInviteCardFor` is the same card built from an invite
   already in hand — the join dialog's preview, which draws the banner and no
   button, neither being safe on a card a message is holding open.
+- `ui/group.go` — the two cards a group is made and grown by, which are one card
+  with and without a name field: the same question asked at two moments. A row is
+  the friends page's own card at the same sizes, minus that page's buttons — the
+  whole row is one answer, so the only thing at its end is the mark saying whether
+  it has been given.
 - `ui/panels.go` — the island all three message surfaces are drawn on and the
   card one message is drawn as, plus two of the surfaces: pins and the mention
   inbox. `messageIsland` is three surfaces deep (island, well, card) with a
@@ -328,15 +379,19 @@ package's own `CLAUDE.md`; this is the map:
   `PromptDialog` (a field per answer and one button), `BanDialog` (a
   confirmation that has to ask for more than a yes, the route taking a reason
   and a window of the member's recent messages), and the `dialogHeader` they all
-  wear.
+  wear. `SliderCard` is the one that is not a modal: a range hung beside what it
+  belongs to, for a value a `fyne.MenuItem` has no shape for.
 - `ui/settings_shell.go` — the surface *both* settings pages are drawn on (the
   layer, the rail, the pane, the vocabulary of rows), embedded by value so a
   section reaches every row shape by promotion. `settings.go` is then the
   client's own sections and the controls that write to config;
   `settings_server.go` is one server's, almost all lists rather than switches
-  (`entryRow`) — and the one section that drills into a row of its own, the role
-  editor, whose permission grid is the whole of what Revolt defines in the three
-  states it stores each bit in. Two of those lists are also *ordered* by the rows
+  (`entryRow`) — and the two sections that drill into a row of their own. Roles
+  drills once, into an editor whose permission grid is the whole of what Revolt
+  defines in the three states it stores each bit in; Channels drills *twice*, a
+  channel's overrides being a channel and a role, and draws that same grid
+  narrowed to the bits a channel decides. One `permissionScope` serves both, plus
+  the two defaults. Two of those lists are also *ordered* by the rows
   in them (`moveButtons`): the roles by seniority, and the channels by the
   arrangement they are drawn in — which for a channel is its category as well as
   its place, a move past the end of one being how it joins the next. `settings_controls.go` holds the controls, none

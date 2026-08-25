@@ -181,8 +181,15 @@ type Slider struct {
 	low, high, step float64
 	value           float64
 
+	// pivot is the value pinned to the middle of the travel, hasPivot whether
+	// there is one. Without it the scale is linear and a range that is not
+	// symmetric puts its natural resting point wherever the arithmetic lands.
+	pivot    float64
+	hasPivot bool
+
 	track   *canvas.Rectangle
 	fill    *canvas.Rectangle
+	detent  *canvas.Rectangle
 	knob    *canvas.Circle
 	content *fyne.Container
 }
@@ -203,16 +210,21 @@ func NewSlider(low, high, step, value float64, onChanged func(float64)) *Slider 
 		value:     clamp(value, low, high),
 		track:     canvas.NewRectangle(theme.Colors.ChannelSelectedBg),
 		fill:      canvas.NewRectangle(theme.Colors.ServerSelectedBg),
+		detent:    canvas.NewRectangle(theme.Colors.SliderDetent),
 		knob:      canvas.NewCircle(theme.Colors.TextPrimary),
 	}
 
 	radius := theme.Sizes.SettingsSliderTrack / 2
 	s.track.CornerRadius = radius
 	s.fill.CornerRadius = radius
+	s.detent.CornerRadius = theme.Sizes.SettingsSliderDetentWidth / 2
+	s.detent.Hide()
 	s.knob.StrokeColor = theme.Colors.Outline
 	s.knob.StrokeWidth = theme.Sizes.OutlineWidth
 
-	s.content = container.New(&sliderLayout{slider: s}, s.track, s.fill, s.knob)
+	// The detent is over the fill and under the knob: the fill crosses it once the
+	// value passes the pivot, and the knob covers it while it sits there.
+	s.content = container.New(&sliderLayout{slider: s}, s.track, s.fill, s.detent, s.knob)
 	s.ExtendBaseWidget(s)
 
 	return s
@@ -224,6 +236,20 @@ func (s *Slider) CreateRenderer() fyne.WidgetRenderer {
 
 // Value reports where the slider stands.
 func (s *Slider) Value() float64 { return s.value }
+
+// SetTrack recolours the unfilled travel, for a slider mounted on a surface its
+// default track cannot be seen against. Call before the first draw.
+func (s *Slider) SetTrack(fill color.Color) { s.track.FillColor = fill }
+
+// SetPivot pins one value to the middle of the travel, each side of the range
+// then scaled to the half it gets, and marks it with a notch a drag lands on
+// from within half a knob. A gain runs -40 dB to +20, so unity — where everyone
+// is until somebody is moved — otherwise sits two thirds along and can only be
+// found by reading the number. Call before the first draw.
+func (s *Slider) SetPivot(value float64) {
+	s.pivot, s.hasPivot = clamp(value, s.low, s.high), true
+	s.detent.Show()
+}
 
 // SetValue moves the slider without calling back, for a value something else
 // changed — the field beside it, or a section resetting a whole group.
@@ -268,9 +294,15 @@ func (s *Slider) moveTo(x float32) {
 	}
 
 	ratio := float64(clamp((x-knob/2)/travel, 0, 1))
-	value := s.low + ratio*(s.high-s.low)
+	value := s.valueAt(ratio)
 	if s.step > 0 {
 		value = math.Round(value/s.step) * s.step
+	}
+
+	// The detent. Half a knob of slack either side, so the pivot is where a drag
+	// released near the middle lands rather than something to be aimed at.
+	if s.hasPivot && math.Abs(ratio-0.5)*float64(travel) <= float64(knob)/2 {
+		value = s.pivot
 	}
 
 	value = clamp(value, s.low, s.high)
@@ -287,12 +319,44 @@ func (s *Slider) moveTo(x float32) {
 }
 
 // ratio is how far along the track the value stands.
-func (s *Slider) ratio() float32 {
+func (s *Slider) ratio() float32 { return s.ratioOf(s.value) }
+
+// ratioOf places any value on the track, and is where a pivot is honoured: each
+// side of it takes half the travel, so a range far from symmetric still reads
+// against its own middle. Pivoted or not, the two ends stay at 0 and 1.
+func (s *Slider) ratioOf(value float64) float32 {
 	if s.high <= s.low {
 		return 0
 	}
 
-	return float32((s.value - s.low) / (s.high - s.low))
+	if !s.pivoted() {
+		return float32((value - s.low) / (s.high - s.low))
+	}
+
+	if value <= s.pivot {
+		return float32((value - s.low) / (s.pivot - s.low) / 2)
+	}
+
+	return float32(0.5 + (value-s.pivot)/(s.high-s.pivot)/2)
+}
+
+// valueAt is the inverse, for a pointer that landed somewhere along the track.
+func (s *Slider) valueAt(ratio float64) float64 {
+	if !s.pivoted() {
+		return s.low + ratio*(s.high-s.low)
+	}
+
+	if ratio <= 0.5 {
+		return s.low + ratio*2*(s.pivot-s.low)
+	}
+
+	return s.pivot + (ratio-0.5)*2*(s.high-s.pivot)
+}
+
+// pivoted reports whether the split scale applies. A pivot at either end would
+// give one side of the range the whole travel and the other none of it.
+func (s *Slider) pivoted() bool {
+	return s.hasPivot && s.pivot > s.low && s.pivot < s.high
 }
 
 // sliderLayout centres the track on the widget's height and places the knob
@@ -300,21 +364,29 @@ func (s *Slider) ratio() float32 {
 type sliderLayout struct{ slider *Slider }
 
 func (l *sliderLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	if len(objects) != 3 {
+	if len(objects) != 4 {
 		return
 	}
 
-	track, fill, knob := objects[0], objects[1], objects[2]
+	track, fill, detent, knob := objects[0], objects[1], objects[2], objects[3]
 	thickness := theme.Sizes.SettingsSliderTrack
 	side := theme.Sizes.SettingsSliderKnob
+	travel := max(size.Width-side, 0)
 
 	y := (size.Height - thickness) / 2
 	track.Resize(fyne.NewSize(size.Width, thickness))
 	track.Move(fyne.NewPos(0, y))
 
-	x := max(size.Width-side, 0) * l.slider.ratio()
+	x := travel * l.slider.ratio()
 	fill.Resize(fyne.NewSize(x+side/2, thickness))
 	fill.Move(fyne.NewPos(0, y))
+
+	// The notch stands under the knob's centre at the pivot, not its left edge,
+	// which is where the knob is placed from.
+	notch := fyne.NewSize(theme.Sizes.SettingsSliderDetentWidth, theme.Sizes.SettingsSliderDetentHeight)
+	detent.Resize(notch)
+	detent.Move(fyne.NewPos(travel*l.slider.ratioOf(l.slider.pivot)+(side-notch.Width)/2,
+		(size.Height-notch.Height)/2))
 
 	knob.Resize(fyne.NewSize(side, side))
 	knob.Move(fyne.NewPos(x, (size.Height-side)/2))
@@ -650,7 +722,7 @@ type settingsOption struct {
 type optionControl struct {
 	tapBase
 
-	label      *canvas.Text
+	label      *fyne.Container
 	background *canvas.Rectangle
 	options    []settingsOption
 	onPick     func(string)
@@ -663,7 +735,11 @@ var (
 )
 
 func newOptionControl(value string, options []settingsOption, onPick func(string)) *optionControl {
-	label := newText(optionLabel(options, value), theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)
+	// Shortened rather than clipped: the slot is fixed and a device name is longer
+	// than it, and a canvas.Text draws its whole width whatever it is resized to —
+	// over the chevron and out through the field's right edge.
+	label := NewEllipsisText(newText(optionLabel(options, value),
+		theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize))
 
 	chevron := newScaledIcon(fynetheme.MenuDropDownIcon(), theme.Sizes.SettingsIconSize)
 
@@ -671,7 +747,7 @@ func newOptionControl(value string, options []settingsOption, onPick func(string
 
 	padding := theme.Sizes.SettingsRowPaddingH
 	row := NewFillRow(0,
-		vcenter(label),
+		label,
 		HorizontalSpacer(theme.Sizes.ChipDotGap),
 		container.NewCenter(chevron),
 	)
@@ -690,8 +766,7 @@ func (c *optionControl) CreateRenderer() fyne.WidgetRenderer {
 
 // set shows a different option as chosen.
 func (c *optionControl) set(value string) {
-	c.label.Text = optionLabel(c.options, value)
-	c.label.Refresh()
+	SetEllipsisText(c.label, optionLabel(c.options, value))
 }
 
 func (c *optionControl) MouseIn(*desktop.MouseEvent) {
@@ -705,12 +780,14 @@ func (c *optionControl) MouseOut() {
 }
 
 func (c *optionControl) open() {
-	items := make([]*fyne.MenuItem, len(c.options))
-	for i, option := range c.options {
-		items[i] = fyne.NewMenuItem(option.Label, func() { c.onPick(option.Value) })
+	target := fyne.CurrentApp().Driver().CanvasForObject(c)
+	if target == nil || len(c.options) == 0 {
+		return
 	}
 
-	showDropdown(c, items)
+	list := newDropdownList(c.options, target, c.onPick)
+	list.minWidth = c.Size().Width
+	list.ShowAtPosition(AnchorBelow(c))
 }
 
 // optionLabel is what an option's stored value reads as. An unrecognised value —
@@ -726,18 +803,191 @@ func optionLabel(options []settingsOption, value string) string {
 	return value
 }
 
-// showDropdown pops items beneath obj, at least as wide as obj itself, so the
-// menu reads as the control opening rather than as a menu appearing near it.
-// Fyne sizes a pop-up menu to its longest item, which for "Cosy" is a sliver.
-func showDropdown(obj fyne.CanvasObject, items []*fyne.MenuItem) {
-	target := fyne.CurrentApp().Driver().CanvasForObject(obj)
-	if target == nil || len(items) == 0 {
+// dropdownList is what an option control opens: the client's own list rather
+// than Fyne's menu. widget.Menu lays its items out at their own minimum whatever
+// the pop-up around them is resized to — the flag that would stretch them is
+// unexported and set only by NewPopUpMenu — so a menu held open to a wider
+// control drew a row the width of its longest label, adrift inside the box.
+// Drawing the rows is also what lets them alternate: a list of near-identical
+// labels is a set of rows before the pointer is anywhere near it.
+type dropdownList struct {
+	widget.BaseWidget
+
+	rows    []*dropdownRow
+	popUp   *widget.PopUp
+	canvas  fyne.Canvas
+	content fyne.CanvasObject
+
+	// active is the row the keyboard is on, -1 until an arrow key moves it. The
+	// pointer does not set it: a list is driven by one or the other at a time.
+	active int
+
+	// minWidth holds the list open to the control it drops from. Zero is a list
+	// sized by its own longest label.
+	minWidth float32
+}
+
+var _ fyne.Focusable = (*dropdownList)(nil)
+
+func newDropdownList(options []settingsOption, c fyne.Canvas, onPick func(string)) *dropdownList {
+	l := &dropdownList{canvas: c, active: -1}
+
+	// The pop-up paints its own rounded surface under this one, so the rows take
+	// its radius rather than the field's: a corner of row fill outside that curve
+	// is a square nub the border then draws around.
+	radius := fynetheme.Size(fynetheme.SizeNamePopupRadius)
+
+	rows := make([]fyne.CanvasObject, len(options))
+	for i, option := range options {
+		row := newDropdownRow(option.Label, i%2 == 1)
+		row.onTap = func() {
+			l.popUp.Hide()
+			onPick(option.Value)
+		}
+
+		if i == 0 {
+			row.background.TopLeftCornerRadius = radius
+			row.background.TopRightCornerRadius = radius
+		}
+		if i == len(options)-1 {
+			row.background.BottomLeftCornerRadius = radius
+			row.background.BottomRightCornerRadius = radius
+		}
+
+		l.rows = append(l.rows, row)
+		rows[i] = NewFixedHeightContainer(theme.Sizes.SettingsInputHeight, row)
+	}
+
+	// The border is stacked over the rows rather than under them: the rows reach
+	// the list's edge, and a rectangle behind them would be painted out.
+	border := canvas.NewRectangle(color.Transparent)
+	border.StrokeColor = theme.Colors.Outline
+	border.StrokeWidth = theme.Sizes.OutlineWidth
+	border.CornerRadius = radius
+
+	l.content = container.NewStack(VBoxNoSpacing(rows...), border)
+	l.ExtendBaseWidget(l)
+	l.popUp = widget.NewPopUp(l, c)
+
+	return l
+}
+
+func (l *dropdownList) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(l.content)
+}
+
+// MinSize widens the list to minWidth. The pop-up takes its size from what it
+// holds, so this is the only place a dropdown can be held to its control's width.
+func (l *dropdownList) MinSize() fyne.Size {
+	size := l.BaseWidget.MinSize()
+	size.Width = max(size.Width, l.minWidth)
+
+	return size
+}
+
+// ShowAtPosition drops the list at pos, pulled back inside the canvas where it
+// would otherwise hang off the right or bottom edge.
+func (l *dropdownList) ShowAtPosition(pos fyne.Position) {
+	size := l.MinSize()
+	_, area := l.canvas.InteractiveArea()
+
+	if pos.X+size.Width > area.Width {
+		pos.X = max(area.Width-size.Width, 0)
+	}
+	if pos.Y+size.Height > area.Height {
+		pos.Y = max(area.Height-size.Height, 0)
+	}
+
+	l.popUp.ShowAtPosition(pos)
+	l.canvas.Focus(l)
+}
+
+func (l *dropdownList) FocusGained()   {}
+func (l *dropdownList) FocusLost()     {}
+func (l *dropdownList) TypedRune(rune) {}
+
+// TypedKey drives the list from the keyboard. It holds focus while it is open, so
+// Escape closes it rather than reaching the handler left on the canvas for
+// whatever is open behind it.
+func (l *dropdownList) TypedKey(event *fyne.KeyEvent) {
+	switch event.Name {
+	case fyne.KeyDown:
+		l.activate(l.active + 1)
+	case fyne.KeyUp:
+		l.activate(l.active - 1)
+	case fyne.KeyEnter, fyne.KeyReturn, fyne.KeySpace:
+		if l.active >= 0 {
+			l.rows[l.active].Tapped(nil)
+		}
+	case fyne.KeyEscape:
+		l.popUp.Hide()
+	}
+}
+
+// activate moves the keyboard cursor, wrapping at either end.
+func (l *dropdownList) activate(index int) {
+	if len(l.rows) == 0 {
 		return
 	}
 
-	menu := widget.NewPopUpMenu(fyne.NewMenu("", items...), target)
-	menu.ShowAtPosition(AnchorBelow(obj))
-	menu.Resize(fyne.NewSize(max(obj.Size().Width, menu.MinSize().Width), menu.MinSize().Height))
+	index = (index + len(l.rows)) % len(l.rows)
+	if l.active >= 0 {
+		l.rows[l.active].setActive(false)
+	}
+
+	l.active = index
+	l.rows[index].setActive(true)
+}
+
+// dropdownRow is one option: a fill that reaches both edges of the list, and a
+// rest colour alternating down it.
+type dropdownRow struct {
+	tapBase
+
+	background *canvas.Rectangle
+	rest       color.Color
+	content    fyne.CanvasObject
+}
+
+var (
+	_ fyne.Tappable     = (*dropdownRow)(nil)
+	_ desktop.Hoverable = (*dropdownRow)(nil)
+)
+
+func newDropdownRow(label string, alternate bool) *dropdownRow {
+	rest := theme.Colors.ChannelListBackground
+	if alternate {
+		rest = theme.Colors.MenuStripeBg
+	}
+
+	r := &dropdownRow{background: canvas.NewRectangle(rest), rest: rest}
+	text := newText(label, theme.Colors.TextPrimary, theme.Sizes.SettingsLabelSize)
+	padding := theme.Sizes.SettingsRowPaddingH
+
+	// Not NewEllipsisText, whose minimum width is zero: the list is sized by its
+	// longest label, so a device name too long for the control still reads whole
+	// once the list is open.
+	r.content = container.NewStack(r.background,
+		NewInset(NewFillRow(0, text), 0, 0, padding, padding))
+	r.ExtendBaseWidget(r)
+
+	return r
+}
+
+func (r *dropdownRow) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(r.content)
+}
+
+func (r *dropdownRow) MouseIn(*desktop.MouseEvent) { r.setActive(true) }
+func (r *dropdownRow) MouseOut()                   { r.setActive(false) }
+
+// setActive lifts the row, for the pointer and for the keyboard alike.
+func (r *dropdownRow) setActive(active bool) {
+	r.background.FillColor = r.rest
+	if active {
+		r.background.FillColor = theme.Colors.MenuHoverBg
+	}
+	r.background.Refresh()
 }
 
 /* Colours */

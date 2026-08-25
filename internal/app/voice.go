@@ -4,11 +4,13 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"math"
 	"time"
 
 	"fyne.io/fyne/v2"
 	fynetheme "fyne.io/fyne/v2/theme"
 
+	"RGOClient/assets"
 	"RGOClient/internal/audio"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
@@ -22,7 +24,7 @@ import (
 // joinCall opens the microphone and dials the channel's voice node. Never a side
 // effect of selecting a channel: Revolt keeps messages in a voice channel, and a
 // tap that opens a microphone is not a tap anybody expects. It is reached from
-// the note under the header and from the channel's own menu.
+// the island's join half and from the channel's own menu.
 //
 // The REST call and the microphone happen off the UI thread; the dial happens in
 // `then`, after the epoch check. a.backgroundThen guards `then` and not `fn`, so
@@ -80,30 +82,60 @@ func (a *App) joinCall(channelID string) {
 	// handled, and a call briefly connected and hung up is cheaper than a frozen
 	// client.
 	a.background(func() error {
-		// force_disconnect: Stoat refuses a second connection for one account, so a
-		// client that crashed mid-call cannot rejoin without it.
-		creds, err := a.client.JoinCall(channelID, true)
-		if err != nil {
-			return err
-		}
-
-		capture, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
-			Sensitivity:      settings.Sensitivity,
-			Gain:             float32(settings.InputVolume) / 100,
-			HighPass:         settings.HighPass,
-			NoiseSuppression: settings.NoiseSuppression,
-		})
-		if err != nil {
-			return err
-		}
-
+		// The devices and the credentials have nothing to say to each other, so both
+		// are started at once: run in order, a join costs a REST round trip *plus*
+		// two device opens where it need only cost the slower of the two.
+		//
 		// The speakers are opened before the dial. The engine otherwise opens them
 		// on the first notification sound, and the device callback is both what mixes
 		// the call's lanes and what asks for the next frame — so a call joined before
 		// anything had rung would decode nothing and be silent. Both are safe from a
 		// worker: one is a send to the engine goroutine, the other an atomic.
-		a.sounds.StartOutput()
-		a.sounds.SetCallVolume(float64(settings.OutputVolume) / 100)
+		devices := make(chan openedInput, 1)
+
+		go func() {
+			a.sounds.StartOutput()
+			a.sounds.SetCallVolume(float64(audio.GainFromDB(settings.OutputGainDB, config.VoiceGainOffDB)))
+			a.sounds.SetSoftClip(settings.SoftClip)
+
+			// The per-person volumes are the sink's own and outlive a call, but on the
+			// first join after a restart it has never heard of anybody: they are seeded
+			// before a lane can open, since a lane takes its gain when it is opened.
+			for id, db := range settings.UserGainsDB {
+				a.sounds.Sink().SetGain(id, float64(audio.GainFromDB(db, config.VoiceGainOffDB)))
+			}
+
+			capture, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
+				Sensitivity:      settings.Sensitivity,
+				Gain:             audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB),
+				SoftClip:         settings.SoftClip,
+				HighPass:         settings.HighPass,
+				NoiseSuppression: settings.NoiseSuppression,
+			})
+
+			devices <- openedInput{capture: capture, err: err}
+		}()
+
+		// force_disconnect: Stoat refuses a second connection for one account, so a
+		// client that crashed mid-call cannot rejoin without it.
+		creds, err := a.client.JoinCall(channelID, true)
+
+		// Waited for whatever the route answered: the microphone is being opened
+		// either way, and one left to arrive after this returns is a device nothing
+		// is holding and nothing will ever close.
+		opened := <-devices
+
+		switch {
+		case err != nil:
+			opened.close()
+
+			return err
+
+		case opened.err != nil:
+			return opened.err
+		}
+
+		capture := opened.capture
 
 		call, err := voice.Join(creds, capture, a.sounds.Sink(), voice.Options{
 			Muted:    settings.JoinMuted,
@@ -123,6 +155,22 @@ func (a *App) joinCall(channelID string) {
 		a.callJoining = false
 		a.failedJoin(channelID, epoch, gen, err)
 	})
+}
+
+// openedInput carries the microphone back from the goroutine that opened it
+// beside the credentials request. Both halves have to be waited for, so a
+// failure travels with the device rather than being reported from in there.
+type openedInput struct {
+	capture *audio.Capture
+	err     error
+}
+
+// close releases a microphone that opened into a join which has since failed for
+// some other reason. Nothing else holds it, so this is its only way out.
+func (o openedInput) close() {
+	if o.capture != nil {
+		o.capture.Close()
+	}
 }
 
 // installCall is the join's last step, back on the UI thread. It is the only
@@ -157,8 +205,8 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 
 // dropCall releases the media without giving up the channel: the call, the
 // microphone and the key poll go, and callChannelID stays. That is what a call
-// being reconnected looks like — the dock has not been left, so it stays on
-// screen saying so. Call on the UI thread.
+// being reconnected looks like — the call has not been left, so the island stays
+// on screen saying so. Call on the UI thread.
 func (a *App) dropCall() {
 	// Bumped first and unconditionally: the case this exists for is a hang-up
 	// while the join is still in flight, when there is no call to close yet.
@@ -200,10 +248,10 @@ func (a *App) hangUp() {
 	a.syncCall()
 }
 
-// leaveCall is hanging up on purpose: the dock's button, the channel menu, the
-// note under the header, a moderator disconnecting this account, and logging
-// out. It gives up on getting back in, which is the whole difference from
-// hangUp — a call somebody left must not reconnect itself.
+// leaveCall is hanging up on purpose: the island's own button, the channel menu,
+// a moderator disconnecting this account, and logging out. It gives up on getting
+// back in, which is the whole difference from hangUp — a call somebody left must
+// not reconnect itself.
 func (a *App) leaveCall() {
 	a.cancelRejoin()
 	a.hangUp()
@@ -284,18 +332,15 @@ func (a *App) onSpeakingChanged(e voice.SpeakingChanged) {
 	}
 }
 
-// onCallConnection moves the dock's state line.
+// onCallConnection moves the island's dot, and the word beside it where the
+// colour alone would not say enough.
 func (a *App) onCallConnection(e voice.ConnectionChanged) {
 	// Back in the room, so whatever the reconnect was counting is spent.
 	if e.State == voice.Connected {
 		a.cancelRejoin()
 	}
 
-	if a.callDock == nil {
-		return
-	}
-
-	a.callDock.SetState(e.State.String(), e.State == voice.Connected)
+	a.setCallState(e.State.String(), e.State == voice.Connected)
 }
 
 // onCallEnded tears the call down from the far end's side. The microphone is
@@ -410,9 +455,9 @@ func (a *App) scheduleRejoin(channelID string, err error) {
 
 	// Redrawn from a state with no call, which sets the line to "Connecting" —
 	// right for a join that has not landed, and overwritten for one that had.
-	a.syncCallDock()
-	if a.callDock != nil && a.callRetryAfterDrop {
-		a.callDock.SetState("Reconnecting", false)
+	a.syncCallIsland()
+	if a.callRetryAfterDrop {
+		a.setCallState("Reconnecting", false)
 	}
 
 	epoch := a.epoch
@@ -447,54 +492,187 @@ func (a *App) cancelRejoin() {
 	a.callRetryAfterDrop = false
 }
 
-/* The dock */
+/* The island */
 
-// syncCallDock matches the strip at the foot of the channel column to whatever
-// the call is doing, and hides it when there is none. Hiding a child reclaims
-// nothing on its own, so the column is relaid out either way. Call on the UI
-// thread.
-func (a *App) syncCallDock() {
-	if a.callDock == nil {
+// syncCallIsland matches the card at the top of the window to both things it can
+// report: the call this account is in, and the voice channel it is looking at.
+// They are one widget because they are one card on screen, and because a call and
+// the channel being read move independently — a reader in one call browsing
+// another voice channel sees both halves at once.
+//
+// Joining is never a side effect of selecting, so the join half's button is what
+// does it. Call on the UI thread.
+func (a *App) syncCallIsland() {
+	if a.callIsland == nil {
 		return
 	}
 
 	if a.callChannelID == "" {
-		a.callDock.Hide()
-		ui.Relayout(a.channelColumn)
+		a.callIsland.ClearCall()
+	} else {
+		a.callIsland.SetCall(a.voiceWhere(a.callChannelID))
+		a.callIsland.SetMuted(a.muted)
+		a.callIsland.SetDeafened(a.deafened)
 
+		// The bar is otherwise whatever the last ConnectionChanged painted it, which
+		// for a call that has not landed yet is nothing at all.
+		if a.call == nil {
+			a.callIsland.SetState("Connecting", false)
+		}
+	}
+
+	channelID := a.currentChannelID
+
+	switch {
+	case a.channelKind() != domain.ChannelVoice, channelID == a.callChannelID:
+		// Nothing to offer: not a voice channel, or the one the live half already names.
+		a.callIsland.ClearJoin()
+
+	default:
+		a.callIsland.SetJoin(a.voiceWhere(channelID), a.canJoinCall(channelID))
+	}
+
+	a.settleCallIsland()
+}
+
+// settleCallIsland shows or hides the card and re-measures the layer under it.
+// The card is as wide as what is in it and a widget does not re-measure the
+// layer it floats on; Refresh rather than Relayout because the room is retaken
+// by walking descendants, which here is one card. Call on the UI thread.
+func (a *App) settleCallIsland() {
+	a.callIsland.Sync()
+	a.callIslandLayer.Refresh()
+}
+
+// setCallState paints the island's state bar. It settles after for the case the
+// bar was not drawn at all a moment ago — a call that has only just been asked
+// for is a card without one.
+func (a *App) setCallState(text string, good bool) {
+	if a.callIsland == nil {
 		return
 	}
 
-	name := "Voice"
-	if channel, ok := a.store.Channel(a.callChannelID); ok && channel.Name != "" {
-		name = channel.Name
-	}
-
-	a.callDock.SetChannel(name)
-	a.callDock.SetMuted(a.muted)
-	a.callDock.SetDeafened(a.deafened)
-
-	if a.call == nil {
-		a.callDock.SetState("Connecting", false)
-	}
-
-	a.callDock.Show()
-	ui.Relayout(a.channelColumn)
+	a.callIsland.SetState(text, good)
+	a.settleCallIsland()
 }
 
-// syncCall is the whole of what a call starting or ending changes on screen: the
-// dock at the foot of the channel column, and the strip under the message header
-// if the open channel happens to be the one the call is in.
+// showCallState is the island's one hover: the state bar carries the connection
+// as a colour, and the word it stands for is read by pointing at it.
+func (a *App) showCallState(text string, over fyne.CanvasObject, hovering bool) {
+	if !hovering {
+		a.tooltip.Hide()
+		return
+	}
+
+	// Below rather than beside: the bar runs the card's whole width, so a label off
+	// its right edge would be nowhere near the pointer — and the bar is the card's
+	// bottom edge, so under it is the one side with nothing of the card on it.
+	a.tooltip.ShowBelow(text, over)
+}
+
+// syncCall is the whole of what a call starting or ending changes on screen.
 func (a *App) syncCall() {
-	a.syncCallDock()
-
-	if a.channelKind() == domain.ChannelVoice {
-		a.syncVoiceNote()
-		ui.Relayout(a.messageColumn)
-	}
+	a.syncCallIsland()
 }
 
-// toggleMute and toggleDeafen are the dock's two switches. Deafening implies
+// voiceWhere fills the island's two lines and its picture for a channel a call is
+// in or on offer. It falls back rather than failing: the call outlives leaving the
+// server it is in, so the store may hold neither, and a channel it cannot place
+// gets a name alone — an ID with no name being worse than nothing.
+func (a *App) voiceWhere(channelID string) ui.CallIslandWhere {
+	where := ui.CallIslandWhere{Channel: "Voice"}
+
+	channel, ok := a.store.Channel(channelID)
+	if !ok {
+		return where
+	}
+	if channel.Name != "" {
+		where.Channel = channel.Name
+	}
+
+	// A conversation is in no server: its picture is its own — a group's icon, or
+	// the other account's avatar for a direct message — and only a group has
+	// anything to put on the second line.
+	if channel.ServerID == "" {
+		where.Initial = where.Channel
+		where.IconURL = channel.AvatarURL
+
+		if channel.Kind == domain.ChannelGroup {
+			where.Detail = voiceGroupDetail(len(channel.Recipients))
+			where.Faces = a.voiceGroupFaces(channel.Recipients)
+		}
+
+		return where
+	}
+
+	server, ok := a.store.Server(channel.ServerID)
+	if !ok {
+		return where
+	}
+
+	where.Detail = server.Name
+	where.Initial = server.Name
+	where.IconURL = server.IconURL
+
+	return where
+}
+
+// callIslandFaces is how many of a group's members the island draws where the
+// group has none of its own. Three: past that a cluster is a smudge, and the
+// people after the third say nothing the member count has not.
+const callIslandFaces = 3
+
+// voiceGroupFaces is who a group with no picture of its own is drawn as. This
+// account is skipped — the reader knows they are in it, and a face they see in
+// every mirror names nothing — and anybody the store cannot resolve with them: a
+// blank circle is not a person.
+func (a *App) voiceGroupFaces(recipients []string) []ui.CallIslandFace {
+	selfID := a.store.SelfID()
+
+	faces := make([]ui.CallIslandFace, 0, callIslandFaces)
+	for _, userID := range recipients {
+		if userID == selfID {
+			continue
+		}
+
+		user, ok := a.store.User(userID)
+		if !ok {
+			continue
+		}
+
+		faces = append(faces, ui.CallIslandFace{Name: user.Name, AvatarURL: user.AvatarURL})
+		if len(faces) == callIslandFaces {
+			break
+		}
+	}
+
+	return faces
+}
+
+// voiceGroupDetail is what stands under a group's name: a group is in no server,
+// and how many are in it is the one thing about it worth a line. The count is
+// every recipient, this account included — it is the size of the group, not of
+// everybody else.
+func voiceGroupDetail(members int) string {
+	if members == 1 {
+		return "1 member"
+	}
+
+	return fmt.Sprintf("%d members", members)
+}
+
+// joinCallHere joins the call in the channel on screen, which is what the
+// island's join half offers. It reads the open channel at the tap rather than
+// closing over one: the pill outlives every selection.
+func (a *App) joinCallHere() {
+	if a.currentChannelID == "" {
+		return
+	}
+
+	a.joinCall(a.currentChannelID)
+}
+
+// toggleMute and toggleDeafen are the island's two switches. Deafening implies
 // muting, so both redraw the pair.
 func (a *App) toggleMute() {
 	if a.call == nil {
@@ -503,7 +681,7 @@ func (a *App) toggleMute() {
 
 	a.call.SetMuted(!a.call.Muted())
 	a.muted = a.call.Muted()
-	a.syncCallDock()
+	a.syncCallIsland()
 }
 
 func (a *App) toggleDeafen() {
@@ -513,41 +691,7 @@ func (a *App) toggleDeafen() {
 
 	a.call.SetDeafened(!a.call.Deafened())
 	a.muted, a.deafened = a.call.Muted(), a.call.Deafened()
-	a.syncCallDock()
-}
-
-/* The note under the header */
-
-// syncVoiceNote matches the strip under the message header to what this account
-// can do about the open channel's call. It is the primary way in: the one surface
-// already drawn only for a voice channel, already built once and already relaid
-// out on every switch.
-//
-// Joining is never a side effect of selecting, so the button is what does it.
-// Call on the UI thread.
-func (a *App) syncVoiceNote() {
-	if a.channelNote == nil {
-		return
-	}
-
-	channelID, _ := a.currentChannel()
-
-	switch {
-	case a.callChannelID != "" && a.callChannelID == channelID.ID:
-		a.channelNote.Set(voiceNoteJoined)
-		// Warning rather than danger: leaving a call is undone by joining it again.
-		a.channelNote.SetAction(ui.NewWeightedButton("Disconnect", ui.ButtonWarning, a.leaveCall))
-
-	case a.canJoinCall(channelID.ID):
-		a.channelNote.Set(voiceNote)
-		// Primary: the strip is drawn for this channel and joining is what it is for.
-		a.channelNote.SetAction(ui.NewWeightedButton("Join call", ui.ButtonPrimary,
-			func() { a.joinCall(channelID.ID) }))
-
-	default:
-		a.channelNote.Set(voiceNoteClosed)
-		a.channelNote.SetAction(nil)
-	}
+	a.syncCallIsland()
 }
 
 /* Rows */
@@ -583,13 +727,17 @@ func (a *App) refreshSpeakingAll() {
 /* The participant menu */
 
 // voiceParticipantMenu is where all four per-person voice actions meet: the local
-// volume, and the three moderation ones a permission may allow.
+// volume, and the three moderation ones a permission may allow. anchor is the row
+// it was opened from, which the volume card hangs beside.
 //
 // Not on the profile card — every action there closes the card first, so a slider
 // would be dragged out from under the pointer — and not on the member sidebar's
 // own menu, which is the whole membership, most of whom are not in the call.
-func (a *App) voiceParticipantMenu(channelID, userID string) []*fyne.MenuItem {
-	items := []*fyne.MenuItem{a.userVolumeItem(userID)}
+func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID string,
+	participant domain.VoiceParticipant) []*fyne.MenuItem {
+
+	userID := participant.UserID
+	items := []*fyne.MenuItem{a.userVolumeItem(anchor, participant)}
 
 	channel, ok := a.store.Channel(channelID)
 	if !ok || channel.ServerID == "" {
@@ -604,30 +752,69 @@ func (a *App) voiceParticipantMenu(channelID, userID string) []*fyne.MenuItem {
 	return items
 }
 
-// callVolumeSteps is what a per-person volume may be set to. A submenu of steps
-// rather than a slider: a slider is not a fyne.MenuItem, and this needs no
-// surface of its own.
-var callVolumeSteps = []int{0, 50, 100, 150, 200}
+// userVolumeItem is how loud one participant is heard, on this machine and
+// nobody else's.
+//
+// The item opens a card rather than a submenu of steps: a slider is not a
+// fyne.MenuItem, so a menu on its own can offer only the levels somebody thought
+// of. Fyne dismisses the menu before running the action, so nothing is left over
+// the card.
+func (a *App) userVolumeItem(anchor fyne.CanvasObject,
+	participant domain.VoiceParticipant) *fyne.MenuItem {
 
-// userVolumeItem is the local volume for one participant. It lives in the call's
-// mixer and is deliberately not persisted: a voice too quiet today is a room
-// rather than a preference.
-func (a *App) userVolumeItem(userID string) *fyne.MenuItem {
-	current := int(a.sounds.Sink().Gain(userID)*100 + 0.5)
+	return fyne.NewMenuItemWithIcon("Volume", fynetheme.VolumeUpIcon(),
+		func() { a.showUserVolume(anchor, participant) })
+}
 
-	steps := make([]*fyne.MenuItem, 0, len(callVolumeSteps))
-	for _, step := range callVolumeSteps {
-		item := fyne.NewMenuItem(fmt.Sprintf("%d%%", step), func() {
-			a.sounds.Sink().SetGain(userID, float64(step)/100)
-		})
-		item.Checked = step == current
-		steps = append(steps, item)
+// showUserVolume hangs the volume card beside the row it was opened from. Whole
+// decibels, the unit the settings are in, so the two cannot be read against each
+// other wrongly — and the card is titled with the person and marked with the
+// headphones, there being three other volumes in the client and nothing else on
+// a card this size to say which one this is.
+//
+// The level is written back as it moves: the sink holds it for as long as the
+// client runs, and config for longer. A voice too quiet is usually the room and
+// not the person, but the room is the same one tomorrow.
+func (a *App) showUserVolume(anchor fyne.CanvasObject, participant domain.VoiceParticipant) {
+	userID := participant.UserID
+	current := audio.DecibelsFromGain(a.sounds.Sink().Gain(userID), config.VoiceGainOffDB)
+
+	// Unity in the middle: the range is -40 to +20, so the level everybody else is
+	// at would otherwise sit two thirds along.
+	unity := 0.0
+
+	card := ui.NewSliderCard(ui.SliderCard{
+		Title:   participant.Name,
+		Icon:    assets.HeadphonesIcon,
+		Low:     config.VoiceGainOffDB,
+		High:    config.VoiceGainMaxDB,
+		Step:    1,
+		Value:   float64(current),
+		Pivot:   &unity,
+		Reading: func(db float64) string { return callVolumeLabel(int(math.Round(db))) },
+		OnChanged: func(db float64) {
+			level := int(math.Round(db))
+
+			a.sounds.Sink().SetGain(userID, float64(audio.GainFromDB(level, config.VoiceGainOffDB)))
+			config.SetUserGain(userID, level)
+		},
+	})
+
+	a.showPopover(card, anchor)
+}
+
+// callVolumeLabel names one level. The bottom of the range is silence rather than
+// a quantity, and unity is what everybody is at until somebody moves them, so
+// neither reads as a decibel figure.
+func callVolumeLabel(db int) string {
+	switch db {
+	case config.VoiceGainOffDB:
+		return "Off"
+	case 0:
+		return "Normal"
 	}
 
-	item := fyne.NewMenuItemWithIcon("Volume", fynetheme.VolumeUpIcon(), nil)
-	item.ChildMenu = fyne.NewMenu("", steps...)
-
-	return item
+	return fmt.Sprintf("%+d dB", db)
 }
 
 /* Devices, for the settings page */
@@ -705,7 +892,8 @@ func (a *App) startInputMonitor(report func(level float32)) {
 
 		opened, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
 			Sensitivity:      settings.Sensitivity,
-			Gain:             float32(settings.InputVolume) / 100,
+			Gain:             audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB),
+			SoftClip:         settings.SoftClip,
 			HighPass:         settings.HighPass,
 			NoiseSuppression: settings.NoiseSuppression,
 		})
@@ -881,11 +1069,13 @@ func (a *App) applyVoiceSettings() {
 	// nothing is joined — it is also what makes the output picker do anything at
 	// all for the notification sounds.
 	a.sounds.UseOutput(settings.OutputDevice)
-	a.sounds.SetCallVolume(float64(settings.OutputVolume) / 100)
+	a.sounds.SetCallVolume(float64(audio.GainFromDB(settings.OutputGainDB, config.VoiceGainOffDB)))
+	a.sounds.SetSoftClip(settings.SoftClip)
 
 	if a.capture != nil {
 		a.capture.SetSensitivity(settings.Sensitivity)
-		a.capture.SetGain(float32(settings.InputVolume) / 100)
+		a.capture.SetGain(audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB))
+		a.capture.SetSoftClip(settings.SoftClip)
 		a.capture.SetHighPass(settings.HighPass)
 		a.capture.SetNoiseSuppression(settings.NoiseSuppression)
 		a.capture.SetDevice(settings.InputDevice)
@@ -895,7 +1085,8 @@ func (a *App) applyVoiceSettings() {
 	// device that was just chosen rather than the one before it.
 	if a.monitor != nil && a.monitorOwned {
 		a.monitor.SetSensitivity(settings.Sensitivity)
-		a.monitor.SetGain(float32(settings.InputVolume) / 100)
+		a.monitor.SetGain(audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB))
+		a.monitor.SetSoftClip(settings.SoftClip)
 		a.monitor.SetHighPass(settings.HighPass)
 		a.monitor.SetNoiseSuppression(settings.NoiseSuppression)
 		a.monitor.SetDevice(settings.InputDevice)

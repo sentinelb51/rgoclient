@@ -142,6 +142,10 @@ func (a *App) serverSettingsHooks() ui.ServerSettingsHooks {
 		EditChannel:   a.editChannel,
 		MoveChannel:   a.moveChannel,
 
+		ChannelOverrides:             a.channelOverrides,
+		SetChannelRolePermissions:    a.setChannelRolePermissions,
+		SetChannelDefaultPermissions: a.setChannelDefaultPermissions,
+
 		CreateCategory: a.promptCreateCategory,
 		RenameCategory: a.promptRenameCategory,
 		MoveCategory:   a.moveCategory,
@@ -374,6 +378,89 @@ func (a *App) serverSettingsChannels() []ui.ServerCategoryEntry {
 	return entries
 }
 
+// channelOverrides is one channel's own permissions as its editor draws them:
+// every role the server defines carrying what *this channel* changes about it,
+// the default last as the Roles section lists it.
+//
+// Everything here is read from the store. An override edit comes back as a
+// channel update — revoltgo's PartialChannel carries both halves and its own
+// handler applies them — so unlike the invite and ban lists this needs no fetch
+// and no overlay, and a change made from another client lands the same way.
+func (a *App) channelOverrides(channelID string) (ui.ServerChannelOverrides, bool) {
+	serverID := a.serverSettingsID
+
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.ServerID != serverID {
+		return ui.ServerChannelOverrides{}, false
+	}
+
+	overrides, ok := a.store.ChannelOverrides(channelID)
+	if !ok {
+		return ui.ServerChannelOverrides{}, false
+	}
+
+	// The channel's own resolution, not the server's: an override is exactly what
+	// moves the two apart, so a reader holding ManagePermissions across the server
+	// may still have been denied it here.
+	out := ui.ServerChannelOverrides{
+		ChannelID: channelID,
+		Name:      channel.Name,
+		Kind:      channel.Kind,
+		Held:      a.store.Permissions(channelID),
+	}
+
+	roles := a.store.ServerRoles(serverID)
+	ranking := a.serverRanking(serverID)
+
+	out.Roles = make([]ui.ServerRoleEntry, 0, len(roles)+1)
+	for _, role := range roles {
+		override := overrides.Roles[role.ID]
+
+		out.Roles = append(out.Roles, ui.ServerRoleEntry{
+			ID:        role.ID,
+			Name:      role.Name,
+			Color:     role.Color,
+			ColorText: role.ColorText,
+			Allow:     override.Allow,
+			Deny:      override.Deny,
+			Hoist:     role.Hoist,
+			Editable:  role.Rank > ranking,
+		})
+	}
+
+	// The default has no rank for anything to outrank, so what may be done to it
+	// is the channel's permission alone — which the grid reads off Held.
+	out.Roles = append(out.Roles, ui.ServerRoleEntry{
+		ID:       defaultRoleID,
+		Name:     "Everyone",
+		Allow:    overrides.Default.Allow,
+		Deny:     overrides.Default.Deny,
+		Default:  true,
+		Editable: true,
+	})
+
+	return out, true
+}
+
+// The two channel-scope setters. Neither reports back: both return as a channel
+// update, and the page is rebuilt from the store on the way past — the same path
+// a role's own permissions take.
+func (a *App) setChannelRolePermissions(channelID, roleID string, allow, deny domain.Permission) {
+	a.background(
+		func() error { return a.client.SetChannelRolePermissions(channelID, roleID, allow, deny) },
+		a.notifyFailure("set permissions on role "+roleID+" in channel "+channelID,
+			"Could not change what that role may do here."),
+	)
+}
+
+func (a *App) setChannelDefaultPermissions(channelID string, allow, deny domain.Permission) {
+	a.background(
+		func() error { return a.client.SetChannelDefaultPermissions(channelID, allow, deny) },
+		a.notifyFailure("set default permissions on channel "+channelID,
+			"Could not change what everybody may do here."),
+	)
+}
+
 /* Categories */
 
 // moveChannel moves a channel one place through the arrangement, which is also
@@ -472,7 +559,7 @@ func (a *App) promptCreateCategory() {
 		return
 	}
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Create a category",
 		Action: "Create",
 		Busy:   "Creating...",
@@ -481,10 +568,7 @@ func (a *App) promptCreateCategory() {
 			a.closeOverlay()
 			a.createCategory(serverID, values[0])
 		},
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 // createCategory adds an empty category at the end of the order. It carries no
@@ -524,7 +608,7 @@ func (a *App) promptRenameCategory(categoryID string) {
 		return
 	}
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Rename category",
 		Action: "Rename",
 		Busy:   "Renaming...",
@@ -533,10 +617,7 @@ func (a *App) promptRenameCategory(categoryID string) {
 			a.closeOverlay()
 			a.renameCategory(serverID, categoryID, values[0])
 		},
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 func (a *App) renameCategory(serverID, categoryID, title string) {
@@ -766,7 +847,7 @@ func (a *App) promptCreateRole() {
 		return
 	}
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Create a role",
 		Action: "Create",
 		Busy:   "Creating...",
@@ -775,10 +856,7 @@ func (a *App) promptCreateRole() {
 			a.closeOverlay()
 			a.createRole(serverID, values[0])
 		},
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 // createRole makes the role and marks it to be opened. The role reaches the page

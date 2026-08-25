@@ -23,11 +23,46 @@ import (
 	"log"
 	"sync"
 	"sync/atomic"
+	"time"
 
+	"github.com/go-logr/logr"
+	protoLogger "github.com/livekit/protocol/logger"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 
 	"RGOClient/internal/domain"
 )
+
+/* The SDK's own logging */
+
+// lksdk logs through the *process's* logger unless told otherwise
+// (`lksdk/logger.go`, `stdr.New(log.Default())`), and at info it narrates every
+// ICE connectivity check that fails — from the agent's own goroutine, during the
+// handshake, on any machine holding an adapter that cannot route. That buries
+// this client's diagnostics under pion's.
+//
+// Errors are kept and everything below them dropped. It has to be a sink rather
+// than a verbosity: stdr enables V(0) whatever the level, and a logr-level
+// filter cannot tell the two apart either — `LogRLogger.Warnw` maps onto `Info`
+// alongside `Infow`.
+func init() { lksdk.SetLogger(protoLogger.LogRLogger(logr.New(quietSink{}))) }
+
+// quietSink answers "not enabled" for every level, so logr never formats the
+// values behind a dropped line.
+type quietSink struct{ name string }
+
+func (quietSink) Init(logr.RuntimeInfo) {}
+
+func (quietSink) Enabled(int) bool { return false }
+
+func (quietSink) Info(int, string, ...any) {}
+
+func (s quietSink) Error(err error, msg string, _ ...any) {
+	log.Printf("voice: %s%s: %v", s.name, msg, err)
+}
+
+func (s quietSink) WithValues(...any) logr.LogSink { return s }
+
+func (s quietSink) WithName(name string) logr.LogSink { return quietSink{name: name + ": "} }
 
 /* What a call is wired to */
 
@@ -216,6 +251,11 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	if creds.URL == "" || creds.Token == "" {
 		return nil, ErrNoCredentials
 	}
+	// Asked before the dial rather than by newPublisher after it: a call with
+	// nothing to send is a refusal, not a room to connect to and then leave.
+	if src == nil {
+		return nil, errors.New("no microphone")
+	}
 
 	c := &Call{
 		selfID:   opts.SelfID,
@@ -231,21 +271,30 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	c.deafened.Store(opts.Deafened)
 	c.deepPLC.Store(opts.DeepPLC)
 
-	room, err := lksdk.ConnectToRoomWithToken(creds.URL, creds.Token, c.callbacks())
+	started := time.Now()
+
+	room, mic, pub, err := dial(creds, c, opts)
 	if err != nil {
-		return nil, fmt.Errorf("dial voice node: %w", err)
+		return nil, err
 	}
 	c.room = room
+
+	dialled := time.Now()
 
 	// The joining mute is newPublisher's to apply, before its loop starts: the
 	// capture ring already holds audio from before the dial, so a publisher born
 	// unmuted and muted a moment later has already sent a syllable.
-	publisher, err := newPublisher(room, src, c, opts)
+	publisher, err := newPublisher(mic, pub, src, c, opts)
 	if err != nil {
 		room.Disconnect()
 		return nil, err
 	}
 	c.publisher.Store(publisher)
+
+	log.Printf("voice: joined in %v (dial %v, start %v)",
+		time.Since(started).Round(time.Millisecond),
+		dialled.Sub(started).Round(time.Millisecond),
+		time.Since(dialled).Round(time.Millisecond))
 
 	// Everything per-person is keyed on the voice server agreeing that a
 	// participant's identity *is* the Revolt user ID — lane routing, the speaking
@@ -265,6 +314,75 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	c.emit(ConnectionChanged{State: Connected})
 
 	return c, nil
+}
+
+// dial connects the room with the microphone already published.
+//
+// lksdk's default is a peer connection each way — so ICE and DTLS run twice
+// against one node — and a track published after that is a further offer/answer
+// on top. `WithSinglePeerConnection` collapses the pair and `WithTrack` carries
+// the publisher's offer *in the join request*, which is one handshake for what
+// was three.
+//
+// It is not a free switch: single-connection mode selects a different signalling
+// protocol, so a node that does not speak it has to be met the old way. That is
+// the fallback, and it costs a second dial only on an instance that needs one.
+// The track cannot be reused across the two — preparing a publication binds a
+// transceiver to it — so each attempt builds its own.
+func dial(creds domain.CallCredentials, c *Call, opts Options) (*lksdk.Room, *microphone, *lksdk.LocalTrackPublication, error) {
+	mic, err := newMicrophone(opts)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+
+	room, err := lksdk.ConnectToRoomWithToken(creds.URL, creds.Token, c.callbacks(),
+		lksdk.WithSinglePeerConnection(),
+		lksdk.WithTrack(mic.track, micPublication()),
+	)
+	if err == nil {
+		if pub := localPublication(room, mic.track.ID()); pub != nil {
+			return room, mic, pub, nil
+		}
+
+		// Connected, but the track did not come back published. Nothing above can
+		// mute or drive a publication that does not exist, so this is the node not
+		// really supporting the mode rather than a call to carry on with.
+		room.Disconnect()
+		err = errors.New("the node published no track in the join")
+	}
+
+	log.Printf("voice: single-connection join unavailable (%v); falling back to the split", err)
+
+	if mic, err = newMicrophone(opts); err != nil {
+		return nil, nil, nil, err
+	}
+
+	room, err = lksdk.ConnectToRoomWithToken(creds.URL, creds.Token, c.callbacks())
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("dial voice node: %w", err)
+	}
+
+	pub, err := room.LocalParticipant.PublishTrack(mic.track, micPublication())
+	if err != nil {
+		room.Disconnect()
+
+		return nil, nil, nil, fmt.Errorf("publish microphone: %w", err)
+	}
+
+	return room, mic, pub, nil
+}
+
+// localPublication finds what the join published, the connect option reporting
+// it only through the participant rather than returning it.
+func localPublication(room *lksdk.Room, trackID string) *lksdk.LocalTrackPublication {
+	for _, published := range room.LocalParticipant.TrackPublications() {
+		local, ok := published.(*lksdk.LocalTrackPublication)
+		if ok && local.TrackLocal() != nil && local.TrackLocal().ID() == trackID {
+			return local
+		}
+	}
+
+	return nil
 }
 
 // Events is the call's own channel, read by exactly one goroutine. It is closed

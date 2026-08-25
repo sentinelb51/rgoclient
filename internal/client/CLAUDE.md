@@ -261,7 +261,11 @@ dependency DAG and the client's contract; this file is the wire-level notes.
     `PermissionOverwrite` — the shape an overwrite is *read* in, `{a, d}` — where all three
     routes take `{"permissions": {"allow", "deny"}}`. `revoltgo.Override` is that write
     shape now and the three wrap it; a group's channel default takes a plain value instead
-    and is `GroupPermissionsSetDefault`.
+    and is `GroupPermissionsSetDefault`. Both channel routes document "Channel must be a
+    `TextChannel`", which reads as excluding voice and does not: Stoat dropped the
+    `VoiceChannel` variant, so a voice channel *is* a text channel carrying a `voice`
+    object (see `toChannelKind`) and both take one. What the arm excludes is a DM and
+    saved notes.
   - `ServersRoleRanksEdit` sent a bare array where the route takes `{"ranks": [...]}`.
   - `ServersRoleCreate` decoded `{id, role}` into a `ServerRole`, so every field came back
     zero and the ID a creation answers with was lost — it now fills `ServerRole.ID`, which
@@ -270,6 +274,24 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   `roles_edit.rs` drops rank from the partial and `DataCreateRole.rank` is documented as
   having no effect. Ordering is `ServersRoleRanksEdit` and nothing else, and the array is
   the server's whole order — rank is the index in it (`Server::set_role_ordering`).
+- **`GroupCreate` answers with a shape of its own and writes nothing.**
+  `POST /channels/create` returns a whole `Channel` of the Group variant, and
+  revoltgo decodes it into `revoltgo.Group` — `{_id, owner, name, description,
+  users}`, so the icon, the permissions and the age gate are dropped — and files
+  none of it in `State`. Every channel-keyed path here looks a channel up there,
+  so `Client.CreateGroup` asks for it once afterwards, exactly as
+  `OpenConversation` does with what `DirectMessageCreate` hands back. The
+  `ChannelCreate` the gateway sends does file it, but a caller that wants to
+  select the new group cannot wait for it.
+  Two more numbers the route carries and revoltgo does not: `users` is capped at
+  **49** (fifty counting the account making it), and every ID in it must be a
+  **friend** — a stranger among them is refused, and the whole request with them.
+  Adding to a group that exists has no such documented cap; the ceiling there is
+  a runtime limit of the instance's own, so it is asked for and refused rather
+  than guessed at. `GroupMemberAdd`/`Delete` name **one** recipient each
+  (`PUT`/`DELETE /channels/{group}/recipients/{member}`), so adding several is a
+  request apiece; removing is the **owner's** alone and is not a permission bit,
+  so no grant carries it and `domain.Channel.OwnerID` is what answers instead.
 - **A server's channel arrangement is one field, replaced whole.**
   `ServerEditParams.Categories` (`[]*ServerCategory`: `id`, `title`, `channels`)
   is the *only* way to order channels — `server.channels` takes no route, so the
@@ -301,7 +323,44 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   instead. The `ID` on the event is **this** account and the `User` it carries is
   the other half. revoltgo's `FriendAdd` is also mis-named for what the client
   wants: it is `PUT /users/{id}/friend`, which *accepts*, while sending a request
-  is `POST /users/friend` and has no method at all — see `Client.AddFriend`.
+  is `POST /users/friend` and has no method at all — see `Client.AddFriend`. That
+  route names somebody by **handle**, not by ID, and matches on the name *and*
+  the discriminator with no guess at either: `{"username": "name#0000"}`. So the
+  same request serves two callers — `AddFriend` reads the handle out of `State`
+  for a profile button, `AddFriendByHandle` takes one somebody typed — and the
+  answer to the second names an account nothing has cached, which is why the
+  friends list waits for the gateway to file it rather than drawing it at once.
+- **An MFA ticket is a header, and revoltgo has no per-request headers.** Every
+  route that changes how an account is *reached* is guarded by one:
+  `x-mfa-ticket`, minted by `PUT /auth/mfa/ticket` from a password, a TOTP code or
+  a recovery code, and good for a few minutes. Which routes take one is **not**
+  guessable and is not symmetric — read it off the spec's own `security` lists,
+  which are per-route and precise (`PUT /auth/mfa/ticket` is guarded by an
+  *Unvalidated* ticket, everything else by a *Valid* one):
+  - **Gated:** revoke a session, revoke all, change password, change email,
+    disable TOTP, generate a TOTP secret, both recovery-code routes, disable and
+    delete the account.
+  - **Not:** read the account, list sessions, *rename* a session, MFA status,
+    MFA methods, logout — and **enabling** TOTP, whose answer rides in the body
+    because the only proof worth taking there is a code from the authenticator.
+
+  `HTTPClient` has `SetHeader`/`RemoveHeader` and nothing per call, so
+  `Client.withTicket` sets it for the length of one request and takes it off
+  again, serialised on `ticketMu`. The header map has its own lock, so that is
+  safe; what it cannot promise is that no unrelated request overlaps and carries
+  the header too — harmless, since a route that does not declare the guard never
+  reads it, and it is this account's own ticket either way.
+  `LogoutEverywhere` was **sending no ticket at all** before this and is one of
+  the gated ones, so it was almost certainly being refused; it now goes through
+  `withTicketOn`, against the session it has already dropped.
+- **A session's own ID is answered by the login route and nothing else.** There is
+  no "which of these am I": `GET /auth/session/all` is `{_id, name}` per row with
+  no current marker, and the friendly name is whatever a client called itself, so
+  two logins from one machine share it. `ResponseLogin` carries `_id`, which is
+  the only time it is ever said — hence `Login.SessionID`, `Client.OpenAs`, and
+  `SavedSession.SessionID` beside the token. Without it this client cannot mark
+  its own row in the session list, and `EventAuth` cannot tell this session being
+  revoked from anybody else's; both say so rather than guessing.
 - **An error carries no status.** Every non-2xx comes back as
   `fmt.Errorf("bad status code %d: %s")` — no type, no code — so "it is not
   there" and "the request failed" are one answer. `answeredGone` reads the number

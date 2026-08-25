@@ -40,21 +40,28 @@ var Colors = struct {
 	SwiftActionHoverBg     color.Color
 	SessionCardBg          color.Color
 	SettingsIslandOutline  color.Color
+	FriendsCardHoverBg     color.Color
+	GroupPickChosenBg      color.Color
 	SettingsJumpBackground color.Color
 	SettingsBackText       color.Color
 	TooltipBg              color.Color
 	NoticeBg               color.Color
+	SliderCardTrack        color.Color
+	SliderDetent           color.Color
 	OverlayBackdrop        color.Color
 	ViewerCardBg           color.Color
 	ViewerBodyBg           color.Color
 	ComposerBg             color.Color
 	ComposerBorderFocus    color.Color
 	MentionRowSelectedBg   color.Color
+	MenuHoverBg            color.Color
+	MenuStripeBg           color.Color
 
 	/* Edges */
 
-	Outline    color.Color
-	CardShadow color.Color
+	Outline     color.Color
+	MenuOutline color.Color
+	CardShadow  color.Color
 
 	/* Elements */
 
@@ -95,7 +102,6 @@ var Colors = struct {
 	JumpBarHoverBg        color.Color
 	JumpBarAction         color.Color
 	MessageStatusMark     color.Color
-	ChannelNoteText       color.Color
 	ChannelTopicText      color.Color
 	ErrorText             color.Color
 
@@ -148,17 +154,27 @@ var Colors = struct {
 	// against both.
 	VoiceSpeaking color.Color
 
-	/* The call dock */
+	/* The call island */
 
-	// The strip at the foot of the channel column while this account is in a call.
-	// The two state colours are the connection's health, and the danger tint is
-	// what hanging up wears — an outlined button carries its own tint in its
-	// hairline, so nothing else has to say which button that is.
-	CallDockBackground color.Color
-	CallDockText       color.Color
-	CallDockStateGood  color.Color
-	CallDockStatePoor  color.Color
-	CallDockDanger     color.Color
+	// The card floating at the top of the window while this account is in a call or
+	// looking at a voice channel. Muted is the server line under each channel name
+	// and the rule between the halves. The two state colours are the connection's
+	// health, carried by the bar along the card's bottom edge — a colour rather
+	// than a word, the word being what its tooltip is for. TextHover is what the
+	// call's two lines light to under the pointer: they are the target, and the
+	// card is the only panel in play, so a fill behind them would read as a button
+	// nobody drew an edge on. Join and the danger tint are what the two ends of the
+	// card wear: every control on it is outlined and carries its own colour in its
+	// hairline, so nothing else has to say which button is which.
+	CallIslandBackground color.Color
+	CallIslandOutline    color.Color
+	CallIslandText       color.Color
+	CallIslandTextHover  color.Color
+	CallIslandMuted      color.Color
+	CallIslandStateGood  color.Color
+	CallIslandStatePoor  color.Color
+	CallIslandJoin       color.Color
+	CallIslandDanger     color.Color
 
 	/* Bot mark */
 
@@ -274,6 +290,16 @@ var Colors = struct {
 	// that meet; an island meets nothing, and a groove around one against a page
 	// barely darker than it is an edge nobody sees.
 	SettingsIslandOutline: color.RGBA{R: 52, G: 60, B: 80, A: 255}, // #343C50
+	// The one island in the client that is also a target — a friend's row, which
+	// leads to their profile. A step off SessionCardBg rather than a wash of the
+	// accent: the row is the way to a person, not an action, and the outline is
+	// already what says the card is a thing of its own.
+	FriendsCardHoverBg: color.RGBA{R: 40, G: 45, B: 62, A: 255}, // #282D3E
+	// The same card once it has been *picked*, on the group cards. Hover is a
+	// pointer passing over and chosen is an answer already given, so the two cannot
+	// share a fill — this one is the accent the settings jump washes with, which is
+	// what the client already means by "this one".
+	GroupPickChosenBg: color.RGBA{R: 48, G: 60, B: 100, A: 255}, // #303C64
 	// What a jump from the rail or the search washes the group card it landed on
 	// with. The accent again, as a message jump takes it, and against a lighter
 	// surface than a message row — a card the same colour as the wash says nothing.
@@ -288,12 +314,35 @@ var Colors = struct {
 	ViewerCardBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card
 	ViewerBodyBg:     color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well
 
+	// A slider's own track is the colour a lifted card is, so on one it has to be
+	// darker than the surface rather than lighter: unfilled travel reads as a
+	// recess, and at the bottom of the range there is nothing else to read.
+	SliderCardTrack: color.RGBA{R: 30, G: 34, B: 47, A: 255}, // #1E222F
+
+	// The mark standing where a slider's pivot is. Dimmer than the knob and
+	// brighter than the track: it has to be legible under the fill that crosses
+	// it as well as against the recess on either side.
+	SliderDetent: color.RGBA{R: 92, G: 100, B: 124, A: 255}, // #5C647C
+
 	// The composer card fills with the entry's own input background so the entry's
 	// box disappears into it; the outline draws the boundary instead, and lights up
 	// with the accent while the entry holds focus.
 	ComposerBg:           color.RGBA{R: 31, G: 35, B: 48, A: 255},   // #1F2330, == ColorNameInputBackground
 	ComposerBorderFocus:  color.RGBA{R: 91, G: 124, B: 250, A: 255}, // #5B7CFA accent
 	MentionRowSelectedBg: color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142, the picker's active row
+
+	// The row under the pointer in a pop-up menu, kept off the accent: a menu is
+	// opened *on* a choice already made, and an accent block following the pointer
+	// down a dropdown reads as the option that is set rather than the one about to
+	// be. It has to clear MenuStripeBg as well as the surface, or the pointer says
+	// nothing on every other row of a striped list.
+	MenuHoverBg: color.RGBA{R: 53, G: 60, B: 80, A: 255}, // #353C50, the lift a server row takes
+
+	// Every other row of a dropdown, off the menu's own surface. One step under
+	// the hover fill, so the three read as a ramp: rest, striped, under the
+	// pointer — a list of near-identical labels is a set of rows before it is
+	// hovered, and the pointer still lifts whichever row it is on above both.
+	MenuStripeBg: color.RGBA{R: 38, G: 43, B: 58, A: 255}, // #262B3A
 
 	// One hairline draws every edge in the client: a card lifted off a surface
 	// (an embed, an attachment, the composer dock) and the seam between two
@@ -302,6 +351,11 @@ var Colors = struct {
 	// card the row contains — so no state of what is behind it can wash it out.
 	// That ordering is the invariant, not the literal value.
 	Outline: color.RGBA{R: 15, G: 17, B: 23, A: 255}, // #0F1117
+
+	// A menu's edge, lighter for the same reason the island's is: it hangs over
+	// whatever the reader was looking at rather than meeting a surface, and a
+	// groove around it disappears against everything darker than the menu itself.
+	MenuOutline: color.RGBA{R: 52, G: 60, B: 80, A: 255}, // #343C50
 
 	// The cast shadow under the one card that floats. Black rather than a palette
 	// entry: it multiplies whatever is behind it instead of naming a surface, so
@@ -394,11 +448,6 @@ var Colors = struct {
 	// sentence should not be led by the loudest thing on screen.
 	MessageStatusMark: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 
-	// The strip under the header saying what the client cannot do in the channel
-	// below it. Quiet in the same way: it is a standing caption rather than a
-	// notice, so it must not compete with the messages it sits over.
-	ChannelNoteText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
-
 	// The topic beside the channel's name. Quieter than the name and quieter than
 	// the note above: it is the one line of somebody else's prose in the chrome,
 	// and it shares its row with the buttons the header is there for.
@@ -471,13 +520,21 @@ var Colors = struct {
 	// two backgrounds it is drawn over.
 	VoiceSpeaking: color.RGBA{R: 61, G: 214, B: 140, A: 255}, // #3DD68C
 
-	// The dock sits below the channel list and above nothing, so it is a shade
-	// darker than the column rather than lighter: it reads as a floor.
-	CallDockBackground: color.RGBA{R: 26, G: 29, B: 36, A: 255},    // #1A1D24
-	CallDockText:       color.RGBA{R: 214, G: 219, B: 229, A: 255}, // #D6DBE5
-	CallDockStateGood:  color.RGBA{R: 61, G: 214, B: 140, A: 255},  // #3DD68C
-	CallDockStatePoor:  color.RGBA{R: 232, G: 179, B: 84, A: 255},  // #E8B354
-	CallDockDanger:     color.RGBA{R: 226, G: 92, B: 92, A: 255},   // #E25C5C
+	// The server rail's own black, which is the darkest surface the client draws:
+	// the card floats over whatever is being read, and a fill lighter than the page
+	// would read as a hole cut in it rather than as something laid on top. What
+	// lifts it is the outline and the shadow, not the fill — the outline being
+	// lighter than the client's one hairline for the reason the settings island's
+	// and the context menu's are.
+	CallIslandBackground: color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
+	CallIslandOutline:    color.RGBA{R: 52, G: 60, B: 80, A: 255},    // #343C50
+	CallIslandText:       color.RGBA{R: 214, G: 219, B: 229, A: 255}, // #D6DBE5
+	CallIslandTextHover:  color.RGBA{R: 255, G: 255, B: 255, A: 255}, // #FFFFFF
+	CallIslandMuted:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
+	CallIslandStateGood:  color.RGBA{R: 61, G: 214, B: 140, A: 255},  // #3DD68C
+	CallIslandStatePoor:  color.RGBA{R: 232, G: 179, B: 84, A: 255},  // #E8B354
+	CallIslandJoin:       color.RGBA{R: 91, G: 124, B: 250, A: 255},  // #5B7CFA, the accent
+	CallIslandDanger:     color.RGBA{R: 226, G: 92, B: 92, A: 255},   // #E25C5C
 
 	// What the sidebar says when it has no rows to say it with. Pitched at the
 	// section headers rather than at a name: it is furniture, not a member.
@@ -622,22 +679,52 @@ var Sizes = struct {
 	// twice this or the ring clips at the top and bottom.
 	VoiceSpeakingRing float32
 
-	/* The call dock */
+	/* The call island */
 
-	// The strip at the foot of the channel column. None of these is derived from
-	// the channel sidebar's own padding: a size expressed as an offset from an
-	// unrelated one cannot be edited without moving something nobody asked to
-	// move, and the settings page reaches this table by reflection anyway.
-	CallDockHeight    float32
-	CallDockPaddingV  float32
-	CallDockPaddingH  float32
-	CallDockGap       float32
-	CallDockNameSize  float32
-	CallDockStateSize float32
+	// The card floating at the top of the window. Height is a floor rather than a
+	// ceiling — two lines of text and a state bar set the real one — and Margin is
+	// how far in from the window's top edge the card hangs. None of these is
+	// derived from a size elsewhere: one expressed as an offset from an unrelated
+	// one cannot be edited without moving something nobody asked to move, and the
+	// settings page reaches this table by reflection anyway.
+	CallIslandHeight     float32
+	CallIslandRadius     float32
+	CallIslandMargin     float32
+	CallIslandShadowBlur float32
+
+	CallIslandPaddingV   float32
+	CallIslandPaddingH   float32
+	CallIslandGap        float32
+	CallIslandLineGap    float32
+	CallIslandNameSize   float32
+	CallIslandDetailSize float32
+
+	// The picture leading a half, and the space between it and the lines it names —
+	// closer than Gap, which stands between whole blocks.
+	CallIslandIconSize float32
+	CallIslandIconGap  float32
+
+	// A group with no picture of its own is drawn as the faces of the people in
+	// it, overlapping. Step is how far each one stands from the last, so Size minus
+	// Step is how much of the one behind is covered; Ring is the band of the card's
+	// own colour each face wears, which is what cuts it out of its neighbour rather
+	// than smudging into it. Size plus twice Ring must not exceed IconSize, or a
+	// group makes the card taller than a server does.
+	CallIslandFaceSize float32
+	CallIslandFaceRing float32
+	CallIslandFaceStep float32
+
+	// The strip along the card's bottom edge saying how the call is doing. Gap is
+	// what stands between it and the lines above; the radius rounds its ends, a
+	// bar with square ends inside a rounded card reading as a rule someone drew
+	// rather than as part of the card.
+	CallIslandBarHeight float32
+	CallIslandBarGap    float32
+	CallIslandBarRadius float32
 
 	// No button size: an OutlinedIconButton fixes its own square at
 	// IconButtonSize, so a second number here would be one nothing reads.
-	CallDockButtonGap float32
+	CallIslandButtonGap float32
 
 	// The strip drawn over the list while a membership is on its way or after it
 	// failed to arrive. The mark is the client's own sweeping line, so its width
@@ -728,13 +815,6 @@ var Sizes = struct {
 	// The line the column draws in place of messages, and the mark leading it.
 	MessageStatusMarkSize float32
 	MessageStatusGap      float32
-
-	// The strip under the message header, and the mark leading it.
-	ChannelNoteTextSize float32
-	ChannelNoteMarkSize float32
-	ChannelNoteGap      float32
-	ChannelNotePaddingV float32
-	ChannelNotePaddingH float32
 
 	// The topic beside the channel's name, and the rule dividing the two.
 	ChannelTopicSize       float32
@@ -894,6 +974,26 @@ var Sizes = struct {
 	PopoverGap    float32
 	PopoverMargin float32
 
+	// The card a menu opens where the value it names is a range rather than a
+	// list. Width is pinned: a slider's own minimum is one knob wide, so nothing
+	// else here would give it a track.
+	SliderCardWidth    float32
+	SliderCardRadius   float32
+	SliderCardPadding  float32
+	SliderCardGap      float32
+	SliderCardTextSize float32
+
+	// The vertical padding is its own entry rather than the horizontal one: a
+	// card two lines tall is all margin if the two agree, and the slider already
+	// carries clearance of its own inside its height.
+	SliderCardPaddingV float32
+
+	// The mark that says which direction the value is about, ahead of its title.
+	// The gap is the head row's throughout: after the mark, and between a title
+	// that ellipsises and the reading it must not run into.
+	SliderCardIconSize float32
+	SliderCardHeadGap  float32
+
 	/* Hover tooltips */
 
 	TooltipTextSize float32
@@ -953,17 +1053,37 @@ var Sizes = struct {
 	DialogLabelGap     float32
 	DialogFieldGap     float32
 
-	/* Friends dialog */
+	/* Friends page */
 
-	FriendsDialogWidth   float32
-	FriendsListMaxHeight float32
-	FriendsRowHeight     float32
-	FriendsAvatarSize    float32
-	FriendsNameSize      float32
-	FriendsHandleSize    float32
-	FriendsSectionSize   float32
-	FriendsPadding       float32
-	FriendsGap           float32
+	// FriendsPageWidth is a ceiling rather than a width: the page stands where the
+	// messages do, which is as narrow as MessageAreaMinWidth and as wide as a
+	// maximised window, and a row is a name at one end and its buttons at the other.
+	FriendsPageWidth   float32
+	FriendsPagePadding float32
+
+	FriendsRowHeight    float32
+	FriendsCardPaddingH float32
+	FriendsCardPaddingV float32
+	FriendsAvatarSize   float32
+	FriendsNameSize     float32
+	FriendsHandleSize   float32
+	FriendsCaptionSize  float32
+
+	// FriendsGap separates what is on a row, FriendsCardGap one card from the next
+	// and FriendsGroupGap one section from the one before it.
+	FriendsGap      float32
+	FriendsCardGap  float32
+	FriendsGroupGap float32
+
+	/* Picking people: the group cards */
+
+	// GroupDialogWidth is wider than a channel's card because the card holds a
+	// list: a name and a handle side by side need the room a single field does not.
+	// GroupPickerHeight is how much of that list is on screen before it scrolls,
+	// which is what stops a card of forty friends from being taller than the window.
+	GroupDialogWidth  float32
+	GroupPickerHeight float32
+	GroupPickMarkSize float32
 
 	/* The message islands: pins, mentions and channel search */
 
@@ -1003,35 +1123,41 @@ var Sizes = struct {
 
 	/* Settings */
 
-	SettingsRailWidth      float32
-	SettingsRailRowHeight  float32
-	SettingsRailTextSize   float32
-	SettingsPageWidth      float32
-	SettingsPagePadding    float32
-	SettingsHeaderSize     float32
-	SettingsCaptionSize    float32
-	SettingsBackGap        float32
-	SettingsBackMarkGap    float32
-	SettingsRowHeight      float32
-	SettingsRowPaddingH    float32
-	SettingsRowPaddingV    float32
-	SettingsControlGap     float32
-	SettingsGroupRadius    float32
-	SettingsGroupGap       float32
-	SettingsLabelSize      float32
-	SettingsDetailSize     float32
-	SettingsIconSize       float32
-	SettingsControlWidth   float32
-	SettingsValueWidth     float32
-	SettingsInputHeight    float32
-	SettingsInputRadius    float32
-	SettingsToggleWidth    float32
-	SettingsToggleHeight   float32
-	SettingsToggleInset    float32
-	SettingsSwatchSize     float32
-	SettingsSliderHeight   float32
-	SettingsSliderTrack    float32
-	SettingsSliderKnob     float32
+	SettingsRailWidth     float32
+	SettingsRailRowHeight float32
+	SettingsRailTextSize  float32
+	SettingsPageWidth     float32
+	SettingsPagePadding   float32
+	SettingsHeaderSize    float32
+	SettingsCaptionSize   float32
+	SettingsBackGap       float32
+	SettingsBackMarkGap   float32
+	SettingsRowHeight     float32
+	SettingsRowPaddingH   float32
+	SettingsRowPaddingV   float32
+	SettingsControlGap    float32
+	SettingsGroupRadius   float32
+	SettingsGroupGap      float32
+	SettingsLabelSize     float32
+	SettingsDetailSize    float32
+	SettingsIconSize      float32
+	SettingsControlWidth  float32
+	SettingsValueWidth    float32
+	SettingsInputHeight   float32
+	SettingsInputRadius   float32
+	SettingsToggleWidth   float32
+	SettingsToggleHeight  float32
+	SettingsToggleInset   float32
+	SettingsSwatchSize    float32
+	SettingsSliderHeight  float32
+	SettingsSliderTrack   float32
+	SettingsSliderKnob    float32
+
+	// The notch a pivoted slider draws at its middle, the level the knob snaps
+	// back to.
+	SettingsSliderDetentWidth  float32
+	SettingsSliderDetentHeight float32
+
 	SettingsUsageHeight    float32
 	SettingsLevelHeight    float32
 	SettingsLevelMarker    float32
@@ -1096,13 +1222,44 @@ var Sizes = struct {
 	// 18 + 2x2 is 22 against a row of 28, so the ring has its headroom.
 	VoiceSpeakingRing: 2,
 
-	CallDockHeight:    52,
-	CallDockPaddingV:  8,
-	CallDockPaddingH:  10,
-	CallDockGap:       2,
-	CallDockNameSize:  12,
-	CallDockStateSize: 11,
-	CallDockButtonGap: 4,
+	// A floor only: two lines over a bar come to more than this, and a half with no
+	// server to name comes to less. The radius, the padding and the two text sizes
+	// are the settings page's invite card — this is the same shape in another
+	// place, and two cards a shade apart read as a mistake.
+	CallIslandHeight: 52,
+	CallIslandRadius: 8,
+	CallIslandMargin: 10,
+
+	// Half again the composer dock's. The dock meets the message area's own edge
+	// and the island hangs over the header row with nothing under it, so the halo
+	// is the only thing saying which of the two surfaces is on top.
+	CallIslandShadowBlur: 22,
+
+	CallIslandPaddingV:   8,
+	CallIslandPaddingH:   14,
+	CallIslandGap:        12,
+	CallIslandLineGap:    4,
+	CallIslandNameSize:   14,
+	CallIslandDetailSize: 11,
+
+	// 14 of name over 11 of detail with 4 between comes to 29, so the circle is
+	// the height of the lines it stands beside.
+	CallIslandIconSize: 30,
+	CallIslandIconGap:  9,
+
+	// 22 and 2 come to 26 against an icon of 30, so a cluster is no taller. A step
+	// of 17 leaves 9 of each face covered — a third, which is what keeps three of
+	// them reading as three people rather than as one shape, and leaves the letter
+	// at a face's centre clear of the one in front.
+	CallIslandFaceSize: 22,
+	CallIslandFaceRing: 2,
+	CallIslandFaceStep: 17,
+
+	CallIslandBarHeight: 3,
+	CallIslandBarGap:    7,
+	CallIslandBarRadius: 1.5,
+
+	CallIslandButtonGap: 6,
 
 	MemberStatusTextSize: 12,
 	MemberStatusMarkSize: 24,
@@ -1195,16 +1352,6 @@ var Sizes = struct {
 	// is large enough to be the shape somebody reads first.
 	MessageStatusMarkSize: 30,
 	MessageStatusGap:      4,
-
-	// The note's own mark is set against the sentence rather than against the
-	// header above it: the strip is a caption on the channel, and a mark the size
-	// of the header's glyph would read as a second title. Its horizontal padding
-	// matches the header's, so the sentence starts under the channel's name.
-	ChannelNoteTextSize: 12,
-	ChannelNoteMarkSize: 14,
-	ChannelNoteGap:      6,
-	ChannelNotePaddingV: 2,
-	ChannelNotePaddingH: 8,
 
 	ChannelTopicSize:       12,
 	ChannelTopicGap:        10,
@@ -1403,6 +1550,15 @@ var Sizes = struct {
 	PopoverGap:    10,
 	PopoverMargin: 12,
 
+	SliderCardWidth:    186,
+	SliderCardRadius:   10,
+	SliderCardPadding:  12,
+	SliderCardGap:      6,
+	SliderCardTextSize: 12,
+	SliderCardPaddingV: 8,
+	SliderCardIconSize: 13,
+	SliderCardHeadGap:  6,
+
 	TooltipTextSize: 13,
 	TooltipRadius:   4,
 	TooltipPaddingV: 5,
@@ -1452,15 +1608,28 @@ var Sizes = struct {
 	DialogLabelGap:     5,
 	DialogFieldGap:     14,
 
-	FriendsDialogWidth:   460,
-	FriendsListMaxHeight: 420,
-	FriendsRowHeight:     52,
-	FriendsAvatarSize:    36,
-	FriendsNameSize:      15,
-	FriendsHandleSize:    12,
-	FriendsSectionSize:   12,
-	FriendsPadding:       12,
-	FriendsGap:           6,
+	FriendsPageWidth:   620,
+	FriendsPagePadding: 20,
+
+	FriendsRowHeight:    56,
+	FriendsCardPaddingH: 14,
+	FriendsCardPaddingV: 10,
+	FriendsAvatarSize:   36,
+	FriendsNameSize:     15,
+	FriendsHandleSize:   12,
+	FriendsCaptionSize:  11,
+
+	FriendsGap:      10,
+	FriendsCardGap:  8,
+	FriendsGroupGap: 22,
+
+	GroupDialogWidth: 400,
+	// Four rows and part of the next. There is no scrollbar on this list — the rows
+	// carry their own mark down the right-hand edge, where one would land — so the
+	// cut card is the whole of what says the list goes on, and a ceiling that left
+	// the fourth resting flush against the edge would say the opposite.
+	GroupPickerHeight: 302,
+	GroupPickMarkSize: 18,
 
 	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
 	// narrower and the heading shortens a name to fit a date beside it.
@@ -1540,12 +1709,16 @@ var Sizes = struct {
 	SettingsSliderHeight: 20,
 	SettingsSliderTrack:  4,
 	SettingsSliderKnob:   14,
-	SettingsUsageHeight:  8,
-	SettingsLevelHeight:  10,
-	SettingsLevelMarker:  2,
-	SettingsPaletteSize:  22,
-	SettingsPaletteGap:   6,
-	SettingsPreviewGap:   10,
+
+	SettingsSliderDetentWidth:  2,
+	SettingsSliderDetentHeight: 8,
+
+	SettingsUsageHeight: 8,
+	SettingsLevelHeight: 10,
+	SettingsLevelMarker: 2,
+	SettingsPaletteSize: 22,
+	SettingsPaletteGap:  6,
+	SettingsPreviewGap:  10,
 	// Wide enough for a channel name of about eighteen characters at the detail
 	// size, which is where a name stops being read and starts being recognised.
 	SettingsEntryColumnWidth: 140,
@@ -1567,8 +1740,11 @@ var selectionTint color.Color = color.RGBA{R: 91, G: 124, B: 250, A: 90}
 // noShadow removes Fyne's only other edge treatment. A scroll paints it as a
 // gradient along whichever edge has more content past it — a smear rather than a
 // line, which read as a bar welded under the message area once the composer
-// floated free. Outline is the edge in the client, and SettingsIslandOutline the
-// one exception: a card standing on its own rather than against another surface.
+// floated free. Outline is the edge in the client; SettingsIslandOutline,
+// MenuOutline and CallIslandOutline are the exceptions, all three surfaces
+// standing on their own rather than against another — a hairline darker than
+// what it is laid over reads as a groove, which is exactly wrong for something
+// that has to look lifted.
 var noShadow = color.Transparent
 
 // AppTheme applies the palette to Fyne's built-in widgets so they match the
@@ -1630,8 +1806,13 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 		return Colors.CodeCall
 	case theme.ColorNameScrollBar:
 		return color.Transparent
-	case theme.ColorNamePrimary, theme.ColorNameFocus:
+	case theme.ColorNamePrimary:
 		return Colors.ServerSelectedBg
+	// Focus is not the accent here: widget.Menu paints the item under the pointer
+	// with it (widget/menu_item.go), and it is the only thing this client still
+	// draws with a focus colour — a focus *ring* is drawn by nothing it mounts.
+	case theme.ColorNameFocus:
+		return Colors.MenuHoverBg
 	// The tones a notice or a confirmation button paints itself with; Fyne's
 	// Danger/Warning button importances read them straight off the theme.
 	case theme.ColorNameError:

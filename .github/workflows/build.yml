@@ -10,6 +10,12 @@ on:
 permissions:
   contents: read
 
+# Go's own codegen level for the Go half. It costs no compatibility that is not
+# already spent: gopus compiles libopus with -march=x86-64-v3, so an amd64 build
+# needs Haswell or newer regardless. Ignored on the arm64 leg.
+env:
+  GOAMD64: v3
+
 # A second push supersedes the first: three runners apiece is too much to spend
 # on a commit nobody is waiting on any more.
 concurrency:

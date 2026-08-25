@@ -242,10 +242,16 @@ func (e *Engine) Play(key string, volume float64) {
 // speakers, and picking them once is the whole point of the engine owning both.
 func (e *Engine) UseOutput(id string) { e.send(request{kind: requestOutput, device: id}, true) }
 
-// SetCallVolume scales every remote participant, 0 to 1. Notification sounds are
-// deliberately not scaled by it — a reader who turned the call down did not ask
-// for a quieter mention ping.
+// SetCallVolume scales every remote participant, 0 to maxGain. Notification
+// sounds are deliberately not scaled by it — a reader who turned the call down
+// did not ask for a quieter mention ping.
 func (e *Engine) SetCallVolume(volume float64) { e.mix.setMaster(float32(volume)) }
+
+// SetSoftClip picks how the mix meets the sample ceiling: a peak rounded over, or
+// sliced flat. It covers the notification sounds as well as the call, the two
+// being summed before anything decides — which is also why it is the sum that is
+// clipped rather than each source.
+func (e *Engine) SetSoftClip(on bool) { e.mix.setSoftClip(on) }
 
 // send hands a request to the engine goroutine. wait is for the ones that must
 // not be lost — installing a sound, changing device — where dropping would leave

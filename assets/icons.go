@@ -52,6 +52,9 @@ var headphonesOffSVG []byte
 //go:embed call-end.svg
 var callEndSVG []byte
 
+//go:embed call-join.svg
+var callJoinSVG []byte
+
 //go:embed camera.svg
 var cameraSVG []byte
 
@@ -71,7 +74,7 @@ var appIconPNG []byte
 // them, and the few it does have are filled where these are stroked, so the rail
 // would read as two icon sets sitting together.
 //
-//go:embed account.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg advanced.svg about.svg
+//go:embed account.svg security.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg advanced.svg about.svg
 //go:embed server-overview.svg server-channels.svg server-roles.svg server-invites.svg server-bans.svg
 var settingsIcons embed.FS
 
@@ -149,14 +152,20 @@ var (
 	CameraIcon      fyne.Resource = fyne.NewStaticResource("camera.svg", cameraSVG)
 	ScreenshareIcon fyne.Resource = fyne.NewStaticResource("screenshare.svg", screenshareSVG)
 
-	// The call dock's three buttons, each in both of its states. Stroked outlines
-	// with one stroke colour, like every other mark here — tintedIcon rewrites
-	// that colour, and a fill it cannot reach comes back white.
+	// The call dock's toggles, each in both of its states. Stroked outlines with
+	// one stroke colour, like most of the marks here — tintedIcon rewrites that
+	// colour wherever it appears, a fill included.
 	MicIcon           fyne.Resource = fyne.NewStaticResource("mic.svg", micSVG)
 	MicOffIcon        fyne.Resource = fyne.NewStaticResource("mic-off.svg", micOffSVG)
 	HeadphonesIcon    fyne.Resource = fyne.NewStaticResource("headphones.svg", headphonesSVG)
 	HeadphonesOffIcon fyne.Resource = fyne.NewStaticResource("headphones-off.svg", headphonesOffSVG)
-	CallEndIcon       fyne.Resource = fyne.NewStaticResource("call-end.svg", callEndSVG)
+
+	// The two ends of a call: hang up, and join the voice channel on screen. One
+	// handset at two angles, set down and lifted, and the only *solid* marks in
+	// the set — outlined, a handset at the 17 units one is drawn at reads as a
+	// bitten crescent, its inner and outer curves arriving a pixel apart.
+	CallEndIcon  fyne.Resource = fyne.NewStaticResource("call-end.svg", callEndSVG)
+	CallJoinIcon fyne.Resource = fyne.NewStaticResource("call-join.svg", callJoinSVG)
 
 	// ForbiddenIcon leads the line the composer draws in place of its entry where
 	// the account may not write.
@@ -174,6 +183,7 @@ var (
 // The settings sections, in rail order.
 var (
 	AccountIcon     = settingsIcon("account.svg")
+	SecurityIcon    = settingsIcon("security.svg")
 	InterfaceIcon   = settingsIcon("interface.svg")
 	StylesIcon      = settingsIcon("styles.svg")
 	BehaviourIcon   = settingsIcon("behaviour.svg")
@@ -232,6 +242,13 @@ var (
 	// way wherever it is offered.
 	ActionUpIcon   = actionIcon("action-up.svg")
 	ActionDownIcon = actionIcon("action-down.svg")
+
+	// ActionUnblockIcon is ForbiddenIcon's answer — the same circle with a tick
+	// where the bar was — so the two read as one pair. It is the friends page's
+	// only new mark: accepting a request is ActionSaveIcon, declining one
+	// ActionCancelIcon, and adding or removing somebody is the pair the system
+	// messages already draw.
+	ActionUnblockIcon = actionIcon("action-unblock.svg")
 
 	// ActionEmojiIcon opens the emoji picker from the composer. It is in this set
 	// rather than beside the reaction chip's mark because both open the same

@@ -5,6 +5,7 @@ go 1.27
 require (
 	fyne.io/fyne/v2 v2.8.0
 	github.com/gen2brain/malgo v0.11.26
+	github.com/go-logr/logr v1.4.3
 	github.com/hajimehoshi/go-mp3 v0.3.4
 	github.com/livekit/protocol v1.49.0
 	github.com/livekit/server-sdk-go/v2 v2.18.1
@@ -43,7 +44,6 @@ require (
 	github.com/gammazero/deque v1.2.1 // indirect
 	github.com/go-gl/gl v0.0.0-20260331235117-4566fea9a276 // indirect
 	github.com/go-gl/glfw/v3.4/glfw v0.1.0-pre.1.0.20260707082822-2a407d02d01a // indirect
-	github.com/go-logr/logr v1.4.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-text/render v0.2.1 // indirect
 	github.com/go-text/typesetting v0.3.4 // indirect
@@ -134,5 +134,7 @@ replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4
 // system libraries. The fork keeps the module path layeh.com/gopus, which is why
 // this replace needs nothing beside it — the same arrangement as Fyne above. It
 // is a fork rather than upstream for the three encoder CTLs rgoclient asks for
-// through voice.opusTuning: in-band FEC, packet-loss estimate and DTX.
-replace layeh.com/gopus => github.com/sentinelb51/gopus v0.0.0-20260824060045-cdf306c4c6d4
+// through voice.opusTuning — in-band FEC, packet-loss estimate and DTX — and,
+// since, for libopus 1.5.2 with Deep PLC and for the vector instructions each
+// architecture already guarantees. See docs/voice-chat-todo.md.
+replace layeh.com/gopus => github.com/sentinelb51/gopus v0.0.0-20260825001102-0d81e98a0421

@@ -169,6 +169,12 @@ func newTestServerSettingsPage(probe *serverListProbe) *ServerSettingsPage {
 		MoveCategory:   func(string, bool) {},
 		DeleteCategory: func(string) {},
 
+		ChannelOverrides: func(string) (ServerChannelOverrides, bool) {
+			return ServerChannelOverrides{}, false
+		},
+		SetChannelRolePermissions:    func(string, string, domain.Permission, domain.Permission) {},
+		SetChannelDefaultPermissions: func(string, domain.Permission, domain.Permission) {},
+
 		Roles:                 func() []ServerRoleEntry { return nil },
 		CreateRole:            func() {},
 		SetRoleName:           func(string, string) {},

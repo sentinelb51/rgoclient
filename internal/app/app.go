@@ -113,17 +113,24 @@ type App struct {
 	mainRow         *fyne.Container // the four-column fill row, relaid out by toggleMemberList
 	tooltip         *ui.Tooltip     // the hover label floating over that row
 	notices         *ui.NoticeStack // the transient messages floating over it too
+	callIsland      *ui.CallIsland  // the call pill floating at the top of the window, over every view
+	callIslandLayer *fyne.Container // the layer it hangs on; refreshed when the pill changes width
 	serverList      *fyne.Container
 	channelColumn   *fyne.Container // header + pinned group over the list; relaid out when the group changes
-	callDock        *ui.CallDock    // the strip at its foot while a call is running
 	channelTop      *fyne.Container // that group: what is pinned above the channels, full column width
 	channelList     *fyne.Container
 	memberList      *ui.MemberList  // virtualised: it mounts only the rows on screen
 	memberSidebar   *fyne.Container // the member column itself, hidden by its header toggle
 	messages        *ui.MessageList // virtualised: the window is data, only what is on screen has a widget
 	messageHeader   *fyne.Container // the channel's name row
-	messageColumn   *fyne.Container // header + note + dock; relaid out when the note appears
-	channelNote     *ui.ChannelNote // the standing caption under that header, shown in a voice channel
+	messageColumn   *fyne.Container // header over dock
+
+	// friendsPage stands in the message column's slot rather than on the modal
+	// layer: it is a view the reader stays on, not an answer to a question. Only
+	// one of the two is ever up, friendsOpen saying which — see friends.go.
+	friendsPage *ui.FriendsPage
+	friendsOpen bool
+
 	composerDock    *fyne.Container // badge row + jump bar + card: what the message column runs under
 	floatingDock    *fyne.Container // that stack hung over messages; relaid out when either appears
 	input           *ui.MessageInput
@@ -140,6 +147,7 @@ type App struct {
 	channelGlyph    *fyne.Container  // holds the message header's # / @ / group mark
 	channelTopic    *ui.ChannelTopic // what the channel is for, after its name in that row
 	serverCog       *ui.IconButton   // opens the open server's settings; hidden where there is nothing to manage
+	groupAdd        *ui.IconButton   // makes a group; shares the cog's slot and belongs to the home view
 
 	/* Modal layer and the settings page */
 
@@ -158,7 +166,9 @@ type App struct {
 	joinDialog    *ui.JoinServerDialog // the invite dialog on the modal layer, if any
 	prompt        *ui.PromptDialog     // the field-and-a-button card on that layer, if any
 	channelDialog *ui.ChannelDialog    // the channel editor on that layer, if any
-	friends       *ui.FriendsDialog    // the friends list on that layer, if any
+	groupDialog   *ui.GroupDialog      // the card making a group or adding to one, if any
+	challengeCard *ui.ChallengeDialog  // the second-factor card, if any
+	secretCard    *ui.SecretDialog     // the authenticator setup card, if any
 	editing       *ui.MessageWidget    // the message being edited in place, if any
 
 	/* What the settings page draws about this account, see settings.go */
@@ -374,7 +384,12 @@ type App struct {
 	loginStatus *ui.StatusLine
 	readyTimer  *time.Timer
 
-	pendingToken  string // stashed by a credential login until Ready names the user
+	pendingToken string // stashed by a credential login until Ready names the user
+
+	// pendingSessionID is that token's own session, which the login route answers
+	// with and nothing else does — saved beside it so a restored login can still
+	// tell its own revocation from any other. See domain.AccountSession.
+	pendingSessionID string
 	pendingJoin   bool   // a join is in flight, so its ServerJoined should select
 	pendingRoleID string // a role just created, opened once the event carrying it lands
 

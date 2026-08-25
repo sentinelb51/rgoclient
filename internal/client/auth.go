@@ -47,6 +47,13 @@ func (m MFAMethod) Label() string {
 type Login struct {
 	Token string
 
+	// SessionID is the ID of the session the token belongs to, which arrives here
+	// and **nowhere else**: no route answers "which of this account's sessions am
+	// I". Worth persisting beside the token — a login restored without it cannot
+	// mark itself in the session list or tell its own revocation from anybody
+	// else's.
+	SessionID string
+
 	Ticket  string
 	Methods []MFAMethod
 }
@@ -89,6 +96,8 @@ type mfaResponse struct {
 type loginResponse struct {
 	Result string `json:"result"`
 
+	// ID is the new session's own, which Revolt sends here and on no other route.
+	ID    string `json:"_id"`
 	Token string `json:"token"`
 
 	Ticket         string      `json:"ticket"`
@@ -151,7 +160,10 @@ func (c *Client) login(request loginRequest) (Login, error) {
 
 	switch {
 	case response.Token != "":
-		return Login{Token: response.Token}, c.Open(response.Token)
+		// OpenAs rather than Open: the ID is cleared by opening a session, so it has
+		// to be recorded on the far side of it.
+		return Login{Token: response.Token, SessionID: response.ID},
+			c.OpenAs(response.Token, response.ID)
 	case response.Ticket != "":
 		return Login{Ticket: response.Ticket, Methods: response.AllowedMethods}, nil
 	}

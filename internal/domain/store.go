@@ -116,4 +116,11 @@ type Store interface {
 	// what a moderation action asks: Revolt refuses a timeout against anybody
 	// holding the permission to hand one out.
 	MemberServerPermissions(serverID, userID string) Permission
+
+	// ChannelOverrides is what one server channel changes about its server's
+	// permissions, which is what the channel half of the permission editor sets.
+	// Kept off Channel, which is asked for on every sidebar row and every header:
+	// this copies a map, and only one page ever reads it. Answers false for a
+	// conversation, which has no roles to override anything for.
+	ChannelOverrides(channelID string) (ChannelOverrides, bool)
 }

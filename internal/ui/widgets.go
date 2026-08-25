@@ -133,15 +133,22 @@ func Outline(rect *canvas.Rectangle) {
 	rect.StrokeWidth = theme.Sizes.OutlineWidth
 }
 
-// Elevate casts rect's shadow onto what it is laid over — only the composer dock
-// carries one, an outline and a margin making a card but only a shadow making one
-// that is *above* something. DropShadow follows the corner radius and paints
-// nothing under the fill, so a translucent shadow cannot dirty the card, and the
-// blur overruns the margin on purpose: the surface behind is what has to darken.
-func Elevate(rect *canvas.Rectangle) {
+// Elevate casts rect's shadow onto what it is laid over — the composer dock and
+// the call island carry one, an outline and a margin making a card but only a
+// shadow making one that is *above* something. DropShadow follows the corner
+// radius and paints nothing under the fill, so a translucent shadow cannot dirty
+// the card, and the blur overruns the margin on purpose: the surface behind is
+// what has to darken.
+func Elevate(rect *canvas.Rectangle) { elevate(rect, theme.Sizes.CardShadowBlur) }
+
+// elevate is Elevate at a chosen blur. How far a shadow spreads is the whole of
+// how high a card reads as floating, and the call island hangs over the header
+// row with nothing under it — where the composer dock meets the message area's
+// own edge and needs far less to say the same thing.
+func elevate(rect *canvas.Rectangle, blur float32) {
 	rect.Shadow = canvas.Shadow{
 		Color:      theme.Colors.CardShadow,
-		BlurRadius: theme.Sizes.CardShadowBlur,
+		BlurRadius: blur,
 		Variant:    canvas.DropShadow,
 	}
 }
@@ -582,7 +589,13 @@ type Button struct {
 	background *canvas.Rectangle
 	label      *canvas.Text
 
-	weight   ButtonWeight
+	weight ButtonWeight
+
+	// tint is the colour an outlined button wears in its hairline and its label,
+	// where a weighted one wears its tone as a fill. Nil is a button drawn from its
+	// weight alone, which is every one of these but the call island's.
+	tint color.Color
+
 	hovered  bool
 	disabled bool
 }
@@ -709,7 +722,23 @@ func (b *Button) setHovered(on bool) {
 // outranks everything, tone outranks hover: a filled button lifts its own colour
 // rather than taking the plain one's hover, there being no palette entry for a
 // tone one step up.
+// outlined drops the fill and puts the button's whole colour into its hairline
+// and its label, the way an OutlinedIconButton carries its tint — for a surface
+// whose every other control is one of those, and where a filled block would be
+// the loudest thing on it.
+func (b *Button) outlined(tint color.Color) *Button {
+	b.tint = tint
+	b.refreshAppearance()
+
+	return b
+}
+
 func (b *Button) refreshAppearance() {
+	if b.tint != nil {
+		b.refreshOutlined()
+		return
+	}
+
 	tone, tinted := b.weight.fill()
 	tinted = tinted && !b.disabled // a disabled button offers nothing, so it says nothing
 
@@ -739,6 +768,30 @@ func (b *Button) refreshAppearance() {
 	// The two objects rather than the widget: nothing here moves, and a widget-wide
 	// Refresh would build the renderer at construction, before anything is mounted.
 	b.label.Color = solidColor(text)
+	b.label.Refresh()
+}
+
+// refreshOutlined is the same for a button carrying a tint. Disabled greys both
+// the edge and the word rather than reddening them: the action is unavailable,
+// not dangerous, and red is what this client reserves for what cannot be undone.
+// It keeps a faint fill, which is what says the button is still there.
+func (b *Button) refreshOutlined() {
+	tint := b.tint
+
+	var fill color.Color = color.Transparent
+	switch {
+	case b.disabled:
+		tint, fill = theme.Colors.ButtonDisabledText, theme.Colors.ButtonDisabledBg
+	case b.hovered:
+		fill = theme.Colors.ButtonHoverBg
+	}
+
+	b.background.FillColor = fill
+	b.background.StrokeColor = tint
+	b.background.StrokeWidth = theme.Sizes.OutlineWidth
+	b.background.Refresh()
+
+	b.label.Color = solidColor(tint)
 	b.label.Refresh()
 }
 
@@ -852,6 +905,15 @@ func NewOutlinedIconButton(res fyne.Resource, tint color.Color, onTap func()) *O
 // reaching for the button.
 func (b *OutlinedIconButton) reporting(onHover func(bool)) *OutlinedIconButton {
 	b.onHover = onHover
+
+	return b
+}
+
+// round makes the button a circle rather than a rounded square, for the same
+// reason Button.pill exists: a rounded rectangle inside a capsule reads as a form
+// control that landed in the wrong place. Half the square MinSize already fixes.
+func (b *OutlinedIconButton) round() *OutlinedIconButton {
+	b.background.CornerRadius = theme.Sizes.IconButtonSize / 2
 
 	return b
 }
@@ -1167,6 +1229,21 @@ func (t *Tooltip) ShowAbove(text string, obj fyne.CanvasObject) {
 	}
 
 	t.place(fyne.NewPos(x, y))
+}
+
+// ShowBelow centres the label under obj, clamped to the layer's width. What
+// something anchored at the *top* of the window needs: there is room above it,
+// so ShowAbove would not fall through to its second placement and would draw the
+// label over the very thing it is about.
+func (t *Tooltip) ShowBelow(text string, obj fyne.CanvasObject) {
+	anchor, size, ok := t.prepare(text, obj)
+	if !ok {
+		return
+	}
+
+	x := clamp(anchor.X+(obj.Size().Width-size.Width)/2, 0, max(t.Layer.Size().Width-size.Width, 0))
+
+	t.place(fyne.NewPos(x, anchor.Y+obj.Size().Height+theme.Sizes.TooltipGap))
 }
 
 // prepare labels the card and measures it, reporting where obj sits inside the

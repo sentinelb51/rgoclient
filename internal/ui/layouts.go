@@ -70,6 +70,13 @@ func NewGapColumn(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{fill: -1, gap: gap}, objects...)
 }
 
+// NewGapRow lays objects left to right with gap between the *visible* ones. The
+// call island is the caller: its two halves and the parts inside them come and
+// go, and a hidden one must cost neither its width nor its gap.
+func NewGapRow(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
+	return container.New(&noSpacingLayout{horizontal: true, fill: -1, gap: gap}, objects...)
+}
+
 // NewGapBlock is the same with gap above and below the block as well, and
 // nothing at all — not even the gap — while every child is hidden. The composer
 // dock's optional rows are the caller: the card's own padding is sized for the
@@ -435,6 +442,60 @@ func (l *dockReserveLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 	m.Height += DockReserve(l.card)
 
 	return m
+}
+
+/* Ceilings */
+
+// cappedHeightLayout hands its children the room it is given and reports the
+// content's minimum height up to a ceiling, past which the scroller takes over.
+// The *content* is measured rather than the child, the child being that scroller
+// and a scroller having no opinion about its height. The ceiling is a field
+// rather than a theme lookup: two surfaces mount one of these.
+type cappedHeightLayout struct {
+	content fyne.CanvasObject
+	max     float32
+}
+
+func (l *cappedHeightLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	for _, child := range objects {
+		child.Resize(size)
+		child.Move(fyne.Position{})
+	}
+}
+
+func (l *cappedHeightLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	wanted := l.content.MinSize()
+
+	return fyne.NewSize(wanted.Width, min(wanted.Height, l.max))
+}
+
+// cappedWidthLayout centres its child at up to max and hands it everything it has
+// below that, reporting no width of its own. It is what stands in for the
+// settings page's fixed-width column on a surface that has to shrink: a row is a
+// name at one end and its buttons at the other, and across a maximised window the
+// two lose each other — but the message area is also narrower than that ceiling
+// on a small window, where a fixed width would be clipped instead.
+type cappedWidthLayout struct{ max float32 }
+
+func (l *cappedWidthLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	width := min(size.Width, l.max)
+
+	for _, child := range objects {
+		child.Resize(fyne.NewSize(width, size.Height))
+		child.Move(fyne.NewPos((size.Width-width)/2, 0))
+	}
+}
+
+// MinSize reports the content's height and no width at all: the ceiling is what
+// the column is *given*, not what it demands, and a minimum here would put the
+// whole page into the window's own.
+func (l *cappedWidthLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
+	var height float32
+	for _, child := range objects {
+		height = max(height, child.MinSize().Height)
+	}
+
+	return fyne.NewSize(0, height)
 }
 
 /* Minimum size */

@@ -32,11 +32,14 @@ var loginWindowSize = fyne.NewSize(300, 320)
 
 /* Opening a session */
 
-// startWithToken opens a session using an existing token.
-func (a *App) startWithToken(token string) error {
+// startWithToken opens a session from a saved login: the token, and the ID of the
+// session that token *is* where the saved login carries one. A login saved before
+// the client began recording it opens exactly as before and simply cannot mark
+// itself in the account's own session list — see domain.AccountSession.
+func (a *App) startWithToken(session SavedSession) error {
 	a.doOnUI(a.resetSessionState, true)
 
-	return a.client.Open(token)
+	return a.client.OpenAs(session.Token, session.SessionID)
 }
 
 // startWithLogin opens a session using credentials. An account with a second
@@ -61,7 +64,9 @@ func (a *App) stashToken(result client.Login, err error) (client.Login, error) {
 	if err != nil || result.Token == "" {
 		return result, err
 	}
-	a.doOnUI(func() { a.pendingToken = result.Token }, true)
+	a.doOnUI(func() {
+		a.pendingToken, a.pendingSessionID = result.Token, result.SessionID
+	}, true)
 
 	return result, nil
 }
@@ -162,6 +167,14 @@ func (a *App) resetSessionState() {
 	a.dmChannels = nil
 	a.friendsRow = nil
 	a.loadingDMs = false
+
+	// The friends page lists the account signing out. It stands in the message
+	// column's slot, so leaving it is what puts that column back for whoever signs
+	// in next.
+	a.leaveFriendsPage()
+	if a.friendsPage != nil {
+		a.friendsPage.SetSections(nil)
+	}
 }
 
 /* Waiting for Ready */
@@ -429,7 +442,7 @@ func (a *App) loginWithToken(session SavedSession) {
 	a.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
 
 	go func() {
-		err := a.startWithToken(session.Token)
+		err := a.startWithToken(session)
 
 		a.doOnUI(func() {
 			if err == nil {
@@ -453,7 +466,15 @@ func (a *App) loginWithToken(session SavedSession) {
 // building CDN URLs outside internal/client still carry one, and a card with the
 // right face is worth the four lines that keep it working.
 type SavedSession struct {
-	Token     string `json:"token"`
+	Token string `json:"token"`
+
+	// SessionID is which of the account's sessions that token *is*, answered only
+	// by the login that made it — see client.Login. Absent from anything saved
+	// before the client began recording one, which is why nothing may assume it:
+	// what it is missing from is a session that cannot mark itself in the account's
+	// own list, and a fresh sign-in is what puts it back.
+	SessionID string `json:"session_id,omitempty"`
+
 	UserID    string `json:"user_id"`
 	Username  string `json:"username"`
 	AvatarURL string `json:"avatar_url"`

@@ -663,6 +663,7 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 			out.AvatarURL = user.AvatarURL(avatarSize)
 		}
 	case domain.ChannelGroup:
+		out.OwnerID = channel.Owner
 		if channel.Icon != nil {
 			out.AvatarURL = channel.Icon.URL(avatarSize)
 		}
@@ -673,6 +674,47 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 	}
 
 	return out, true
+}
+
+// ChannelOverrides is what one server channel changes about its server's
+// permissions. Both maps are copied rather than handed out: revoltgo's own
+// handler replaces `RolePermissions` wholesale on the next channel update, and
+// the page reading this is on the UI thread with no lock between them.
+//
+// A conversation answers false. Revolt files a group's own permissions as a
+// plain value on the channel rather than as an override, and there are no roles
+// in one to override anything for.
+func (s *store) ChannelOverrides(channelID string) (domain.ChannelOverrides, bool) {
+	state := s.state()
+	if state == nil || channelID == "" {
+		return domain.ChannelOverrides{}, false
+	}
+
+	channel := state.Channel(channelID)
+	if channel == nil || channel.Server == nil {
+		return domain.ChannelOverrides{}, false
+	}
+
+	out := domain.ChannelOverrides{}
+	if channel.DefaultPermissions != nil {
+		out.Default = toOverride(*channel.DefaultPermissions)
+	}
+	if len(channel.RolePermissions) > 0 {
+		out.Roles = make(map[string]domain.PermissionOverride, len(channel.RolePermissions))
+		for roleID, overwrite := range channel.RolePermissions {
+			out.Roles[roleID] = toOverride(overwrite)
+		}
+	}
+
+	return out, true
+}
+
+// toOverride converts one allow/deny pair.
+func toOverride(overwrite revoltgo.PermissionOverwrite) domain.PermissionOverride {
+	return domain.PermissionOverride{
+		Allow: domain.Permission(overwrite.Allow),
+		Deny:  domain.Permission(overwrite.Deny),
+	}
 }
 
 // recipientID returns the other participant of a direct message, or "" when it

@@ -15,6 +15,12 @@ on:
 permissions:
   contents: write
 
+# Go's own codegen level for the Go half. It costs no compatibility that is not
+# already spent: gopus compiles libopus with -march=x86-64-v3, so an amd64 build
+# needs Haswell or newer regardless. Ignored on the arm64 leg.
+env:
+  GOAMD64: v3
+
 concurrency:
   group: release-${{ github.event.release.tag_name || github.ref }}
   cancel-in-progress: false

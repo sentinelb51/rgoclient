@@ -425,6 +425,31 @@ const (
 // unresolvable question answers with — holds nothing.
 func (p Permission) Has(want Permission) bool { return p&want == want }
 
+// PermissionOverride is what one role is granted and what it is refused
+// somewhere. A bit in neither half is inherited from whatever else has an
+// opinion, which is what makes an override three states per bit where a plain
+// set is two.
+type PermissionOverride struct {
+	Allow Permission
+	Deny  Permission
+}
+
+// ChannelOverrides is what one channel changes about its server's permissions.
+// Both halves are overrides — a channel stands under the server, so even its
+// default has something beneath it to inherit from, unlike the server's own.
+//
+// An absent entry and an empty one mean the same thing, so nothing here
+// distinguishes them: a role changing nothing in a channel is a role with no
+// override there.
+type ChannelOverrides struct {
+	// Default applies to everybody in the channel before any role does.
+	Default PermissionOverride
+
+	// Roles is the override per role ID, holding only the roles that change
+	// something here. Nil where none do.
+	Roles map[string]PermissionOverride
+}
+
 /* Channels */
 
 // ChannelKind is what sort of channel this is.
@@ -467,6 +492,11 @@ type Channel struct {
 	// Nothing draws it — the call itself is not built — but an edit prefills from
 	// what the channel is now.
 	UserLimit int
+
+	// OwnerID is who made a group, and "" for every other kind. Revolt files a
+	// group's own moderation on that one account: whoever owns it is the only one
+	// who may put somebody out of it.
+	OwnerID string
 
 	Recipients    []string
 	LastMessageID string
@@ -828,6 +858,39 @@ type Profile struct {
 	Relationship Relationship
 
 	Bot bool
+}
+
+/* This account's own security */
+
+// AccountSession is one login Revolt is holding open for this account, on any
+// device. Not a saved session: that is a token this computer has kept so the
+// login screen can offer it, where this is the login itself, and revoking one
+// signs that device out wherever it is.
+//
+// The name is whatever the client that signed in called itself, and is the only
+// thing telling two apart — so it is editable, and this client composes its own
+// out of the machine's hostname.
+type AccountSession struct {
+	ID   string
+	Name string
+
+	// Current marks the session this client is using. Knowable only where its ID
+	// was recorded at sign-in: no route answers "which of these am I", so a login
+	// restored from a token saved before that was recorded marks nothing rather
+	// than guessing at the name.
+	Current bool
+}
+
+// MFAStatus is which second factors an account has, as `GET /auth/mfa` reports
+// them. Only the first two are actionable from here — Revolt defines the rest
+// and this client can answer none of them, having no WebAuthn and no way to read
+// an email.
+type MFAStatus struct {
+	TOTP     bool // an authenticator app is set up
+	Recovery bool // recovery codes have been generated
+
+	EmailOTP    bool
+	SecurityKey bool
 }
 
 /* Composing */

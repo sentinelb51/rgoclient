@@ -278,17 +278,26 @@ type Voice struct {
 	// words.
 	NoiseSuppression bool `json:"noise_suppression"`
 
-	// InputVolume scales the microphone, 0-200.
-	InputVolume int `json:"input_volume"`
+	// InputGainDB amplifies the microphone, VoiceGainOffDB to VoiceGainMaxDB. It
+	// runs in front of the gate rather than after it, so raising it on a quiet
+	// microphone is also what lets the gate hear one.
+	InputGainDB int `json:"input_gain_db"`
 
 	// PushToTalkKey is the key held to speak in VoiceModePush.
 	PushToTalkKey string `json:"push_to_talk_key"`
 
 	/* Playback */
 
-	// OutputVolume scales every remote participant, 0-100. Notification sounds
-	// have their own and are deliberately not scaled by it.
-	OutputVolume int `json:"output_volume"`
+	// OutputGainDB scales every remote participant, VoiceGainOffDB to
+	// VoiceGainMaxDB. Notification sounds have their own and are deliberately not
+	// scaled by it.
+	OutputGainDB int `json:"output_gain_db"`
+
+	// UserGainsDB is how loud one participant is heard, keyed by user ID, in the
+	// same decibels and on top of OutputGainDB. Unity is not stored — SetUserGain
+	// drops it — so the map is only ever as long as the list of people actually
+	// moved, and somebody set back to normal leaves no record behind.
+	UserGainsDB map[string]int `json:"user_gains_db"`
 
 	// DeepPLC reconstructs a lost packet with libopus's neural model instead of
 	// extrapolating the last pitch period. It costs nothing on a clean stream —
@@ -296,11 +305,32 @@ type Voice struct {
 	// on by default, and it is a setting because it is the reader's machine.
 	DeepPLC bool `json:"deep_plc"`
 
+	/* Both directions */
+
+	// SoftClip rounds a peak that overshoots the ceiling instead of slicing it
+	// flat, on the microphone and on the call's playback alike. Without it the top
+	// of the gain range is distortion rather than loudness, which is the whole
+	// reason the range can go as high as it does.
+	SoftClip bool `json:"soft_clip"`
+
 	/* On joining */
 
 	JoinMuted    bool `json:"join_muted"`
 	JoinDeafened bool `json:"join_deafened"`
 }
+
+// What a voice gain may be set to, in decibels. Decibels rather than a
+// percentage because a percentage is linear on amplitude — half of one is -6 dB,
+// so the whole of the useful boost crowds into the top of the scale — and
+// because a threshold, a meter and a gain that share one unit cannot disagree
+// about what a number means.
+//
+// VoiceGainOffDB is the bottom of the range and means silence: no decibel figure
+// does, so the end of the scale has to.
+const (
+	VoiceGainOffDB = -40
+	VoiceGainMaxDB = 20
+)
 
 /* Enumerated values */
 
@@ -413,8 +443,8 @@ func Default() Settings {
 		Voice: Voice{
 			// Voice activity rather than push-to-talk: it is what a client with no
 			// key captured yet can actually do, and the gate is what the sensitivity
-			// slider is for. Both volumes at unity, and joining neither muted nor
-			// deafened — a reader who wants either can say so, and a client that
+			// slider is for. Both gains at unity — 0 dB — and joining neither muted
+			// nor deafened: a reader who wants either can say so, and a client that
 			// joins silent with no obvious reason reads as broken.
 			Mode:        VoiceModeActivity,
 			Sensitivity: 35,
@@ -425,8 +455,13 @@ func Default() Settings {
 			// room — is the rare one.
 			NoiseSuppression: true,
 
-			InputVolume:  100,
-			OutputVolume: 100,
+			InputGainDB:  0,
+			OutputGainDB: 0,
+
+			// On: it costs a branch a sample on everything below the knee, and it is
+			// what makes a gain past a few decibels sound like a louder voice rather
+			// than a broken one.
+			SoftClip: true,
 
 			// On: a clean stream decodes at exactly the same price either way, so
 			// the only machine that pays is one already losing packets, which is the
@@ -525,6 +560,24 @@ func Update(mutate func(*Settings)) {
 	scheduleSave()
 }
 
+// SetUserGain records how loud one participant is heard at, in decibels. Unity
+// is a deletion rather than an entry: it is what everybody is at already, and
+// storing it would keep a row for every person ever nudged and put back.
+func SetUserGain(userID string, db int) {
+	Update(func(s *Settings) {
+		if userID == "" || db == 0 {
+			delete(s.Voice.UserGainsDB, userID)
+			return
+		}
+
+		if s.Voice.UserGainsDB == nil {
+			s.Voice.UserGainsDB = make(map[string]int)
+		}
+
+		s.Voice.UserGainsDB[userID] = clamp(db, VoiceGainOffDB, VoiceGainMaxDB)
+	})
+}
+
 // Load reads the settings file into the current settings. An absent file is not
 // an error — it is what every first run looks like — and a malformed one is
 // reported and ignored, since refusing to start over a settings file the user
@@ -583,6 +636,22 @@ func (s *Settings) sanitise() {
 	// would be silence reported as a number.
 	s.Notifications.SoundVolume = clamp(s.Notifications.SoundVolume, 0, 100)
 	s.Notifications.TypingVolume = clamp(s.Notifications.TypingVolume, 0, 100)
+
+	// A gain the file may name anything at. The ceiling is the one the mixer
+	// enforces anyway; clamping here is what keeps the slider and the file
+	// agreeing about where the range ends.
+	s.Voice.Sensitivity = clamp(s.Voice.Sensitivity, 0, 100)
+	s.Voice.InputGainDB = clamp(s.Voice.InputGainDB, VoiceGainOffDB, VoiceGainMaxDB)
+	s.Voice.OutputGainDB = clamp(s.Voice.OutputGainDB, VoiceGainOffDB, VoiceGainMaxDB)
+
+	for id, db := range s.Voice.UserGainsDB {
+		if db == 0 {
+			delete(s.Voice.UserGainsDB, id)
+			continue
+		}
+
+		s.Voice.UserGainsDB[id] = clamp(db, VoiceGainOffDB, VoiceGainMaxDB)
+	}
 
 	floor(&s.Cache.ImageDiskMiB, 1)
 	floor(&s.Cache.ImageMemoryMiB, 1)
@@ -664,6 +733,7 @@ func (s *Settings) clone() *Settings {
 	next.Styles.Sizes = maps.Clone(s.Styles.Sizes)
 	next.Styles.Colors = maps.Clone(s.Styles.Colors)
 	next.Notifications.SoundFiles = maps.Clone(s.Notifications.SoundFiles)
+	next.Voice.UserGainsDB = maps.Clone(s.Voice.UserGainsDB)
 
 	return &next
 }

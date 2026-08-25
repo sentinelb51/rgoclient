@@ -269,12 +269,19 @@ func (a *App) restyle() {
 	if a.currentChannelID != "" {
 		a.displayCached()
 	}
+	a.restoreFriendsPage()
 
 	// The typing line is a fresh widget knowing nothing, and the channel rows are the
 	// same objects with their renderers replaced. Both are put back from state that
 	// outlived the rebuild.
 	a.refreshTyping()
 	a.syncChannelList()
+
+	// So is the call island, which starts hidden: a restyle under a running call
+	// would otherwise leave the reader in one with nothing on screen to leave it
+	// from. A connected call needs no SetState to come back — a fresh pill is a
+	// green dot and no word, which is what Connected looks like.
+	a.syncCallIsland()
 
 	a.styleNativeChrome(a.window)
 }
@@ -347,6 +354,17 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		RemoveBanner: a.removeBanner,
 		SetBio:       a.setBio,
 		LoadProfile:  a.loadSelfProfile,
+
+		LoadSecurity:   a.loadSecurity,
+		ChangePassword: a.changePassword,
+		ChangeEmail:    a.changeEmail,
+		EnableTOTP:     a.enableTOTP,
+		DisableTOTP:    a.disableTOTP,
+		RecoveryCodes:  a.recoveryCodes,
+		RenewRecovery:  a.renewRecovery,
+		RenameLogin:    a.renameLogin,
+		RevokeLogin:    a.revokeLogin,
+		RevokeOthers:   a.revokeOthers,
 
 		Sounds:      settingsSounds,
 		ChooseSound: a.chooseSound,
@@ -426,21 +444,28 @@ func (a *App) logOut() {
 // of the ones just revoked, so its card would offer a sign-in that can only fail.
 // Removed *before* the request — the identity is read off a session about to be
 // dropped, and a failure to reach the server does not make the token less dead.
+// The challenge in front of it is Revolt's: every route that ends a session is
+// ticket-gated, so the question is asked before anything is torn down — a card
+// raised over a client that had already returned to the login screen would be
+// asking about an account it no longer knows.
 func (a *App) logOutEverywhere() {
-	a.closeSettings()
+	a.challenge("Signing every device out of this account needs you to confirm it's you.",
+		func(ticket string) {
+			a.closeSettings()
 
-	if userID := a.store.SelfID(); userID != "" {
-		if err := RemoveSession(userID); err != nil {
-			log.Printf("remove session: %v", err)
-		}
-	}
+			if userID := a.store.SelfID(); userID != "" {
+				if err := RemoveSession(userID); err != nil {
+					log.Printf("remove session: %v", err)
+				}
+			}
 
-	a.background(
-		a.client.LogoutEverywhere,
-		func(err error) { log.Printf("revoke all sessions: %v", err) },
-	)
-	a.resetSessionState()
-	a.showLogin()
+			a.background(
+				func() error { return a.client.LogoutEverywhere(ticket) },
+				func(err error) { log.Printf("revoke all sessions: %v", err) },
+			)
+			a.resetSessionState()
+			a.showLogin()
+		})
 }
 
 // setPresence publishes how this account appears. Nothing is painted here: the
@@ -609,7 +634,7 @@ func (a *App) changeUsername() {
 		return
 	}
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Change username",
 		Action: "Change",
 		Busy:   "Changing...",
@@ -618,11 +643,7 @@ func (a *App) changeUsername() {
 			{Label: "Current password", Placeholder: "Your account password", Password: true},
 		},
 		OnSubmit: a.submitUsername,
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.prompt = dialog // after showOverlay, which clears the field
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 // submitUsername changes the handle, leaving the card up until it has. The new

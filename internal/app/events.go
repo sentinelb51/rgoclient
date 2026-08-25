@@ -29,7 +29,7 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 // permissions, every member, every emoji — so none is worth making once per
 // event.
 //
-// Deliberately only these five. What an event changes about the *open* thing — a
+// Deliberately only these six. What an event changes about the *open* thing — a
 // header, the channel glyph, whether the composer takes a message — is a setter
 // and a lookup, and deferring those would feel slow to save nothing.
 //
@@ -37,6 +37,10 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 // the membership already resolved rather than from a fresh walk. Presence moves
 // a member between sections and nothing else — not their name, so not the order
 // — which is what lets the two be different amounts of work.
+//
+// refreshFriends is queued only while that page is open, where it is the same
+// walk the member sidebar does and drawn the same way: presence moves nobody's
+// name, but a row's ring is the only thing on the page that says who is here.
 type refreshTarget uint8
 
 const (
@@ -45,6 +49,7 @@ const (
 	refreshMembers
 	refreshEmojis
 	refreshPresence
+	refreshFriends
 )
 
 // refreshDelay is how long a queued rebuild waits for more of the same burst.
@@ -100,6 +105,10 @@ func (a *App) flushRefresh() {
 		a.refreshMemberPresence()
 	}
 
+	if targets&refreshFriends != 0 {
+		a.refreshFriends()
+	}
+
 	// Last, and skipped when the rail was rebuilt: which servers the account is in
 	// is also which emoji it may type, so refreshServerList re-takes these itself
 	// and a flush that ran it has already paid for this walk.
@@ -126,6 +135,8 @@ func (a *App) dispatch(event client.Event) {
 		a.doOnUI(func() { a.onReady(e) }, true)
 	case client.Disconnected:
 		a.doOnUI(func() { a.onDisconnected(e) }, true)
+	case client.SessionsChanged:
+		a.doOnUI(a.onSessionsChanged, false)
 	case client.MessageCreated:
 		a.doOnUI(func() { a.onMessageCreated(e) }, false)
 	case client.MessageUpdated:
@@ -186,13 +197,15 @@ func (a *App) onReady(event client.Ready) {
 		a.playSound(audio.Online)
 	}
 
+	// Both taken wholesale rather than merged: Ready is the account's whole read
+	// state, so a reconnect must not carry over a mention the reader has since
+	// cleared, nor a channel read on another client while this one was away.
+	// The one thing carried over is what was dismissed — Revolt keeps no record of
+	// that, so re-reading its set is exactly when it would come back.
+	a.unreadChannels = make(map[string]bool, len(event.UnreadChannelIDs))
 	for _, channelID := range event.UnreadChannelIDs {
 		a.unreadChannels[channelID] = true
 	}
-	// Taken wholesale rather than merged: Ready is the account's whole read state,
-	// and a reconnect must not carry over a mention the reader has since cleared.
-	// The one thing carried over is what was dismissed — Revolt keeps no record of
-	// that, so re-reading its set is exactly when it would come back.
 	a.mentions = a.keepDismissed(event.MentionIDs)
 
 	a.showMainUI()
@@ -203,6 +216,16 @@ func (a *App) onReady(event client.Ready) {
 
 	a.serverIDs = slices.Clone(event.ServerIDs)
 	a.refreshServerList()
+
+	// The voice node is instance configuration and cannot change under a running
+	// client, but it is resolved lazily — so without this the first join of a
+	// session pays a REST round trip for it at the moment somebody is waiting on a
+	// call. Nothing depends on the answer arriving.
+	a.background(func() error {
+		a.client.WarmVoiceNode()
+
+		return nil
+	}, func(error) {})
 
 	// An account in no servers still has somewhere to land: the home view opens on
 	// its direct messages rather than leaving the client blank.
@@ -227,6 +250,7 @@ func (a *App) savePendingToken() {
 
 	saved := SavedSession{
 		Token:     a.pendingToken,
+		SessionID: a.pendingSessionID,
 		UserID:    self.ID,
 		Username:  self.Username,
 		AvatarURL: self.AvatarURL,
@@ -235,7 +259,7 @@ func (a *App) savePendingToken() {
 		log.Printf("save session: %v", err)
 	}
 
-	a.pendingToken = ""
+	a.pendingToken, a.pendingSessionID = "", ""
 }
 
 // onDisconnected tears down a dead session and returns to the login screen. Only
@@ -568,7 +592,7 @@ func (a *App) onRecipientsChanged(event client.RecipientsChanged) {
 	}
 
 	if event.ChannelID == a.currentChannelID {
-		a.refreshMentionCandidates()
+		a.refreshRecipients()
 	}
 }
 
@@ -659,9 +683,27 @@ func (a *App) onRelationshipChanged(event client.RelationshipChanged) {
 // change a membership already resolved can absorb: nobody's name moves, so the
 // order stands and only these people need resolving again.
 func (a *App) onPresenceChanged(event client.PresenceChanged) {
-	if !config.Current().Behaviour.LiveMemberPresence || a.currentServerID == "" {
+	// Before the member sidebar's gate and outside the setting: the friends page is
+	// the one surface open while no server is, so the first line below would drop
+	// every event it draws — and it is a list of the reader's own people rather
+	// than of a thousand strangers, which is what that setting is about.
+	a.friendsFollowPresence(event.UserID)
+
+	if !config.Current().Behaviour.LiveMemberPresence {
 		return
 	}
+
+	// A group's sidebar is the other list open while no server is. Its walk is the
+	// cheap one — a conversation carries its own participants — so it is rebuilt
+	// whole rather than patched the way a membership is.
+	if a.currentServerID == "" {
+		if a.inCurrentGroup(event.UserID) {
+			a.queueRefresh(refreshMembers)
+		}
+
+		return
+	}
+
 	if !a.store.HasMember(a.currentServerID, event.UserID) {
 		return
 	}

@@ -23,21 +23,28 @@ import (
 // members. Only the message area (index 2) stretches; the rest keep their fixed
 // widths, which is what makes the sections sit flush.
 //
-// Four layers sit over the row — notices, the tooltip (a server icon's name has
-// to overhang the narrow column it is anchored in) and the two settings pages.
-// The first two match no pointer event bar a notice card itself, so the row keeps
-// receiving every click and hover. Settings is a layer rather than an overlay
-// because the modal layer holds one thing at a time, and a confirmation raised
-// from the page has to draw over it. Only one of the two pages is ever up: a
-// server's is opened from the sidebar the client's own covers.
+// Five layers sit over the row — the call island, notices, the tooltip (a server
+// icon's name has to overhang the narrow column it is anchored in) and the two
+// settings pages. None of them matches a pointer event bar the island and a
+// notice card themselves, so the row keeps receiving every click and hover.
+// Settings is a layer rather than an overlay because the modal layer holds one
+// thing at a time, and a confirmation raised from the page has to draw over it.
+// Only one of the two pages is ever up: a server's is opened from the sidebar the
+// client's own covers.
+//
+// The island is the lowest of the five: it is a standing report rather than an
+// answer to anything, so a notice pushed over it wins, and the settings page — a
+// surface of its own — covers it outright.
 func (a *App) buildUI() fyne.CanvasObject {
-	// Built before the columns, the channel column mounting it in its bottom slot.
-	a.callDock = ui.NewCallDock(ui.CallDockActions{
+	a.callIsland = ui.NewCallIsland(a.images, ui.CallIslandActions{
 		OnMute:    a.toggleMute,
 		OnDeafen:  a.toggleDeafen,
 		OnHangUp:  a.leaveCall,
+		OnJoin:    a.joinCallHere,
 		OnChannel: func() { a.OnChannelTapped(a.callChannelID) },
+		OnState:   a.showCallState,
 	})
+	a.callIslandLayer = ui.NewCallIslandLayer(a.callIsland)
 
 	a.mainRow = ui.NewFillRow(2,
 		a.buildServerList(),
@@ -46,8 +53,8 @@ func (a *App) buildUI() fyne.CanvasObject {
 		a.buildMemberList(),
 	)
 
-	return container.NewStack(a.mainRow, a.notices.Layer, a.tooltip.Layer,
-		a.settings.Layer, a.serverSettings.Layer)
+	return container.NewStack(a.mainRow, a.callIslandLayer, a.notices.Layer,
+		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer)
 }
 
 /* Server sidebar */
@@ -154,11 +161,26 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	a.serverHeader = widget.NewLabelWithStyle(name, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	a.serverHeader.Truncation = fyne.TextTruncateEllipsis
 
-	// The cog is built once and shown per server, as the message header's own
-	// buttons are: which servers it belongs on changes with the selection, and a
-	// button rebuilt per switch is a widget per switch.
+	// The cog and the plus share the header's one trailing slot, neither view
+	// having the other's button: a server is configured, and the home view is added
+	// to. Both are built once and shown per view, as the message header's own
+	// buttons are — a button rebuilt per switch is a widget per switch.
 	a.serverCog = ui.NewIconButton(assets.CogIcon, a.openServerSettings, nil)
+
+	// Only the plus is labelled: a cog in the corner of a header says settings
+	// wherever it is drawn, where a plus says "new" and nothing about what of. The
+	// closure reads the field rather than closing over the button, which does not
+	// exist until the call it is being passed to returns.
+	a.groupAdd = ui.NewIconButton(assets.ActionAddIcon, a.showCreateGroup, func(hovering bool) {
+		if hovering {
+			a.tooltip.Show(newGroupTip, a.groupAdd)
+			return
+		}
+		a.tooltip.Hide()
+	})
+
 	a.syncServerCog()
+	a.syncGroupAdd()
 
 	a.refreshChannelList()
 
@@ -166,19 +188,18 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
 		container.NewVScroll(a.channelList))
 
-	// The name takes what the cog leaves, so a long one shortens rather than
-	// pushing the button out of the column.
-	title := container.NewBorder(nil, nil, nil, a.serverCog, a.serverHeader)
+	// The name takes what the buttons leave, so a long one shortens rather than
+	// pushing them out of the column. The row charges nothing for the hidden one,
+	// which is always exactly one of the two.
+	title := container.NewBorder(nil, nil, nil,
+		ui.HBoxNoSpacing(a.groupAdd, a.serverCog), a.serverHeader)
 
 	// The pinned group sits outside that padding and above the scroll: full column
 	// width, which is what says it is not one of the rows below, and it does not
 	// scroll away from what it leads to.
 	header := ui.VBoxNoSpacing(container.NewPadded(title), a.channelTop)
 
-	// The dock hangs under the list in both views, and is the one fixed block
-	// there besides the pinned group: the column is not rebuilt by a channel-list
-	// refresh, and a call outlives leaving the channel and the server.
-	a.channelColumn = container.NewBorder(header, a.callDock, nil, nil, scroll)
+	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
 
 	return ui.NewFixedWidthContainer(theme.Sizes.ChannelSidebarWidth, background,
 		ui.NewFillRow(0, a.channelColumn, ui.NewColumnDivider()))
@@ -205,7 +226,7 @@ func (a *App) refreshChannelList() {
 	if a.homeSelected {
 		// Rebuilt with the list rather than kept aside: the sidebar's objects are
 		// replaced wholesale, so a row held across one is a widget in no container.
-		a.friendsRow = ui.NewFriendsRow(a.showFriends)
+		a.friendsRow = ui.NewFriendsRow(a.showFriendsPage)
 
 		// Neither of these is a conversation with somebody, so they are pinned as
 		// their own group rather than sorted among the ones that are — Saved Notes
@@ -339,7 +360,7 @@ func (a *App) callRows(channel domain.Channel) []fyne.CanvasObject {
 		// Built when the click arrives rather than captured: what the menu may offer
 		// depends on permissions a role change can move under a standing sidebar.
 		row.Menu = func() []*fyne.MenuItem {
-			return a.voiceParticipantMenu(channel.ID, participant.UserID)
+			return a.voiceParticipantMenu(row, channel.ID, participant)
 		}
 
 		// A rebuilt row is a new object and knows nothing of who was talking when
@@ -458,6 +479,16 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		fyne.NewMenuItemWithIcon("Copy channel ID", fynetheme.ContentCopyIcon(), func() {
 			ui.CopyToClipboard(channelID)
 		}),
+	}
+
+	// A group is joined by being put in rather than by redeeming anything, so the
+	// two ways in are named apart: this one adds somebody, the one below hands out
+	// a code.
+	if a.canInviteToGroup(channelID) {
+		items = append(items,
+			fyne.NewMenuItemWithIcon("Add people", assets.SystemAddedIcon,
+				func() { a.showInviteToGroup(channelID) }),
+		)
 	}
 
 	// Offered here rather than on the server icon: Revolt has no server-wide invite,
@@ -659,6 +690,7 @@ func (a *App) enterServer(serverID string) (domain.Server, bool) {
 	a.syncServerSelection(serverID)
 	a.setHeader(a.serverHeader, server.Name)
 	a.syncServerCog()
+	a.syncGroupAdd()
 	a.refreshChannelList()
 
 	// The emoji of the server being entered come first in the composer's list, as
@@ -735,8 +767,11 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	// What was half-composed stays in the entry, but the channel being left should
-	// stop being told it is still being written in.
+	// stop being told it is still being written in. The friends page goes too — it
+	// stands in the message column's slot — and it never holds a selection to be
+	// this one, showFriendsPage having cleared it on the way in.
 	a.stopTyping(a.currentChannelID)
+	a.leaveFriendsPage()
 
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)
@@ -756,7 +791,8 @@ func (a *App) selectChannel(channelID string) {
 	}
 
 	a.syncChannelList()
-	a.refreshMentionCandidates()
+	a.refreshRecipients()
+	a.ensureRecipients()
 	a.syncComposer()
 	a.refreshSlowmode()
 	a.refreshTyping() // whoever was typing here while the channel was in the background
@@ -784,9 +820,12 @@ func (a *App) selectChannel(channelID string) {
 	a.loadChannelMessages(channelID)
 }
 
-// clearChannelSelection deselects the current channel and clears the view.
+// clearChannelSelection deselects the current channel and clears the view. The
+// friends page goes with it — it stands in the message column's slot, so
+// whatever is putting the column back is also taking the page down.
 func (a *App) clearChannelSelection() {
 	a.stopTyping(a.currentChannelID)
+	a.leaveFriendsPage()
 
 	a.currentChannelID = ""
 	a.clearMessages()
@@ -794,6 +833,7 @@ func (a *App) clearChannelSelection() {
 	a.syncChannelKind()
 	a.syncChannelTopic()
 	a.syncChannelList()
+	a.refreshRecipients() // a group's people go with the group, and a server's stay
 	a.refreshSlowmode()
 	a.refreshTyping()
 	a.syncComposer()
@@ -834,13 +874,16 @@ func (a *App) channelRows() iter.Seq[*ui.ChannelWidget] {
 }
 
 // syncChannelList refreshes the selection, unread and typing state of every
-// channel row.
+// channel row, and the friends row above them — it answers to selection as they
+// do, the page it opens standing in the same slot their messages would.
 func (a *App) syncChannelList() {
 	animate := config.Current().Behaviour.TypingAnimation
 
 	for w := range a.channelRows() {
 		a.applyChannelState(w, animate)
 	}
+
+	a.syncFriendsRow(a.awaitingAnswer())
 }
 
 // releaseChannelRows stops what the rows about to be dropped are still running.
@@ -885,8 +928,27 @@ func (a *App) channelName() string {
 /* The home view */
 
 // homeHeader titles the channel sidebar while the home view is open, standing
-// in for the server name.
-const homeHeader = "Direct Messages"
+// in for the server name; newGroupTip labels the button beside it.
+const (
+	homeHeader  = "Direct Messages"
+	newGroupTip = "New group"
+)
+
+// syncGroupAdd shows the header's new-group button in the home view alone. It
+// makes a conversation, and a server's channels are not conversations — the card
+// it opens picks from this account's friends, which no server has to do with.
+func (a *App) syncGroupAdd() {
+	if a.groupAdd == nil {
+		return
+	}
+
+	if a.homeSelected {
+		a.groupAdd.Show()
+		return
+	}
+
+	a.groupAdd.Hide()
+}
 
 // selectHome opens the home view. The cached list paints at once and a refresh
 // fires regardless: it is a fetched snapshot with no gateway event behind it, so
@@ -903,6 +965,7 @@ func (a *App) selectHome() {
 	a.syncServerSelection("")
 	a.setHeader(a.serverHeader, homeHeader)
 	a.syncServerCog()
+	a.syncGroupAdd()
 	a.refreshChannelList()
 	a.refreshMemberList()
 

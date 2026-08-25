@@ -75,11 +75,32 @@ type publisher struct {
 	stopped   sync.WaitGroup
 }
 
-func newPublisher(room *lksdk.Room, src PCMSource, call *Call, opts Options) (*publisher, error) {
-	if src == nil {
-		return nil, errors.New("no microphone")
-	}
+// microphone is the encoder and the track it feeds, with nothing driving them
+// yet. It is built *before* the room exists because publishing in the join
+// request means handing the track over at the dial — so what a publisher is made
+// of and when it starts running are two separate moments.
+type microphone struct {
+	track   *lksdk.LocalTrack
+	encoder *gopus.Encoder
+	tuning  opusTuning
+}
 
+// micPublication is what the track is published as, shared by both dials so the
+// far end sees the same thing whichever one connected.
+//
+// DisableDTX is left false so a gated frame costs comfort noise rather than a
+// track the far end thinks has died.
+func micPublication() *lksdk.TrackPublicationOptions {
+	return &lksdk.TrackPublicationOptions{
+		Name:   "microphone",
+		Source: livekit.TrackSource_MICROPHONE,
+	}
+}
+
+// newMicrophone builds the encoder and the track. A fresh one is needed per dial
+// attempt: preparing a publication binds a transceiver to the track, so a track
+// offered to a join that failed cannot be offered to the next one.
+func newMicrophone(opts Options) (*microphone, error) {
 	encoder, err := gopus.NewEncoder(sampleRate, channels, gopus.Voip)
 	if err != nil {
 		return nil, fmt.Errorf("opus encoder: %w", err)
@@ -92,12 +113,12 @@ func newPublisher(room *lksdk.Room, src PCMSource, call *Call, opts Options) (*p
 	encoder.SetBitrate(bitrate)
 	encoder.SetVbr(true)
 
-	p := &publisher{source: src, encoder: encoder, done: make(chan struct{})}
+	mic := &microphone{encoder: encoder}
 
 	// Loss tolerance, where the binding offers it. A build without the fork simply
 	// runs without FEC rather than failing to compile or to start.
 	if tuning, ok := any(encoder).(opusTuning); ok {
-		p.tuning = tuning
+		mic.tuning = tuning
 		_ = tuning.SetInBandFEC(true)
 		_ = tuning.SetPacketLossPerc(initialLossPercent)
 		_ = tuning.SetDTX(true)
@@ -126,18 +147,27 @@ func newPublisher(room *lksdk.Room, src PCMSource, call *Call, opts Options) (*p
 	if err != nil {
 		return nil, fmt.Errorf("opus track: %w", err)
 	}
-	p.track = track
+	mic.track = track
 
-	// DisableDTX is left false so a gated frame costs comfort noise rather than a
-	// track the far end thinks has died.
-	publication, err := room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
-		Name:   "microphone",
-		Source: livekit.TrackSource_MICROPHONE,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("publish microphone: %w", err)
+	return mic, nil
+}
+
+// newPublisher starts driving an already-published track. The publication is the
+// dial's to produce — in the join request where the node takes one there, in a
+// negotiation of its own where it does not — so by here it exists either way.
+func newPublisher(mic *microphone, pub *lksdk.LocalTrackPublication, src PCMSource, call *Call, opts Options) (*publisher, error) {
+	if src == nil {
+		return nil, errors.New("no microphone")
 	}
-	p.pub = publication
+
+	p := &publisher{
+		track:   mic.track,
+		pub:     pub,
+		source:  src,
+		encoder: mic.encoder,
+		tuning:  mic.tuning,
+		done:    make(chan struct{}),
+	}
 
 	p.selfID = opts.SelfID
 

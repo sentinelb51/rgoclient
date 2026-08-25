@@ -66,6 +66,13 @@ type Client struct {
 	events chan Event
 	done   chan struct{} // closed by Shutdown; unblocks a stalled emit
 
+	// ticketMu serialises the calls that carry an MFA ticket. revoltgo has no
+	// per-request headers, so a ticket is set on the session's shared header map
+	// for the length of one call — two overlapping ones would leave it holding the
+	// other's. Its own lock, not mu: a gated call is a whole round trip, and mu is
+	// taken on the read path.
+	ticketMu sync.Mutex
+
 	mu       sync.Mutex      // guards the maps below and voiceNodeName
 	fetching map[string]bool // channelID -> a page request is already in flight
 
@@ -79,6 +86,12 @@ type Client struct {
 	// server IDs — and a channel and a server sharing an ID is not a thing Revolt
 	// promises will never happen.
 	fetchingMembers map[string]bool
+
+	// sessionID is *this* login's own ID, or "" where it was never recorded. No
+	// route answers "which of these sessions am I", so it is only ever known from
+	// the login that made it — kept here so the session list can mark itself and
+	// EventAuth can tell this session being revoked from any other.
+	sessionID string
 
 	// relations is what the client knows about a relationship that State does not.
 	// Ready fills User.Relationship for everybody it names, but nothing keeps it
@@ -134,6 +147,19 @@ func (c *Client) Open(token string) error {
 	return c.start(revoltgo.New(token))
 }
 
+// OpenAs is Open for a token saved beside the ID of the session it belongs to,
+// which is the only way a restored login knows which of the account's sessions
+// it is — no route answers that. The ID is recorded *after* the session, opening
+// one having cleared whatever came before.
+func (c *Client) OpenAs(token, sessionID string) error {
+	if err := c.Open(token); err != nil {
+		return err
+	}
+	c.setSessionID(sessionID)
+
+	return nil
+}
+
 // start attaches a session: it drops whatever came before, registers the gateway
 // handlers against this session's epoch, and opens the websocket.
 func (c *Client) start(session *revoltgo.Session) error {
@@ -176,9 +202,16 @@ func (c *Client) Logout() error {
 // the answer to a token that has been used somewhere it shouldn't have been.
 //
 // revokeSelf is true because the alternative is signing every other device out
-// and staying signed in here, which is not what the words mean.
-func (c *Client) LogoutEverywhere() error {
-	return c.revoke(func(session *revoltgo.Session) error { return session.SessionsDeleteAll(true) })
+// and staying signed in here, which is not what the words mean; that one is
+// RevokeOtherSessions. The route is **ticket-gated**, like every other way of
+// ending a session, so the caller answers a challenge first — and the ticket is
+// spent on the session this has already dropped, hence withTicketOn.
+func (c *Client) LogoutEverywhere(ticket string) error {
+	return c.revoke(func(session *revoltgo.Session) error {
+		return c.withTicketOn(session, ticket, func(session *revoltgo.Session) error {
+			return session.SessionsDeleteAll(true)
+		})
+	})
 }
 
 // revoke is the shared half of the two above: drop the session, then spend it on
@@ -206,6 +239,7 @@ func (c *Client) Close() {
 	clear(c.fetching)
 	clear(c.fetchingMembers)
 	clear(c.relations)
+	c.sessionID = ""
 	c.mu.Unlock()
 
 	if session != nil {

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"RGOClient/internal/audio"
 	"RGOClient/internal/client"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/voice"
@@ -18,6 +17,10 @@ import (
 
 // A live call against the real server. Skipped unless RGO_LIVE is set, and it
 // signs in with the saved session on this machine.
+//
+// It publishes a sine and never opens a microphone. An automated test that puts
+// the room on the wire is a hazard with no assertion behind it, so the device is
+// deliberately unreachable from here rather than a mode to be asked for.
 //
 // What it is actually for is the one assumption nothing else can check: that
 // LiveKit's participant identity is the Revolt user ID. Everything per-person —
@@ -242,34 +245,16 @@ func TestLiveCall(t *testing.T) {
 	}
 	t.Logf("credentials: url=%s token=%d bytes", creds.URL, len(creds.Token))
 
-	// The real capture chain rather than a synthetic source, so this exercises the
-	// device, the gate and the encoder together. RGO_LIVE=tone falls back to the
-	// sine where there is no microphone.
-	var source voice.PCMSource = &tone{}
-	if os.Getenv("RGO_LIVE") != "tone" {
-		capture, err := audio.OpenInput("", audio.InputConfig{Sensitivity: 35, Gain: 1, HighPass: true})
-		if err != nil {
-			t.Logf("no microphone (%v); falling back to a sine", err)
-		} else {
-			defer capture.Close()
-			source = capture
-			t.Log("publishing from the real microphone")
-		}
-	}
-
+	// A synthetic source, always. This test joins a real channel on a real server
+	// and publishes for twenty seconds, so opening the machine's microphone would
+	// put whatever is in the room on the wire — and it never asserted anything
+	// about the device to pay for that. What the real capture chain does is the
+	// app's to demonstrate, not an automated test's.
 	sink := newCountingSink()
-	call, err := voice.Join(creds, source, sink, voice.Options{SelfID: me.UserID})
+
+	call, err := voice.Join(creds, &tone{}, sink, voice.Options{SelfID: me.UserID})
 	if err != nil {
 		t.Fatalf("voice.Join: %v", err)
-	}
-
-	if capture, ok := source.(*audio.Capture); ok {
-		go func() {
-			for range 8 {
-				time.Sleep(2 * time.Second)
-				t.Logf("mic level=%.4f voiced=%v", capture.Level(), capture.Voiced())
-			}
-		}()
 	}
 
 	// Drain events for a while, recording what identities turn up.

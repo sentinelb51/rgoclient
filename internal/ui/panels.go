@@ -204,8 +204,8 @@ func (d *messageIsland) buildCountRow(trailing fyne.CanvasObject) fyne.CanvasObj
 
 // buildWell is the sunk surface the cards sit in. The scroller cannot be asked
 // how tall it wants to be — container.Scroll reports its own current height as
-// its minimum — so the list is measured and the ceiling applied here, as the
-// friends list does it.
+// its minimum — so the list is measured and the ceiling applied here, through
+// cappedHeightLayout.
 func (d *messageIsland) buildWell(res fyne.Resource) fyne.CanvasObject {
 	pad := theme.Sizes.IslandWellPadding
 

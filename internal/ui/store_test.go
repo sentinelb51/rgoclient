@@ -29,6 +29,8 @@ type fakeStore struct {
 
 	participants map[string][]domain.VoiceParticipant // channelID
 
+	channelOverrides map[string]domain.ChannelOverrides // channelID
+
 	permissions       domain.Permission
 	serverPermissions domain.Permission
 	memberPermissions domain.Permission
@@ -166,6 +168,12 @@ func (s *fakeStore) ServerPermissions(string) domain.Permission { return s.serve
 
 func (s *fakeStore) MemberServerPermissions(string, string) domain.Permission {
 	return s.memberPermissions
+}
+
+func (s *fakeStore) ChannelOverrides(channelID string) (domain.ChannelOverrides, bool) {
+	overrides, ok := s.channelOverrides[channelID]
+
+	return overrides, ok
 }
 
 // testDeps is the bundle a widget test mounts against: a store that knows

@@ -48,7 +48,28 @@ naming and the test policy.
   stacked over it, and carries what `PopUpMenu` did around the menu: clamping the
   position into the canvas, and the arrow/Enter/Escape handling — all exported
   `Menu` calls. It takes canvas focus while it is up, which keeps Escape off
-  `App.bindKeys`.
+  `App.bindKeys`. Its edge is `Colors.MenuOutline`, *lighter* than the client's
+  one hairline for the same reason the settings island's is: a menu hangs over
+  whatever was being read rather than meeting a surface, so a groove around it is
+  an edge nobody sees.
+- **A settings dropdown is not a menu at all.** `widget.Menu` lays its items out
+  at their own minimum whatever the pop-up around them is resized to — the flag
+  that would stretch them, `customSized`, is unexported and set only by
+  `NewPopUpMenu` — so a menu held open to a wider control drew rows the width of
+  its longest label, and a hovered one highlighted a strip adrift inside the box.
+  `ui.dropdownList` is the client's own rows in a plain `widget.PopUp` instead,
+  which is also what lets them alternate (`Colors.MenuStripeBg`). It carries the
+  same clamping, focus and key handling `contextMenu` does. Its width is set by
+  `MinSize` — the pop-up takes its size from what it holds — and its corners take
+  `SizeNamePopupRadius`, the radius of the surface the pop-up paints underneath:
+  a row fill outside that curve is a square nub the border then draws around.
+  The rows carry it per corner (`canvas.Rectangle.TopLeftCornerRadius`), first
+  and last only.
+- **`ColorNameFocus` is a menu's hover fill, not a focus ring.** Nothing the
+  client mounts draws a focus ring, and `widget.Menu` paints the item under the
+  pointer with it, so `AppTheme` answers it with `Colors.MenuHoverBg` rather than
+  the accent `ColorNamePrimary` still gets: an accent block following the pointer
+  down a menu reads as the option already chosen.
 - **A submenu is drawn by the menu, not by the pop-up around it.** `fyne.MenuItem`
   with a `ChildMenu` works inside `ui.contextMenu` — `widget.Menu` appends the
   child to its *own* renderer objects and places it beside the item — but the
@@ -56,9 +77,23 @@ naming and the test policy.
   `newContextMenu` stacks over that pop-up does not reach it. A submenu therefore
   wears Fyne's own menu background and no border; the member menu's roles and
   timeout spans are the two that use one, both being lists too long to flatten
-  into the menu itself.
-- **Two cards are elevated.** `ui.Elevate` casts a `canvas.Shadow`: the composer
-  dock, and the emoji picker's island over the plain panel Fyne draws behind any
+  into the menu itself. A **range** is not a list and has no menu shape at all,
+  so the item opens a card instead: `NewSliderCard`, hung beside the row through
+  `App.showPopover`. Its title is the fill slot and ellipsises, being somebody's
+  name as often as a word, and its `Icon` says what *kind* of value the card is
+  about where the title can only say whose. A range with a natural resting point
+  takes `Pivot` (`Slider.SetPivot`): each side of it gets half the travel and a
+  notch marks it, so unity on a −40..+20 gain sits in the middle rather than two
+  thirds along, and a drag within half a knob of it snaps there. Its track is recoloured (`Slider.SetTrack`) because the
+  default one is `ChannelSelectedBg`, the very colour a lifted card is — on
+  `NoticeBg` the unfilled travel vanished and the bottom of the range drew as a
+  lone knob, which is the same failure Fyne's own slider has here.
+- **Four cards are elevated.** `ui.Elevate` casts a `canvas.Shadow`: the composer
+  dock, the settings page's invite card, the call island (through
+  `elevate(rect, blur)`, at half again the blur — the dock meets the message
+  area's own edge where the island hangs over the header row with nothing under
+  it, and the halo is the only thing saying which is on
+  top), and the emoji picker's island over the plain panel Fyne draws behind any
   pop-up (`ColorNameOverlayBackground` at `SizeNamePopupRadius`, which the island
   covers with its own wider corner — what the shadow falls on is the couple of
   pixels that leaves). `DropShadow` follows the corner radius and paints
@@ -201,6 +236,25 @@ naming and the test policy.
   misses rather than returning a stale palette. Message buttons draw
   `action-*.svg` rather than Fyne's icons for the same reason: a themed resource
   takes its colour from a theme *name*, and delete reading as delete is the point.
+- **A mark is centred by its path coordinates, never by its `viewBox` origin.**
+  oksvg's `SetTarget` translates by `x-ViewBox.X` *before* scaling, so a viewBox
+  offset moves the drawing that many **device pixels** rather than that many
+  viewBox units — an offset that does nothing at the sizes a mark is drawn at and
+  changes with the size. `assets/voice.svg` and `assets/system-call.svg` are both
+  off-centre for this reason, having been drawn against an origin that does
+  nothing. To measure one, rasterise it with the software driver and take the
+  alpha bounding box — the arithmetic on a stroked bezier is not worth doing by
+  hand — then delete the harness.
+- **A handset has to be drawn solid.** `assets/call-end.svg` and
+  `assets/call-join.svg` are the only filled marks in the set. Outlined, at
+  `IconButtonGlyph` (17), a handset's inner and outer curves land a pixel apart
+  and the mark reads as a bitten crescent rather than a phone — which is what the
+  stroked pair before them did. `ui.tintedIcon` colours a fill as readily as a
+  stroke, being a byte replace of `#ffffff` over the whole file, so nothing else
+  had to change. Both are built from rounded rectangles and one annular sector
+  unioned by a nonzero fill: every face stays flat and every number is mirrored
+  about the box's centre line, which is what keeps the pair geometric and
+  symmetric where a hand-cut bezier drifts.
 - **Tap plumbing is `ui.tapBase`, not a hand-written pair of methods.** Embedding
   it supplies `Tapped`, `TappedSecondary`, `MouseMoved` and the pointer `Cursor`
   from two func fields, and every interactive widget here uses it. A widget whose
@@ -430,13 +484,15 @@ naming and the test policy.
   `buildRailColumn` drops a nil `foot` rather than laying it out — a layout walks
   its children calling `Visible()`, which a nil interface answers with a panic,
   and the server page pins nothing under its rail.
-  A section that **drills into one of its rows** — the role editor, the only one —
-  is still one section: `ServerSettingsPage.roleID` decides which groups
-  `rolesSection` returns, so the rail entry stays marked and tapping it is what
-  goes back, and the editor's group captions become the rail's sub-entries the
-  way any other section's do. The way in is `showRole`, and it must be re-derived
-  on every build: a role can be deleted, or moved above this account's own rank,
-  while its editor is open. What says so is the **back button above the title**
+  A section that **drills into one of its rows** is still one section: the page's
+  `roleID` / `channelID` decide which groups the section returns, so the rail entry
+  stays marked and tapping it is what goes back, and the drilldown's group captions
+  become the rail's sub-entries the way any other section's do. Two sections drill,
+  and Channels drills **twice** — a channel's overrides are a channel *and* a role
+  — so `paneBack` steps back one level at a time while a rail tap
+  (`closeDrilldown`) leaves all of them. The way in is `showRole` / `showChannel`,
+  and every level must be re-derived on every build: a role can be deleted or moved
+  above this account's own rank, and a channel deleted, while its editor is open. What says so is the **back button above the title**
   (`backLink`, `settingsBackLink`): `mount` is a section and empties it,
   `mountUnder` is something standing inside one and fills it, and there is no
   third way to write the pane — a way back outliving what it led out of would tap
@@ -458,7 +514,13 @@ naming and the test policy.
   A card of forty rows is read by its **markers**, not its controls:
   `markPermission` paints the same bar `boolRow` uses in the accent for a grant
   and the danger tone for a denial, so a role's shape is legible without reading
-  every dropdown.
+  every dropdown. **One grid serves four scopes** — a server role, the server's
+  default, a role in one channel and a channel's default — and `permissionScope`
+  is the whole of what separates them: three states or two, which bits are drawn
+  at all, whether a bit may be moved, and where the change is sent. A category
+  whose bits the mask empties is dropped rather than captioned over nothing, and
+  the two cards whose wording is about the server say it again for a channel
+  (`captionIn` / `detailIn`).
 - **A list row's own action is an outlined icon, not a filled button.** A page of
   lists with a filled `Edit` on every row is a column of accent slabs shouting
   from a surface that is mostly read — so `editButton` puts the `action-edit`
@@ -478,6 +540,110 @@ naming and the test policy.
   list's copy and revoke): two words at the end of a row whose own text is
   already a code and a destination is more to read than there is, and the marks
   are `action-*.svg`, so copy and delete mean the same thing here as on a message.
+- **`ui.FriendsPage` is a view, not a card.** It stands in the message area's own
+  slot with the message column hidden under it (`app.buildMessageArea`), which is
+  why it is a page at all: four sections of people, each row carrying what can be
+  done about somebody, is a surface a reader stays on rather than an answer to a
+  question — and a dialog holding it had to cap its own height and put a wall of
+  labelled buttons down its right-hand edge. It is read the way the settings page
+  is, and its rows are the settings page's **invite island**: `newIslandCard`,
+  which both now share so the two cannot drift a shade apart. Three differences
+  from that island:
+  - **The card is the row's primary action, not a button on it.**
+    `FriendEntry.Open` — writing to somebody, which the controller lifts out of
+    `relationshipButtons` — so what is left at the row's end is the rare and the
+    destructive, and there is no high-frequency target one square from Block.
+    Nil where Revolt would refuse the conversation (it opens one only between
+    friends), and the card falls back to the profile.
+  - **So it answers the pointer.** It fills (`FriendsCardHoverBg`) *and* lifts its
+    rim by `cardHoverLift` — the outline is drawn at rest everywhere here, so hover
+    has to brighten one rather than add one. Everything on the card that takes its
+    own hover hands it back: the buttons through `OutlinedIconButton.reporting`,
+    the picture through `islandLink`.
+  - **Its marks are picked from `ProfileButton.Action`**, not chosen at the call
+    site: the controller names the *kind* of action and `friendMark` decides the
+    glyph and the tint, so the card's word and the page's mark cannot come to mean
+    different things. What a mark means is the tooltip's to say.
+
+  **Every heading folds** (`friendsHeader`), because a section here only ever
+  grows: nobody cleans up sent requests, and a hundred of them would stand between
+  the reader and their friends. Three things about it:
+  - A folded section's cards are **not built**, not built and hidden — which is
+    the point of folding one. So `fold` redraws the whole list rather than
+    toggling visibility, and `FriendsPage.sections` keeps the controller's last
+    answer so a click on a heading is a redraw rather than a walk of every
+    relationship.
+  - `FriendsPage.folded` is what the *reader* decided, by caption, and is absent
+    until they touch one — which is how a decision is told from
+    `FriendSection.Folded`, the state the controller asks a section to *start* in
+    (Blocked, the one section nobody opens this page to read). It outlives a refill
+    and dies with the page, as `App.collapsedCategories` outlives a sidebar rebuild
+    and dies with the session.
+  - The strip is the column's full width and fills with
+    `ChannelHoverBackground` — a channel category's fill, not `ButtonHoverBg`,
+    which is a step brighter than the cards it names. Its mark is `drawIndicator`,
+    the client's one collapse glyph, and it sits at a card's own left padding so it
+    lines up over the pictures below it. The section's explanation is *inside* the
+    heading, so the whole block is one target and a shut section costs one line.
+
+  The picture leading a card is the one part of it that does not do what the card
+  does — it opens the profile, this client's rule for an avatar everywhere. An
+  `islandLink`, not a `TappableContainer`: a fill of its own inside a card that
+  already fills is a second shape appearing. Its tooltip is what makes the second
+  target findable — a rule is not a label.
+  Its column is `cappedWidthLayout`, not the settings page's fixed width: that
+  page is a layer over the whole window where this is as narrow as
+  `MessageAreaMinWidth`, so the width is a ceiling to shrink under and the
+  layout reports **no** width of its own — a minimum here would put the page into
+  the window's.
+  It carries one control of its own: `buildAsk`, the field and button that send a
+  friend request to a typed handle. It is built **once, in the constructor**, and
+  stands between the header and the scroll rather than in the list — `SetSections`
+  replaces that list wholesale and presence alone refills it, so a field inside it
+  would lose what somebody was typing. It reports through
+  `onAsk(handle, done)` rather than clearing itself: the field is emptied by what
+  took and kept by what did not, and only the controller knows which.
+- **The Security section is the one that fetches, and the one that must not.**
+  Its three answers arrive as one `SecurityState` held in `cachedOne` — the
+  single-value twin of `cachedList`, same three rules — for the life of one
+  *opening*, which `SettingsPage.visit` guards the way a server page's does. A
+  late answer rebuilds the **whole section** rather than refilling a list: unlike
+  a server's, every row in it is drawn from that one answer, not just the rows
+  under one caption. And `loadSecurity` checks `p.indexing` before asking:
+  `buildSettingsIndex` builds every section twice on the first keystroke in the
+  search box, so it goes in the list with `LoadProfile` and the microphone.
+- **Three cards ask for a credential, and each is its own type for one reason.**
+  `ChallengeDialog` cannot be a `Prompt` with a picker bolted on: which method is
+  chosen is what the field is *called*, so the label follows the pick, where a
+  Prompt's fields are fixed once it is built. Its field is masked whichever method
+  is chosen — a password must be, a recovery code is a secret written down once,
+  and a TOTP code masked is at worst unremarkable, where a field that changed its
+  mind about hiding what is in it as the picker moved would be worse than either.
+  `SecretDialog` holds the TOTP key **and** the code confirming it on one card,
+  the key being shown once. `NewCodesDialog` has no confirming action at all: the
+  codes *are* the outcome, so its button copies. All three draw a value somebody
+  has to read off the screen through `newSecretWell` — monospaced so a zero and an
+  O are different shapes, selectable, on the same field surface every other value
+  on a card sits on.
+- **A group card's rows are that same island, answered rather than followed.**
+  `ui/group.go` is one builder behind two constructors, the way `ChannelDialog` is
+  — a new group and an addition to one differ in a name field and nothing else.
+  Three things about a `pickRow`:
+  - **Chosen outranks hovered.** Three fills, one rectangle: a pointer passing
+    over must not paint over an answer already given, so `repaint` asks in that
+    order and `GroupPickChosenBg` is a colour of its own rather than the hover
+    fill reused.
+  - **The mark at its end is not a button.** Innermost wins, so an
+    `OutlinedIconButton` there would take both the tap and the hover from the row,
+    and the whole row is the one answer. `pickMark` is therefore a plain widget
+    that is not `Hoverable`, drawing one rim whose stroke moves and one tick that
+    is hidden until it is wanted — the tick is tinted at construction, which is
+    what a `tintedIcon` raster is cached under, and it is never recoloured.
+  - **The list is capped and carries no indicator.** `cappedHeightLayout` +
+    `NewPlainVScroll`, the arrangement `panels.go` already uses, and the ceiling
+    is chosen to cut a card in half: the rows carry their own mark down the right
+    edge, which is where a bar would land, so the cut is the whole of what says
+    the list goes on.
 - **`IconButton` is a mark; `OutlinedIconButton` is a target.** The first is
   right where the row has already said what is going on and the icons are
   *revealed* — a message's hover actions — and wrong where the icon is the only
@@ -532,14 +698,82 @@ naming and the test policy.
   `SetSpeaking` no-ops on an unchanged value, the contract `MemberRow.SetMember`
   and `ChannelWidget.SetState` already keep — see `internal/app/CLAUDE.md` item 36
   for why anything else is a full window repaint per syllable.
-- **`ui.CallDock` is a fourth kind of surface**, and not any of the three it looks
-  like. Not a `messageIsland` (the modal layer's surface for the three message
-  lists), not a composer dock badge (everything in that stack is about the *open
-  channel*, and a call outlives leaving the channel and the server), not a
-  `ChannelNote` (which is about the channel being read). It goes in the channel
-  column's bottom slot, follows `channelTop`'s rules — outside the list's padding,
-  full column width, its own `NewRowDivider`, hidden when there is no call — and
-  every `Show`/`Hide` is followed by `Relayout`, hiding a child reclaiming nothing.
+- **`ui.CallIsland` is a fourth kind of surface**, and not any of the three it
+  looks like. Not a `messageIsland` (the modal layer's surface for the three
+  message lists), not a composer dock badge (everything in that stack is about the
+  *open channel*), not a strip under the message header (which every view without
+  one would have to draw for itself). It floats on a layer of its own at the top of
+  the window — `NewCallIslandLayer`, stacked under the notice and settings layers —
+  because a call outlives leaving the channel, the server *and* the view. It is
+  drawn as the settings page's **invite card** — `SettingsGroupRadius`,
+  `SettingsRowPaddingH`, the same two text sizes and the same lifted outline —
+  because it is the same shape doing the same job somewhere else, and two cards a
+  shade apart read as a mistake. Five things about it are load-bearing:
+  - **The layer reports no minimum** (`NewLayer`), or a card appearing would grow
+    the window and Fyne would never give the room back.
+  - **The card is as wide as what is in it**, and a widget does not re-measure the
+    layer it floats on. Every setter is followed by `Sync` and then a `Refresh` of
+    the layer — `Relayout` alone re-runs one container's layout and would not
+    re-measure the nested `Center`. `app.settleCallIsland` is the pair.
+  - **A part that comes and goes must not cost a gap.** `NewGapRow`/`NewGapColumn`
+    charge a gap per *visible* child, so a half with no server to name hides the
+    **slot** holding that line, not the text inside it.
+  - **The picture is keyed on what it is drawn from, not on an ID.**
+    `CallIslandWhere.icon()` joins the URL, the letter and every face; `setWhere`
+    runs on every sync and re-asks only when that string moves, which catches an
+    icon changed without its channel doing. The slot is *refilled* rather than
+    re-pointed — a load already in flight lands in the container it was handed.
+    `islandIcon` is a widget rather than a bare `GridWrap` because the row stretches
+    every child to its full height and a grid pins its cell to the top of that; its
+    `MinSize` width is whatever it currently holds, a cluster being wider than one
+    circle.
+  - **A group with no picture is the faces of the people in it.** `setFaces` +
+    `facesLayout`: each face wears a `FaceRing` band of `CallIslandBackground`,
+    which is what cuts it out of the one behind rather than letting two circles
+    smudge into one shape — so the band has to stay the *card's* colour, not a new
+    one. Objects are reversed before laying out and placed from the right, because
+    Fyne paints in order and the first face is the one that must be on top.
+    `FaceSize + 2×FaceRing` must not exceed `IconSize`, or a group makes the card
+    taller than a server does. One face is drawn as a plain picture instead: a
+    stack of one is a small circle in a slot with room for a whole one.
+  - **Its fill is the darkest surface the client has** (the server rail's), not a
+    lighter one. A card floating over the page is lifted by its outline and its
+    shadow; a *lighter* fill reads as a hole cut in the page. Which is also why the
+    rule between the halves is `CallIslandOutline` and not `NewColumnDivider` —
+    the client's one hairline is darker than every surface it meets, and this card
+    is darker than that hairline.
+  - **Every control on it is outlined.** The three call buttons are
+    `OutlinedIconButton`s carrying their tint in a hairline, as the invite list's
+    copy and revoke are, and `Button.outlined(tint)` is the same treatment for the
+    one text button the client has — a filled block is the loudest thing on a
+    surface this dark. Unjoinable greys it (`Disable`) rather than reddening it:
+    the action is unavailable, not dangerous, and red is what this client reserves
+    for what cannot be undone. Greyed keeps a faint `ButtonDisabledBg`, which is
+    what says the button is still there.
+  - **Hover lights the text, not a rectangle behind it.** `NewTappableContainer`
+    fills `TappableHoverBg`, and a fill the height of two lines on a card that *is*
+    the only panel in play reads as a button nobody drew an edge on. `islandLink`
+    is the same tap target reporting its hover instead, and `lightCall` brightens
+    the two lines a step each — name to `CallIslandTextHover`, server to
+    `CallIslandText`. The icon is outside the target: it names the server rather
+    than offering anything.
+  - **A 3 px bar is not a hover target.** `stateBar` reports `BarHeight + BarGap`
+    as its minimum and draws the fill at the bottom of that, so the gap above the
+    bar is hover room rather than a spacer between two objects. Its tooltip goes
+    through `Tooltip.ShowBelow`, not `ShowAbove`: the card is at the top of the
+    window, so there *is* room above it and `ShowAbove` would never fall through to
+    its second placement — it would label the card by covering it.
+  - **The bar belongs to the live half, not to the card.** It is the last child of
+    that half's own column, so it ends where the half does — a gap short of the
+    rule, the margin it starts at on the other side — and goes down with it rather
+    than being hidden on its own. What it reports is the running call; the other
+    half is an offer with no state. The cost is `joinReserve`: the bar's height
+    standing empty under the join half, shown and hidden **with the bar**, or the
+    two halves' lines sit at different levels — one centres over the card's whole
+    height, the other over what is left above its bar.
+
+  It sits over the message header, which means it covers whatever is in that row's
+  centre — the channel topic. That is the cost of the slot, not a bug.
   Its two toggles **replace** their buttons rather than recolouring them:
   `OutlinedIconButton` bakes its mark, its tint and its `disabled()` state at
   construction, so a slot with a rebuilt button is the only way to change any of

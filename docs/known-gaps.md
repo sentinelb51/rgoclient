@@ -49,12 +49,18 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   working adapter's candidate winning, but the dead ones are checked first and
   logged per pair. Fixing it means a hook upstream in `livekit/server-sdk-go`.
 
-- **No echo cancellation.** The capture chain is a high-pass, a noise gate and a
-  gain; `audio.Processor` is the seam AEC would go in and `Engine` owns both
-  directions precisely so the playback reference is reachable, but nothing
-  implements one. Headphones are assumed — on speakers the far end hears itself.
-  There is no spectral noise suppression either: "noise reduction" is the
-  high-pass in front of the gate, which is what the sensitivity slider drives.
+- **No echo cancellation.** The capture chain is a high-pass, RNNoise, a preamp
+  and a noise gate; `audio.Processor` is the seam AEC would go in and `Engine`
+  owns both directions precisely so the playback reference is reachable, but
+  nothing implements one. Headphones are assumed — on speakers the far end hears
+  itself.
+
+- **No automatic gain control.** The input gain is a number the reader sets, and
+  the gate's threshold is another; neither follows the room. That is deliberate —
+  an adaptive floor that guesses wrong is a microphone nobody can reason about —
+  but it does mean a quiet microphone is fixed by hand, up to `maxGain`'s +20 dB,
+  and that a gain far enough up to need soft clipping is amplifying the room's
+  own noise along with the voice.
 
 - **Push-to-talk is Windows-only, and binds from a list rather than a captured
   key.** `ui.KeyHeld` is `GetAsyncKeyState`, which needs no canvas focus — the
@@ -76,12 +82,19 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the *sender* to enable it too: against the official web client, or anything else
   that is not this library, it buys nothing. The two are also 10 MB of model data
   against Deep PLC's 5.
-  The classic codec's intrinsics are compiled out — SSE, AVX2 and Neon — so celt
-  and silk run their generic C paths, which is what lets one object serve every
-  amd64 and arm64 target. That trade is measured and cheap (see
-  `docs/performance.md`), and it does *not* apply to the neural code: `dnn/vec.h`
-  dispatches on the compiler's own `__SSE2__` and `__ARM_NEON` rather than on
-  libopus's config, so Deep PLC is already vectorised everywhere this builds.
+  **amd64 builds require AVX2** — `-march=x86-64-v3`, so Haswell or Excavator
+  (2013) and newer; below that the failure is SIGILL, and the answer is
+  `-tags opus_baseline`, which drops the flag and roughly triples the cost of a
+  concealed frame. The floor is there for Deep PLC, whose `dnn/vec_avx.h` reads
+  the compiler's own `__AVX2__`: without it the model runs an SSE2 fallback at
+  690 µs a concealed frame against 227. libopus's own SSE/SSE2/Neon intrinsics
+  are on as well and are worth 0.5 %, gcc having long since learned to
+  auto-vectorise what they were hand-written for. arm64 takes no floor and is
+  unmeasured. Released amd64 binaries compile the *Go* half at the matching level
+  too (`GOAMD64: v3` in both workflows), which costs no compatibility the C floor
+  has not already spent. AVX-512 was measured and left alone: 3 % on the one
+  workload that moves, against ruling out every Intel consumer part since Rocket
+  Lake. See `docs/voice-chat-todo.md`.
   The encoder CTLs are reached through `voice.opusTuning`, an interface assertion
   rather than a direct call, so the client still builds against a binding without
   them — at the cost of a deeper jitter buffer, and it says so once at join.
@@ -294,12 +307,50 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the store can *name* does — the rest are a "+n" that answers nothing — and
   `channels` (the groups and conversations in common) is dropped, Revolt sending it
   and nothing here having a place to say it.
+- **An account can be secured, but not ended.** The Security section changes the
+  password and the email, turns an authenticator on and off, shows and replaces
+  the recovery codes, and lists every login with a way to revoke one. What it does
+  not do is **disable or delete the account**: deletion is a two-step flow through
+  a token Revolt emails, which this client cannot read, and neither is something
+  to offer beside a rename. `EmailOTP` and `SecurityKeyMFA` are read from the
+  status and drawn nowhere — there is no WebAuthn here and no way to read a mail,
+  so an account secured either way is one `answerable` refuses to raise a
+  challenge for, and it says so rather than offering a field that cannot work.
+  Changing the **email** takes effect when Revolt's confirmation mail is followed,
+  which this client cannot see: the section goes on reading the old address until
+  then, and a notice says why. A **partial** failure of the section's one fetch
+  reads as a total one — the three requests share an error, so a route being down
+  greys the lot rather than a third of it.
+- **A login can only mark itself as "this device" if it recorded its own session
+  ID.** No route answers which of an account's sessions the caller is; the login
+  route says it once, in `_id`, and nothing else ever does. So a session restored
+  from a token saved before this client began recording one is listed without the
+  mark, and `EventAuth` cannot tell that session being revoked from any other —
+  both say so rather than guessing, and a fresh sign-in is what puts it right.
+- **A group is made, named and grown, and has no picture.** Revolt takes a name,
+  a description, an age gate and up to 49 friends at creation; this client asks
+  for the name and the people, and the rest is the ordinary channel edit
+  afterwards. The **icon** is not settable from here — `ChannelEditParams.Icon`
+  takes an upload into a bucket of its own, as a server's did before it was built
+  — so a group wears its members' faces wherever one is drawn. The picker lists
+  every friend with no way to filter, which is the shape of the friends list
+  itself (below): a long list is scrolled rather than searched. Nothing counts how
+  many are in a group anywhere but its member sidebar, and **adding** has no
+  client-side ceiling at all — the create route documents 49 and the add route
+  documents none, the real limit being a runtime setting of the instance's, so
+  one past it is refused by the server rather than not offered.
 - **The friends list is as complete as the account cache is.** It is a walk of
   the cached users, so somebody Ready did not name and nothing has since fetched
   is not in it, and nothing announces an incoming request beyond the sidebar row's
-  mark — which is only visible in the home view. It does not follow presence, has
-  no search and no way to add somebody by handle: adding is offered from a
-  profile, which is a route only their message or their member row opens. A
+  mark — which is only visible in the home view. It has no search and no ordering
+  but by name. Somebody can now be asked **by handle** from the field at the head
+  of the page — the one way to reach an account the client has never drawn — but
+  the answer names an account nothing has cached, so the row appears when the
+  gateway files it rather than when the request returns, and a refusal cannot say
+  which of "no such handle" and "already asked" it was: Revolt answers both with
+  a status code and no sentence. Somebody's presence is drawn but their status
+  text is not: a row is a name and a handle, and the handle is what tells two
+  identical names apart. A
   relationship change made from the profile card still closes it and reports
   through a notice, a profile not refreshing in place. A *server* relationship —
   Revolt's own `Relations` array on the account — is dropped at the boundary, so
@@ -468,21 +519,34 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   included, and the client's own palette and swatch agree on hexes — so a role
   already wearing a gradient keeps it until somebody picks a colour and there is
   no way to type one back; `domain.Role.ColorText` is what the field opens on
-  where it can, and what a read-only row states exactly. And the grid is the
-  role's **server-wide** override only: per-channel overrides
-  (`ChannelPermissionsSet`) are the same three states aimed at a channel and are
-  not built. What stops them is the surface rather than the route — revoltgo
-  declares it correctly now — since a channel's overrides are a channel *and* a
-  role, and the page drills one level. So a role denied something in one channel
-  can be read that way and never written. Nothing counts how many members hold a
-  role, for the reason there is no member count. Which members hold it is the
-  member menu's question, not this page's.
+  where it can, and what a read-only row states exactly. Nothing counts how many
+  members hold a role, for the reason there is no member count. Which members hold
+  it is the member menu's question, not this page's.
+- **A channel's own overrides are set, and they are a subset of the grid.** The
+  Channels section drills into a channel and then into a role, which is the second
+  level the page has; what it draws there is the same three-state grid the Roles
+  section does, filtered to the bits a channel decides (`ui.channelPermissions`).
+  Revolt keeps **one** bitfield for both scopes, so an override of "ban members"
+  would be stored and never read — a control that appears to work and does not —
+  hence the mask rather than the whole grid. Two consequences worth knowing:
+  what a channel changes about a role is not visible from the Roles section, and
+  the row summarising a role in a channel says *how many* bits moved and never
+  which. A **group's** default permissions are the one route not sent: Revolt takes
+  a plain value there rather than an override
+  (`revoltgo.GroupPermissionsSetDefault`), and no settings page for a group exists
+  to put it on — a group is edited through the channel card, which the Channels
+  section's own permissions button is not on.
 - **Three permissions decide what of a role can be changed, and the page asks all
   three.** `ManageRole` covers the name, the colour, the hoist, the order and the
   delete; `ManagePermissions` covers the grid; and Revolt refuses to grant a bit
   the actor does not hold themselves, so the grid is drawn per bit — a control
   where all of that holds, and the state in words where it does not. The section
-  is listed for either permission. What this cannot answer for is a *rank* change
+  is listed for either permission. A channel's grid asks the same two questions
+  **of the channel** rather than of the server, an override being exactly what
+  moves the two apart, and adds the rank check the server's route makes elsewhere:
+  a role more senior than the reader's is listed and drawn read-only rather than
+  left without a way in, since unlike the Roles section its row cannot say which
+  bits a channel moved. What this cannot answer for is a *rank* change
   under an open editor: the page rebuilds from the store on every role event, so a
   role that has just risen above the reader closes its own editor and returns them
   to the list, which is correct and abrupt.

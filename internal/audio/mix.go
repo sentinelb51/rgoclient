@@ -1,6 +1,7 @@
 package audio
 
 import (
+	"math"
 	"sync/atomic"
 	"unsafe"
 )
@@ -95,6 +96,11 @@ type mixer struct {
 	// the call down did not ask for a quieter mention ping.
 	master atomic.Uint32 // float32 bits
 
+	// soft rounds a peak over the ceiling instead of slicing it flat. Read once
+	// per chunk rather than per sample, so a setting moved mid-call lands between
+	// chunks and never inside one.
+	soft atomic.Bool
+
 	lanes [maxLanes]lane
 
 	// wake is how the speakers ask for more. The callback sends into it without
@@ -131,6 +137,9 @@ func (m *mixer) play(cmd playCmd) bool { return m.commands.Push(cmd) }
 
 // setMaster sets the gain every lane is scaled by.
 func (m *mixer) setMaster(gain float32) { m.master.Store(floatBits(clampGain(gain))) }
+
+// setSoftClip picks how the sum meets the ceiling: rounded, or sliced flat.
+func (m *mixer) setSoftClip(on bool) { m.soft.Store(on) }
 
 /* Rendering */
 
@@ -236,6 +245,16 @@ func (m *mixer) renderChunk(out []int16, frames int) {
 	m.mixVoices(acc)
 	m.mixLanes(acc, frames)
 
+	// Hoisted rather than branched per sample: the sum is the hottest loop in the
+	// callback and the setting cannot change inside a chunk anyway.
+	if m.soft.Load() {
+		for i, sample := range acc {
+			out[i] = softClipSample(sample)
+		}
+
+		return
+	}
+
 	for i, sample := range acc {
 		out[i] = clampSample(sample)
 	}
@@ -319,12 +338,70 @@ func clampSample(v int32) int16 {
 	return int16(v)
 }
 
-// clampGain bounds anything a gain arrives as. maxGain is where amplification
-// stops being loudness and becomes clipping, and is the 200 % the settings offer
-// as their own ceiling.
+// clampGain bounds anything a gain arrives as. maxGain is ×10, the +20 dB the
+// settings offer as their own ceiling: past that a microphone quiet enough to
+// need it is amplifying its own noise floor rather than a voice.
+//
+// Gains multiply — a lane's against the master's — so a pair at the ceiling
+// exceeds it. That is deliberate and is what softClip is for: what the sum meets
+// is the sample ceiling, not this one.
 func clampGain(gain float32) float32 { return min(max(gain, 0), maxGain) }
 
-const maxGain = 2
+const maxGain = 10
+
+// Where soft clipping starts, as a percentage of full scale. Below the knee a
+// sample is untouched, which is nearly all of them: the branch is what keeps the
+// curve off the ordinary path.
+//
+// A percentage because the two forms are then both constants — an untyped float
+// does not convert to int32 — and because one number is one number: a knee the
+// float path and the sample path disagreed about would be a step at the seam.
+const (
+	softKneePercent = 70
+	softKnee        = softKneePercent / 100.0
+)
+
+// softClip folds a normalised sample towards the ceiling instead of against it.
+//
+// A hard clamp slices the top off a wave, and a sliced sinusoid is a square one —
+// harmonics the signal never had, which is the buzz on the loudest syllable of an
+// over-amplified microphone. tanh approaches the ceiling instead of meeting it,
+// so a peak rounds over: the loudest part of a word loses some of its shape and
+// none of the rest of it does.
+//
+// Scaled so the curve leaves the knee at slope 1 (sech²(0) = 1), which is what
+// makes it continuous with the untouched signal below — a knee with a corner in
+// it would be audible in its own right.
+func softClip(v float32) float32 {
+	if v > -softKnee && v < softKnee {
+		return v
+	}
+
+	sign := float32(1)
+	if v < 0 {
+		sign, v = -1, -v
+	}
+
+	const headroom = 1 - softKnee
+
+	return sign * (softKnee + headroom*float32(math.Tanh(float64((v-softKnee)/headroom))))
+}
+
+// softClipSample is the same curve on the mixer's accumulator, which counts in
+// whole samples rather than in a normalised range. tanh never reaches 1, so the
+// result is always inside int16 and needs no clamp after it.
+func softClipSample(v int32) int16 {
+	if v > -softKneeSample && v < softKneeSample {
+		return int16(v)
+	}
+
+	return int16(softClip(float32(v)/sampleCeiling) * sampleCeiling)
+}
+
+const (
+	sampleCeiling  = 32767
+	softKneeSample = int32(sampleCeiling * softKneePercent / 100)
+)
 
 func floatBits(v float32) uint32 { return *(*uint32)(unsafe.Pointer(&v)) }
 func bitsFloat(v uint32) float32 { return *(*float32)(unsafe.Pointer(&v)) }

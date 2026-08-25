@@ -198,23 +198,20 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	a.syncChannelTopic() // a restyle rebuilds this row under a standing selection
 	header := container.NewPadded(a.messageHeader)
 
-	// The note hangs under the header rather than over the column: it is about the
-	// channel, not about what is in it, and the column below carries messages the
-	// reader is here for. It is built once and shown per channel — there is one
-	// note, and a strip rebuilt per selection would be a widget per channel switch.
-	// Its visibility comes from the open channel rather than starting hidden: a
-	// restyle rebuilds this tree under a standing selection, and a note that came
-	// back down would leave a voice channel looking like a text one.
-	a.channelNote = ui.NewChannelNote(assets.VoiceIcon, voiceNote)
-	if a.channelKind() != domain.ChannelVoice {
-		a.channelNote.Hide()
-	}
-
 	a.floatingDock = ui.NewFloatingDock(a.messages, a.composerDock)
-	a.messageColumn = ui.NewFillColumn(2, header, a.channelNote, a.floatingDock)
+	a.messageColumn = ui.NewFillColumn(1, header, a.floatingDock)
+
+	// The friends list is a view rather than an overlay, so it stands in this same
+	// slot with the message column hidden under it — the two are one view apiece and
+	// the sidebar marks whichever is up. Stacked rather than swapped into the main
+	// row: the row addresses its children by position to find the one that
+	// stretches, and this column's floor has to hold for either.
+	a.friendsPage = ui.NewFriendsPage(a.deps(), a.OnUserTapped, a.askFriend)
 
 	floor := fyne.NewSize(theme.Sizes.MessageAreaMinWidth, theme.Sizes.MessageAreaMinHeight)
-	return ui.NewFixedSizeContainer(floor, container.NewStack(background, a.messageColumn))
+
+	return ui.NewFixedSizeContainer(floor,
+		container.NewStack(background, a.messageColumn, a.friendsPage))
 }
 
 // resizeDock re-hangs the floating stack after something in it appeared or
@@ -557,32 +554,18 @@ func (a *App) channelKind() domain.ChannelKind {
 // Revolt's voice channels carry messages like any other, so each of these names
 // the *call* — a mark saying "voice" over a composer that works would otherwise
 // read as a channel refusing messages.
-const (
-	voiceNote       = "Voice channel. Join the call, or just send messages here."
-	voiceNoteJoined = "You're in this call."
-	voiceNoteClosed = "Voice channel. You cannot join this call."
-)
-
 // syncChannelKind matches the message header to the open channel's type: the
-// prefix mark, so a DM reads "@name" rather than "#name", and the note under it,
-// which only a voice channel draws. Hiding a child reclaims nothing on its own,
-// so the column is relaid out either way. Call on the UI thread.
+// prefix mark, so a DM reads "@name" rather than "#name", and the call island,
+// whose join half is about the channel on screen. Call on the UI thread.
 func (a *App) syncChannelKind() {
 	if a.channelGlyph == nil {
 		return
 	}
 
-	kind := a.channelKind()
-	a.channelGlyph.Objects = []fyne.CanvasObject{ui.ChannelGlyph(kind)}
+	a.channelGlyph.Objects = []fyne.CanvasObject{ui.ChannelGlyph(a.channelKind())}
 	a.channelGlyph.Refresh()
 
-	if kind == domain.ChannelVoice {
-		a.syncVoiceNote()
-		a.channelNote.Show()
-	} else {
-		a.channelNote.Hide()
-	}
-	ui.Relayout(a.messageColumn)
+	a.syncCallIsland()
 }
 
 // syncChannelTopic labels the header with what the open channel says it is for.

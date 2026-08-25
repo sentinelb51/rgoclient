@@ -23,6 +23,7 @@ type SettingsSection int
 
 const (
 	SectionAccount SettingsSection = iota
+	SectionSecurity
 	SectionInterface
 	SectionStyles
 	SectionBehaviour
@@ -36,6 +37,7 @@ const (
 
 var railEntries = []railEntry{
 	{int(SectionAccount), "Account", assets.AccountIcon},
+	{int(SectionSecurity), "Security", assets.SecurityIcon},
 	{int(SectionInterface), "Interface", assets.InterfaceIcon},
 	{int(SectionStyles), "Styles", assets.StylesIcon},
 	{int(SectionBehaviour), "Behaviour", assets.BehaviourIcon},
@@ -137,6 +139,36 @@ type SettingsHooks struct {
 	// controller already holds, and it may never answer at all.
 	LoadProfile func(onLoaded func(profile domain.UserProfile))
 
+	/* Security */
+
+	// LoadSecurity fetches everything that section is drawn from at once — see
+	// SecurityState for why the three are one request rather than three. It may
+	// answer long after the section that asked has closed; the page records the
+	// answer anyway and draws it into whatever is mounted then.
+	LoadSecurity func(onLoaded func(state SecurityState, err error))
+
+	// ChangePassword and ChangeEmail raise their own cards: both take two answers
+	// at once and one of them is a password, which must not sit on a page that
+	// stays open — the same reason ChangeUsername is a card.
+	ChangePassword func()
+	ChangeEmail    func()
+
+	// EnableTOTP walks the reader through setting up an authenticator, DisableTOTP
+	// takes it off, and RecoveryCodes shows them — regenerating replaces every code
+	// already written down, which is why it is a separate answer rather than a flag
+	// the page decides.
+	EnableTOTP    func()
+	DisableTOTP   func()
+	RecoveryCodes func()
+	RenewRecovery func()
+
+	// RenameLogin, RevokeLogin and RevokeOthers act on the account's own logins.
+	// The name is passed alongside the ID because what a confirmation says is the
+	// name — the ID is a ULID nobody recognises.
+	RenameLogin  func(sessionID, name string)
+	RevokeLogin  func(sessionID, name string)
+	RevokeOthers func()
+
 	/* Sounds */
 
 	// Sounds is every sound the client can make, in the order they are listed.
@@ -195,6 +227,24 @@ type CPUCores struct {
 func (c CPUCores) Split() bool {
 
 	return (c.Performance > 0 && c.Efficiency > 0) || (c.CCD0 > 0 && c.CCD1 > 0)
+}
+
+// SecurityState is everything the Security section is drawn from, and every part
+// of it is a request: the email is not on the user record, the second factors are
+// a route of their own, and the logins are a list Revolt announces changes to but
+// publishes no store for. They are fetched **together** because the section
+// cannot be drawn without any of them, and one wait reads better than three
+// cards filling in at different moments.
+//
+// SelfKnown is whether this login's own session ID was ever recorded. Without it
+// no row can be marked as this device — see domain.AccountSession — and the
+// section says so rather than leaving the reader to guess which row is the one
+// they are sitting at.
+type SecurityState struct {
+	Email     string
+	MFA       domain.MFAStatus
+	Logins    []domain.AccountSession
+	SelfKnown bool
 }
 
 // SettingsSession is one saved login as the Account section lists it.
@@ -266,6 +316,18 @@ type SettingsPage struct {
 	// page that owns a *device*. It is stopped by both showSection and Close — the
 	// page has no unmount hook, and a discarded widget hears nothing.
 	meter *voiceLevelMeter
+
+	// security is the Security section's answer, held for the life of one opening
+	// and no longer — the same rule a server's fetched lists follow. Unlike a
+	// server's, a late answer rebuilds the whole section rather than refilling one
+	// list: every row in it is drawn from that one answer, not just the list.
+	security cachedOne[SecurityState]
+
+	// visit counts openings, and every fetch captures it. An answer for a visit
+	// that has ended must not be recorded either: the page can be closed and
+	// reopened — on another account, after a sign-out — before one lands, and
+	// IsOpen alone cannot tell those two apart.
+	visit uint64
 }
 
 // settingsPreview is a sample of the real widgets, and how to build it again.
@@ -286,6 +348,7 @@ func NewSettingsPage(hooks SettingsHooks) *SettingsPage {
 
 // Open builds the page and shows it. Call on the UI thread.
 func (p *SettingsPage) Open() {
+	p.visit++
 	p.Rebuild()
 	p.Layer.Show()
 }
@@ -301,6 +364,26 @@ func (p *SettingsPage) Close() {
 	p.searching = false
 	p.field = nil
 	p.index = nil
+
+	// The Security section is a snapshot of one visit: nothing announces an email
+	// changed from a phone, and the logins are announced only while this client is
+	// connected. A second opening asks again.
+	p.visit++ // whatever is still in flight has nowhere to land, and nothing to record in
+	p.security.drop()
+}
+
+// RefreshSecurity drops what the Security section is drawn from and redraws it,
+// for a change this client caused or was told about. UI thread; a no-op while the
+// page is down, the answer being dropped with it.
+func (p *SettingsPage) RefreshSecurity() {
+	if !p.IsOpen() {
+		return
+	}
+
+	p.security.drop()
+	if p.section == SectionSecurity && !p.searching {
+		p.reload()
+	}
 }
 
 // Rebuild constructs the page from the theme tables as they now stand. Called on
@@ -431,6 +514,8 @@ func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 	switch section {
 	case SectionAccount:
 		return p.accountSection()
+	case SectionSecurity:
+		return p.securitySection()
 	case SectionInterface:
 		return p.interfaceSection()
 	case SectionStyles:

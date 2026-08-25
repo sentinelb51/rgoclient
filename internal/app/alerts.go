@@ -147,6 +147,12 @@ func (a *App) startAlerts() {
 	lifecycle.SetOnEnteredForeground(func() { a.focused.Store(true) })
 	lifecycle.SetOnExitedForeground(func() { a.focused.Store(false) })
 
+	// The mixer's own atomic starts false, and applyVoiceSettings only runs when
+	// something is changed: without this a client that never joins a call and
+	// never opens the page clips its notification sounds hard whatever the setting
+	// says. Everything else the mixer holds is set by a join.
+	a.sounds.SetSoftClip(config.Current().Voice.SoftClip)
+
 	go a.loadSounds()
 }
 

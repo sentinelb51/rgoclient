@@ -2,6 +2,7 @@ package audio
 
 import (
 	"math"
+	"sync/atomic"
 
 	"RGOClient/internal/audio/rnnoise"
 )
@@ -107,6 +108,55 @@ func (n *noiseSuppressor) Process(frame []float32) bool {
 	for at := 0; at+rnnoise.FrameSize <= len(frame); at += rnnoise.FrameSize {
 		n.dn.Process(frame[at : at+rnnoise.FrameSize])
 	}
+
+	return true
+}
+
+/* Preamp */
+
+// preamp is the microphone's own gain, and the meter's tap.
+//
+// It sits after the filters and in front of the gate rather than at the end of
+// the chain, which is the whole of what makes a quiet microphone usable: the gate
+// then measures the signal that is actually sent, so raising the gain is also
+// what lets the gate hear a voice it was closing on. RNNoise still sees the level
+// the microphone delivered, which is the level it was trained on.
+//
+// The meter reads from here for the same reason. A bar and a threshold that
+// disagreed about the scale is the thing that makes a sensitivity slider
+// untunable, so there is one measurement and both come off it.
+//
+// gain is written by whoever moves the setting and level read by the UI thread,
+// while Process runs on the capture's own goroutine: both are atomic and neither
+// is read inside the loop it bounds.
+type preamp struct {
+	gain  atomic.Uint32 // float32 bits
+	level atomic.Uint32 // float32 bits
+}
+
+func newPreamp(gain float32) *preamp {
+	p := &preamp{}
+	p.SetGain(gain)
+
+	return p
+}
+
+// SetGain scales what the gate and the encoder see, 0 to maxGain.
+func (p *preamp) SetGain(gain float32) { p.gain.Store(floatBits(clampGain(gain))) }
+
+// Level is the frame's RMS after the gain, 0-1, which is what the gate's
+// threshold is compared against.
+func (p *preamp) Level() float32 { return bitsFloat(p.level.Load()) }
+
+// Process answers true: a gain has no opinion about whether a frame is speech.
+func (p *preamp) Process(frame []float32) bool {
+	if gain := bitsFloat(p.gain.Load()); gain != 1 {
+		for i := range frame {
+			frame[i] *= gain
+		}
+	}
+
+	p.level.Store(floatBits(rms(frame)))
 
 	return true
 }
@@ -272,3 +322,29 @@ func rms(frame []float32) float32 {
 }
 
 func decibelsToLinear(db float64) float64 { return math.Pow(10, db/20) }
+
+/* Decibels, for the settings that are expressed in them */
+
+// GainFromDB is the linear gain a decibel figure asks for, which is the unit
+// every level in this package is expressed in.
+//
+// off is the bottom of the caller's range and means silence, no decibel figure
+// being able to: the range's own end is passed in rather than named here, so the
+// settings stay the one place that decides where it is.
+func GainFromDB(db, off int) float32 {
+	if db <= off {
+		return 0
+	}
+
+	return float32(decibelsToLinear(float64(db)))
+}
+
+// DecibelsFromGain is the inverse, rounded to whole decibels — for a menu that
+// has to mark which of its steps is the one in force.
+func DecibelsFromGain(gain float64, off int) int {
+	if gain <= 0 {
+		return off
+	}
+
+	return int(math.Round(20 * math.Log10(gain)))
+}

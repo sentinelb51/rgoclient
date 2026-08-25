@@ -69,6 +69,24 @@ func presenceColor(presence domain.Presence) color.Color {
 
 /* Profile data */
 
+// ProfileAction is what a button about somebody does, named rather than drawn so
+// a surface offering it as a mark and one offering it as a word cannot come to
+// disagree about which action they are showing. ProfileActionOther is anything
+// with no mark of its own, which a mark-drawing surface falls back to a label for
+// rather than leaving out.
+type ProfileAction int
+
+const (
+	ProfileActionOther ProfileAction = iota
+	ProfileActionMessage
+	ProfileActionAccept
+	ProfileActionDecline // an incoming request ignored, or a sent one withdrawn
+	ProfileActionAdd
+	ProfileActionRemove
+	ProfileActionBlock
+	ProfileActionUnblock
+)
+
 // ProfileButton is one thing a card offers to do about somebody. A nil Do draws
 // it disabled rather than leaving it out: "Request sent" is the state, and a card
 // that simply omitted it would say nothing about it at all.
@@ -76,6 +94,14 @@ type ProfileButton struct {
 	Label  string
 	Danger bool // drawn in the destructive weight
 	Do     func()
+
+	// Action names what this button does, for a surface drawing marks instead of
+	// labels — the friends page, where a row is a person and three labelled buttons
+	// beside one would be more to read than the row itself. The controller names the
+	// kind and this package picks the mark and its tint, the way it decides what a
+	// keystroke sounds like from ui.Keystroke. The card ignores it: a label already
+	// says the same thing in words.
+	Action ProfileAction
 
 	// Overflow files the action behind the card's hamburger rather than drawing it
 	// under the card: blocking somebody or copying their ID is not what a profile is

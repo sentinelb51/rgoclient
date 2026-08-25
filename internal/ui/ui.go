@@ -214,7 +214,8 @@ func newContextMenu(menu *fyne.Menu, c fyne.Canvas) *contextMenu {
 		border: canvas.NewRectangle(color.Transparent),
 		canvas: c,
 	}
-	Outline(m.border)
+	m.border.StrokeColor = theme.Colors.MenuOutline
+	m.border.StrokeWidth = theme.Sizes.OutlineWidth
 	m.border.CornerRadius = fynetheme.Size(fynetheme.SizeNameMenuRadius)
 	m.ExtendBaseWidget(m)
 

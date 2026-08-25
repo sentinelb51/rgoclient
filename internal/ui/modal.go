@@ -705,6 +705,241 @@ func (d *PromptDialog) Fail(message string) {
 	d.action.Enable()
 }
 
+/* Second-factor challenge */
+
+// ChallengeMethod is one way an account can prove it is the account: what to call
+// it where it is picked, and what to call the field once it is. Both are the
+// controller's — which factors Revolt will accept is a question about the account
+// rather than about this card.
+type ChallengeMethod struct {
+	Label  string // "Authenticator app"
+	Prompt string // "The six-digit code from your authenticator app"
+}
+
+// ChallengeDialog asks for that proof. It is its own card rather than a Prompt
+// with a picker bolted on, because the two answers are not independent: which
+// method is chosen is what the field is *called*, so the label has to follow the
+// pick — and a Prompt's fields are fixed once it is built.
+//
+// The field is masked whichever method is chosen. A password must be; a recovery
+// code is a secret written down once; and a TOTP code masked is at worst
+// unremarkable, where a field that changed its mind about hiding what is in it as
+// the picker moved would be worse than either.
+type ChallengeDialog struct {
+	// Content is the card to hand to the modal layer, and Entry the field to focus
+	// once it is up.
+	Content fyne.CanvasObject
+	Entry   fyne.Focusable
+
+	status dialogStatus
+	action *Button
+}
+
+// NewChallengeDialog builds the card. purpose is the line under the title saying
+// what the proof is *for* — the card is raised by half a dozen different actions
+// and is otherwise identical for all of them. onSubmit is called on the UI thread
+// with the index of the chosen method and what was typed; the caller owns the
+// request, so the card says only that one is out and is closed or failed by them.
+func NewChallengeDialog(purpose string, methods []ChallengeMethod,
+	onSubmit func(method int, code string), onClose func()) *ChallengeDialog {
+
+	d := &ChallengeDialog{}
+
+	if len(methods) == 0 {
+		methods = []ChallengeMethod{{Label: "Password", Prompt: "Password"}}
+	}
+	picked := 0
+
+	code := newModalEntry(onClose)
+	code.Password = true
+	code.OnSubmitted = func(string) { d.action.Tap() }
+
+	// The box rather than the text: what a pick re-labels is the fitted box, the
+	// text object holding whatever last fitted the card's width. Upper-cased as
+	// every other field label on a card is — the *sentence* explaining what is
+	// being asked for is the purpose line at the top, said once.
+	label := NewEllipsisText(newBoldText(strings.ToUpper(methods[0].Prompt),
+		theme.Colors.CategoryText, theme.Sizes.DialogLabelSize))
+
+	rows := []fyne.CanvasObject{
+		dialogHeader("Confirm it's you", onClose),
+		widget.NewSeparator(),
+		NewWrappedText(purpose, theme.Sizes.ChannelDialogWidth, theme.Sizes.JoinDialogTextSize,
+			theme.Colors.TimestampText),
+	}
+
+	// The picker is drawn only where there is something to pick between, which for
+	// most accounts there is not: a password is the only factor they have.
+	if len(methods) > 1 {
+		options := make([]settingsOption, len(methods))
+		for i, method := range methods {
+			options[i] = settingsOption{Label: method.Label, Value: strconv.Itoa(i)}
+		}
+
+		var control *optionControl
+		control = newOptionControl("0", options, func(value string) {
+			picked, _ = strconv.Atoi(value)
+			control.set(value)
+
+			SetEllipsisText(label, strings.ToUpper(methods[picked].Prompt))
+		})
+
+		rows = append(rows, dialogField("Method", control))
+	}
+
+	rows = append(rows, VBoxNoSpacing(
+		label,
+		VerticalSpacer(theme.Sizes.DialogLabelGap),
+		fieldSurface(code),
+	))
+
+	d.status = newDialogStatus()
+	d.action = NewWeightedButton("Confirm", ButtonPrimary, func() {
+		if code.Text == "" {
+			return
+		}
+
+		d.status.set("Checking...", theme.Colors.TimestampText)
+		d.action.Disable()
+
+		onSubmit(picked, code.Text)
+	})
+
+	rows = append(rows, d.status.row(), d.action)
+
+	padding := theme.Sizes.DialogPadding
+	body := NewMinWidthContainer(theme.Sizes.ChannelDialogWidth,
+		NewInset(spacedColumn(theme.Sizes.DialogFieldGap, rows...), padding, padding, padding, padding))
+
+	d.Content = newTapSink(container.NewStack(newDialogCard(), body))
+	d.Entry = code
+
+	return d
+}
+
+// Fail reports a refused answer and re-enables the button, so a mistyped code can
+// be corrected in the field it came from. Call on the UI thread.
+func (d *ChallengeDialog) Fail(message string) {
+	d.status.set(message, theme.Colors.ErrorText)
+	d.action.Enable()
+}
+
+/* Setting up an authenticator */
+
+// SecretDialog is the second half of turning TOTP on: the shared secret, and the
+// code proving it was stored. Both have to be on one card — the secret is shown
+// once and asking for the code afterwards would mean showing it again — and the
+// code is the *only* proof worth taking here, a password saying nothing about
+// whether the authenticator was actually set up.
+//
+// The secret is selectable rather than drawn as text: it is a string somebody has
+// to get into another program, and a copy button is the whole of what this card
+// is for besides the field.
+type SecretDialog struct {
+	Content fyne.CanvasObject
+	Entry   fyne.Focusable
+
+	status dialogStatus
+	action *Button
+}
+
+// NewSecretDialog builds it. onSubmit takes the typed code on the UI thread; the
+// caller owns the request and closes the card or fails it.
+func NewSecretDialog(secret string, onSubmit func(code string), onClose func()) *SecretDialog {
+	d := &SecretDialog{}
+
+	code := newModalEntry(onClose)
+	code.SetPlaceHolder("000000")
+	code.OnSubmitted = func(string) { d.action.Tap() }
+
+	d.status = newDialogStatus()
+	d.action = NewWeightedButton("Turn on", ButtonPrimary, func() {
+		if code.Text == "" {
+			return
+		}
+
+		d.status.set("Checking...", theme.Colors.TimestampText)
+		d.action.Disable()
+		onSubmit(code.Text)
+	})
+
+	rows := []fyne.CanvasObject{
+		dialogHeader("Set up your authenticator", onClose),
+		widget.NewSeparator(),
+		NewWrappedText(
+			"Add this key to your authenticator app, then enter the code it gives you. "+
+				"It is shown once — starting again generates a different one.",
+			theme.Sizes.ChannelDialogWidth, theme.Sizes.JoinDialogTextSize, theme.Colors.TimestampText),
+		dialogField("Setup key", newSecretWell(secret)),
+		dialogField("Code from the app", fieldSurface(code)),
+		d.status.row(),
+		d.action,
+	}
+
+	padding := theme.Sizes.DialogPadding
+	body := NewMinWidthContainer(theme.Sizes.ChannelDialogWidth,
+		NewInset(spacedColumn(theme.Sizes.DialogFieldGap, rows...), padding, padding, padding, padding))
+
+	d.Content = newTapSink(container.NewStack(newDialogCard(), body))
+	d.Entry = code
+
+	return d
+}
+
+// Fail reports a refused code and re-enables the button. Call on the UI thread.
+func (d *SecretDialog) Fail(message string) {
+	d.status.set(message, theme.Colors.ErrorText)
+	d.action.Enable()
+}
+
+/* Recovery codes */
+
+// NewCodesDialog shows a set of recovery codes and nothing else. There is no
+// action on it: the codes *are* the outcome, and the only thing to do with them
+// is take a copy — which is why the button copies rather than confirms.
+//
+// It is raised both by asking to see the codes and by generating new ones, so
+// what it says about them is the caller's: one is a reminder, the other is the
+// only time the new set will ever be legible.
+func NewCodesDialog(purpose string, codes []string, onClose func()) fyne.CanvasObject {
+	joined := strings.Join(codes, "\n")
+
+	body := newSecretWell(joined)
+	if len(codes) == 0 {
+		body = newSecretWell("There are no codes on this account.")
+	}
+
+	rows := []fyne.CanvasObject{
+		dialogHeader("Recovery codes", onClose),
+		widget.NewSeparator(),
+		NewWrappedText(purpose, theme.Sizes.ChannelDialogWidth, theme.Sizes.JoinDialogTextSize,
+			theme.Colors.TimestampText),
+		body,
+		NewWeightedButton("Copy", ButtonPrimary, func() { CopyToClipboard(joined) }),
+	}
+
+	padding := theme.Sizes.DialogPadding
+	card := NewMinWidthContainer(theme.Sizes.ChannelDialogWidth,
+		NewInset(spacedColumn(theme.Sizes.DialogFieldGap, rows...), padding, padding, padding, padding))
+
+	return newTapSink(container.NewStack(newDialogCard(), card))
+}
+
+// newSecretWell is a string somebody has to read off the screen and get into
+// another program: monospaced so a zero and an O are different shapes, selectable
+// so it can be copied by hand, and on the same field surface every other value on
+// a card sits on.
+func newSecretWell(text string) fyne.CanvasObject {
+	label := widget.NewLabelWithStyle(text, fyne.TextAlignLeading,
+		fyne.TextStyle{Monospace: true})
+	label.Selectable = true
+	label.Wrapping = fyne.TextWrapBreak
+
+	padding := theme.Sizes.SettingsRowPaddingH
+
+	return container.NewStack(newFieldBackground(), NewInset(label, 0, 0, padding, padding))
+}
+
 /* Channel dialog */
 
 // topicRows is how much of a topic is on screen at once: enough for the sentence
@@ -1096,4 +1331,93 @@ func (e *modalEntry) TypedKey(key *fyne.KeyEvent) {
 	}
 
 	e.Entry.TypedKey(key)
+}
+
+/* A value on a card */
+
+// SliderCard is what a menu offers where the value it names is a range rather
+// than a list: a fyne.MenuItem carries text and an icon and nothing else, so a
+// menu on its own can only offer the steps somebody thought of. Reading names a
+// value in the caller's own units, ui having none.
+type SliderCard struct {
+	Title string
+
+	// Icon leads the title and says what *kind* of value this is — which
+	// direction a volume is, where a title only names whose it is. Nil for a card
+	// whose title is the whole answer.
+	Icon fyne.Resource
+
+	Low, High, Step float64
+	Value           float64
+
+	// Pivot is the value the middle of the travel is pinned to, nil for a plain
+	// linear scale. See Slider.SetPivot.
+	Pivot *float64
+
+	Reading   func(float64) string
+	OnChanged func(float64)
+}
+
+// NewSliderCard draws one, for App.showPopover to hang beside whatever the value
+// belongs to. Not a widget.PopUp: a popover is dismissed by the tap that lands
+// outside it, and a card holding a control has to keep the ones that land inside.
+func NewSliderCard(spec SliderCard) fyne.CanvasObject {
+	pad, padV := theme.Sizes.SliderCardPadding, theme.Sizes.SliderCardPaddingV
+
+	background := canvas.NewRectangle(theme.Colors.NoticeBg)
+	background.CornerRadius = theme.Sizes.SliderCardRadius
+	Outline(background)
+	Elevate(background)
+
+	// The title takes the fill slot and is ellipsised there: it is somebody's name
+	// as often as it is a word, and the card's width is pinned. The reading keeps
+	// its minimum against the right edge, so it stays put as the knob moves and
+	// the title's end is what gives way.
+	title := NewEllipsisText(newText(spec.Title, theme.Colors.TimestampText,
+		theme.Sizes.SliderCardTextSize))
+
+	reading := newBoldText(spec.reading(spec.Value), theme.Colors.TextPrimary,
+		theme.Sizes.SliderCardTextSize)
+	reading.Alignment = fyne.TextAlignTrailing
+
+	slider := NewSlider(spec.Low, spec.High, spec.Step, spec.Value, func(value float64) {
+		reading.Text = spec.reading(value)
+		reading.Refresh()
+
+		if spec.OnChanged != nil {
+			spec.OnChanged(value)
+		}
+	})
+	slider.SetTrack(theme.Colors.SliderCardTrack)
+
+	if spec.Pivot != nil {
+		slider.SetPivot(*spec.Pivot)
+	}
+
+	gap := theme.Sizes.SliderCardHeadGap
+
+	head, fill := []fyne.CanvasObject{title, HorizontalSpacer(gap), reading}, 0
+	if spec.Icon != nil {
+		mark := newScaledIcon(tintedIcon(spec.Icon, theme.Colors.TimestampText),
+			theme.Sizes.SliderCardIconSize)
+
+		head = append([]fyne.CanvasObject{mark, HorizontalSpacer(gap)}, head...)
+		fill = 2
+	}
+
+	body := VBoxNoSpacing(NewFillRow(fill, head...),
+		VerticalSpacer(theme.Sizes.SliderCardGap), slider)
+
+	return newTapSink(NewFixedWidthContainer(theme.Sizes.SliderCardWidth,
+		container.NewStack(background, NewInset(body, padV, padV, pad, pad))))
+}
+
+// reading names one value, falling back to the number itself where the caller
+// gave no units.
+func (s SliderCard) reading(value float64) string {
+	if s.Reading == nil {
+		return strconv.FormatFloat(value, 'f', -1, 64)
+	}
+
+	return s.Reading(value)
 }

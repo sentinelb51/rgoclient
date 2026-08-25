@@ -250,7 +250,7 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		return nil
 	}
 
-	message := ui.ProfileButton{Label: "Message", Do: func() {
+	message := ui.ProfileButton{Label: "Message", Action: ui.ProfileActionMessage, Do: func() {
 		a.closeOverlay()
 		a.openConversation(userID)
 	}}
@@ -259,9 +259,12 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 	}
 
 	// Each settles the surface that raised it before firing, so a button cannot be
-	// clicked twice against a state the first click changed.
-	act := func(label string, danger bool, run func()) ui.ProfileButton {
-		return ui.ProfileButton{Label: label, Danger: danger, Do: func() {
+	// clicked twice against a state the first click changed. What it does is
+	// *named* as well as labelled: the friends page draws marks where the card
+	// draws words, and a surface deciding for itself which mark a label deserves is
+	// how the two come to show different things.
+	act := func(label string, action ui.ProfileAction, danger bool, run func()) ui.ProfileButton {
+		return ui.ProfileButton{Label: label, Action: action, Danger: danger, Do: func() {
 			done()
 			run()
 		}}
@@ -276,22 +279,22 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		return button
 	}
 
-	block := overflow(act("Block", true, func() { a.confirmBlockUser(userID, name) }),
-		fynetheme.VisibilityOffIcon())
+	block := overflow(act("Block", ui.ProfileActionBlock, true,
+		func() { a.confirmBlockUser(userID, name) }), fynetheme.VisibilityOffIcon())
 
 	switch profile.Relationship {
 	case domain.RelationshipFriend:
 		return []ui.ProfileButton{message,
-			overflow(act("Remove", true, func() { a.confirmRemoveFriend(userID, name) }),
-				fynetheme.ContentRemoveIcon()),
+			overflow(act("Remove friend", ui.ProfileActionRemove, true,
+				func() { a.confirmRemoveFriend(userID, name) }), fynetheme.ContentRemoveIcon()),
 			block}
 
 	case domain.RelationshipIncoming:
 		// Neither is drawn as destructive, for the same reason neither is confirmed: a
 		// declined request can be sent again.
 		return []ui.ProfileButton{
-			act("Accept request", false, func() { a.acceptFriend(userID, name) }),
-			act("Ignore", false, func() { a.removeFriend(userID, name) }),
+			act("Accept request", ui.ProfileActionAccept, false, func() { a.acceptFriend(userID, name) }),
+			act("Ignore request", ui.ProfileActionDecline, false, func() { a.removeFriend(userID, name) }),
 		}
 
 	case domain.RelationshipOutgoing:
@@ -299,11 +302,13 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		// read as one that had never been asked.
 		return []ui.ProfileButton{
 			{Label: "Request sent"},
-			act("Cancel request", false, func() { a.removeFriend(userID, name) }),
+			act("Cancel request", ui.ProfileActionDecline, false, func() { a.removeFriend(userID, name) }),
 		}
 
 	case domain.RelationshipBlocked:
-		return []ui.ProfileButton{act("Unblock", false, func() { a.unblockUser(userID, name) })}
+		return []ui.ProfileButton{
+			act("Unblock", ui.ProfileActionUnblock, false, func() { a.unblockUser(userID, name) }),
+		}
 
 	case domain.RelationshipBlockedBy:
 		// Blocking back is the only thing that still works from this side.
@@ -311,7 +316,7 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 	}
 
 	return []ui.ProfileButton{
-		act("Add friend", false, func() { a.addFriend(userID, name) }),
+		act("Add friend", ui.ProfileActionAdd, false, func() { a.addFriend(userID, name) }),
 		block,
 	}
 }

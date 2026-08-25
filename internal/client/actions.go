@@ -938,6 +938,109 @@ func (c *Client) CloseChannel(channelID string) error {
 	return session.ChannelDelete(channelID)
 }
 
+/* Groups */
+
+// MaxGroupCreate is how many accounts Revolt takes in the *create* request —
+// `users` is capped at 49, so a group starts at fifty counting the account making
+// it. The route refuses a longer list rather than taking the first forty-nine,
+// which is why the card stops before the request does.
+//
+// There is no such number for adding to a group that exists: the ceiling there is
+// a runtime limit of the instance's own, so one is asked for and refused rather
+// than guessed at here.
+const MaxGroupCreate = 49
+
+// ErrGroupTooLarge reports a create naming more accounts than the route takes.
+var ErrGroupTooLarge = fmt.Errorf("a new group takes at most %d people", MaxGroupCreate)
+
+// CreateGroup opens a group conversation with the accounts named, which Revolt
+// requires to be **friends** — a stranger among them is refused, and the whole
+// request with them. The name is the one field it insists on, and it takes a
+// channel's own 1-32.
+//
+// The response is not a channel State knows: group_create answers with the group
+// and revoltgo decodes it into a shape of its own that writes nothing, so the
+// channel is asked for once afterwards exactly as OpenConversation asks for the
+// one DirectMessageCreate hands back. Every channel-keyed path downstream looks a
+// channel up there, the caller's selection included, and the ChannelCreate the
+// gateway sends cannot be waited for.
+func (c *Client) CreateGroup(name string, userIDs []string) (channelID string, err error) {
+	session := c.session.Load()
+	if session == nil {
+		return "", ErrNoSession
+	}
+
+	clean := trimTo(name, MaxChannelName)
+	if clean == "" {
+		return "", ErrChannelNameEmpty
+	}
+	if len(userIDs) > MaxGroupCreate {
+		return "", ErrGroupTooLarge
+	}
+
+	group, err := session.GroupCreate(revoltgo.GroupCreateParams{Name: clean, Users: userIDs})
+	if err != nil {
+		return "", err
+	}
+
+	if session.State.Channel(group.ID) == nil {
+		if _, err := session.Channel(group.ID); err != nil {
+			log.Printf("fetch group %s: %v", group.ID, err)
+		}
+	}
+
+	return group.ID, nil
+}
+
+// AddGroupMembers puts accounts into a group — one request each, the route
+// naming a single recipient — and reports how many took alongside **a** refusal
+// rather than the first: they are sent together, so which one answered first is
+// not the caller's to know. Nothing is written here, each addition arriving as
+// ChannelGroupJoin.
+//
+// The count is what a caller needs to know whether asking again is the same
+// request: Revolt refuses somebody already in the group, so a partial success
+// cannot simply be retried whole.
+func (c *Client) AddGroupMembers(channelID string, userIDs []string) (added int, err error) {
+	session := c.session.Load()
+	if session == nil {
+		return 0, ErrNoSession
+	}
+
+	var mu sync.Mutex
+
+	inParallel(userIDs, func(userID string) {
+		failure := session.GroupMemberAdd(channelID, userID)
+		if failure != nil {
+			log.Printf("add %s to group %s: %v", userID, channelID, failure)
+		}
+
+		mu.Lock()
+		defer mu.Unlock()
+
+		switch {
+		case failure == nil:
+			added++
+		case err == nil:
+			err = failure
+		}
+	})
+
+	return added, err
+}
+
+// RemoveGroupMember puts somebody out of a group. Revolt allows it to the
+// group's owner alone — see domain.Channel.OwnerID — and announces it to
+// everybody as ChannelGroupLeave.
+func (c *Client) RemoveGroupMember(channelID, userID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.GroupMemberDelete(channelID, userID)
+}
+
 /* Editing a channel */
 
 // Revolt's ceilings on what a channel carries — the name and the description
@@ -1067,6 +1170,21 @@ func (c *Client) pickVoiceNode(session *revoltgo.Session) (string, error) {
 	return name, nil
 }
 
+// WarmVoiceNode resolves the node ahead of anybody asking for a call, so the
+// instance config is not a REST round trip the first join of a session pays for
+// while somebody watches a button they pressed. Blocking, and a failure is not
+// worth reporting: the join asks again and says so itself.
+func (c *Client) WarmVoiceNode() {
+	session := c.session.Load()
+	if session == nil {
+		return
+	}
+
+	if _, err := c.pickVoiceNode(session); err != nil {
+		log.Printf("client: voice node not resolved ahead of time: %v", err)
+	}
+}
+
 // nearestVoiceNode picks which media server to dial. The nodes carry
 // coordinates, but the reader's own position is not something this client knows
 // or has any business asking for, so nearness is measured rather than computed:
@@ -1159,10 +1277,14 @@ func (c *Client) JoinCall(channelID string, force bool) (domain.CallCredentials,
 	// The node is required — an empty one is UnknownNode, not "you pick" — and is
 	// resolved from the instance config once per session. Recipients rings a DM or
 	// group and has no meaning in a server channel.
+	started := time.Now()
+
 	node, err := c.pickVoiceNode(session)
 	if err != nil {
 		return domain.CallCredentials{}, err
 	}
+
+	picked := time.Now()
 
 	call, err := session.ChannelsJoinCall(channelID, revoltgo.ChannelJoinCallParams{
 		Node:            node,
@@ -1171,6 +1293,14 @@ func (c *Client) JoinCall(channelID string, force bool) (domain.CallCredentials,
 	if err != nil {
 		return domain.CallCredentials{}, err
 	}
+
+	// Both halves, because they are worth different amounts: the route is paid on
+	// every join and the node only on the first of a session, which is what makes
+	// the first call of a run the slow one.
+	log.Printf("client: credentials for %s in %v (node %v, join_call %v)",
+		node, time.Since(started).Round(time.Millisecond),
+		picked.Sub(started).Round(time.Millisecond),
+		time.Since(picked).Round(time.Millisecond))
 
 	// A 200 carrying neither field must not become a dial to "".
 	if call.URL == "" || call.Token == "" {
@@ -1865,6 +1995,40 @@ func (c *Client) SetDefaultPermissions(serverID string, allow domain.Permission)
 	})
 }
 
+// SetChannelRolePermissions publishes one role's override in one channel — the
+// same whole-override shape a server's takes, aimed at a channel. Revolt resolves
+// what the sender may do **in the channel** rather than across the server, and
+// refuses a role at or above the sender's own rank:
+// https://github.com/stoatchat/stoatchat/blob/main/crates/delta/src/routes/channels/permissions_set.rs
+func (c *Client) SetChannelRolePermissions(channelID, roleID string, allow, deny domain.Permission) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ChannelPermissionsSet(channelID, roleID, revoltgo.PermissionOverwrite{
+		Allow: int64(allow),
+		Deny:  int64(deny),
+	})
+}
+
+// SetChannelDefaultPermissions publishes what everybody in a channel holds before
+// any role. An **override** rather than the plain set a server's default is: a
+// channel stands under its server, so there is something beneath it to inherit
+// from. A group's default is the plain-value shape instead, which nothing here
+// sends — see docs/known-gaps.md.
+func (c *Client) SetChannelDefaultPermissions(channelID string, allow, deny domain.Permission) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.ChannelPermissionsSetDefault(channelID, revoltgo.PermissionOverwrite{
+		Allow: int64(allow),
+		Deny:  int64(deny),
+	})
+}
+
 // SetRoleRanks reorders a server's roles, most senior first. The route takes
 // **every** role the server has and refuses a partial list, so the caller sends
 // the whole order rather than the one role that moved:
@@ -2219,22 +2383,90 @@ func (c *Client) AddFriend(userID string) error {
 		return errors.New("nothing known about that account")
 	}
 
-	name := user.Username
-	if user.Discriminator != "" {
-		name += "#" + user.Discriminator
-	}
-
-	body := struct {
-		Username string `json:"username"`
-	}{Username: name}
-
-	var updated revoltgo.User
-	if err := session.HTTP.Request(http.MethodPost, revoltgo.EndpointUserFriend(""), body, &updated); err != nil {
+	updated, err := c.requestFriend(session, wireHandle(user))
+	if err != nil {
 		return err
 	}
 	c.setRelationship(userID, toRelationship(updated.Relationship))
 
 	return nil
+}
+
+// ErrHandleMalformed reports a handle the route could not have looked anybody up
+// by. Revolt matches on the name *and* the discriminator and guesses at neither,
+// so a bare name is refused here rather than sent to be refused there with
+// nothing to say why.
+var ErrHandleMalformed = errors.New("handle is not a name and a discriminator")
+
+// AddFriendByHandle sends a request to somebody named rather than picked. It is
+// the only way to reach an account the client has never drawn — a profile is a
+// surface their message or their member row opens, and neither exists for a
+// stranger.
+//
+// Nothing files the account behind the answer: the overlay is keyed by ID and
+// Store.Relationships is a walk of the *cached* users, so somebody met this way
+// reaches the friends list through the gateway's own UserRelationship, whose
+// handler queues the fetch.
+func (c *Client) AddFriendByHandle(handle string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	clean, ok := cleanHandle(handle)
+	if !ok {
+		return ErrHandleMalformed
+	}
+
+	updated, err := c.requestFriend(session, clean)
+	if err != nil {
+		return err
+	}
+	if updated.ID != "" {
+		c.setRelationship(updated.ID, toRelationship(updated.Relationship))
+	}
+
+	return nil
+}
+
+// requestFriend is the send half of a friend request. revoltgo has no method for
+// it — FriendAdd is the *accept* — so the body is composed here, and both callers
+// arrive with a handle because that is what the route names somebody by.
+func (c *Client) requestFriend(session *revoltgo.Session, handle string) (revoltgo.User, error) {
+	body := struct {
+		Username string `json:"username"`
+	}{Username: handle}
+
+	var updated revoltgo.User
+	err := session.HTTP.Request(http.MethodPost, revoltgo.EndpointUserFriend(""), body, &updated)
+
+	return updated, err
+}
+
+// wireHandle is an account as the friend route names one: the handle without the
+// "@" Store.Handle draws it with, that being the client's own mark rather than
+// part of the name.
+func wireHandle(user *revoltgo.User) string {
+	if user.Discriminator == "" {
+		return user.Username
+	}
+
+	return user.Username + "#" + user.Discriminator
+}
+
+// cleanHandle is a typed handle as the route takes one, or ok=false for one it
+// could not use. The "@" is dropped because the client draws it and a handle
+// copied out of the client carries it back; both halves are insisted on for the
+// reason ErrHandleMalformed gives.
+func cleanHandle(handle string) (string, bool) {
+	clean := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(handle), "@"))
+
+	name, discriminator, split := strings.Cut(clean, "#")
+	if !split || name == "" || discriminator == "" {
+		return "", false
+	}
+
+	return clean, true
 }
 
 // AcceptFriend accepts a request that has already arrived.

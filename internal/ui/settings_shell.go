@@ -975,11 +975,19 @@ func pairedRows(cells []fyne.CanvasObject) []fyne.CanvasObject {
 // is its own thing rather than a line of a table — an invite, which is a code
 // somebody hands out and revokes on its own.
 func newIsland(body fyne.CanvasObject) fyne.CanvasObject {
+	return container.NewStack(newIslandCard(), body)
+}
+
+// newIslandCard is that surface on its own, for a caller that has to keep the
+// rectangle — the friends page, whose islands are also targets and repaint under
+// the pointer. Built here so an island in the settings and an island where the
+// messages go cannot drift a shade apart.
+func newIslandCard() *canvas.Rectangle {
 	card := newSettingsCard()
 	card.StrokeColor = theme.Colors.SettingsIslandOutline
 	Elevate(card)
 
-	return container.NewStack(card, body)
+	return card
 }
 
 // halfCardWidth is the card one cell of a paired row is built in: half of what is

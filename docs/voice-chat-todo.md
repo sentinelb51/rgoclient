@@ -236,10 +236,79 @@ answer is worth retrying (a dial timeout says nothing about the request), a 5xx
 is the server failing rather than refusing, and a 4xx or `ErrNoSession` is an
 answer. Fewer attempts than a drop gets — `joinRetries` is 3 against
 `callRetries` 5 — because somebody is watching a button they pressed, and the
-dock says "Connecting" rather than "Reconnecting" for a call that was never up.
+island says "Connecting" rather than "Reconnecting" for a call that was never up.
 Only the last failure is said out loud.
 
+### Joining took three handshakes; it now takes one — fixed
+
+The join is timed at both seams now (`client.JoinCall`, `voice.Join`), because
+none of it was and the four candidates for "the delay" turned out not to be the
+same size at all. Measured live against `hel1` from this machine.
+
+**What it was.** lksdk's default is a peer connection each way, so ICE and DTLS
+ran twice against one node, and `PublishTrack` was then a further offer/answer
+once both were up — three handshakes for one call. `dial` now asks for
+`WithSinglePeerConnection()` and hands the track over with `WithTrack(...)`, so
+the publisher's offer travels *in the join request*: one ICE agent, one DTLS
+handshake, no renegotiation. `hel1` speaks it — verified, no fallback taken in
+nine live joins.
+
+It is not a free switch, hence the fallback: single-connection mode selects
+`signallingJoinRequest`, a different signalling protocol (`&join_request=`
+carrying a gzipped proto), so a node that does not speak it has to be met the old
+way. That costs a second dial, and only on an instance that needs one. The track
+cannot be reused across the two attempts — preparing a publication binds a
+transceiver to it — so each builds its own, which is why `newMicrophone` is
+separate from `newPublisher`.
+
+**What it bought, honestly.** The renegotiation is gone outright: `start 0s` on
+every join since, against 276 ms measured before. Everything else is swamped.
+Four joins each way, `voice.Join` end to end:
+
+| | samples (s) | median |
+|---|---|---|
+| split + publish after | 1.35, 1.92, 2.19, 3.35 | ~2.06 |
+| single, published in the join | 0.62, 1.25, 1.85, 3.41 | ~1.85 |
+
+The difference is about one renegotiation, which is what it should be. **The
+spread is `hel1`'s and it dwarfs everything this client can do**: `join_call`
+alone measured 104 ms, 340 ms, 554 ms, 566 ms, 732 ms, 1.05 s, 1.58 s, 2.32 s,
+3.11 s and 3.48 s across ten joins of the same channel. Do not read a single
+join as a regression or a win; nothing under two seconds of variance is visible
+here.
+
+**Two smaller ones, both taken.** `Instance()` was resolved lazily inside the
+first join of a session (~55-70 ms, consistently) — `Client.WarmVoiceNode` is now
+called off Ready, so nobody waits on it. And `JoinCall` and the two device opens
+ran in order though they have nothing to say to each other; the worker now starts
+both and waits for the pair, so a join costs the slower rather than the sum.
+
+Still not measured: the device opens themselves. They are the app's path and the
+live harness does not take it.
+
+### lksdk logged through this process's own logger — fixed
+
+`lksdk/logger.go` defaults to `stdr.New(log.Default())`, and nothing called
+`lksdk.SetLogger` — so every LiveKit and pion `Infow` landed in the client's log:
+a whole `ConnectParams` dump per join, and one "socket operation was attempted to
+an unreachable network" per failed connectivity check, from the ICE agent's own
+goroutine during the handshake.
+
+Hygiene rather than latency — sixty lines a join is milliseconds — but it buried
+the client's own diagnostics under pion's. `voice.quietSink` keeps `Error` and
+drops everything below it. It has to be a sink: a verbosity cannot do it (stdr
+enables `V(0)` whatever the level) and neither can a logr-level filter,
+`LogRLogger.Warnw` mapping onto `Info` alongside `Infow`. The cost is that
+lksdk's warnings go too — the TURN allocation failures below among them, which
+are documented there instead.
+
 ### ICE gathers on adapters that cannot route
+
+Still true at server-sdk-go v2.18.1: `transport.go:219` builds the
+`webrtc.SettingEngine` privately and the only thing `ConnectParams` reaches on it
+is `IPv6Only`, via `SetIPFilter`. Seen since on this machine as well:
+`192.168.56.1`, a VirtualBox host-only adapter, gathered and then failing every
+check it is picked for.
 
 Seen on this machine: `Ethernet 3` sits on an APIPA address (`169.254.96.39`, no
 DHCP lease) and neither adapter has a global IPv6, only `fe80::` link-locals.
@@ -356,7 +425,7 @@ hardware; the code paths were.
 
 - **Reconnect after a hard disconnect.** A `CallEnded` carrying an error now
   rejoins rather than reporting: `App.scheduleRejoin` doubles the wait per
-  attempt to a 30 s ceiling, gives up after five, and keeps the dock on screen
+  attempt to a 30 s ceiling, gives up after five, and keeps the island on screen
   saying *Reconnecting* the whole time. A rejoin that itself fails counts against
   the same sequence; leaving cancels it, which is why every reader-facing exit is
   `leaveCall` rather than `hangUp`.
@@ -373,10 +442,34 @@ hardware; the code paths were.
   `a.capture` where there is one, so a device held in exclusive mode is not asked
   to grant a second open. `monitorOwned` is which, and `restartInputMonitor`
   moves the bar between the two as a call starts and ends.
+- **Everything was 6 dB from silence.** Both directions clamped at `maxGain = 2`,
+  and the receive side could only ever *cut*: call volume topped out at 100 %,
+  so the only boost anywhere was the per-person menu's 200 %. Now a gain is
+  decibels, `config.VoiceGainOffDB`..`VoiceGainMaxDB` (−40 = off, +20 = ×10),
+  with `maxGain = 10` to match. Percentages were the wrong unit as well as the
+  wrong range: linear on amplitude, so half of one is −6 dB and every useful
+  boost crowded into the top of the scale.
+- **The input gain ran after the gate**, so cranking it did nothing for a quiet
+  microphone the gate was closing on, and the meter measured ahead of it and
+  never showed the boost. It is now a `preamp` stage *inside* the chain, after
+  RNNoise (which keeps the level it was trained on) and in front of the gate —
+  and the meter reads from it, so the bar and the threshold mark measure one
+  signal. A settings file's `sensitivity` therefore means something different
+  once a gain is set: it is compared against the boosted level now.
+- **Soft clipping**, `config.Voice.SoftClip`, on by default. `maxGain` of 10 into
+  a hard clamp is a sliced wave, which is buzz rather than loudness; `softClip`
+  is a tanh knee at 70 % of full scale, continuous at the knee (slope 1 either
+  side) and never reaching the ceiling. It is applied to the capture's output
+  frame and to the mixer's *sum* — clipping each source separately is distortion
+  the sum would not have had. Cost: a compare per sample below the knee, a
+  `math.Tanh` above it. A full-scale peak comes out ~0.6 dB down, which is what
+  the curve is.
 
-**Unverified by hand:** all four. Unplugging a microphone mid-call and swapping
-one in settings mid-call are two of the checks in section 6, and neither has been
-done on real hardware.
+**Unverified by hand:** all of them. Unplugging a microphone mid-call and
+swapping one in settings mid-call are two of the checks in section 6, and neither
+has been done on real hardware. The gain work is arithmetic-verified only — the
+curve, the round trip and the preamp were checked numerically, and nothing has
+been listened to.
 
 ## 4. Features not built
 
@@ -434,66 +527,100 @@ done on real hardware.
 
 ## 5. Performance — measured, and mostly a non-issue
 
-Measured on this machine, 48 kHz mono, libopus 1.5.2 pure C:
+Re-measured 2026-08-25 on a 9950X3D, 48 kHz mono VoIP at 32 kbps, 20 ms frames,
+libopus 1.5.2 built `-O3 -march=x86-64-v3`. The codec rows replace older ones
+that are discussed below; the mixer rows are unchanged and were not re-taken.
 
 | | cost | share of budget |
 | --- | --- | --- |
-| Opus encode | 165 µs/frame | 0.83 % of one core at 50 fps |
-| Opus decode | 15.4 µs/frame | 0.08 % per participant |
-| Opus PLC, classic | 8.0 µs/frame | only while concealing |
-| Opus PLC, deep | 24.7 µs/frame | 0.12 % of realtime, only while concealing |
+| Opus encode | 38.0 µs/frame | 0.19 % of one core at 50 fps |
+| Opus decode | 13.4 µs/frame | 0.07 % per participant |
+| Opus decode, complexity 5 | 17.6 µs/frame | 0.09 % per participant |
+| Opus PLC, classic | 16.7 µs/frame | only while concealing |
+| **Opus PLC, deep** | **226.7 µs/frame** | **1.1 % of realtime, per concealed frame** |
 | Mixer, 1 lane | 1.6 µs/period | 0.016 % of the 10 ms budget |
 | Mixer, 20 lanes | 18.1 µs/period | 0.181 % |
 | Mixer, 50 lanes | 44.4 µs/period | 0.444 % |
 
-Whole audio path with 20 remote participants: **about 2.4 % of one core.**
+### Deep PLC is not free, and the old numbers here were wrong
 
-### Deep PLC costs nothing until something is lost
+Three claims that used to stand in this section do not survive re-measurement:
 
-Measured in `sentinelb51/gopus`, mono at 48 kHz:
+- **"Clean decode is identical either way."** It is not. A decoder at complexity
+  5 costs about a quarter more on every frame that *arrives* — 17.6 µs against
+  13.4 — because the model has to be fed whether or not anything is lost
+  (`celt_decoder.c` calls `update_plc_state` on each good frame).
+- **"Concealment is 3.1×, 8.0 → 24.7 µs."** It is **13.5×**, 16.7 → 226.7 µs —
+  and 690 µs without the AVX2 floor.
+- **"165 µs/frame" for encode** is not reproducible here; encode is 38 µs, or
+  41 µs at `-O2`. Unexplained rather than explained away.
 
-- **Clean decode is identical either way** — 16.7 µs/frame at complexity 0 and at
-  complexity 5, 1.00×. The neural model is not run on a frame that arrived.
-- **Concealment is 3.1×** — 8.0 µs → 24.7 µs per concealed frame, which is 0.12 %
-  of realtime for one stream.
-- **Decoder state is 85 KB** with it compiled in, so 1.7 MB across twenty
-  participants. That is paid whether or not the switch is on, the state being part
-  of `OpusDecoder`.
+The likely cause of the first two is a trap worth writing down: **timing a run of
+consecutive lost frames measures the wrong thing.** `celt_decoder.c:643` flips to
+noise-based concealment once `loss_duration` reaches 80 ms, and that path never
+reaches the model at all — so a benchmark that decodes nothing but holes reports
+the cost of comfort noise and shows no difference between complexity 0 and 5.
+The shape that measures it is one hole among good frames. (This bit twice: the
+re-measurement made the same mistake first and briefly concluded Deep PLC was
+never running.)
 
-That is why the default is on: the only machine that pays is one already losing
-packets, which is the machine that wants it. The switch exists because it is the
-reader's machine, and because a build without the model — or a system libopus
-older than 1.5 on the `opus_shared` path — reports the CTL as unimplemented,
-which `lane.applyDeepPLC` logs once and carries on from.
+**Decoder state is 85 KB** with it compiled in, so 1.7 MB across twenty
+participants, paid whether or not the switch is on — the state is part of
+`OpusDecoder`. That still stands.
 
-### SIMD: not worth it for the codec, and already done for the model
+It is still right to default it on: 227 µs is 1 % of realtime for one stream, and
+only a stream already losing packets pays it. But it is no longer true that it
+costs nothing, and a fifty-person call on a weak machine with a lossy link is a
+case worth remembering when this is next looked at. The switch also exists
+because a build without the model — or a system libopus older than 1.5 on the
+`opus_shared` path — reports the CTL as unimplemented, which
+`lane.applyDeepPLC` logs once and carries on from.
 
-The neural code was the part where this mattered, and it needed nothing:
-`dnn/vec.h` selects `vec_avx.h` or `vec_neon.h` from the *compiler's* `__SSE2__`
-and `__ARM_NEON`, not from libopus's `OPUS_X86_MAY_HAVE_*` config. amd64
-guarantees SSE2 and arm64 guarantees NEON, so Deep PLC is vectorised on every
-target this builds for with no flag at all. Going further means `-mavx2`, which
-drops pre-2013 machines, or `OPUS_HAVE_RTCD` plus `dnn/x86/x86_dnn_map.c`, which
-is the runtime dispatch the fork exists to avoid. The build prints libopus's own
-`#warning` asking for AVX2; it is answered here, not ignored.
+### SIMD and compiler flags: the codec barely cares, Deep PLC does
 
-The rest of this section is about celt and silk, and stands.
+Two separate things live in `sentinelb51/gopus`, and only the second matters.
 
+**libopus's own intrinsics** are on: `config.h` presumes what each architecture
+guarantees (SSE and SSE2 on amd64, Neon on arm64), `OPUS_HAVE_RTCD` stays
+undefined, and the `PRESUME_*` branches resolve every dispatch macro to a direct
+call — no table, no cpuid, no floor. Worth **0.5 %** of encode and nothing of
+decode, measured with the presume block on and off. gcc 15 auto-vectorises the
+float loops celt's SSE intrinsics were hand-written for in 2013. Kept because it
+costs nothing, not because it bought anything.
 
+**`-O3 -march=x86-64-v3`** is the one that pays, and it pays for `dnn/vec_avx.h`
+rather than for celt. That header picks its width from the compiler's own
+`__AVX2__` and `__FMA__`, so without the flag the neural model runs its SSE2
+fallback — which is what "Deep PLC is vectorised everywhere with no flag at all"
+used to mean here, and it was only half the story. `-tags opus_baseline` drops
+the floor for anything older than Haswell (2013), where the failure would be
+SIGILL rather than a slow decode.
 
-libopus is vendored with intrinsics compiled out (`config.h` leaves every
-`OPUS_X86_MAY_HAVE_*` and `OPUS_ARM_*` undefined), so it runs generic C. That was
-a deliberate trade — no runtime dispatch tables, one object that works on every
-amd64 and arm64 target.
+Dead ends, so nobody spends the afternoon again:
 
-Enabling SSE2/NEON would be a modest change: `OPUS_X86_PRESUME_SSE2` needs no
-runtime detection because amd64 guarantees SSE2, and arm64 guarantees NEON. AVX2
-would need `OPUS_HAVE_RTCD` and `celt/x86/x86cpu.c`.
+- **`-march=native` is 13 % *slower*** than v3 on Zen 5. `vec_avx.h:623` takes
+  the hardware VNNI dot product wherever one exists, and that instruction loses
+  to the AVX2 sequence it replaces; `-mno-avxvnni` recovers every bit of it,
+  which is what pins the cause. It is a property of this CPU, not a rule — on a
+  part with fast VNNI, native would likely win.
+- **`x86-64-v4`** is 3 % better than v3 and rules out every Intel consumer part
+  since Rocket Lake. Not worth it.
+- **`-Ofast` does not compile.** `celt/arch.h:201` refuses it: *"Cannot build
+  libopus with -ffast-math unless FLOAT_APPROX is defined."*
+- **`-fno-math-errno -fno-trapping-math`** are the halves of that which *are*
+  safe here and are worth a further ~6 %, but cgo's flag allowlist rejects every
+  `-f` flag outside its own list, so a library cannot carry them. They have to
+  come from `CGO_CFLAGS` at build time.
+- **LTO buys nothing and is broken.** `-flto` passes the allowlist and produces
+  a binary Windows will not load. It would gain nothing regardless: the
+  amalgamation is already one translation unit of 138 files, so cross-TU
+  inlining has been done at the source level. cgo compiles three TUs on amd64.
+- **`-funroll-loops`** is inside the noise.
 
-It is not worth doing. A good SIMD build might take encode from 165 µs to
-~110 µs — saving **0.3 % of one core**. The audio path is not where this client
-spends anything. Revisit only if a call of 50 people on a weak machine turns out
-to matter, and measure before and after.
+arm64 is **unmeasured** — no machine here. Neon is already 128 bits wide and
+`vec_neon.h` is unconditional, so there is no equivalent of the AVX2 cliff; the
+further step would be `OPUS_ARM_PRESUME_DOTPROD`, which is an ARMv8.4 floor and
+so a much harsher cut than v3 is on x86. Measure on Apple Silicon first.
 
 The mixer is the other arithmetic-shaped loop and is 100× cheaper than the codec.
 Hand-vectorising it would be optimising 0.4 % of a 10 ms budget.
@@ -535,7 +662,7 @@ cgo, and the work is already off the UI thread and cached to disk. Measure
   each way, with no interruption to the 50 reads a second. What is left is doing
   it **from the settings picker while somebody can hear**, which is the half
   `app` owns.
-- **Pull the network mid-call.** The reconnect should take over, the dock should
+- **Pull the network mid-call.** The reconnect should take over, the island should
   say *Reconnecting*, and hanging up during the wait must not be undone by a
   timer that has already been armed.
 - **Log out mid-call.** `resetSessionState` calls `hangUp` and
@@ -562,17 +689,27 @@ for. Delete any that earn their keep less than they cost:
   satisfies `voice.PCMSource` and `*audio.Sink` satisfies `voice.PCMSink`.
 - `internal/voice/live_test.go` — **the live call.** Skipped unless `RGO_LIVE` is
   set; signs in with the saved session on this machine, finds a voice channel,
-  joins and reports what identities the voice server hands back. `RGO_LIVE=tone`
-  publishes a sine instead of opening the microphone. This is the fastest way to
-  answer "is it actually working".
+  joins and reports what identities the voice server hands back. This is the
+  fastest way to answer "is it actually working".
 - `internal/ui/settings_index_test.go` — the regression most likely to ship
   silently: the settings search index builds every section twice, and the Voice
   section owns a microphone.
-- `internal/audio/devices_test.go` — peak signal per input device. Written
-  because the default microphone on this machine reads exactly `0.00000` while
-  the other reads `1.00003`; that is a muted headset, not a bug, and it will look
-  like a bug during two-person testing.
 - `internal/audio/mixer_bench_test.go` — the numbers in section 5.
+
+**No test opens an input device, and none should.** Two used to. The live call
+took the real microphone by default (`RGO_LIVE=tone` was the opt-*out*) and
+published it to a real channel for twenty seconds while asserting nothing about
+it; it publishes a sine now, and the device is not reachable from there at all.
+`internal/audio/devices_test.go` reported the peak signal per input and was
+worse: it was gated on nothing, so every `go test ./...` — CI included — opened
+every microphone on the machine for two seconds each with the gate wide open. It
+had no assertions either, which made it a harness rather than a test. Deleted.
+
+What that costs is real and worth naming: the **real capture chain end to end**
+— device, high-pass, RNNoise, preamp, gate, encoder, track — is no longer covered
+by anything automated, and the last time it went unverified the client published
+no audio at all for weeks (section 3). It is the app's job to demonstrate now.
+Run the client, join `voice-test`, and watch the settings meter move.
 
 ## 8. Housekeeping
 

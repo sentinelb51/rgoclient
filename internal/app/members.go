@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -109,7 +111,7 @@ func (a *App) flushAuthors() {
 				a.refreshMemberList()
 				return
 			}
-			a.refreshMentionCandidates()
+			a.refreshRecipients()
 		}, false)
 	}()
 }
@@ -150,6 +152,10 @@ func (a *App) buildMemberList() fyne.CanvasObject {
 	// are recycled, so one capturing a member would offer to kick whoever used to be
 	// drawn there.
 	a.memberList.RowMenu = func(userID string) []*fyne.MenuItem {
+		if a.currentServerID == "" {
+			return a.groupMemberMenu(a.currentChannelID, userID)
+		}
+
 		return a.memberMenu(a.currentServerID, userID)
 	}
 
@@ -213,9 +219,7 @@ func (a *App) refreshMemberList() {
 	if serverID == "" {
 		a.memberStale = false
 		a.dropMemberCache()
-		a.memberList.Reset()
-		a.setMentionCandidates(ui.MentionUser, nil)
-		a.updateMemberStatus()
+		a.refreshRecipients()
 
 		return
 	}
@@ -572,10 +576,12 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 	a.refreshMemberList()
 }
 
-/* Mention candidates */
+/* A conversation's own people */
 
-// refreshMentionCandidates hands the picker the people mentionable in a
-// *conversation* — its own recipients, a list the channel already carries.
+// refreshRecipients draws a conversation's participants: the group's member
+// sidebar, and the people mentionable in whatever is open. One walk feeds both,
+// which is the arrangement the server path already has — there refreshMemberList
+// resolves a membership once and pushes the sidebar and the picker from it.
 //
 // A server's people are deliberately not its business: that walk is far too much
 // for the UI thread, and refreshMemberList already makes it off-thread and pushes
@@ -584,14 +590,126 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 // walk a whole membership a second time, on the wrong thread, to arrive at what
 // the picker is holding. Channels are pushed separately by refreshChannelList.
 //
+// Only a **group** fills the sidebar. A direct message is two people the header
+// has already named and saved notes is one, so either would be a column drawing
+// what is written across the top of the window.
+//
+// This one is cheap enough for the UI thread where a membership is not: a
+// conversation carries its participants, Revolt caps a group well under a
+// thousand, and every lookup is the store answering from what it holds.
+//
 // Call on the UI thread, when the open conversation or its recipients change.
-func (a *App) refreshMentionCandidates() {
+func (a *App) refreshRecipients() {
+	if a.currentServerID != "" {
+		return // both lists are the server's, and its own walk is what fills them
+	}
+
 	channel, ok := a.currentChannel()
 	if !ok || channel.ServerID != "" {
+		a.clearRecipients()
 		return
 	}
 
 	a.setMentionCandidates(ui.MentionUser, recipientCandidates(a.store, channel))
+
+	if channel.Kind != domain.ChannelGroup {
+		a.resetMemberList()
+		return
+	}
+
+	members := recipientMembers(a.store, channel)
+
+	if a.memberList != nil {
+		a.memberList.SetModel(ui.NewMemberModel(members, nil, a.recipientListOptions()))
+		a.updateMemberStatus()
+	}
+}
+
+// ensureRecipients queues the accounts behind a group's participants. It is that
+// group's answer to a server's one membership fetch: somebody who has only ever
+// been in the group has never written a message here, so nothing else would ask
+// who they are, and both walks above drop whoever they cannot name.
+//
+// Called where the conversation changes rather than from refreshRecipients, which
+// runs on every batch of resolved authors: flushAuthors releases the guard on a
+// failure so a later message retries, and re-queueing from inside that flush
+// would be one request per batch, forever, for an account that cannot be fetched.
+// Call on the UI thread.
+func (a *App) ensureRecipients() {
+	channel, ok := a.currentChannel()
+	if !ok || channel.Kind != domain.ChannelGroup {
+		return
+	}
+
+	for _, userID := range channel.Recipients {
+		a.ensureAuthor("", userID)
+	}
+}
+
+// clearRecipients empties both lists, which is what leaving the home view for a
+// server and closing the last conversation both mean.
+func (a *App) clearRecipients() {
+	a.resetMemberList()
+	a.setMentionCandidates(ui.MentionUser, nil)
+}
+
+// resetMemberList empties the sidebar and returns it to the top.
+func (a *App) resetMemberList() {
+	if a.memberList == nil {
+		return
+	}
+
+	a.memberList.Reset()
+	a.updateMemberStatus()
+}
+
+// recipientListOptions is memberListOptions for a conversation, which has no
+// roles at all: hiding the members who hold none would hide every one of them,
+// and hoisting is an arrangement only a server has. What is left — grouping by
+// presence, hiding who is offline, drawing this account first — means the same
+// thing in a group as in a server.
+func (a *App) recipientListOptions() ui.MemberListOptions {
+	options := a.memberListOptions()
+	options.HoistRoles, options.HideRoleless = false, false
+
+	return options
+}
+
+// recipientMembers resolves a conversation's people into what the sidebar draws,
+// ordered by name as Store.Members orders a server's — the model never re-orders
+// within a bucket, so the order has to arrive with them.
+//
+// A group has no memberships, so there is no nickname, role colour or join date
+// to resolve: what is drawn is the account itself. It takes the store rather than
+// reading a.store, which is what lets it be tested against a fake.
+func recipientMembers(store domain.Store, channel domain.Channel) []domain.Member {
+	members := make([]domain.Member, 0, len(channel.Recipients))
+
+	for _, userID := range channel.Recipients {
+		user, ok := store.User(userID)
+		if !ok {
+			continue
+		}
+
+		members = append(members, domain.Member{
+			UserID:    user.ID,
+			Name:      user.Name,
+			Username:  user.Username,
+			AvatarURL: user.AvatarURL,
+			Presence:  user.Presence,
+			Bot:       user.Bot,
+		})
+	}
+
+	slices.SortFunc(members, func(x, y domain.Member) int {
+		if by := strings.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)); by != 0 {
+			return by
+		}
+
+		return strings.Compare(x.UserID, y.UserID)
+	})
+
+	return members
 }
 
 // setMentionCandidates hands the picker a list somebody else has already
@@ -727,7 +845,7 @@ func (a *App) canRenameMember(serverID, userID string) bool {
 func (a *App) promptMemberNickname(serverID, userID string) {
 	name := a.memberName(serverID, userID)
 
-	dialog := ui.NewPromptDialog(ui.Prompt{
+	a.showPrompt(ui.Prompt{
 		Title:  "Change nickname",
 		Action: "Change",
 		Busy:   "Changing...",
@@ -736,10 +854,7 @@ func (a *App) promptMemberNickname(serverID, userID string) {
 			a.closeOverlay()
 			a.setMemberNickname(serverID, userID, values[0])
 		},
-	}, a.closeOverlay)
-
-	a.showOverlay(dialog.Content)
-	a.window.Canvas().Focus(dialog.Entry)
+	})
 }
 
 // setMemberNickname renames a member, an empty name taking the nickname off. What

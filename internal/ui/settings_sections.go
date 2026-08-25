@@ -19,6 +19,7 @@ import (
 
 	"github.com/oklog/ulid/v2"
 
+	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
@@ -268,6 +269,198 @@ func (p *SettingsPage) swatchlessAvatar(url string) fyne.CanvasObject {
 	side := theme.Sizes.SessionCardAvatarSize
 
 	return circularAvatar(p.hooks.Deps.Images, url, fyne.NewSize(side, side))
+}
+
+/* Security */
+
+// securitySection is how the account is reached rather than what is in it: the
+// address it signs in with, the password, the second factor, and every device
+// holding a login.
+//
+// All of it is one fetch (see SecurityState) and every action on it needs a
+// proof of identity Revolt mints separately — so the section draws what it is
+// told and the *controller* owns both the challenge card and the request behind
+// it. Nothing here writes to config; nothing here is a setting.
+func (p *SettingsPage) securitySection() []settingsGroup {
+	p.loadSecurity()
+
+	state := p.security.value
+
+	sessions := p.groupOf("Your devices",
+		"Every device holding a login for this account. Revoking one signs it out at once.",
+		VBoxNoSpacing(p.spaceRows(p.loginRows())...))
+
+	return []settingsGroup{
+		p.group("Sign-in", "",
+			p.emailRow(state),
+			p.actionRow("Password", "Changing it does not sign your other devices out.",
+				"Change", ToneWarning, p.hooks.ChangePassword),
+		),
+		p.group("Second factor",
+			"A code from an app, asked for on top of your password when you sign in.",
+			p.totpRow(state), p.recoveryRow(state),
+		),
+		sessions,
+	}
+}
+
+// emailRow states the address rather than taking one: it is changed through a
+// card, Revolt asking for the password with it, and it is not a field that can be
+// left half-typed on a page that stays open.
+func (p *SettingsPage) emailRow(state SecurityState) fyne.CanvasObject {
+	email := state.Email
+	switch {
+	case p.security.err != nil:
+		email = "Could not be read"
+	case p.security.pending():
+		email = "…"
+	case email == "":
+		email = "Not set"
+	}
+
+	button := newRowButton("Change", ToneWarning, p.hooks.ChangeEmail)
+	enableIf(button, p.security.err == nil && !p.security.pending())
+
+	return p.rowWith("Email",
+		newText(email, theme.Colors.TimestampText, theme.Sizes.SettingsLabelSize),
+		vcenter(button))
+}
+
+// totpRow offers the one second factor this client can set up. An authenticator
+// is a shared secret and a code proving it was stored, so enabling is a card with
+// two steps in it — see the controller.
+func (p *SettingsPage) totpRow(state SecurityState) fyne.CanvasObject {
+	if p.security.pending() || p.security.err != nil {
+		return p.readOnlyRow("Authenticator app", securityUnknown(p.security.err))
+	}
+
+	if state.MFA.TOTP {
+		return p.actionRow("Authenticator app", "On. Codes from your app are asked for at sign-in.",
+			"Turn off", ToneDanger, p.hooks.DisableTOTP)
+	}
+
+	return p.actionRow("Authenticator app",
+		"Off. Your password is the only thing between somebody and this account.",
+		"Set up", ToneInfo, p.hooks.EnableTOTP)
+}
+
+// recoveryRow is the way back in when the authenticator is gone. Two actions on
+// one row: seeing the codes that exist, and replacing them — which invalidates
+// every one already written down, hence the second button rather than one that
+// decides for itself.
+func (p *SettingsPage) recoveryRow(state SecurityState) fyne.CanvasObject {
+	if p.security.pending() || p.security.err != nil {
+		return p.readOnlyRow("Recovery codes", securityUnknown(p.security.err))
+	}
+
+	detail := "None yet. Generate a set and keep them somewhere other than this computer."
+	if state.MFA.Recovery {
+		detail = "Generated. Each one signs you in once if you lose your authenticator."
+	}
+
+	show := newRowButton("Show", ToneInfo, p.hooks.RecoveryCodes)
+	enableIf(show, state.MFA.Recovery)
+
+	renew := newRowButton("Generate new", ToneWarning, p.hooks.RenewRecovery)
+
+	return p.row("Recovery codes", detail,
+		HBoxNoSpacing(vcenter(show), HorizontalSpacer(theme.Sizes.SettingsPreviewGap), vcenter(renew)))
+}
+
+// loginRows is the held answer drawn, or the one line standing for whichever
+// state it is not in — the shape a server's fetched lists take, and for the same
+// reasons.
+func (p *SettingsPage) loginRows() []fyne.CanvasObject {
+	switch {
+	case p.security.pending():
+		return []fyne.CanvasObject{p.note("Fetching…")}
+	case p.security.err != nil:
+		return []fyne.CanvasObject{p.note("Could not read where this account is signed in.")}
+	case len(p.security.value.Logins) == 0:
+		return []fyne.CanvasObject{p.note("Revolt is holding no logins for this account.")}
+	}
+
+	state := p.security.value
+
+	rows := make([]fyne.CanvasObject, 0, len(state.Logins)+2)
+	for _, login := range state.Logins {
+		rows = append(rows, p.loginRow(login))
+	}
+
+	// Said once under the list rather than on every row: it is a fact about this
+	// client, not about any one login.
+	if !state.SelfKnown {
+		rows = append(rows, p.note(
+			"This client can't tell which of these is the one you're using — sign in again and it will."))
+	}
+
+	if len(state.Logins) > 1 {
+		rows = append(rows, p.actionRow("Sign out everywhere else",
+			"Signs out every other device and leaves this one signed in.",
+			"Sign out others", ToneDanger, p.hooks.RevokeOthers))
+	}
+
+	return rows
+}
+
+// loginRow is one device. The name is the whole of what tells two apart — Revolt
+// stores whatever the client that signed in called itself — so it leads the row
+// and is editable, and the current one is marked because revoking it is the one
+// entry here that signs *this* window out.
+func (p *SettingsPage) loginRow(login domain.AccountSession) fyne.CanvasObject {
+	detail := "Signed in"
+	if login.Current {
+		detail = "This device"
+	}
+
+	rename := NewOutlinedIconButton(
+		tintedIcon(assets.ActionEditIcon, theme.Colors.SwiftActionIcon), theme.Colors.SwiftActionIcon,
+		func() { p.hooks.RenameLogin(login.ID, login.Name) })
+
+	revokeTint := theme.Colors.SwiftActionDanger
+	revoke := NewOutlinedIconButton(tintedIcon(assets.ActionDeleteIcon, revokeTint), revokeTint,
+		func() { p.hooks.RevokeLogin(login.ID, login.Name) })
+
+	return p.entryRow(nil, login.Name, detail, rename, HorizontalSpacer(theme.Sizes.IconButtonGap), revoke)
+}
+
+// securityUnknown is what a row says while the section has no answer, or could
+// not get one. A row that simply went missing would read as a feature this client
+// does not have.
+func securityUnknown(err error) string {
+	if err != nil {
+		return "Could not be read"
+	}
+
+	return "…"
+}
+
+// loadSecurity asks for the section's one answer, unless a request is already out
+// or the held one is still fresh. Recorded whatever the reader has done
+// meanwhile, and drawn into whichever list is mounted *now*.
+func (p *SettingsPage) loadSecurity() {
+	// The index pass builds every section twice on the first keystroke in the
+	// search box, and this one is three requests: it goes in the list with
+	// LoadProfile and the microphone.
+	if p.indexing || p.hooks.LoadSecurity == nil || !p.security.claim() {
+		return
+	}
+
+	visit := p.visit
+
+	p.hooks.LoadSecurity(func(state SecurityState, err error) {
+		if p.visit != visit {
+			return // the page closed; there is nothing left to record this in
+		}
+		p.security.settle(state, err)
+
+		// The rows above the list are drawn from the same answer, so the whole section
+		// is rebuilt rather than only the list refilled — unlike a server's, where the
+		// list is the whole of what the answer decides.
+		if p.section == SectionSecurity && !p.searching {
+			p.reload()
+		}
+	})
 }
 
 /* Interface */

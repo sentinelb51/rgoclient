@@ -31,6 +31,10 @@ DAG and conventions.
    `resetSessionState` — the gateway that owed the snapshot is being replaced.
 2. `onReady` → save token, record unreads, `showMainUI`, `refreshServerList`,
    `selectServer(first)` — or `selectHome` when the account is in no servers.
+   The unread channels and the mentions are both taken **wholesale**, not merged:
+   Ready is the account's whole read state, so a reconnect carrying neither must
+   not leave a channel read on a phone still bold here. What is carried over is
+   `dismissedMentions` alone (item 33), Revolt keeping no record of that.
 3. `selectServer` → `refreshChannelList`, `refreshMemberList`, `loadMembers` →
    `selectChannel(first)`. `loadMembers` is **one request for the whole
    membership**, once per server per session (`App.fetchedMembers`,
@@ -144,7 +148,7 @@ DAG and conventions.
    flattens the same groups the pop-up picker draws, called from
    `refreshServerList` (the set) and `enterServer` (the open server's first). A
    **server's** people therefore arrive only from `refreshMemberList`, which makes
-   that walk off the UI thread; `refreshMentionCandidates` covers the conversation
+   that walk off the UI thread; `refreshRecipients` covers the conversation
    case alone (`recipientCandidates`, bounded by the channel's recipient list) and
    returns at once for a server channel. Asking it for a server's would walk a
    whole membership on the UI thread, per channel switch, for what the picker
@@ -190,7 +194,10 @@ DAG and conventions.
    picture otherwise being this account's own standing in for a notepad. Its rows
    answer to selection, unread and typing like any other, hence `App.channelRows`
    walking both halves — a walk that knew only the list would leave one row that
-   never repaints.
+   never repaints. The Friends row is *not* in that walk, being no channel, so
+   `syncChannelList` paints it separately (`syncFriendsRow`): it answers to
+   selection too, the page it opens standing in the same slot a channel's messages
+   would (item 27).
 10. **Joining a server.** The join response does *not* add the server: revoltgo
     decodes it into an `Invite` whose `ServerID` is never populated. The
     `ServerJoined` event does, and `App.pendingJoin` tells that handler to select
@@ -702,7 +709,7 @@ DAG and conventions.
     is now wrong and let the rebuild re-read the store.
     Those rebuilds are **queued**, not made: `App.queueRefresh` sets bits in
     `App.dirty` (`refreshServers` | `refreshChannels` | `refreshMembers` |
-    `refreshEmojis` | `refreshPresence`) and arms one timer; `flushRefresh` runs
+    `refreshEmojis` | `refreshPresence` | `refreshFriends`) and arms one timer; `flushRefresh` runs
     each at most once, outermost column first. `refreshPresence` is skipped when
     `refreshMembers` ran in the same flush — the walk answered it on the way
     past — the same way `refreshEmojis` is skipped behind `refreshServers`. The
@@ -879,25 +886,50 @@ DAG and conventions.
     of some server and nothing more. Ordering is `Members`' — folded name,
     tie-broken on ID, so a row cannot swap out from under the pointer about to
     answer it.
-    It is a dialog opened from `ui.FriendsRow`, above the conversations in the home
-    sidebar, a relationship being a fact about somebody rather than about a server.
+    It is a **view, not an overlay** (`ui.FriendsPage`), opened from
+    `ui.FriendsRow` above the conversations in the home sidebar, a relationship
+    being a fact about somebody rather than about a server. It is stacked in the
+    message area's own slot with `App.messageColumn` hidden under it
+    (`buildMessageArea`), so the two are one view apiece and `App.friendsOpen` says
+    which: `showFriendsPage` clears the channel selection first — the page stands
+    where its messages would — and `clearChannelSelection` calls
+    `leaveFriendsPage`, which covers every path ending in no channel at all;
+    `selectChannel` calls it itself. Its own no-op guard cannot swallow the page:
+    the selection was cleared on the way in, so no channel is still the current one.
+    `restyle` hands back a fresh tree with the page hidden, so `restoreFriendsPage`
+    puts it back from the flag that outlived the rebuild.
     The row is rebuilt with the sidebar — those objects are replaced wholesale —
-    and marks itself the way an unread channel does when requests are waiting, that
-    being the one part of the list that arrives unasked.
-    With the dialog **down**, that mark is all `refreshFriends` is for, and it
+    and draws selection and a pending mark against each other exactly as a channel
+    row draws selection against unread (`SetState`), an incoming request being the
+    one part of the list that arrives unasked.
+    With the page **down**, that mark is all `refreshFriends` is for, and it
     takes `awaitingAnswer` rather than the sections: `flushAuthors` calls it once
     per batch of resolved authors, and building four sections of rows and their
     buttons to ask whether one of them is empty is the whole list's cost for one
     boolean.
-    The dialog **refills in place** (`SetSections`) rather than closing: accepting
+    The page **refills in place** (`SetSections`) rather than closing: accepting
     a request is an action whose entire result is the list changing, and every
     other answer is still up. That is what `App.relationshipButtons` is for — the
     profile card's own policy with the way out left open, so the two surfaces
     cannot come to offer different things about one person. A button drawn disabled
-    is dropped here, "Request sent" being what the heading above it already says,
-    and only a section `Awaiting` an answer draws its first button emphasised — a
-    coloured slab per row in a list that is mostly read would be the loudest thing
-    in it.
+    is dropped here, "Request sent" being what the heading above it already says.
+    Each button also carries a `ui.ProfileAction`, which is what lets the page draw
+    a **mark** where the card draws a word: the controller names the kind of action
+    and `ui.friendMark` picks the glyph and the tint, the way the composer names a
+    kind of keystroke and `app` decides what it sounds like.
+    Every heading **folds**, and which sections are shut is the page's own state —
+    what the controller decides is only which one *starts* shut (`Folded`, on
+    Blocked). See `internal/ui/CLAUDE.md`.
+    That name is also how `friendEntry` lifts **Message** out of the buttons
+    entirely and hands it over as `FriendEntry.Open`, the card's own tap: writing to
+    somebody is the one thing done from a friends list often, and a target for it a
+    square from Block is a hand aiming at the wrong one. Most rows have no such
+    action — Revolt opens a conversation only between friends — and their card falls
+    back to the profile, which the picture leading every card opens in any case.
+    Presence is drawn on every row, so `onPresenceChanged` queues `refreshFriends`
+    **before** the member sidebar's own gate — this page is the one surface open
+    while no server is, which is the first thing that gate drops, and its people are
+    the reader's own rather than a thousand strangers.
     Somebody the gateway names that `State` has never cached has no name to draw —
     `EventUserRelationship` carries the account and nothing files it — so
     `friendsChanged` queues them through `ensureAuthor`, and `flushAuthors` refills.
@@ -1157,7 +1189,7 @@ DAG and conventions.
     the padding inside a card, or the grid reads as rows again.
     **Roles** is the one section drawn from the store rather than fetched — Ready
     carries every role and the three role events keep them current — so it has no
-    `cachedList` and nothing to expire. It is also the only section that *drills*:
+    `cachedList` and nothing to expire. It *drills*:
     `ServerSettingsPage.roleID` is the role being edited, "" the list, and the rail
     entry going back to the list is why a tap on it clears the field. The editor is
     rebuilt from the store on every role event, this account's own edits included,
@@ -1181,6 +1213,20 @@ DAG and conventions.
     reserved ID, nothing outranks it, and its editor is switches rather than the
     three-state control. It is what a role's "Inherit" defers to, which is why it
     had to be reachable at all.
+    **A channel's own overrides are the same grid one scope down**, and the page's
+    only *second* level: Channels drills into a channel (`ServerSettingsPage.channelID`)
+    and then into a role, so `paneBack` steps back one at a time while a rail tap
+    leaves both. `App.channelOverrides` is what it draws — `Store.ChannelOverrides`
+    merged with `Store.ServerRoles`, so every role is listed whether this channel
+    changes anything about it or not, and `Store.Permissions(channelID)` rather than
+    the server-wide answer, an override being exactly what moves those apart. It is
+    read from the store like the roles and for a better reason: `PartialChannel`
+    carries both halves, revoltgo applies them, and the `ChannelUpdate` that follows
+    an edit already queues `refreshChannels`, which is what rebuilds this page. The
+    grid draws a **subset** of the bits (`ui.channelPermissions`) — Revolt keeps one
+    bitfield for both scopes, so an override of a server-only bit would be stored and
+    never read. Unlike the Roles section, a role this account does not outrank is
+    still opened, read-only: its row can only say how many bits moved, never which.
 35. **Editing a member** is `ServerMemberEdit` under three different permissions,
     and the member menu is where all of it is offered (`members.go`, built into
     `memberMenu`). A **nickname** is a `PromptDialog` that closes on submit — a
@@ -1216,23 +1262,32 @@ DAG and conventions.
     gone is closed rather than never made, the same way the microphone already was.
     `a.background` rather than `a.backgroundThen`, because the latter runs neither
     branch when the worker succeeds into a stale session — which would leak a live
-    call. `callJoining` is the
+    call.
+    Inside that worker the credentials and the **devices** are started together
+    and waited for as a pair (`openedInput`): the microphone has nothing to say to
+    the token, so run in order a join cost a REST round trip *plus* two device
+    opens. The pair is what makes the wait unconditional — a capture arriving
+    after a failed route is a device nothing holds and nothing closes. The node
+    itself is off the path entirely: `Client.WarmVoiceNode` resolves it off Ready,
+    it being instance configuration that cannot change under a running client, and
+    resolving it lazily made the first join of every session pay ~60 ms for it.
+    `callJoining` is the
     single flight, a plain bool because the point is "not again *yet*": a second
     tap must not open a second microphone. `force_disconnect` is passed always —
     Stoat refuses a second connection for one account, so a client that crashed
     mid-call could not otherwise rejoin. The join is also cancellable: `dropCall`
     bumps `callGen`, a connection landing after the reader gave up is closed
     rather than installed — otherwise it is a live call with an open microphone
-    and no dock to leave it from — and a *failure* landing after they gave up is
+    and no island to leave it from — and a *failure* landing after they gave up is
     dropped by the same generation in `failedJoin`, or it would re-arm a rejoin
     of a call they left.
     **Three ways out, and they are not the same.** `dropCall` releases the media
     and *keeps* `callChannelID`, which is what a call being reconnected looks
-    like: the dock stays on screen saying so. `hangUp` is that plus giving the
+    like: the island stays on screen saying so. `hangUp` is that plus giving the
     channel up. `leaveCall` is `hangUp` plus `cancelRejoin`, and is what every
-    surface a reader can reach is bound to — the dock, the channel menu, the note
-    under the header, a moderator disconnect, and signing out. A call somebody
-    left must not reconnect itself, which is the whole distinction.
+    surface a reader can reach is bound to — the island's own button, the channel
+    menu, a moderator disconnect, and signing out. A call somebody left must not
+    reconnect itself, which is the whole distinction.
     **A drop is rejoined, not reported.** lksdk recovers a transient blip on its
     own (`OnReconnecting`/`OnReconnected`), so a `CallEnded` carrying an error
     means the room is gone and a fresh token is needed — `JoinCall` again, with
@@ -1264,10 +1319,31 @@ DAG and conventions.
     else's event in that window would read the store's empty answer as a
     disconnect and tear down a call that just connected.
     **Settings apply to a call already running.** `applyVoiceSettings` pushes
-    sensitivity, input gain, the rumble filter, noise suppression, call volume
-    and the output device onto whatever is open, and re-arms the push-to-talk
-    poll; without it each is read once at join and a slider dragged mid-call
-    does nothing, which reads as a broken setting rather than a deferred one. The input *device* included: `Capture.SetDevice`
+    sensitivity, input gain, soft clipping, the rumble filter, noise suppression,
+    call volume and the output device onto whatever is open, and re-arms the
+    push-to-talk poll; without it each is read once at join and a slider dragged
+    mid-call does nothing, which reads as a broken setting rather than a deferred
+    one.
+    **Both gains are decibels** (`config.VoiceGainOffDB`..`VoiceGainMaxDB`,
+    −40 = off, +20 = ×10), converted at the seam by `audio.GainFromDB` — `audio`
+    speaks linear gain, being where the arithmetic is, and `config` owns where
+    the range ends, being the leaf everything reads. The per-person volume is the
+    same range in the same unit, on a `ui.SliderCard` hung beside the participant
+    row (`showUserVolume` → `showPopover`) and seeded by `audio.DecibelsFromGain`
+    off `Sink.Gain`: a slider is not a `fyne.MenuItem`, so the menu item opens a
+    card rather than a submenu of the levels somebody thought of. Fyne dismisses
+    the menu before running an item's action, so nothing is left over it. It is
+    **written down twice**, to the sink and to `config.SetUserGain`: the sink
+    holds it for as long as the client runs and hands it to the lane opened for
+    that person next — theirs across a leave, a rejoin and the next call — and
+    config is what survives a restart, seeded back into the sink in `joinCall`
+    before any lane can open. Unity is stored in neither, so the map is as long
+    as the list of people actually moved. A participant with no lane is still
+    left alone (`Sink.SetGain` conjures none), which is
+    what a volume set across somebody's leave comes to. The input gain is a **preamp inside the capture chain**, in front
+    of the gate: raising it is also what lets the gate hear a quiet microphone,
+    and the meter reads the same measurement so the bar and the threshold mark
+    cannot disagree. The input *device* included: `Capture.SetDevice`
     opens the new microphone on the capture's own goroutine and keeps feeding the
     same ring, so the publisher inside a blocking `Read` sees a period of quiet
     rather than a stream closing under it.
@@ -1318,11 +1394,25 @@ DAG and conventions.
     an unchanged value and moves one circle's fill). `callRows` re-applies
     `a.speaking` as it builds, a rebuilt row being a new object that knows nothing
     of who was talking.
-    **The dock** (`ui.CallDock`) is in the channel column's bottom slot and no
-    other: that column is in both the server and home views, is not rebuilt by
-    `refreshChannelList`, and a call outlives leaving the channel *and* the server.
-    `syncCall` is the pair — the dock, plus the header strip when the open channel
-    is the call's.
+    **The island** (`ui.CallIsland`) floats on its own layer at the top of the
+    window and nowhere else: a call outlives leaving the channel, the server *and*
+    the view, and the window's layer is the one slot present in all of them. It
+    carries both halves of voice — the running call, and the join offer for a voice
+    channel on screen that is not it — so `syncCallIsland` is the single writer and
+    `syncCall` is a call to it. `settleCallIsland` is what every path finishes with:
+    the card's size changes with what is in it, and the layer under it has to be
+    re-measured. `voiceWhere` fills a half's two lines and its picture, falling
+    back rather than failing — the call outlives leaving the server, so the store
+    may hold neither, and a channel it cannot place gets a name alone, an ID with
+    no name being worse than nothing. A **conversation** is in no server and takes
+    its own picture: a group's icon or a direct message's other account, and under
+    a group's name how many are in it. A group with no icon is drawn as its
+    members instead (`voiceGroupFaces`), skipping this account — the reader knows
+    they are in it — and anybody the store cannot resolve, a blank circle not being
+    a person. **A restyle rebuilds
+    the tree** (`applyStyles` → `buildUI`), so the island is re-synced there or a
+    running call loses the only way to leave it; a connected call needs no
+    `SetState` to come back, a fresh card's bar already being green.
     **The settings meter owns a device**, which is the one thing on that page that
     does. It is its own `audio.Capture`, not the call's, so adjusting the gate
     mid-call is not two things fighting over the microphone; it is sampled at
@@ -1336,3 +1426,89 @@ DAG and conventions.
     (`buildSettingsIndex`) stubs all four voice hooks to nil for the same reason
     `LoadProfile` and `CacheStats` are stubbed: it builds every section twice on
     the first keystroke in the search box, and `StartInputMonitor` opens a device.
+37. **A group conversation.** Everything a group *is* was here before one could
+    be made: it is a channel, so its sidebar row, header, messages and edit card
+    are every channel's, and leaving one is `confirmCloseChannel`. What
+    `groups.go` adds is the two things Revolt files on the account rather than on
+    the channel — who is in it, and who may change that.
+    Both cards are picked from `Store.Relationships` filtered to friends
+    (`friendCandidates`), because friendship is the whole of what the routes take:
+    a stranger in a create is refused and the whole request with them. Making one
+    is the **plus in the channel sidebar's header**, which shares the cog's slot
+    (`syncGroupAdd` against `syncServerCog`) — a server is configured, the home
+    view is added to, and neither view has the other's button. Adding to one is
+    "Add people" on the channel's own menu under `InviteOthers`; removing somebody
+    is the member row's menu and the **owner's** alone, that not being a
+    permission bit — hence `domain.Channel.OwnerID`.
+    The response to a create is spent on selecting the new group, which is why
+    `Client.CreateGroup` fetches the channel into `State` first: the
+    `ChannelCreate` that files it cannot be waited for. Everything after is the
+    gateway's — `ChannelCreated` puts the row in the sidebar, `RecipientsChanged`
+    follows every arrival and departure.
+    **A group is also the one conversation with a member sidebar.**
+    `refreshRecipients` (in `members.go`, beside the walk it shares with the
+    mention picker) draws it: a DM is two people the header has already named and
+    saved notes is one, so only a group fills the column. That walk is cheap
+    enough for the UI thread where a membership is not — the channel carries its
+    participants and every lookup is the store answering from what it holds — so
+    it is rebuilt whole rather than patched, which is also what presence in a
+    group queues (`refreshMembers`, not `refreshPresence`). The options are
+    `memberListOptions` with hoisting and hide-roleless cleared: a group has no
+    roles, so the second would hide every row in it. Resolving the accounts behind
+    the participants is `ensureRecipients`, called where the conversation changes
+    and deliberately **not** from `refreshRecipients` — `flushAuthors` ends there,
+    and it releases the guard on a failure, so re-queueing from inside it would be
+    one request per batch forever for an account that cannot be fetched.
+    **Asking somebody new** is the field at the head of the friends page
+    (`askFriend`), and it is the only way to reach an account this client has
+    never drawn — every other route to a person is a surface they appear on. The
+    handle goes to the same route `AddFriend` uses; `done(sent)` is what clears
+    the field on success and keeps it for a typo. The account behind the answer is
+    not cached, so the row appears when the gateway files it, not when the request
+    returns.
+38. **Securing the account.** The Security section is how an account is *reached*
+    rather than what is in it — its email, its password, its second factor and
+    every device holding a login — and `app/security.go` is the whole controller
+    half. It is the one section where nothing writes to config and nothing is a
+    setting.
+    **Everything begins with a challenge.** Revolt gates every route that ends a
+    session or changes a credential behind an MFA ticket (see the client note for
+    which and why), so the shape is: `App.challenge` raises `ui.ChallengeDialog`,
+    mints a ticket from what is typed, and hands it to one request. The ticket is
+    never held between two actions — it is short-lived by design, and an action
+    reusing one is an action nobody confirmed. The methods on that card are
+    **asked for** (`MFAMethods`) rather than assumed, and `answerable` drops what
+    this client cannot answer: Revolt names a security key for an account that
+    has one and there is no WebAuthn here.
+    Two actions deliberately do not take that shape. **Password and email** each
+    need the current password in the request *as well as* a ticket, so a challenge
+    in front of them would ask for one answer twice — they are one card that mints
+    its own ticket (`App.spend`), and `errPasswordRefused` is what tells a wrong
+    password from the route refusing the new value. **Turning TOTP on** takes no
+    ticket at all: its proof is a code from the authenticator, which is the only
+    proof that means anything there. Its secret *is* gated, so setting one up is a
+    challenge, then `ui.SecretDialog` holding the key and the code together — the
+    key is shown once and asking for the code afterwards would mean showing it
+    again.
+    **The section is one fetch.** `ui.SecurityState` is the email, the factors and
+    the logins together: three requests the section cannot draw without any of, so
+    `loadSecurity` runs them in parallel and reports one error for the lot. It is
+    held in `cachedOne` for the life of one *opening* — the same rule a server's
+    fetched lists follow, and `SettingsPage.visit` is the same guard on an answer
+    landing after the page closed. Every action here calls `refreshSecurity` once
+    the server has agreed, which drops the held answer; unlike a server's list a
+    late answer rebuilds the whole section, every row in it being drawn from that
+    one answer.
+    **It must not fetch while indexing.** `buildSettingsIndex` builds every
+    section twice on the first keystroke in the search box, so `loadSecurity`
+    checks `p.indexing` *and* the hook is stubbed there — the same pair
+    `LoadProfile` and the microphone get. `settings_index_test.go` covers the
+    guard through `indexPass`, which is the only way to see it: the stubbing in
+    `buildSettingsIndex` hides exactly what it is about.
+    **`EventAuth` is finally actionable**, and only because the session ID is
+    recorded at login and saved beside the token. Naming *this* session is a fatal
+    drop, the same one `Logout` is; naming any other is `SessionsChanged`, which
+    only the page cares about. Where the ID is unknown — a login saved before the
+    client recorded one — it says nothing rather than guessing, and the section
+    says so under the list instead of leaving the reader to work out which row
+    they are sitting at.

@@ -14,11 +14,12 @@ type Sink struct {
 	mix *mixer
 
 	mu    sync.Mutex
-	byOne map[string]int // user ID -> lane index
+	byOne map[string]int     // user ID -> lane index
+	gains map[string]float64 // user ID -> gain, unity never stored
 }
 
 func newSink(m *mixer) *Sink {
-	return &Sink{mix: m, byOne: make(map[string]int)}
+	return &Sink{mix: m, byOne: make(map[string]int), gains: make(map[string]float64)}
 }
 
 // Write hands one participant's decoded audio to the speakers: 48 kHz mono,
@@ -87,27 +88,41 @@ func (s *Sink) find(userID string) *lane {
 	return &s.mix.lanes[index]
 }
 
-// SetGain scales one participant, 0 to 2. It is about this call and is not
-// persisted: a voice too quiet today is a room, not a preference. Somebody with
-// no lane is left alone — a gain arriving from a menu open across their leave
-// must not conjure a lane back.
+// SetGain scales one participant, 0 to maxGain. The sink remembers it rather
+// than the lane: a lane lasts as long as somebody is in the call, and how loud
+// they are heard is about the person — set once, it holds across their leaving,
+// the call ending and, once the caller writes it down, a restart. Unity is
+// forgotten rather than stored, so the map is as long as the list of people
+// actually moved.
+//
+// Somebody with no lane is still left alone — a gain arriving from a menu open
+// across their leave must not conjure a lane back — but it is recorded, and the
+// lane opened for them next takes it.
 func (s *Sink) SetGain(userID string, gain float64) {
-	if l := s.find(userID); l != nil {
-		l.gain.Store(floatBits(clampGain(float32(gain))))
+	scale := clampGain(float32(gain))
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if scale == 1 {
+		delete(s.gains, userID)
+	} else {
+		s.gains[userID] = float64(scale)
+	}
+
+	if index, ok := s.byOne[userID]; ok {
+		s.mix.lanes[index].gain.Store(floatBits(scale))
 	}
 }
 
 // Gain reports what a participant is scaled by, 1 for anybody never adjusted.
+// The sink's own record rather than the lane's, so it answers for somebody who
+// has not spoken yet — which is what the menu asks before the first packet.
 func (s *Sink) Gain(userID string) float64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	index, ok := s.byOne[userID]
-	if !ok {
-		return 1
-	}
-
-	return float64(bitsFloat(s.mix.lanes[index].gain.Load()))
+	return float64(s.gain(userID))
 }
 
 // Remove closes a participant's lane and gives the slot back. Whatever they had
@@ -148,6 +163,16 @@ func (s *Sink) release(index int) {
 	l.pcm.Discard(l.pcm.Cap())
 }
 
+// gain is what one participant is scaled by, unity for anybody never moved.
+// Callers hold the lock.
+func (s *Sink) gain(userID string) float32 {
+	if gain, ok := s.gains[userID]; ok {
+		return float32(gain)
+	}
+
+	return 1
+}
+
 // lane finds a participant's lane, opening one for a user who has none — which
 // is Open's job and nobody else's. A call with more participants than there are
 // lanes drops the ones past the end rather than growing: maxLanes is well past
@@ -168,9 +193,11 @@ func (s *Sink) lane(userID string) *lane {
 		}
 
 		// The ring is emptied before the callback is told to read it, or the first
-		// thing this participant says is whatever the last one left behind.
+		// thing this participant says is whatever the last one left behind. The
+		// gain is this participant's rather than unity, or somebody turned down
+		// would come back at full volume the moment they rejoined.
 		l.pcm.Discard(l.pcm.Cap())
-		l.gain.Store(floatBits(1))
+		l.gain.Store(floatBits(s.gain(userID)))
 		l.active.Store(true)
 
 		s.byOne[userID] = i

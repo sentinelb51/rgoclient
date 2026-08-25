@@ -140,6 +140,7 @@ func applyPacing() {
 
 	fyne.SetFrameRate(performance.FrameRate)
 	fyne.SetVSync(performance.VSync)
+	fyne.SetPartialRepaint(performance.PartialRepaint)
 }
 
 // applyAffinity restricts the process to the cores the setting names.

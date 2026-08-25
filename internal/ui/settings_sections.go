@@ -986,8 +986,8 @@ func fileCount(files int) string {
 
 /* Performance */
 
-// performanceSection is the two things the client asks of the toolkit rather
-// than of itself. Both take effect on the next frame, so the section is also the
+// performanceSection is what the client asks of the toolkit rather than of
+// itself. Every row takes effect on the next frame, so the section is also the
 // only place in the page where a change can be *seen* rather than described —
 // which is why the note under the limit says what it cannot do on its own.
 func (p *SettingsPage) performanceSection() []settingsGroup {
@@ -1003,6 +1003,9 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 				"Shows each frame in step with the monitor, so none is ever half-drawn. Off, frames appear as soon as they're ready, which can tear.",
 				settings.VSync, func(s *config.Settings, on bool) { s.Performance.VSync = on }),
 			p.note("With V-Sync on, FPS is capped to your monitor's refresh rate (Hz)."),
+			p.toggleRow("Partial redraw",
+				"Redraws only the parts of the window that changed, keeping the rest from the previous frame. Turn off only if part of the window ever looks stale.",
+				settings.PartialRepaint, func(s *config.Settings, on bool) { s.Performance.PartialRepaint = on }),
 		),
 	}
 

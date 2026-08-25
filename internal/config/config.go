@@ -218,10 +218,11 @@ type Cache struct {
 }
 
 // Performance is what the client asks of the toolkit rather than of itself: how
-// often the window may draw, and whether it waits for the display before showing
-// what it drew. Stock Fyne draws at 60 and leaves vsync to the driver, with no
-// way to say otherwise, so both of these reach the toolkit only through the
-// patched copy — see github.com/sentinelb51/rgoclient-fyne.
+// often the window may draw, whether it waits for the display before showing
+// what it drew, and whether it redraws only what changed. Stock Fyne draws at
+// 60, leaves vsync to the driver and repaints the whole window, with no way to
+// say otherwise, so these reach the toolkit only through the patched copy —
+// see github.com/sentinelb51/rgoclient-fyne.
 type Performance struct {
 	// FrameRate is a ceiling rather than a rate. The driver wakes this many times
 	// a second to poll input, advance animations and consider a repaint; a window
@@ -234,6 +235,12 @@ type Performance struct {
 	// input and queued work included. Off, a frame is shown as soon as it is drawn
 	// and a fast scroll can tear.
 	VSync bool `json:"vsync"`
+
+	// PartialRepaint redraws only the regions that changed since the previous
+	// frame, restoring the rest from a snapshot of it. Off is upstream Fyne's
+	// behaviour — every change clears and redraws the whole window — kept as the
+	// escape hatch for a stale-pixel artifact and the baseline for measuring.
+	PartialRepaint bool `json:"partial_repaint"`
 
 	// Cores is which of the machine's cores the client is allowed to run on:
 	// CoresAll, plus CoresEfficiency / CoresPerformance on a hybrid part and
@@ -478,8 +485,9 @@ func Default() Settings {
 			CachedChannels:     5,
 		},
 		Performance: Performance{
-			FrameRate: 120,
-			VSync:     true,
+			FrameRate:      120,
+			VSync:          true,
+			PartialRepaint: true,
 		},
 	}
 }

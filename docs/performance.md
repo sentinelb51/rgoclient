@@ -46,7 +46,8 @@ most four scissored passes, each under a root clip so the painter's rect test
 culls the draw calls too. A caret blink is a restore quad plus a handful of
 draws instead of the window. Damage past 80% coverage promotes to the old full
 repaint, which is what a scroll frame is; `fyne.SetPartialRepaint(false)` is
-the escape hatch and the measuring baseline. The diff covers moves, hides,
+the escape hatch and the measuring baseline, and
+`config.Performance.PartialRepaint` is its setting. The diff covers moves, hides,
 appearances and removals — no exported call site reports a rect, and none needs
 to.
 

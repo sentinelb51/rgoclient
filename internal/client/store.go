@@ -296,7 +296,9 @@ func (s *store) Member(serverID, userID string) (domain.Member, bool) {
 		return domain.Member{}, false
 	}
 
-	return toMember(state, member, state.Server(serverID)), true
+	roles := newHeldRoleTable(state.Server(serverID), member.Roles)
+
+	return toMember(state, member, roles), true
 }
 
 // Members lists everyone the client knows of in a server, ordered by display
@@ -316,12 +318,12 @@ func (s *store) Members(serverID string) []domain.Member {
 	}
 
 	raw := state.Members(serverID)
-	server := state.Server(serverID)
+	roles := newRoleTable(state.Server(serverID))
 
 	if !config.Current().Behaviour.SortMembers {
 		members := make([]domain.Member, len(raw))
 		for i, member := range raw {
-			members[i] = toMember(state, member, server)
+			members[i] = toMember(state, member, roles)
 		}
 
 		return members
@@ -329,17 +331,17 @@ func (s *store) Members(serverID string) []domain.Member {
 
 	entries := make([]keyed[domain.Member], len(raw))
 	for i, member := range raw {
-		resolved := toMember(state, member, server)
+		resolved := toMember(state, member, roles)
 		entries[i] = keyed[domain.Member]{resolved, strings.ToLower(resolved.Name), resolved.UserID}
 	}
 
 	return sortedByName(entries)
 }
 
-// toMember resolves the display fields of a membership. server may be nil — a
+// toMember resolves the display fields of a membership. roles may be empty — a
 // member of a server State has not published to us still has a nickname and an
 // avatar, just no role colour.
-func toMember(state *revoltgo.State, member *revoltgo.ServerMember, server *revoltgo.Server) domain.Member {
+func toMember(state *revoltgo.State, member *revoltgo.ServerMember, roles roleTable) domain.Member {
 	out := domain.Member{
 		ServerID: member.ID.Server,
 		UserID:   member.ID.User,
@@ -376,7 +378,7 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, server *revo
 	}
 
 	out.HasRoles = len(member.Roles) > 0
-	out.Color, out.HoistRoleID = memberRoleInfo(server, member.Roles)
+	out.Color, out.HoistRoleID = memberRoleInfo(roles, member.Roles)
 
 	return out
 }
@@ -406,7 +408,7 @@ func (s *store) VoiceParticipants(channelID string) []domain.VoiceParticipant {
 	if channel := state.Channel(channelID); channel != nil && channel.Server != nil {
 		serverID = *channel.Server
 	}
-	server := state.Server(serverID)
+	roles := newRoleTable(state.Server(serverID))
 
 	entries := make([]keyed[domain.VoiceParticipant], 0, len(states))
 	for _, voice := range states {
@@ -417,7 +419,7 @@ func (s *store) VoiceParticipants(channelID string) []domain.VoiceParticipant {
 		}
 
 		if member := state.Member(serverID, voice.ID); member != nil {
-			resolved := toMember(state, member, server)
+			resolved := toMember(state, member, roles)
 			participant.Name = resolved.Name
 			participant.AvatarURL = resolved.AvatarURL
 			participant.Color = resolved.Color
@@ -462,48 +464,9 @@ func serverRoles(server *revoltgo.Server, roleIDs []string) []domain.Role {
 		return nil
 	}
 
-	// The ID is the map key rather than a field on the role, so it is paired with
-	// its definition here to survive the sort.
-	type known struct {
-		id   string
-		role *revoltgo.ServerRole
-	}
-
-	found := make([]known, 0, len(roleIDs))
+	roles := make([]domain.Role, 0, len(roleIDs))
 	for _, id := range roleIDs {
 		if role := server.Roles[id]; role != nil {
-			found = append(found, known{id: id, role: role})
-		}
-	}
-	slices.SortFunc(found, func(x, y known) int { return cmp.Compare(x.role.Rank, y.role.Rank) })
-
-	roles := make([]domain.Role, len(found))
-	for i, k := range found {
-		roles[i] = toRole(k.id, k.role)
-	}
-
-	return roles
-}
-
-// HoistedRoles lists the roles a server displays as sections of their own, most
-// senior first — which is ascending Rank, Revolt ranking the most senior lowest.
-//
-// It hands back values: nothing may escape holding a *revoltgo.ServerRole, which
-// the gateway rewrites in place.
-func (s *store) HoistedRoles(serverID string) []domain.Role {
-	state := s.state()
-	if state == nil || serverID == "" {
-		return nil
-	}
-
-	server := state.Server(serverID)
-	if server == nil {
-		return nil
-	}
-
-	roles := make([]domain.Role, 0, len(server.Roles))
-	for id, role := range server.Roles {
-		if role != nil && role.Hoist {
 			roles = append(roles, toRole(id, role))
 		}
 	}
@@ -512,10 +475,25 @@ func (s *store) HoistedRoles(serverID string) []domain.Role {
 	return roles
 }
 
+// HoistedRoles lists the roles a server displays as sections of their own, most
+// senior first — which is ascending Rank, Revolt ranking the most senior lowest.
+func (s *store) HoistedRoles(serverID string) []domain.Role {
+	return s.roles(serverID, func(role *revoltgo.ServerRole) bool { return role.Hoist })
+}
+
 // ServerRoles is every role a server defines, most senior first. The role editor
 // asks for all of them where the sidebar asks only for the hoisted ones, and both
 // read what Ready already brought.
 func (s *store) ServerRoles(serverID string) []domain.Role {
+	return s.roles(serverID, func(*revoltgo.ServerRole) bool { return true })
+}
+
+// roles is every role a server defines that keep accepts, most senior first.
+//
+// It hands back values: nothing may escape holding a *revoltgo.ServerRole, which
+// the gateway rewrites in place — which is also why keep has to be a pure test of
+// what it is handed and may not reach back into State.
+func (s *store) roles(serverID string, keep func(role *revoltgo.ServerRole) bool) []domain.Role {
 	state := s.state()
 	if state == nil || serverID == "" {
 		return nil
@@ -528,9 +506,11 @@ func (s *store) ServerRoles(serverID string) []domain.Role {
 
 	roles := make([]domain.Role, 0, len(server.Roles))
 	for id, role := range server.Roles {
-		if role != nil {
-			roles = append(roles, toRole(id, role))
+		// revoltgo can leave a nil behind in the map, and toRole dereferences.
+		if role == nil || !keep(role) {
+			continue
 		}
+		roles = append(roles, toRole(id, role))
 	}
 	sortRoles(roles)
 
@@ -571,6 +551,53 @@ func toRole(id string, role *revoltgo.ServerRole) domain.Role {
 	return out
 }
 
+// roleTable is a server's role definitions converted once, keyed by ID. A walk
+// of a large server reads the same handful of roles per member, and a colour is
+// an interface value: parsing per member boxes a fresh one every time, so the
+// three distinct colours a server actually defines cost thousands of
+// allocations. Resolved up front, every member shares them.
+//
+// A nil table answers every lookup as "not known", which is what a server State
+// has not published to us resolves to — so nothing reading one needs a nil check.
+type roleTable map[string]domain.Role
+
+// newRoleTable converts every role a server has published, for a walk that will
+// read them per member. Built before the walk, never from inside one: revoltgo's
+// sequences hold State's own lock across the body.
+func newRoleTable(server *revoltgo.Server) roleTable {
+	if server == nil {
+		return nil
+	}
+
+	table := make(roleTable, len(server.Roles))
+	for id, role := range server.Roles {
+		if role != nil {
+			table[id] = toRole(id, role)
+		}
+	}
+
+	return table
+}
+
+// newHeldRoleTable converts only the roles one member wears, for the reads that
+// resolve a single membership rather than a whole server. A server defines far
+// more roles than anybody holds, so converting all of them there would cost more
+// than sharing them saves.
+func newHeldRoleTable(server *revoltgo.Server, roleIDs []string) roleTable {
+	if server == nil || len(roleIDs) == 0 {
+		return nil
+	}
+
+	table := make(roleTable, len(roleIDs))
+	for _, id := range roleIDs {
+		if role := server.Roles[id]; role != nil {
+			table[id] = toRole(id, role)
+		}
+	}
+
+	return table
+}
+
 // memberRoleInfo answers both of the questions a member row asks of its roles in
 // one walk: what colour to draw the name in, and which section to file the row
 // under. The most senior role wins each — lowest Rank, by Revolt's convention —
@@ -579,35 +606,27 @@ func toRole(id string, role *revoltgo.ServerRole) domain.Role {
 //
 // The two are independent: the most senior *coloured* role need not be the most
 // senior *hoisted* one.
-func memberRoleInfo(server *revoltgo.Server, roleIDs []string) (color.Color, string) {
-	if server == nil {
-		return nil, ""
-	}
-
-	var coloured, hoisted *revoltgo.ServerRole
-	var hoistID string
+func memberRoleInfo(roles roleTable, roleIDs []string) (color.Color, string) {
+	var coloured, hoisted domain.Role
+	var haveColour, haveHoist bool
 
 	for _, id := range roleIDs {
-		role := server.Roles[id]
-		if role == nil {
+		role, ok := roles[id]
+		if !ok {
 			continue
 		}
 
-		if role.Colour != nil && *role.Colour != "" && (coloured == nil || role.Rank < coloured.Rank) {
-			coloured = role
+		// ColorText is what the role carries, Color what parsed out of it: a value
+		// no stop could be read from still claims the name, and draws in the default.
+		if role.ColorText != "" && (!haveColour || role.Rank < coloured.Rank) {
+			coloured, haveColour = role, true
 		}
-		if role.Hoist && (hoisted == nil || role.Rank < hoisted.Rank) {
-			hoisted, hoistID = role, id
+		if role.Hoist && (!haveHoist || role.Rank < hoisted.Rank) {
+			hoisted, haveHoist = role, true
 		}
 	}
 
-	if coloured == nil {
-		return nil, hoistID
-	}
-
-	fill, _ := parseColor(*coloured.Colour)
-
-	return fill, hoistID
+	return coloured.Color, hoisted.ID
 }
 
 /* Channels and servers */

@@ -225,6 +225,19 @@ type Call struct {
 	speaking map[string]bool  // last reported, so only transitions are emitted
 	lanes    map[string]*lane // who has an open lane, so a leave closes exactly one
 
+	// lanesGen is bumped inside the same critical section as every write to
+	// lanes, and is what tells the filler its snapshot is still the truth. A
+	// mutation that forgets to bump leaves the filler holding a lane that has
+	// been closed, and that failure is silent — the sink drops writes for a lane
+	// it no longer has, so the only symptom is a participant nobody can hear.
+	lanesGen uint64
+
+	// snap is that snapshot and snapGen the generation it was taken at. Rebuilt
+	// under mu, but read and walked only by playLanes: no other goroutine may
+	// take this buffer, and one that walks lanes builds its own slice.
+	snap    []lanePair
+	snapGen uint64
+
 	// evMu orders emit against the closing of events. A send in a select still
 	// panics on a closed channel — default arms only a *full* one — and lksdk
 	// delivers callbacks on detached goroutines that outlive Disconnect, so a
@@ -459,6 +472,12 @@ func (c *Call) DeepPLC() bool { return c.deepPLC.Load() }
 // Close hangs up. There is no leave route — leaving *is* disconnecting, after
 // which the gateway announces it — so this is the whole of it. Safe to call
 // twice.
+//
+// Safe against the disconnect it causes, too, which closeOnce alone would not
+// be: a Once re-entered from inside its own function deadlocks. lksdk raises
+// OnDisconnected from the engine's own goroutines and never from inside
+// Room.Disconnect, so the fail that callback runs waits for this Do to finish
+// and then does nothing.
 func (c *Call) Close() {
 	c.closeOnce.Do(func() {
 		close(c.done)
@@ -520,6 +539,21 @@ func (c *Call) teardown() {
 	if p := c.publisher.Load(); p != nil {
 		p.close()
 	}
+
+	// Every reader is parked in ReadRTP until its own deadline expires, and each
+	// holds a jitter buffer and an Opus decoder. An expiry in the past brings them
+	// all back now to see that done is closed, rather than one read timeout later;
+	// dropping the lanes here is what stops the last of them pinning a decoder.
+	c.mu.Lock()
+	for _, l := range c.lanes {
+		if l.track != nil {
+			_ = l.track.SetReadDeadline(time.Now())
+		}
+	}
+	clear(c.lanes)
+	c.lanesGen++
+	c.mu.Unlock()
+
 	if c.room != nil {
 		c.room.Disconnect()
 	}

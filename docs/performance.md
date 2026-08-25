@@ -151,6 +151,9 @@ everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
   that resolves, then resolves again, and it was one level up from where it had
   already been fixed.
 
+<!-- B2-14: the typing indicator's repaint cost belongs here as one more bullet,
+     once it has been measured. Nothing else in this file is waiting on it. -->
+
 ## Reachable without touching Fyne
 
 Ranked by return.
@@ -320,16 +323,52 @@ on the mixer, allocated once at construction, which is why a period is rendered
 in `chunkFrames` passes rather than against a slice sized by whatever the
 backend asks for.
 
-The rule is cheap to assert and worth asserting: `testing.AllocsPerRun` over
-`Sink.Write` plus `render` must report **zero**. Anything that makes it nonzero
-is a dropout under load even when it benchmarks fine.
+The rule is cheap to assert and is asserted: `TestMixerAllocs`
+(`internal/audio/mixer_bench_test.go`) runs `Sink.Write` plus `render` under
+`testing.AllocsPerRun` and fails on anything but **zero**, because anything
+nonzero is a dropout under load even when it benchmarks fine. The lane has to be
+**opened** first — `Sink.Write` drops for a user with no lane, so the same
+assertion over a sink nothing opened passes without rendering anything, which is
+what `TestBenchMixer` did until it was fixed.
+
+### The one rule it knowingly breaks
 
 `render` also sends on `mixer.wake` once a period, which is what paces the whole
 receive path — decode happens on `voice.Call.playLanes`, woken by that send, not
 on this thread. That placement is the point: decoding here would put
 `adaptiveJitter`'s mutex and a cgo call into libopus inside the callback, which
-is every rule above broken at once. The send is non-blocking and only made when a
-lane is open, so it costs nothing outside a call.
+is every rule above broken at once.
+
+The send is non-blocking and only made when a lane is open, so it costs nothing
+outside a call. It is **not** lock-free, and this document used to imply it was:
+a non-blocking send takes the channel's runtime lock whenever the buffer has
+room, and it nearly always has, because `playLanes` drains it. So during a call
+the callback takes a runtime mutex every 10 ms — bounded (the lock is held across
+no syscall and no user code, ~100 ns) but a real violation of the paragraph
+above, and the one the audio thread pays.
+
+It stays because nothing else carries the device's clock. The alternatives were
+worked through and every one is worse:
+
+- **An atomic ticket the callback increments.** Free on this side — but a ticket
+  cannot wake a parked goroutine, and the filler then has to *find out*.
+- **Spinning on that ticket.** Burns a core for the length of every call.
+- **A `time.Ticker` on the filler.** Playout paced by a timer beside the device
+  rather than by the device: the exact drift the current arrangement was built to
+  remove (`voice-chat-todo.md`, "Playout is now the device's clock").
+- **`sync.Cond` / a mutex hand-off.** Both park, which turns a bounded ~100 ns
+  runtime lock into an unbounded one held by whatever the scheduler chose.
+- **Decimating the kick** — ticket every period, channel send every *N*th — is
+  the only one that keeps the device as the clock, and it halves the rate without
+  removing the lock. It also moves lane occupancy, so `maxFramesPerPass` has to
+  be resized against *N* and the 50 ms figure below re-measured; sized wrong, the
+  symptom is a lane running dry and nothing reports it. Not taken: it buys a
+  factor of two on a cost that is already small, at the price of a silent failure
+  mode. Take it only with the occupancy measurement in hand.
+
+The way out is a wake primitive that is lock-free on the signalling side —
+`runtime_Semrelease` and `notifyList` are exactly that and are not reachable
+outside the standard library.
 
 The arrangement bounds something that used to be unbounded. Playout ran on a
 20 ms `time.Ticker` per participant, which drifts against the audio clock; a lane

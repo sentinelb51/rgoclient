@@ -78,7 +78,9 @@ func TestMemberRoleInfoPicksMostSeniorColouredAndHoistedRoles(t *testing.T) {
 		},
 	}
 
-	fill, hoist := memberRoleInfo(server, []string{"mod", "admin", "owner", "everyone"})
+	table := newRoleTable(server)
+
+	fill, hoist := memberRoleInfo(table, []string{"mod", "admin", "owner", "everyone"})
 	if fill != (color.NRGBA{R: 255, A: 255}) {
 		t.Errorf("colour = %v, want admin red (lowest rank wins)", fill)
 	}
@@ -88,12 +90,12 @@ func TestMemberRoleInfoPicksMostSeniorColouredAndHoistedRoles(t *testing.T) {
 
 	// The most-senior coloured role has an unparseable colour: it still wins the
 	// comparison, so nothing is resolved. Documents current behaviour.
-	if fill, _ := memberRoleInfo(server, []string{"broken", "admin"}); fill != nil {
+	if fill, _ := memberRoleInfo(table, []string{"broken", "admin"}); fill != nil {
 		t.Errorf("unparseable senior colour: got %v, want nil", fill)
 	}
 
 	for _, roles := range [][]string{{"everyone"}, nil, {"missing"}} {
-		if fill, hoist := memberRoleInfo(server, roles); fill != nil || hoist != "" {
+		if fill, hoist := memberRoleInfo(table, roles); fill != nil || hoist != "" {
 			t.Errorf("roles %v: got (%v, %q), want (nil, \"\")", roles, fill, hoist)
 		}
 	}

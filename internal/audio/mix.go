@@ -108,6 +108,15 @@ type mixer struct {
 	// laneTarget — so playout is paced by the device's own clock rather than by a
 	// timer running beside it. Buffered by one: a fill still in progress needs no
 	// second wake, it re-reads every lane's Want anyway.
+	//
+	// This is the one place the callback's no-locking rule is knowingly broken. A
+	// non-blocking send is not a lock-free one: it takes the channel's runtime
+	// lock whenever there is room, and there nearly always is, because the filler
+	// drains it. What buys it is that nothing else can carry the device's clock —
+	// an atomic ticket cannot wake a parked goroutine, and every way to wake one
+	// either locks in the same place, spins a core, or replaces the device's clock
+	// with a timer beside it, which is the drift this arrangement exists to
+	// remove. docs/performance.md carries the whole argument.
 	wake chan struct{}
 
 	/* The callback's own, touched nowhere else */
@@ -164,9 +173,10 @@ func (m *mixer) render(out []byte) {
 	}
 
 	// Only a period with a lane open asks for more, so a client ringing
-	// notification sounds with no call open wakes nobody. The send is the
-	// one the capture callback already makes: it never waits, so a filler that has
-	// not come back yet costs this thread nothing.
+	// notification sounds with no call open wakes nobody — and the one cost this
+	// callback pays that it is not supposed to is paid only during a call. The
+	// send never waits for the filler, but it does take the channel's own runtime
+	// lock; see mixer.wake for why that is the least bad of the options.
 	if m.lanesDrawn {
 		select {
 		case m.wake <- struct{}{}:

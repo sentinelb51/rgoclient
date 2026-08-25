@@ -29,7 +29,7 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 // permissions, every member, every emoji — so none is worth making once per
 // event.
 //
-// Deliberately only these six. What an event changes about the *open* thing — a
+// Deliberately only these seven. What an event changes about the *open* thing — a
 // header, the channel glyph, whether the composer takes a message — is a setter
 // and a lookup, and deferring those would feel slow to save nothing.
 //
@@ -41,6 +41,12 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 // refreshFriends is queued only while that page is open, where it is the same
 // walk the member sidebar does and drawn the same way: presence moves nobody's
 // name, but a row's ring is the only thing on the page that says who is here.
+//
+// refreshServerPage is the settings page for one server, and it is apart from
+// refreshChannels because it is about a *named* server where that column is about
+// the open one: it rebuilds every section, permission grid included, and puts the
+// reader back at the top of the page. So it is queued only by an event naming the
+// server the page is on — somebody joining a call in the open server is not one.
 type refreshTarget uint8
 
 const (
@@ -50,6 +56,7 @@ const (
 	refreshEmojis
 	refreshPresence
 	refreshFriends
+	refreshServerPage
 )
 
 // refreshDelay is how long a queued rebuild waits for more of the same burst.
@@ -90,12 +97,18 @@ func (a *App) flushRefresh() {
 	if targets&refreshChannels != 0 {
 		a.refreshChannelList()
 
-		// The cog and the page it opens are drawn from the same server this rebuild
-		// just re-read — and a role change is the one thing that moves what either
-		// may offer without the selection moving at all.
+		// The cog is about the open server, as the column just rebuilt is, and a role
+		// change is the one thing that moves what it may offer without the selection
+		// moving at all. It is a Show or a Hide; the page behind it is not, which is
+		// why that is queued separately.
 		a.syncServerCog()
+	}
+
+	// After the column, so the page is rebuilt against a sidebar that has settled.
+	if targets&refreshServerPage != 0 {
 		a.refreshServerSettings()
 	}
+
 	if targets&refreshMembers != 0 {
 		a.refreshMemberList()
 	} else if targets&refreshPresence != 0 {
@@ -109,10 +122,10 @@ func (a *App) flushRefresh() {
 		a.refreshFriends()
 	}
 
-	// Last, and skipped when the rail was rebuilt: which servers the account is in
-	// is also which emoji it may type, so refreshServerList re-takes these itself
-	// and a flush that ran it has already paid for this walk.
-	if targets&refreshEmojis != 0 && targets&refreshServers == 0 {
+	// Last, and on its own bit alone: the rail is rebuilt for updates that change no
+	// emoji at all, so a flush that ran it has not paid for this walk — and skipping
+	// behind it would swallow an emoji added in the same window as a server update.
+	if targets&refreshEmojis != 0 {
 		a.refreshEmojiCandidates()
 	}
 }
@@ -216,6 +229,11 @@ func (a *App) onReady(event client.Ready) {
 
 	a.serverIDs = slices.Clone(event.ServerIDs)
 	a.refreshServerList()
+
+	// Which servers the account is in is also which emoji it may type, so the three
+	// paths that move that set say so themselves: the rail's own rebuild is queued
+	// for far more than these and must not imply the walk.
+	a.refreshEmojiCandidates()
 
 	// The voice node is instance configuration and cannot change under a running
 	// client, but it is resolved lazily — so without this the first join of a
@@ -377,6 +395,7 @@ func (a *App) onServerJoined(event client.ServerJoined) {
 	if !slices.Contains(a.serverIDs, event.ServerID) {
 		a.serverIDs = append(a.serverIDs, event.ServerID)
 		a.refreshServerList()
+		a.refreshEmojiCandidates() // a server joined is emoji gained
 	}
 	if selecting {
 		a.selectServer(event.ServerID)
@@ -398,6 +417,7 @@ func (a *App) onServerLeft(event client.ServerLeft) {
 	// inbox button would otherwise stay lit for channels nothing can open again.
 	a.forgetLeftServer(event.ServerID)
 	a.refreshServerList()
+	a.refreshEmojiCandidates() // and a server left is emoji that no longer complete
 
 	// Immediate rather than queued: the page's every section is about a server the
 	// account is no longer in, and a settling window would leave it up saying so.
@@ -427,6 +447,13 @@ func (a *App) onServerLeft(event client.ServerLeft) {
 func (a *App) onServerUpdated(event client.ServerUpdated) {
 	a.queueRefresh(refreshServers)
 
+	// Asked before the selection is: the page names its own server, and everything
+	// this event can carry — the name, the icon, the categories, the order the
+	// channels are drawn in — is something it draws.
+	if a.serverPageOn(event.ServerID) {
+		a.queueRefresh(refreshServerPage)
+	}
+
 	if a.currentServerID != event.ServerID {
 		return
 	}
@@ -448,6 +475,12 @@ func (a *App) onRolesChanged(event client.RolesChanged) {
 	// server whether or not it is the one selected.
 	a.openPendingRole(event.ServerID)
 
+	// The grid and the rail's own list of roles are drawn from this, and the page is
+	// about a server whether or not it is the one selected.
+	if a.serverPageOn(event.ServerID) {
+		a.queueRefresh(refreshServerPage)
+	}
+
 	if a.currentServerID != event.ServerID {
 		return
 	}
@@ -464,6 +497,10 @@ func (a *App) onChannelCreated(event client.ChannelCreated) {
 		if a.currentServerID == event.ServerID {
 			a.queueRefresh(refreshChannels)
 		}
+		if a.serverPageOn(event.ServerID) {
+			a.queueRefresh(refreshServerPage) // the Channels section lists it
+		}
+
 		return
 	}
 
@@ -483,6 +520,12 @@ func (a *App) onChannelCreated(event client.ChannelCreated) {
 // so one can have to appear or disappear, which repainting in place cannot do.
 func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 	a.queueRefresh(refreshChannels)
+
+	// The event names only the channel, so which server's page draws it has to be
+	// looked up — a rename or an overwrite is a row and a grid on that page.
+	if channel, ok := a.store.Channel(event.ChannelID); ok && a.serverPageOn(channel.ServerID) {
+		a.queueRefresh(refreshServerPage)
+	}
 
 	if a.currentChannelID != event.ChannelID {
 		return
@@ -533,6 +576,12 @@ func (a *App) onChannelClosed(event client.ChannelClosed) {
 	a.clearMentions(event.ChannelID)
 	if i := slices.Index(a.dmChannels, event.ChannelID); i >= 0 {
 		a.dmChannels = slices.Delete(a.dmChannels, i, i+1)
+	}
+
+	// Whichever server the page is on: the channel is already gone from the store,
+	// so there is nothing left to ask which server it was in.
+	if a.serverSettingsOpen() {
+		a.queueRefresh(refreshServerPage)
 	}
 
 	if a.currentChannelID != event.ChannelID {
@@ -732,6 +781,13 @@ func (a *App) onMemberUpdated(event client.MemberUpdated) {
 		}
 		a.queueRefresh(targets)
 	}
+
+	// Our own roles are what every permission on that page is resolved from: one
+	// gained or lost changes which bits may be moved and which sections are listed.
+	if event.UserID == a.store.SelfID() && a.serverPageOn(event.ServerID) {
+		a.queueRefresh(refreshServerPage)
+	}
+
 	a.refreshAuthorMessages(event.UserID)
 }
 

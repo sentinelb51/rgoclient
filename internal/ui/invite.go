@@ -419,8 +419,24 @@ func inviteCodesIn(content string) []string {
 		return nil
 	}
 
+	return codesIn(markdown.Parse(content))
+}
+
+// inviteCodesInParsed is inviteCodesIn for a body the caller has already parsed.
+// A message row parses once for the text it draws, so its scan rides on that
+// document rather than over the same bytes a second time.
+func inviteCodesInParsed(content string, doc *markdown.Document) []string {
+	if !util.MayContainInvite(content) {
+		return nil
+	}
+
+	return codesIn(doc)
+}
+
+// codesIn is the walk both entry points share.
+func codesIn(doc *markdown.Document) []string {
 	var codes []string
-	for _, link := range markdown.Links(markdown.Parse(content)) {
+	for _, link := range markdown.Links(doc) {
 		code := util.InviteLinkCode(link)
 		if code == "" || slices.Contains(codes, code) {
 			continue

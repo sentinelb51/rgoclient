@@ -337,13 +337,19 @@ const listTTL = 30 * time.Second
 // It is also what a late answer is written to. The reader may be two sections
 // away by then, so *drawing* is guarded on the section still being mounted, while
 // the answer itself is always recorded — which is what makes going back free
-// rather than another request.
+// rather than another request. Recorded only for the request it was asked as,
+// though: drop supersedes whatever is out, so this client revoking an invite
+// cannot be answered by a fetch that went out before the revoke.
 //
 // err is held beside the entries rather than instead of them: a failure is a
 // state the section draws, and re-mounting it must not read as "no bans".
 type cachedList[T any] struct {
 	entries []T
 	err     error
+
+	// req names the request the held answer belongs to. drop bumps it, so an answer
+	// fetched before a change can no longer be recorded after it.
+	req uint64
 
 	// at is when the answer landed; zero means none has. inflight is a request
 	// already out, which is not the same as an answer held.
@@ -369,14 +375,29 @@ func (c *cachedList[T]) claim() bool {
 	return true
 }
 
-// settle records an answer and releases the claim.
-func (c *cachedList[T]) settle(entries []T, err error) {
+// settle records an answer and releases the claim, reporting whether it did. An
+// answer to a superseded request is refused and leaves inflight alone: the claim
+// it once held belongs to the request that dropped it, and clearing it here would
+// strand that one with no way to be recorded.
+func (c *cachedList[T]) settle(req uint64, entries []T, err error) bool {
+	if req != c.req {
+		return false
+	}
 	c.entries, c.err, c.at, c.inflight = entries, err, time.Now(), false
+
+	return true
 }
 
 // pending reports that there is nothing to draw yet — no answer held, and either
 // one on its way or one about to be asked for.
 func (c *cachedList[T]) pending() bool { return c.at.IsZero() }
+
+// drop forgets the held answer and supersedes whatever is out, so the next mount
+// asks again and the answer already on its way cannot be recorded when it lands.
+// Every action that changes what the list holds calls it — nothing here is
+// announced twice, so a section drawing what it was told before the change is
+// drawing a lie.
+func (c *cachedList[T]) drop() { *c = cachedList[T]{req: c.req + 1} }
 
 // cachedOne is cachedList for a section drawn from a **single** answer rather
 // than a list of them: the same three rules, the same guards, and a value where
@@ -492,8 +513,8 @@ func (p *ServerSettingsPage) Close() {
 
 	// The held answers go with the page. They are as good as a fetch only while
 	// nobody has had time to change anything — which is the visit, not longer.
-	p.invites = cachedList[ServerInviteEntry]{}
-	p.bans = cachedList[domain.Ban]{}
+	p.invites.drop()
+	p.bans.drop()
 }
 
 // Rebuild constructs the page as the theme tables and the store now stand. Called
@@ -1921,13 +1942,15 @@ func (p *ServerSettingsPage) loadInvites() {
 		return
 	}
 
-	visit := p.visit
+	visit, req := p.visit, p.invites.req
 
 	p.hooks.LoadInvites(func(invites []ServerInviteEntry, err error) {
 		if p.visit != visit {
 			return // the page closed; there is nothing left to record this in
 		}
-		p.invites.settle(invites, err)
+		if !p.invites.settle(req, invites, err) {
+			return // the list changed while this was out; a request of its own is already gone
+		}
 		p.redraw(ServerSectionInvites, p.inviteRows)
 	})
 }
@@ -2045,13 +2068,15 @@ func (p *ServerSettingsPage) loadBans() {
 		return
 	}
 
-	visit := p.visit
+	visit, req := p.visit, p.bans.req
 
 	p.hooks.LoadBans(func(bans []domain.Ban, err error) {
 		if p.visit != visit {
 			return
 		}
-		p.bans.settle(bans, err)
+		if !p.bans.settle(req, bans, err) {
+			return
+		}
 		p.redraw(ServerSectionBans, p.banRows)
 	})
 }
@@ -2133,11 +2158,11 @@ func (p *ServerSettingsPage) reloadList(err error, failure string) {
 
 	switch p.section {
 	case ServerSectionInvites:
-		p.invites = cachedList[ServerInviteEntry]{}
+		p.invites.drop()
 		p.refill(body, p.inviteRows())
 		p.loadInvites()
 	case ServerSectionBans:
-		p.bans = cachedList[domain.Ban]{}
+		p.bans.drop()
 		p.refill(body, p.banRows())
 		p.loadBans()
 	}

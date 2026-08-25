@@ -531,10 +531,13 @@ func (c Cache) ImageMemoryBytes() int64 {
 /* The current settings */
 
 var (
-	current atomic.Pointer[Settings]
+	current  atomic.Pointer[Settings]
+	updateMu sync.Mutex // guards the read-modify-write in Update
 
 	saveMu    sync.Mutex // guards saveTimer
 	saveTimer *time.Timer
+
+	writeMu sync.Mutex // serialises the settings file write
 )
 
 func init() {
@@ -552,10 +555,20 @@ func Current() *Settings {
 // Update applies mutate to a copy of the current settings, publishes it, and
 // schedules a write. The copy is deep enough that a reader holding the previous
 // snapshot keeps seeing it unchanged, maps included.
+//
+// mutate must not call Update: the read-modify-write is serialised, so a nested
+// call deadlocks rather than clobbering.
 func Update(mutate func(*Settings)) {
+	updateMu.Lock()
+
 	next := Current().clone()
 	mutate(next)
+	// On the clone, whose maps were just cloned, so a floor cannot reach a
+	// snapshot a reader is still holding.
+	next.sanitise()
 	current.Store(next)
+
+	updateMu.Unlock()
 
 	scheduleSave()
 }
@@ -581,7 +594,8 @@ func SetUserGain(userID string, db int) {
 // Load reads the settings file into the current settings. An absent file is not
 // an error — it is what every first run looks like — and a malformed one is
 // reported and ignored, since refusing to start over a settings file the user
-// can no longer read would be worse than starting with the defaults.
+// can no longer read would be worse than starting with the defaults. It is moved
+// aside first, so the defaults are not written over it.
 func Load() error {
 	path, err := Path()
 	if err != nil {
@@ -601,6 +615,13 @@ func Load() error {
 	// instead of becoming false or zero.
 	settings := Default()
 	if err := json.Unmarshal(data, &settings); err != nil {
+		// The caller starts anyway on the defaults, and the first change written
+		// would put them over the only copy of what the user had. Keep it aside:
+		// unreadable to the client is not unreadable to the user.
+		if renameErr := os.Rename(path, path+".bad"); renameErr != nil {
+			log.Printf("keep unreadable settings aside: %v", renameErr)
+		}
+
 		return err
 	}
 
@@ -695,7 +716,42 @@ func Save() error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0o600)
+	return writeFile(path, data)
+}
+
+// writeFile puts data at path through a temp file renamed into place, so a crash
+// part-way through leaves the previous settings rather than a truncated file that
+// Load would report and ignore — which would be the whole tree gone. The Sync is
+// what carries that past a lost machine and not only a lost process; a settings
+// write is one debounced file every second at worst, so it is affordable here.
+func writeFile(path string, data []byte) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	tmp := path + ".tmp"
+
+	// Not os.Create: its 0o666 would widen the mode this file is written at.
+	file, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+
+	_, err = file.Write(data)
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp, path)
+	}
+
+	if err != nil {
+		_ = os.Remove(tmp)
+	}
+
+	return err
 }
 
 // Path returns the settings file's location.

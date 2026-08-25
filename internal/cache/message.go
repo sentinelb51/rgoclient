@@ -32,7 +32,7 @@ func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 	return &MessageCache{
 		byChannel:   make(map[string][]*domain.Message),
 		depleted:    make(map[string]bool),
-		recency:     NewLRU(),
+		recency:     newLRU(),
 		maxMessages: maxMessages,
 		maxChannels: maxChannels,
 	}
@@ -128,14 +128,16 @@ func (c *MessageCache) Append(channelID string, message *domain.Message) *domain
 	return prev
 }
 
-// trimmed drops the oldest messages past the per-channel cap. Reslicing rather
-// than copying is safe because every caller passes a slice it has just grown.
+// trimmed drops the oldest messages past the per-channel cap. It copies rather
+// than re-slicing: a sub-slice keeps the whole backing array alive, so the
+// dropped prefix would stay reachable and the channel would hold about twice the
+// cap. The copy is what releases it, and is paid once per message past the cap.
 func (c *MessageCache) trimmed(messages []*domain.Message) []*domain.Message {
 	if len(messages) <= c.maxMessages {
 		return messages
 	}
 
-	return messages[len(messages)-c.maxMessages:]
+	return slices.Clone(messages[len(messages)-c.maxMessages:])
 }
 
 // Remove deletes a message from a channel, reporting whether it was present. The
@@ -197,7 +199,7 @@ func (c *MessageCache) Clear() {
 
 	c.byChannel = make(map[string][]*domain.Message)
 	c.depleted = make(map[string]bool)
-	c.recency = NewLRU()
+	c.recency = newLRU()
 }
 
 // chronological reverses an API page (newest first) into a new oldest-first

@@ -101,6 +101,15 @@ func (a *App) serverSettingsOpen() bool {
 	return a.serverSettings != nil && a.serverSettings.IsOpen()
 }
 
+// serverPageOn reports whether the page is up and about serverID. It is what
+// decides an event is worth queueing a rebuild of the page for: that rebuild is
+// every section, the permission grid included, and it puts the reader back at the
+// top of the page — so an event about a server the page is not on, and every event
+// about no server at all, must not reach it.
+func (a *App) serverPageOn(serverID string) bool {
+	return serverID != "" && serverID == a.serverSettingsID && a.serverSettingsOpen()
+}
+
 // refreshServerSettings repaints the page under a server that has changed — a
 // rename, a new icon, a channel added or removed, a role that moved what this
 // account may do. A server left while the page is up closes it instead: every

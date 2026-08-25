@@ -90,7 +90,13 @@ type noiseSuppressor struct {
 	enabled bool
 
 	// dn is created on the first enabled frame rather than at open: its state is
-	// ~100 KB of C memory, and most captures with the setting off never need it.
+	// ~19 KB of C memory, and most captures with the setting off never need it.
+	// The build lands inside one frame — SetEnabled is applied by Read, on the
+	// capture's own goroutine, rather than by whoever moved the setting — so
+	// enabling mid-call costs that one frame a malloc and nothing after it.
+	//
+	// It is never rebuilt. The state carries the filter's own memory, and a fresh
+	// one restarts the model from silence, which is audible at the seam.
 	dn *rnnoise.Denoiser
 }
 

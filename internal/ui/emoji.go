@@ -167,6 +167,18 @@ type emojiPicker struct {
 	// per keystroke. Lazy, so a set past the limit costs nothing for what is unseen.
 	cells map[string]fyne.CanvasObject
 
+	// The same memo for a section's own chrome, indexed by its place in sections —
+	// which foldGroups fixes as the picker opens, where blocks and railButtons above
+	// are in the order a query drew them. Without it a keystroke rebuilds every
+	// caption and grid and asks the image cache for every rail icon again.
+	sectionRails  []*emojiRailButton
+	sectionBlocks []*fyne.Container
+	sectionGrids  []*fyne.Container
+
+	// placed is fill's guard against drawing one emoji twice, held here so the map
+	// is allocated once per opening rather than once per keystroke.
+	placed map[string]bool
+
 	// top is what Enter picks: the first match of the current query, which is why
 	// the field is worth typing into rather than scrolling past. topIn is the group
 	// it sits under, the header naming one as well as drawing it.
@@ -183,14 +195,20 @@ type emojiPicker struct {
 }
 
 func newEmojiPicker(deps Deps, c fyne.Canvas, groups []EmojiGroup, onPick func(EmojiChoice)) *emojiPicker {
+	sections := foldGroups(groups)
 	p := &emojiPicker{
 		deps:     deps,
-		sections: foldGroups(groups),
+		sections: sections,
 		onPick:   onPick,
 		list:     VBoxNoSpacing(),
 		rail:     container.NewVBox(),
 		tip:      NewTooltip(),
 		cells:    make(map[string]fyne.CanvasObject),
+
+		sectionRails:  make([]*emojiRailButton, len(sections)),
+		sectionBlocks: make([]*fyne.Container, len(sections)),
+		sectionGrids:  make([]*fyne.Container, len(sections)),
+		placed:        make(map[string]bool, emojiPickerLimit),
 	}
 
 	p.search = newEmojiSearch(p.fill, p.acceptTop, func() { p.popUp.Hide() })
@@ -375,12 +393,20 @@ func (p *emojiPicker) buildRail() fyne.CanvasObject {
 	return NewFixedWidthContainer(theme.Sizes.EmojiPickerRailWidth, column)
 }
 
-// railButton is the icon that jumps to one drawn section, at position index in
-// what fill has just laid out.
-func (p *emojiPicker) railButton(group EmojiGroup, index int) *emojiRailButton {
+// railButtonFor is the icon that jumps to section i, built the first time that
+// section is drawn and kept. Its tap reads where fill last laid the section out
+// from the button rather than closing over it: the button outlives the query it
+// was first drawn under, and the drawn order moves with the query.
+func (p *emojiPicker) railButtonFor(i int) *emojiRailButton {
+	if button := p.sectionRails[i]; button != nil {
+		return button
+	}
+
+	group := p.sections[i].group
+
 	var button *emojiRailButton
 	button = newEmojiRailButton(p.deps, group,
-		func() { p.jumpTo(index) },
+		func() { p.jumpTo(button.at) },
 		func(over bool) {
 			if !over {
 				p.tip.Hide()
@@ -389,6 +415,7 @@ func (p *emojiPicker) railButton(group EmojiGroup, index int) *emojiRailButton {
 
 			p.tip.ShowAbove(group.Title, button)
 		})
+	p.sectionRails[i] = button
 
 	return button
 }
@@ -450,12 +477,12 @@ func (p *emojiPicker) fill(query string) {
 	// One widget per emoji, so the same one twice in a pass is one object asked to
 	// sit in two cells — which Fyne answers by drawing it in neither. Nothing should
 	// offer a duplicate; dropping one keeps that a missing entry, not a hole.
-	placed := make(map[string]bool, emojiPickerLimit)
+	clear(p.placed)
 
 	var rows, icons []fyne.CanvasObject
 	p.blocks, p.railButtons = p.blocks[:0], p.railButtons[:0]
 
-	for _, section := range p.sections {
+	for i, section := range p.sections {
 		cells := make([]fyne.CanvasObject, 0, min(len(section.entries), emojiPickerLimit-drawn))
 
 		for _, entry := range section.entries {
@@ -467,10 +494,10 @@ func (p *emojiPicker) fill(query string) {
 			}
 
 			value := entry.choice.Value()
-			if placed[value] {
+			if p.placed[value] {
 				continue
 			}
-			placed[value] = true
+			p.placed[value] = true
 
 			if !p.found {
 				p.top, p.topIn, p.found = entry.choice, section.group.Title, true
@@ -487,8 +514,12 @@ func (p *emojiPicker) fill(query string) {
 			rows = append(rows, VerticalSpacer(theme.Sizes.EmojiPickerGap))
 		}
 
-		button := p.railButton(section.group, len(p.blocks))
-		block := VBoxNoSpacing(emojiCaption(section.group.Title), p.grid(cells))
+		// The button is reused, so where it now points has to be written back: a fresh
+		// one knew nothing about a previous query for free.
+		button := p.railButtonFor(i)
+		button.at = len(p.blocks)
+
+		block := p.blockFor(i, cells)
 
 		p.blocks = append(p.blocks, block)
 		p.railButtons = append(p.railButtons, button)
@@ -502,9 +533,12 @@ func (p *emojiPicker) fill(query string) {
 	p.rail.Objects = icons
 	p.rail.Refresh() // a container re-lays out only when it is told its children moved
 
+	// The top of the grid is what a fill leaves the reader at, so the first icon is
+	// marked and every other reused one put back — each a no-op where it was already
+	// in that state, which for a narrowing query is nearly all of them.
 	p.active = 0
-	if len(p.railButtons) > 0 {
-		p.railButtons[0].setSelected(true)
+	for i, button := range p.railButtons {
+		button.setSelected(i == 0)
 	}
 
 	// The content is a different height now, and the scroll clamps an offset against
@@ -527,12 +561,21 @@ func (p *emojiPicker) fill(query string) {
 	}
 }
 
-// grid wraps the cells at whatever the picker's width allows, so the cell size is
-// the only thing deciding how many sit on a row.
-func (p *emojiPicker) grid(cells []fyne.CanvasObject) fyne.CanvasObject {
-	side := theme.Sizes.EmojiPickerCellSize
+// blockFor is section i as it is drawn: its caption over its grid, built once and
+// pointed at whatever cells the query left it with. The grid wraps at whatever the
+// picker's width allows, so the cell size is the only thing deciding how many sit
+// on a row. Nothing is refreshed here — the list this block hangs in is, and a
+// container's refresh walks its children.
+func (p *emojiPicker) blockFor(i int, cells []fyne.CanvasObject) *fyne.Container {
+	if p.sectionGrids[i] == nil {
+		side := theme.Sizes.EmojiPickerCellSize
 
-	return container.NewGridWrap(fyne.NewSize(side, side), cells...)
+		p.sectionGrids[i] = container.NewGridWrap(fyne.NewSize(side, side))
+		p.sectionBlocks[i] = VBoxNoSpacing(emojiCaption(p.sections[i].group.Title), p.sectionGrids[i])
+	}
+	p.sectionGrids[i].Objects = cells
+
+	return p.sectionBlocks[i]
 }
 
 // cell returns the widget for one emoji, building it the first time it is shown.
@@ -690,6 +733,10 @@ type emojiRailButton struct {
 	content    fyne.CanvasObject
 	onHover    func(bool)
 
+	// at is where fill last drew this button's section, which is what its tap jumps
+	// to. A field rather than a captured value: the button survives the query and
+	// the drawn order does not.
+	at       int
 	selected bool
 }
 
@@ -713,8 +760,12 @@ func newEmojiRailButton(deps Deps, group EmojiGroup, onTap func(), onHover func(
 	return b
 }
 
-// setSelected repaints in place.
+// setSelected repaints in place, and not at all when it is already in that state:
+// a button is reused across queries, so most of what fill resets has not moved.
 func (b *emojiRailButton) setSelected(selected bool) {
+	if selected == b.selected {
+		return
+	}
 	b.selected = selected
 
 	b.background.FillColor = color.Transparent

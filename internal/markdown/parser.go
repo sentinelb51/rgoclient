@@ -10,7 +10,7 @@ import (
 func Parse(input string) *Document {
 	input = strings.ReplaceAll(input, "\r\n", "\n")
 
-	return &Document{Blocks: parseBlocks(strings.Split(input, "\n"))}
+	return &Document{Blocks: parseBlocks(strings.Split(input, "\n"), 0)}
 }
 
 // PlainText returns the unformatted text of inline nodes, for previews and for
@@ -187,9 +187,9 @@ func (f *flatten) emoji(emojiID string) {
 
 /* Blocks */
 
-// lineKind is a line's block role. It is decided once per line: parseBlocks
-// switches on it and paragraph collection stops at anything that is not lineText,
-// so classifying costs one pass rather than a predicate per block type.
+// lineKind is a line's block role. classifyLines decides it once for each line of
+// a run and every collector walking that run reads the answer rather than asking
+// again, so classifying costs one pass rather than a predicate per block type.
 type lineKind uint8
 
 const (
@@ -202,74 +202,97 @@ const (
 	lineList
 )
 
-// classify reports a line's block role and, for a heading, its level.
-func classify(line string) (lineKind, int) {
+// lineInfo is one line's classification: its role, and what deciding that role
+// already read off the line. Carrying the marker is what keeps a list item from
+// being parsed once to recognise it and again to collect it.
+type lineInfo struct {
+	kind   lineKind
+	level  int        // a heading's level
+	marker listMarker // a list item's marker and content
+}
+
+// classifyLines classifies a run of lines, once each. Every collector parseBlocks
+// hands the run on to reads this rather than the lines.
+func classifyLines(lines []string) []lineInfo {
+	info := make([]lineInfo, len(lines))
+	for i, line := range lines {
+		info[i] = classify(line)
+	}
+
+	return info
+}
+
+// classify reports a line's block role and what deciding it turned up.
+func classify(line string) lineInfo {
 	if line == "" {
-		return lineBlank, 0
+		return lineInfo{kind: lineBlank}
 	}
 
 	switch line[0] {
 	case ' ', '\t':
 		if strings.TrimSpace(line) == "" {
-			return lineBlank, 0
+			return lineInfo{kind: lineBlank}
 		}
-		if isListItem(line) {
-			return lineList, 0
+		if marker, ok := listItem(line); ok {
+			return lineInfo{kind: lineList, marker: marker}
 		}
 	case '`':
 		if strings.HasPrefix(line, "```") {
-			return lineFence, 0
+			return lineInfo{kind: lineFence}
 		}
 	case '#':
 		if level := headingLevel(line); level > 0 {
-			return lineHeading, level
+			return lineInfo{kind: lineHeading, level: level}
 		}
 	case '-':
 		if strings.HasPrefix(line, "-# ") {
-			return lineSubtext, 0
+			return lineInfo{kind: lineSubtext}
 		}
-		if isListItem(line) {
-			return lineList, 0
+		if marker, ok := listItem(line); ok {
+			return lineInfo{kind: lineList, marker: marker}
 		}
 	case '>':
 		if isQuote(line) {
-			return lineQuote, 0
+			return lineInfo{kind: lineQuote}
 		}
 	case '*', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
-		if isListItem(line) {
-			return lineList, 0
+		if marker, ok := listItem(line); ok {
+			return lineInfo{kind: lineList, marker: marker}
 		}
 	}
 
-	return lineText, 0
+	return lineInfo{kind: lineText}
 }
 
-// parseBlocks groups lines into block-level nodes.
-func parseBlocks(lines []string) []Block {
+// parseBlocks groups lines into block-level nodes. depth is how many blockquotes
+// deep the run already is, since a quote is the one block that parses lines of
+// its own.
+func parseBlocks(lines []string, depth int) []Block {
+	info := classifyLines(lines)
+
 	var blocks []Block
 
 	for i := 0; i < len(lines); {
-		kind, level := classify(lines[i])
-
 		var block Block
 		next := i + 1
 
-		switch kind {
+		switch info[i].kind {
 		case lineBlank:
 			i++ // paragraph separator
 			continue
 		case lineFence:
 			block, next = parseFence(lines, i)
 		case lineHeading:
+			level := info[i].level
 			block = &Heading{Level: level, Children: parseInline(lines[i][level+1:])}
 		case lineSubtext:
 			block = &Subtext{Children: parseInline(lines[i][3:])}
 		case lineQuote:
-			block, next = parseQuote(lines, i)
+			block, next = parseQuote(lines, info, i, depth)
 		case lineList:
-			block, next = parseList(lines, i)
+			block, next = parseList(lines, info, i)
 		default:
-			block, next = parseParagraph(lines, i)
+			block, next = parseParagraph(lines, info, i)
 		}
 
 		blocks = append(blocks, block)
@@ -336,27 +359,46 @@ func parseFence(lines []string, i int) (Block, int) {
 	return &CodeBlock{Language: language, Text: strings.Join(body, "\n")}, j
 }
 
+// quoteMaxDepth is how deep quotes may nest before the markers are left as text.
+// Every level strips one marker and copies the lines it stripped it from, so a
+// body that is nothing but markers costs its own length squared and a widget tree
+// as deep as it is long. Five is past anything written on purpose.
+const quoteMaxDepth = 5
+
 // parseQuote reads a blockquote starting at i. A ">>>" line quotes everything
 // that follows; otherwise consecutive "> " lines are grouped. Either way the
 // quoted lines go back through parseBlocks, so a heading, list or fence inside a
 // quote is the block it looks like — and a quote marker among them is a quote,
-// one strip having left it there.
-func parseQuote(lines []string, i int) (Block, int) {
-	if line := lines[i]; line == ">>>" || strings.HasPrefix(line, ">>> ") {
-		body := append([]string{strings.TrimPrefix(line[3:], " ")}, lines[i+1:]...)
-		return &Blockquote{Blocks: parseBlocks(body)}, len(lines)
-	}
+// one strip having left it there. Past quoteMaxDepth the lines are a paragraph
+// with their markers still on, which is what the reader typed and costs one node.
+func parseQuote(lines []string, info []lineInfo, i, depth int) (Block, int) {
+	line := lines[i]
 
-	var body []string
-	j := i
-	for ; j < len(lines); j++ {
-		if kind, _ := classify(lines[j]); kind != lineQuote {
-			break
+	whole := line == ">>>" || strings.HasPrefix(line, ">>> ")
+	end := len(lines)
+
+	if !whole {
+		end = i
+		for end < len(lines) && info[end].kind == lineQuote {
+			end++
 		}
-		body = append(body, strings.TrimPrefix(strings.TrimPrefix(lines[j], ">"), " "))
 	}
 
-	return &Blockquote{Blocks: parseBlocks(body)}, j
+	if depth >= quoteMaxDepth {
+		return &Paragraph{Children: parseInline(strings.Join(lines[i:end], "\n"))}, end
+	}
+
+	if whole {
+		body := append([]string{strings.TrimPrefix(line[3:], " ")}, lines[i+1:]...)
+		return &Blockquote{Blocks: parseBlocks(body, depth+1)}, end
+	}
+
+	body := make([]string, 0, end-i)
+	for _, quoted := range lines[i:end] {
+		body = append(body, strings.TrimPrefix(strings.TrimPrefix(quoted, ">"), " "))
+	}
+
+	return &Blockquote{Blocks: parseBlocks(body, depth+1)}, end
 }
 
 // List indentation. Discord counts two spaces per level; the cap is there because
@@ -412,26 +454,21 @@ func listItem(line string) (listMarker, bool) {
 	return listMarker{}, false
 }
 
-func isListItem(line string) bool {
-	_, ok := listItem(line)
-	return ok
-}
-
 // parseList reads consecutive list items starting at i. A change of marker kind
 // ends the run — a bulleted list under a numbered one is two lists — while a
 // change of depth does not, an indented item being a sublist of the same run.
 // Numbering restarts at every depth, and the outermost one continues from the
 // number the first item gave.
-func parseList(lines []string, i int) (Block, int) {
-	first, _ := listItem(lines[i])
+func parseList(lines []string, info []lineInfo, i int) (Block, int) {
+	first := info[i].marker
 	list := &List{Ordered: first.ordered, Start: first.number}
 
 	var counters [listMaxIndent + 1]int
 
 	j := i
 	for ; j < len(lines); j++ {
-		item, ok := listItem(lines[j])
-		if !ok || item.ordered != list.Ordered {
+		item := info[j].marker
+		if info[j].kind != lineList || item.ordered != list.Ordered {
 			break
 		}
 
@@ -459,10 +496,10 @@ func parseList(lines []string, i int) (Block, int) {
 // parsed as a single run rather than one at a time, which is what lets a span
 // cross a newline the way Discord's does; the scanner turns the newline into the
 // LineBreak that draws it.
-func parseParagraph(lines []string, i int) (Block, int) {
+func parseParagraph(lines []string, info []lineInfo, i int) (Block, int) {
 	j := i
 	for ; j < len(lines); j++ {
-		if kind, _ := classify(lines[j]); kind != lineText {
+		if info[j].kind != lineText {
 			break
 		}
 	}
@@ -514,11 +551,30 @@ func (p *inlineScanner) emit(node Inline, at, width int) {
 	p.start = at + width
 }
 
+// inlineMaxDepth is how deep spans may nest before the rest of a run is left as
+// text. Every level rescans what it wraps, so a body of nothing but delimiters
+// recurses once per delimiter and lands a widget per level on the message column.
+// Eight is past anything written on purpose.
+const inlineMaxDepth = 8
+
 // parseInline tokenizes a run of text — a whole paragraph, quote or list item,
 // newlines included — into inline nodes. The run arrives whole rather than a line
 // at a time because a Discord span crosses a line break, and only a scanner that
 // can see past the newline can match one that does.
-func parseInline(s string) []Inline {
+func parseInline(s string) []Inline { return scanInline(s, 0) }
+
+// scanInline is parseInline carrying how many spans deep it already is. At the
+// cap the run becomes one Text node holding exactly what the author typed, so a
+// preview still flattens to the same sentence.
+func scanInline(s string, depth int) []Inline {
+	if depth >= inlineMaxDepth {
+		if s == "" {
+			return nil
+		}
+
+		return []Inline{&Text{Text: s}}
+	}
+
 	p := inlineScanner{src: s}
 
 	for i := 0; i < len(s); {
@@ -549,7 +605,7 @@ func parseInline(s string) []Inline {
 			}
 		}
 
-		node, width := matchInline(s[i:], i > 0 && isWordByte(s[i-1]))
+		node, width := matchInline(s[i:], i > 0 && isWordByte(s[i-1]), depth)
 		if node == nil {
 			i++
 			continue
@@ -568,33 +624,34 @@ func parseInline(s string) []Inline {
 // tried before their single-character counterparts. prevWord reports whether the
 // byte before s is a word character — _ is itself a word character, so underscore
 // emphasis only opens at a word boundary (snake_case stays literal) while * needs
-// no boundary (2*3*4 italicises the 3).
-func matchInline(s string, prevWord bool) (Inline, int) {
+// no boundary (2*3*4 italicises the 3). depth is how many spans enclose s, and is
+// only passed on: what nests carries it, and what does not never looks at it.
+func matchInline(s string, prevWord bool, depth int) (Inline, int) {
 	switch s[0] {
 	case '`':
 		return matchCode(s)
 	case '|':
 		if strings.HasPrefix(s, "||") {
-			return wrap(s, "||", func(c []Inline) Inline { return &Spoiler{Children: c} })
+			return wrap(s, "||", depth, func(c []Inline) Inline { return &Spoiler{Children: c} })
 		}
 	case '*':
 		if strings.HasPrefix(s, "**") {
-			return wrap(s, "**", func(c []Inline) Inline { return &Strong{Children: c} })
+			return wrap(s, "**", depth, func(c []Inline) Inline { return &Strong{Children: c} })
 		}
-		return matchEmphasis(s, "*", false)
+		return matchEmphasis(s, "*", false, depth)
 	case '_':
 		if strings.HasPrefix(s, "__") {
-			return wrap(s, "__", func(c []Inline) Inline { return &Underline{Children: c} })
+			return wrap(s, "__", depth, func(c []Inline) Inline { return &Underline{Children: c} })
 		}
 		if !prevWord {
-			return matchEmphasis(s, "_", true)
+			return matchEmphasis(s, "_", true, depth)
 		}
 	case '~':
 		if strings.HasPrefix(s, "~~") {
-			return wrap(s, "~~", func(c []Inline) Inline { return &Strike{Children: c} })
+			return wrap(s, "~~", depth, func(c []Inline) Inline { return &Strike{Children: c} })
 		}
 	case '[':
-		return matchLink(s)
+		return matchLink(s, depth)
 	case '<':
 		return matchAngle(s)
 	case ':':
@@ -808,7 +865,7 @@ func matchAngleURL(s string) (Inline, int) {
 }
 
 // matchLink matches a [label](destination "title") masked link.
-func matchLink(s string) (Inline, int) {
+func matchLink(s string, depth int) (Inline, int) {
 	label, ok := matchLabel(s)
 	if !ok || label == 1 {
 		return nil, 0 // unterminated, or nothing to show
@@ -824,7 +881,7 @@ func matchLink(s string) (Inline, int) {
 		return nil, 0
 	}
 
-	return &Link{Children: parseInline(s[1:label]), URL: destination}, label + 1 + width
+	return &Link{Children: scanInline(s[1:label], depth+1), URL: destination}, label + 1 + width
 }
 
 // matchLabel returns the index of a link label's closing ']'. Brackets nest, so
@@ -931,15 +988,23 @@ func isURLEnd(b byte) bool {
 // trimURLTail drops the punctuation a sentence leaves on the end of a bare URL.
 // A closing parenthesis stays when the URL opened one, which is the difference
 // between "(see https://x)" and an article named "…_(disambiguation)".
+//
+// The parentheses are counted once rather than per trimmed byte: nothing the loop
+// drops is a '(', so opens cannot change, and closes falls by one exactly when a
+// ')' is dropped.
 func trimURLTail(s string, from, end int) int {
+	opens := strings.Count(s[from:end], "(")
+	closes := strings.Count(s[from:end], ")")
+
 	for end > from {
 		switch s[end-1] {
 		case '.', ',', ';', ':', '!', '?', '\'':
 			end--
 		case ')':
-			if strings.Count(s[from:end], "(") >= strings.Count(s[from:end], ")") {
+			if opens >= closes {
 				return end
 			}
+			closes--
 			end--
 		default:
 			return end
@@ -957,7 +1022,7 @@ func trimURLTail(s string, from, end int) int {
 // emphasis must also close at a word boundary ("_open_world" stays literal). A
 // rejected closing delimiter lazily extends the span to the next one, so
 // "_foo_bar_" italicises "foo_bar".
-func matchEmphasis(s, delim string, boundary bool) (Inline, int) {
+func matchEmphasis(s, delim string, boundary bool, depth int) (Inline, int) {
 	rest := s[1:]
 
 	for end := findClose(rest, delim); end > 0; {
@@ -965,7 +1030,7 @@ func matchEmphasis(s, delim string, boundary bool) (Inline, int) {
 		edgesOK := !isSpaceByte(content[0]) && !isSpaceByte(content[end-1])
 		closeOK := !boundary || end+2 >= len(s) || !isWordByte(s[end+2])
 		if edgesOK && closeOK {
-			return &Emphasis{Children: parseInline(content)}, end + 2
+			return &Emphasis{Children: scanInline(content, depth+1)}, end + 2
 		}
 
 		next := findClose(rest[end+1:], delim)
@@ -980,14 +1045,14 @@ func matchEmphasis(s, delim string, boundary bool) (Inline, int) {
 
 // wrap matches a delimiter-bounded span (e.g. **bold**), recursively parsing its
 // contents. An unterminated or empty span does not match.
-func wrap(s, delim string, build func([]Inline) Inline) (Inline, int) {
+func wrap(s, delim string, depth int, build func([]Inline) Inline) (Inline, int) {
 	rest := s[len(delim):]
 	end := findClose(rest, delim)
 	if end <= 0 {
 		return nil, 0
 	}
 
-	return build(parseInline(rest[:end])), len(delim)*2 + end
+	return build(scanInline(rest[:end], depth+1)), len(delim)*2 + end
 }
 
 // matchCode matches an inline code span: a run of N backticks opens it and the

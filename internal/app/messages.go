@@ -43,6 +43,13 @@ const (
 	// ceiling rather than a working size — but a session left running is a session
 	// that must not grow, and nothing else evicts these.
 	maxUncachedMessages = 512
+
+	// maxFetchedReplies bounds the set of quoted messages already asked for. The
+	// guard is kept on failure — see ensureReplies — so a session accumulates one
+	// entry per dead target and nothing else ever drops it. The same ceiling as the
+	// store it guards: reaching it means hundreds of targets are gone, not that
+	// somebody scrolled a long way.
+	maxFetchedReplies = maxUncachedMessages
 )
 
 // The mounting budget, all four settings. They are read per use rather than
@@ -470,7 +477,8 @@ func (a *App) onMessageMounted(message *domain.Message, grouped bool) {
 // The fetchedReplies guard is **kept** on failure, unlike ensureAuthor's: the
 // usual reason is that the target was deleted, which stays true, and a quote
 // remounts on every scroll past it. The cost is that one missed through a dropped
-// connection stays unresolved until the channel is reopened.
+// connection stays unresolved until the channel is reopened — and that nothing
+// takes an entry back out, so maxFetchedReplies is the only ceiling the set has.
 //
 // A grouped continuation draws no quotes, so the caller does not queue for one.
 // Call on the UI thread.
@@ -480,6 +488,12 @@ func (a *App) ensureReplies(message *domain.Message) {
 			continue
 		}
 
+		// The guard alone, never the store beside it: a target asked for again costs
+		// a request, while a window dropped from a.uncached is a quote a jump is
+		// displaying right now.
+		if len(a.fetchedReplies) >= maxFetchedReplies {
+			a.fetchedReplies = make(map[string]bool)
+		}
 		a.fetchedReplies[replyID] = true
 		a.pendingReplies = append(a.pendingReplies, client.MessageRef{
 			ChannelID: message.ChannelID,
@@ -550,13 +564,14 @@ func (a *App) channelKind() domain.ChannelKind {
 	return channel.Kind
 }
 
-// What the strip under the header says in a voice channel, in its three states.
-// Revolt's voice channels carry messages like any other, so each of these names
-// the *call* — a mark saying "voice" over a composer that works would otherwise
-// read as a channel refusing messages.
 // syncChannelKind matches the message header to the open channel's type: the
 // prefix mark, so a DM reads "@name" rather than "#name", and the call island,
 // whose join half is about the channel on screen. Call on the UI thread.
+//
+// For a *selection*, which is the only thing that can change a kind — Revolt's
+// channel-edit route carries no type field. A channel merely being updated wants
+// syncCallIsland on its own: the overwrites the join half reads and the name it
+// draws both move, the mark cannot.
 func (a *App) syncChannelKind() {
 	if a.channelGlyph == nil {
 		return
@@ -589,6 +604,8 @@ func (a *App) syncChannelTopic() {
 // forth no longer fans out one fetch per switch — the superseded switch finds the
 // page already on its way and leaves it to finish.
 func (a *App) loadChannelMessages(channelID string) {
+	epoch := a.epoch
+
 	go func() {
 		count, err := a.client.LatestMessages(channelID, initialPageSize)
 		if err != nil {
@@ -597,15 +614,17 @@ func (a *App) loadChannelMessages(channelID string) {
 			}
 			log.Printf("load channel %s: %v", channelID, err)
 			a.doOnUI(func() {
-				if a.currentChannelID == channelID {
-					a.showStatus("Failed to load messages")
+				if a.stale(epoch) || a.currentChannelID != channelID {
+					return
 				}
+
+				a.showStatus("Failed to load messages")
 			}, true)
 			return
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID != channelID {
+			if a.stale(epoch) || a.currentChannelID != channelID {
 				return
 			}
 
@@ -824,8 +843,13 @@ func (a *App) loadJumpWindow(channelID, messageID string) {
 		page, err := a.client.MessagesAround(channelID, messageID, historyPageSize())
 
 		a.doOnUI(func() {
+			// The flag belongs to the session that set it: resetSessionState has
+			// already cleared it for the one signing in.
+			if a.stale(epoch) {
+				return
+			}
 			a.loadingPage = false
-			if a.stale(epoch) || a.currentChannelID != channelID {
+			if a.currentChannelID != channelID {
 				return
 			}
 			if err != nil || len(page) == 0 {
@@ -1010,7 +1034,16 @@ func (a *App) refreshMessage(channelID, messageID string) {
 	// Read off the window's own copy before it is replaced: an update is delivered
 	// as "this message changed", and only the stamp says which of the things that
 	// can change did. A reaction or an unfurled embed must not flash the row.
-	edited := newlyEdited(a.messages.Message(i), message)
+	previous := a.messages.Message(i)
+
+	// A reaction is the update that arrives most often — anybody in the channel can
+	// send one — and the only one that leaves the rest of the row standing, so the
+	// chips are repainted where the mounted widget can take them. Everything else,
+	// a message gaining its first reaction included, is a rebuild.
+	if sameExceptReactions(previous, message) && a.messages.SetReactions(message) {
+		return
+	}
+	edited := newlyEdited(previous, message)
 
 	a.messages.Replace(message)
 
@@ -1030,6 +1063,45 @@ func newlyEdited(previous, next *domain.Message) bool {
 	}
 
 	return previous.Edited == nil || !previous.Edited.Equal(*next.Edited)
+}
+
+// sameExceptReactions reports whether next is the mounted copy with nothing but
+// its reactions possibly moved, which is what decides that the chips can be
+// repainted rather than the row rebuilt.
+//
+// The answer is sound because the client revises a message as a shallow copy
+// with the one changed field reassigned: a slice next did not change is the very
+// slice previous holds. That makes identity the right question here — and only
+// here. It is not "these carry the same values".
+func sameExceptReactions(previous, next *domain.Message) bool {
+	if previous == nil || next == nil {
+		return false
+	}
+	if previous.AuthorID != next.AuthorID || previous.Content != next.Content ||
+		previous.Edited != next.Edited || previous.Pinned != next.Pinned {
+		return false
+	}
+	if previous.System != next.System || previous.Webhook != next.Webhook ||
+		previous.Masquerade != next.Masquerade ||
+		previous.MentionsEveryone != next.MentionsEveryone {
+		return false
+	}
+
+	return sameBacking(previous.Attachments, next.Attachments) &&
+		sameBacking(previous.Embeds, next.Embeds) &&
+		sameBacking(previous.Replies, next.Replies) &&
+		sameBacking(previous.Mentions, next.Mentions)
+}
+
+// sameBacking reports whether two slices are the same slice: same length, same
+// first element. Identity rather than equality — see sameExceptReactions, its
+// only caller.
+func sameBacking[T any](previous, next []T) bool {
+	if len(previous) != len(next) {
+		return false
+	}
+
+	return len(previous) == 0 || &previous[0] == &next[0]
 }
 
 // editLastOwnMessage opens the in-place editor on the user's newest editable
@@ -1138,9 +1210,10 @@ func (a *App) loadMoreHistory() {
 		return
 	}
 	a.loadingPage = true
+	epoch := a.epoch
 
 	go func() {
-		defer a.doOnUI(func() { a.loadingPage = false }, true)
+		defer a.doOnUI(func() { a.clearLoadingPage(epoch) }, true)
 
 		older, err := a.client.HistoryBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
@@ -1149,11 +1222,26 @@ func (a *App) loadMoreHistory() {
 		}
 
 		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
 			if a.currentChannelID == channelID && a.messages.Message(0) == top {
 				a.prependMessages(older)
 			}
 		}, true)
 	}()
+}
+
+// clearLoadingPage releases the page guard for the session that took it. A page
+// still out when the account signs out has had the flag cleared under it by
+// resetSessionState, and clearing it again would release the guard of whatever
+// page the new session already has in flight. Call on the UI thread.
+func (a *App) clearLoadingPage(epoch uint64) {
+	if a.stale(epoch) {
+		return
+	}
+
+	a.loadingPage = false
 }
 
 // loadOlderPage extends a window that stands outside the cache. atOldest is what
@@ -1165,9 +1253,10 @@ func (a *App) loadOlderPage(channelID string, top *domain.Message) {
 		return
 	}
 	a.loadingPage = true
+	epoch := a.epoch
 
 	go func() {
-		defer a.doOnUI(func() { a.loadingPage = false }, true)
+		defer a.doOnUI(func() { a.clearLoadingPage(epoch) }, true)
 
 		older, err := a.client.MessagesBefore(channelID, top.ID, historyPageSize())
 		if err != nil {
@@ -1176,7 +1265,7 @@ func (a *App) loadOlderPage(channelID string, top *domain.Message) {
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID != channelID || a.messages.Message(0) != top {
+			if a.stale(epoch) || a.currentChannelID != channelID || a.messages.Message(0) != top {
 				return
 			}
 			if len(older) == 0 {
@@ -1239,9 +1328,10 @@ func (a *App) mountNewerFromCache() {
 // column goes back to the cache and mounts it.
 func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
 	a.loadingPage = true
+	epoch := a.epoch
 
 	go func() {
-		defer a.doOnUI(func() { a.loadingPage = false }, true)
+		defer a.doOnUI(func() { a.clearLoadingPage(epoch) }, true)
 
 		newer, err := a.client.MessagesAfter(channelID, bottom.ID, historyPageSize())
 		if err != nil {
@@ -1250,7 +1340,7 @@ func (a *App) loadNewerPage(channelID string, bottom *domain.Message) {
 		}
 
 		a.doOnUI(func() {
-			if a.currentChannelID != channelID || a.messages.Message(a.messages.Len()-1) != bottom {
+			if a.stale(epoch) || a.currentChannelID != channelID || a.messages.Message(a.messages.Len()-1) != bottom {
 				return
 			}
 			if len(newer) == 0 {

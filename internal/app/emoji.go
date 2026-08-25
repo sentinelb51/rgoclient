@@ -36,8 +36,10 @@ func (a *App) OnPickEmoji(anchor fyne.CanvasObject, onPick func(ui.EmojiChoice))
 
 // refreshEmojiCandidates hands the composer what a typed ":" completes against —
 // the same groups the pop-up draws, flattened, so the two cannot offer different
-// things in different orders. Called where either changes: the set when a server
-// is joined or left, the order when one is entered.
+// things in different orders. Called where either changes: the set on ready, on a
+// server joined or left and on an emoji added or removed; the order when a server
+// is entered. Not from the rail's own rebuild, which is queued for updates that
+// change no emoji at all.
 //
 // Cheap enough for the UI thread: Store.Emojis is a walk of what State already
 // holds and no request backs it, which is the same walk opening the picker makes.

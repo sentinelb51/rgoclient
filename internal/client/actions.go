@@ -336,7 +336,13 @@ func withUser(users []string, userID string, add bool) ([]string, bool) {
 	case add && index != -1, !add && index == -1:
 		return users, false
 	case add:
-		return append(slices.Clone(users), userID), true
+		// Sized for the result rather than cloned and grown: the copy is what keeps
+		// the published slice immutable, but it need only be made once.
+		grown := make([]string, len(users)+1)
+		copy(grown, users)
+		grown[len(users)] = userID
+
+		return grown, true
 	default:
 		return slices.Delete(slices.Clone(users), index, index+1), true
 	}
@@ -413,12 +419,11 @@ func (c *Client) LatestMessages(channelID string, limit int) (int, error) {
 	if session == nil {
 		return 0, ErrNoSession
 	}
-	if !c.claim(c.fetching, channelID) {
+	epoch, ok := c.claim(c.fetching, channelID)
+	if !ok {
 		return 0, ErrBusy
 	}
-	defer c.release(c.fetching, channelID)
-
-	c.messages.SetDepleted(channelID, false)
+	defer c.release(c.fetching, channelID, epoch)
 
 	page, err := session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 		IncludeUsers: true,
@@ -432,6 +437,10 @@ func (c *Client) LatestMessages(channelID string, limit int) (int, error) {
 		return 0, nil
 	}
 
+	// Cleared beside the Set it belongs with, never before the request: a fetch
+	// that errors would otherwise leave the flag behind on a channel Set never
+	// reaches, and nothing else clears it.
+	c.messages.SetDepleted(channelID, false)
 	c.messages.Set(channelID, toMessages(page.Messages))
 
 	return len(page.Messages), nil
@@ -444,10 +453,11 @@ func (c *Client) HistoryBefore(channelID, beforeID string, limit int) ([]*domain
 	if session == nil {
 		return nil, ErrNoSession
 	}
-	if !c.claim(c.fetching, channelID) {
+	epoch, ok := c.claim(c.fetching, channelID)
+	if !ok {
 		return nil, ErrBusy
 	}
-	defer c.release(c.fetching, channelID)
+	defer c.release(c.fetching, channelID, epoch)
 
 	page, err := session.ChannelMessages(channelID, revoltgo.ChannelMessagesParams{
 		Before:       beforeID,
@@ -509,10 +519,11 @@ func (c *Client) messagePage(channelID string, params revoltgo.ChannelMessagesPa
 	if session == nil {
 		return nil, ErrNoSession
 	}
-	if !c.claim(c.fetching, channelID) {
+	epoch, ok := c.claim(c.fetching, channelID)
+	if !ok {
 		return nil, ErrBusy
 	}
-	defer c.release(c.fetching, channelID)
+	defer c.release(c.fetching, channelID, epoch)
 
 	page, err := session.ChannelMessages(channelID, params)
 	if err != nil {
@@ -617,26 +628,35 @@ func wireSort(sort domain.MessageSort) revoltgo.ChannelMessagesParamsSortType {
 // superseded request into ErrBusy — revoltgo's REST layer takes no context, so a
 // request cannot be cancelled, only not made twice.
 //
+// A claim is stamped with the epoch that made it, and release gives back only
+// what it still holds: Close clears the guards under requests that are still in
+// flight, so an unconditional delete on the way out would hand away a claim the
+// *next* session had since made.
+//
 // The guard is passed in because the two key different things — channels and
 // servers — and no ID is promised unique across both. Reading the field to pass
 // it needs no lock: the maps are built in New and only ever cleared.
-func (c *Client) claim(guard map[string]bool, key string) bool {
+func (c *Client) claim(guard map[string]uint64, key string) (uint64, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if guard[key] {
-		return false
+	if _, held := guard[key]; held {
+		return 0, false
 	}
-	guard[key] = true
 
-	return true
+	epoch := c.epoch.Load()
+	guard[key] = epoch
+
+	return epoch, true
 }
 
-func (c *Client) release(guard map[string]bool, key string) {
+func (c *Client) release(guard map[string]uint64, key string, epoch uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	delete(guard, key)
+	if held, ok := guard[key]; ok && held == epoch {
+		delete(guard, key)
+	}
 }
 
 // inParallel runs fn over every item, at most resolveWorkers at a time, and
@@ -1411,10 +1431,11 @@ func (c *Client) FetchMembers(serverID string) error {
 	if session == nil {
 		return ErrNoSession
 	}
-	if !c.claim(c.fetchingMembers, serverID) {
+	epoch, ok := c.claim(c.fetchingMembers, serverID)
+	if !ok {
 		return ErrBusy
 	}
-	defer c.release(c.fetchingMembers, serverID)
+	defer c.release(c.fetchingMembers, serverID, epoch)
 
 	_, err := session.ServerMembers(serverID, false)
 

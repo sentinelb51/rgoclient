@@ -253,7 +253,12 @@ func (a *App) unblockUser(userID, name string) {
 // reportAction runs one request about somebody and says so either way, both
 // messages taking their name. The success notice is the receipt: whatever raised
 // it — a profile card, a menu — is gone by the time this runs.
+//
+// Only the receipt is guarded by the session: a request that failed is worth
+// saying whoever is logged in, while a receipt landing after a re-login would
+// congratulate the next account on something it never asked for.
 func (a *App) reportAction(request func() error, what, failure, success, name string) {
+	epoch := a.epoch
 	onFail := a.notifyFailure(what, failure, name)
 
 	go func() {
@@ -262,6 +267,9 @@ func (a *App) reportAction(request func() error, what, failure, success, name st
 		a.doOnUI(func() {
 			if err != nil {
 				onFail(err)
+				return
+			}
+			if a.stale(epoch) {
 				return
 			}
 

@@ -23,9 +23,15 @@ type ring[T any] struct {
 	mask uint64
 
 	write atomic.Uint64 // producer's own; read by the consumer
-	read  atomic.Uint64 // consumer's own; read by the producer
 
-	_ [56]byte // keeps the two counters off one cache line
+	// The pad is between the counters rather than after them, which is the only
+	// place it does anything: each end writes its own counter every push and reads
+	// the other's, so adjacent they would trade one cache line back and forth. buf
+	// and mask stay ahead of write — written once at construction and read-only
+	// afterwards, so they cost the producer's line nothing.
+	_ [56]byte
+
+	read atomic.Uint64 // consumer's own; read by the producer
 }
 
 // newRing returns a ring holding at least capacity items.

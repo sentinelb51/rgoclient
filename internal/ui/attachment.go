@@ -96,14 +96,26 @@ func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar
 }
 
 func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
-	preview := widget.NewRichTextFromMarkdown("Loading preview...")
+	// Asked here rather than on a worker: the cache is a mutexed map read and never
+	// the network, and a row re-mounted by the message column is a hit — hopping off
+	// the thread for one only flashes the placeholder and parses the text again.
+	text, ok := texts.Get(attachment.URL)
+
+	body := "Loading preview..."
+	if ok {
+		body = textPreviewBlock(text)
+	}
+
+	preview := widget.NewRichTextFromMarkdown(body)
 	preview.Wrapping = fyne.TextWrapWord
 
 	background := canvas.NewRectangle(theme.Colors.ServerDefaultBg)
 	background.SetMinSize(fyne.NewSize(attachmentCardWidth, attachmentTextHeight))
 
 	content := container.NewStack(background, container.NewPadded(preview))
-	go fetchTextPreview(texts, attachment.URL, preview)
+	if !ok {
+		go fetchTextPreview(texts, attachment.URL, preview)
+	}
 
 	return VBoxNoSpacing(content, bar)
 }
@@ -138,29 +150,32 @@ func attachmentBar(name string, size int, onRemove func()) fyne.CanvasObject {
 
 /* Text fetching */
 
-// fetchTextPreview loads the first few hundred characters into preview as a code
-// block. Fetched once per URL; failures are not memoised, so they retry on the
-// next rebuild. Call off the UI thread.
-func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichText) {
-	text, ok := texts.Get(url)
-	if !ok {
-		full, err := fetchText(url, attachmentPreviewRead)
-		if err != nil || full == "" {
-			return
-		}
+// textPreviewBlock fences a preview: an attachment is drawn as code whatever is
+// in it, so nothing in the file can restyle the card it is previewed on.
+func textPreviewBlock(text string) string {
+	return "```\n" + text + "\n```"
+}
 
-		runes := []rune(full)
-		if len(runes) > attachmentPreviewRune {
-			runes = append(runes[:attachmentPreviewRune], []rune("...")...)
-		}
-		text = string(runes)
-		texts.Set(url, text)
+// fetchTextPreview loads the first few hundred characters into preview as a code
+// block, for a URL the cache has not seen — the caller asks it first. Fetched once
+// per URL; failures are not memoised, so they retry on the next rebuild. Call off
+// the UI thread.
+func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichText) {
+	full, err := fetchText(url, attachmentPreviewRead)
+	if err != nil || full == "" {
+		return
 	}
 
-	DoOnUI(func() {
-		preview.ParseMarkdown("```\n" + text + "\n```")
-		preview.Refresh()
-	})
+	runes := []rune(full)
+	if len(runes) > attachmentPreviewRune {
+		runes = append(runes[:attachmentPreviewRune], []rune("...")...)
+	}
+
+	text := string(runes)
+	texts.Set(url, text)
+
+	// ParseMarkdown refreshes for itself.
+	DoOnUI(func() { preview.ParseMarkdown(textPreviewBlock(text)) })
 }
 
 // fetchText downloads at most limit bytes of a text file — the cap is what keeps

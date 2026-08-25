@@ -100,6 +100,15 @@ type MessageWidget struct {
 	bodySlot *fyne.Container
 	body     fyne.CanvasObject
 
+	// codes are the invite links the body carries, taken off the document the body
+	// was rendered from. Nil for the great majority of messages.
+	codes []string
+
+	// reactionRow is the box the chips are drawn in, kept so a reaction anybody
+	// adds repaints them alone — see SetReactions. Nil while the message carries
+	// none, that box not being built at all.
+	reactionRow *fyne.Container
+
 	// The quick-actions are built on first reveal (ensureActions), so a message the
 	// pointer never touches builds no buttons. actionsOverlay is empty until then.
 	actionsOverlay *fyne.Container
@@ -306,9 +315,10 @@ func (w *MessageWidget) canReact(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionReact)
 }
 
-// permissions is asked lazily on the first hover or right-click, so a mounted
-// page costs no permission checks — and once per menu, one bitfield answering
-// every question it has.
+// permissions is asked when something needs it — a hover, a right-click, and a
+// row that carries reactions, whose chips have to know whether they answer a
+// click — never per mounted row. Once per menu, one bitfield answering every
+// question it has.
 func (w *MessageWidget) permissions() domain.Permission {
 	return w.deps.Store.Permissions(w.message.ChannelID)
 }
@@ -710,9 +720,15 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime string) fyne.CanvasObject {
 	deps, message := w.deps, w.message
 
+	// Parsed once and read twice: the text below and the invite scan buildExtras
+	// makes are the same document, and each parsing for itself is a second pass
+	// over the body on every mount.
+	doc := markdown.Parse(message.Content)
+	w.codes = inviteCodesInParsed(message.Content, doc)
+
 	// Every interactive piece of the row takes the same menu, so the pointer never
 	// lands somewhere that swallows a right-click.
-	w.body = newFlushContainer(renderMessageBody(deps, message.Content, w.TappedSecondary))
+	w.body = newFlushContainer(renderDocument(deps, doc, w.TappedSecondary))
 	w.bodySlot = container.NewStack(w.body)
 
 	// An empty body still renders one line tall, drawing as a gap above whatever the
@@ -953,10 +969,13 @@ func stackExtras(head fyne.CanvasObject, extras []fyne.CanvasObject) fyne.Canvas
 // deliberate — then any invite, the one thing the client composed rather than the
 // server, then reactions, what everybody else added to all of it.
 //
-// The reaction row is drawn only when there is one, so a mounted page still costs
-// no permission checks: the chips need to know whether they answer a click, and
-// asking per message would be a lookup per row for a feature few carry. Adding
-// the first is offered from the hover actions, which read permissions once anyway.
+// The reaction row is drawn only when there is one, so the permission it needs —
+// whether the chips answer a click — is paid by the few messages that carry one
+// rather than by every row on the page. Adding the first is offered from the
+// hover actions, which read permissions when the pointer arrives.
+//
+// It is also the one part of the row that is repainted in place: the box holding
+// the chips is kept, so a reaction arriving does not rebuild everything above it.
 func (w *MessageWidget) buildExtras() []fyne.CanvasObject {
 	deps, message, onMenu := w.deps, w.message, w.TappedSecondary
 
@@ -968,14 +987,43 @@ func (w *MessageWidget) buildExtras() []fyne.CanvasObject {
 	if len(message.Embeds) > 0 {
 		extras = append(extras, buildEmbeds(deps, message.Embeds, onMenu))
 	}
-	if codes := inviteCodesIn(message.Content); len(codes) > 0 {
-		extras = append(extras, buildInvites(deps, codes))
+	if len(w.codes) > 0 {
+		extras = append(extras, buildInvites(deps, w.codes))
 	}
 	if len(message.Reactions) > 0 {
-		extras = append(extras, buildReactions(deps, message, w.canReact(w.permissions()), onMenu, w.setOverChild))
+		w.reactionRow = container.NewStack(w.newReactions(message))
+		extras = append(extras, w.reactionRow)
 	}
 
 	return extras
+}
+
+// newReactions is the chip row as this widget draws it, the one place the four
+// things buildReactions needs are gathered — construction and SetReactions must
+// not disagree about any of them.
+func (w *MessageWidget) newReactions(message *domain.Message) fyne.CanvasObject {
+	return buildReactions(w.deps, message, w.canReact(w.permissions()), w.TappedSecondary, w.setOverChild)
+}
+
+// SetReactions redraws the chip row from message, leaving the rest of the row —
+// the parsed body, its pictures, an open hover — exactly as it stands. It answers
+// false when there is no chip row to redraw: a message gaining its first reaction
+// or losing its last changes whether the box under the body exists at all, which
+// is a rebuild.
+//
+// The chips are built from the new message, never the old: each closes over the
+// count and the emoji it was drawn with, and a chip toggling against a stale
+// count is a chip that undoes somebody else's reaction.
+func (w *MessageWidget) SetReactions(message *domain.Message) bool {
+	if w.reactionRow == nil || len(message.Reactions) == 0 {
+		return false
+	}
+
+	w.message = message
+	w.reactionRow.Objects = []fyne.CanvasObject{w.newReactions(message)}
+	w.reactionRow.Refresh()
+
+	return true
 }
 
 // setOverChild is the hook every child that takes hover for itself reports

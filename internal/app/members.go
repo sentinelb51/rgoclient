@@ -98,20 +98,23 @@ func (a *App) flushAuthors() {
 			for _, ref := range result.Failed {
 				delete(a.fetchedAuthors, authorKey(ref.ServerID, ref.UserID))
 			}
+
+			// Releasing those guards is the whole of a batch that named nobody: none
+			// of the repaints below can draw anything they did not draw before.
+			if len(result.Resolved) == 0 {
+				return
+			}
+
 			a.refreshAuthorMessages(result.Resolved...)
 			a.refreshTyping()  // somebody the line could only count may now have a name
 			a.refreshFriends() // and somebody the friends list could not name at all
 
-			// In a server this is refreshMemberList's to redo, whether a member record
-			// or only the account behind one was fetched: toMember fills a membership's
-			// name from that account, and memberCandidates drops a member it cannot name
-			// — so a resolved *user* can make an already-cached membership mentionable.
-			// A conversation has no membership to rebuild, so it takes the cheap path.
-			if a.currentServerID != "" {
-				a.refreshMemberList()
-				return
-			}
-			a.refreshRecipients()
+			// Whichever people the sidebar is drawing, a name is what it drops them
+			// for: toMember fills a membership's from the account behind it, and both
+			// candidate walks skip whoever they cannot name — so a resolved *user* can
+			// make an already-cached membership mentionable. refreshMemberList is the
+			// one entry to both, falling through to refreshRecipients outside a server.
+			a.queueRefresh(refreshMembers)
 		}, false)
 	}()
 }
@@ -119,22 +122,19 @@ func (a *App) flushAuthors() {
 // refreshAuthorMessages updates the mounted widgets authored by any of userIDs in
 // place — name, role colour, avatar — rather than re-rendering the channel. A
 // batch at a time, so the column is scanned once rather than once per author.
+//
+// Membership is a scan rather than a map: a batch is bounded by the mounted
+// window and most calls carry a single ID, which an event delivers often enough
+// that the map cost more to build than the compares it saved.
 func (a *App) refreshAuthorMessages(userIDs ...string) {
-	authors := make(map[string]bool, len(userIDs))
-	for _, userID := range userIDs {
-		if userID != "" {
-			authors[userID] = true
-		}
-	}
-	if len(authors) == 0 {
+	if len(userIDs) == 0 || a.messages == nil {
 		return
 	}
 
-	if a.messages == nil {
-		return
-	}
 	a.messages.EachMounted(func(w *ui.MessageWidget) {
-		if authors[w.Author()] {
+		// A system message that targets nobody has no author, and an empty ID in the
+		// batch would otherwise match every one of them.
+		if author := w.Author(); author != "" && slices.Contains(userIDs, author) {
 			w.RefreshAuthor()
 		}
 	})
@@ -224,11 +224,25 @@ func (a *App) refreshMemberList() {
 		return
 	}
 
+	// A walk already in flight is this same membership being resolved, and a second
+	// would take the claim the first still holds — memberRebuilt releases on
+	// whichever lands, so a presence patch would wait on a claim nobody will drop.
+	// The deferral is the queue's own bit rather than a flag of its own, which is
+	// what stops one outliving the walk it waited on: flushRefresh clears it by
+	// running this again. The window is deliberately not armed here — a flush
+	// landing while the claim is held would only defer it a second time — so
+	// memberRebuilt is what arms it.
+	if a.memberWorking {
+		a.dirty |= refreshMembers
+		return
+	}
+
 	visible := a.memberSidebar == nil || a.memberSidebar.Visible()
 	a.memberStale = !visible
 
-	// Two rebuilds can be in flight — an event landing beside a server change — and
-	// the store moves under them, so the older has nothing useful to install.
+	// The claim above is what keeps two walks from overlapping; the counter is what
+	// a landing is checked against, so an answer is still dropped rather than
+	// installed if a path ever starts a rebuild without taking the claim.
 	a.memberSeq++
 	seq := a.memberSeq
 	epoch := a.epoch
@@ -366,7 +380,13 @@ func patchedMembers(store domain.Store, serverID string, previous []domain.Membe
 func (a *App) memberRebuilt() {
 	a.memberWorking = false
 
-	if len(a.presenceDirty) > 0 {
+	// A rebuild deferred by the claim is already queued and only wants the window
+	// it is drawn in; presence has neither. The walk supersedes the patch, which is
+	// flushRefresh's own rule.
+	switch {
+	case a.dirty&refreshMembers != 0:
+		a.queueRefresh(refreshMembers)
+	case len(a.presenceDirty) > 0:
 		a.queueRefresh(refreshPresence)
 	}
 }

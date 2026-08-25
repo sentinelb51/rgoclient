@@ -65,9 +65,13 @@ type codeCopy struct {
 	icon *canvas.Image
 	text string
 
-	// generation guards the revert: a second tap arms a second timer, and the
-	// first must not clear a tick the second put back.
+	// revert puts the clipboard mark back. Held so a second tap stops the first
+	// rather than leaving two wakes running, and guarded by generation as well
+	// because a timer that has already fired cannot be recalled.
+	revert     *time.Timer
 	generation uint64
+
+	copied bool
 }
 
 var _ fyne.Tappable = (*codeCopy)(nil)
@@ -104,7 +108,15 @@ func (c *codeCopy) copy() {
 
 	c.generation++
 	generation := c.generation
-	time.AfterFunc(codeCopyRevert, func() {
+
+	if c.revert != nil {
+		c.revert.Stop()
+	}
+
+	// A chip dropped with the message it was in is told nothing, so a revert can
+	// land on one no longer drawn: that is a single dirty frame, bounded by
+	// codeCopyRevert and by setCopied refusing to repaint a mark already back.
+	c.revert = time.AfterFunc(codeCopyRevert, func() {
 		DoOnUI(func() {
 			if c.generation == generation {
 				c.setCopied(false)
@@ -116,6 +128,11 @@ func (c *codeCopy) copy() {
 // setCopied swaps the mark for the state it is in. The tick is lit where the
 // clipboard glyph rests dimmed: the confirmation is the whole point of it.
 func (c *codeCopy) setCopied(copied bool) {
+	if copied == c.copied {
+		return
+	}
+	c.copied = copied
+
 	c.icon.Resource, c.icon.Translucency = actionMark(assets.ActionCopyIcon), iconRestTranslucency
 	if copied {
 		c.icon.Resource, c.icon.Translucency = tintedIcon(assets.ActionSaveIcon, theme.Colors.SwiftActionConfirm), 0

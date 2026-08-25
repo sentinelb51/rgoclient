@@ -4,7 +4,7 @@ import (
 	"errors"
 	"io"
 	"log"
-	"maps"
+	"net"
 	"time"
 
 	lksdk "github.com/livekit/server-sdk-go/v2"
@@ -154,6 +154,7 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 
 	c.mu.Lock()
 	c.lanes[userID] = l
+	c.lanesGen++
 	c.mu.Unlock()
 
 	// The speakers only ask for audio for a lane they can see, so the lane is
@@ -163,6 +164,13 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 
 	go c.readTrack(track, buffer, userID)
 }
+
+// readTimeout is how long one read may block before the loop looks at c.done
+// again. A participant who mutes through the SDK stops sending entirely, so
+// without a deadline a hang-up leaves this goroutine parked in ReadRTP holding
+// a jitter buffer and an Opus decoder for the rest of the process. Nothing a
+// reader tunes: it is the resolution of the exit check, not a media setting.
+const readTimeout = time.Second
 
 // readTrack moves RTP from the track into the jitter buffer and does nothing
 // else. It ends when the track does, which is what closes the player after it.
@@ -174,8 +182,26 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 		default:
 		}
 
+		// Re-armed every pass: a deadline set once expires once and then fails every
+		// read after it.
+		_ = track.SetReadDeadline(time.Now().Add(readTimeout))
+
 		packet, _, err := track.ReadRTP()
 		if err != nil {
+			// An expiry is silence, not failure — DTX and a muted publisher both
+			// make long gaps ordinary — so it goes back round rather than closing
+			// the lane, which would take the participant off the speakers for good
+			// with nothing reporting it.
+			//
+			// Matched through net.Error rather than against os.ErrDeadlineExceeded:
+			// a lapsed deadline comes back from pion's own packetio buffer, which
+			// answers with an error of its own that is not that sentinel and says
+			// what it is only through Timeout.
+			var timeout net.Error
+			if errors.As(err, &timeout) && timeout.Timeout() {
+				continue
+			}
+
 			if !errors.Is(err, io.EOF) {
 				select {
 				case <-c.done:
@@ -257,7 +283,9 @@ const maxFramesPerPass = 3
 func (c *Call) fillLanes() {
 	deafened := c.deafened.Load()
 
-	for userID, l := range c.openLanes() {
+	for _, p := range c.laneSnapshot() {
+		userID, l := p.userID, p.lane
+
 		// Bounded as well as conditioned: Want is answered by another goroutine, and
 		// a loop that only it can end is one bug away from never ending.
 		for range maxFramesPerPass {
@@ -326,8 +354,8 @@ func (c *Call) reportLoss() {
 	// nothing: either way the encoder keeps what it has — the initial seed at the
 	// start, which exists precisely to cover the window before a measurement.
 	worst := -1
-	for _, l := range c.openLanes() {
-		worst = max(worst, l.buffer.Loss())
+	for _, p := range c.laneSnapshot() {
+		worst = max(worst, p.lane.buffer.Loss())
 	}
 	if worst < 0 {
 		return
@@ -336,17 +364,35 @@ func (c *Call) reportLoss() {
 	p.setLoss(worst)
 }
 
-// openLanes is a snapshot of the lanes to work through, so the map's lock is not
-// held across a decode.
-func (c *Call) openLanes() map[string]*lane {
+// lanePair is one entry of the filler's snapshot: who a lane belongs to, and the
+// lane. A slice rather than a map because the filler only ever walks it.
+type lanePair struct {
+	userID string
+	lane   *lane
+}
+
+// laneSnapshot is the lanes to work through, so the map's lock is not held
+// across a decode. Rebuilt only when c.lanes has actually changed — this runs at
+// the device's period, and a fresh map every 10 ms was garbage for an answer
+// that is the same one nearly every time.
+//
+// The buffer is the filler's own. Only playLanes and what it calls may reach
+// this: another goroutine walking c.lanes builds its own slice.
+func (c *Call) laneSnapshot() []lanePair {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if len(c.lanes) == 0 {
-		return nil
+	if c.snapGen == c.lanesGen {
+		return c.snap
 	}
 
-	return maps.Clone(c.lanes)
+	c.snap = c.snap[:0]
+	for userID, l := range c.lanes {
+		c.snap = append(c.snap, lanePair{userID: userID, lane: l})
+	}
+	c.snapGen = c.lanesGen
+
+	return c.snap
 }
 
 // decodeFrame turns one playout slot into audio, in the three ways a slot can
@@ -404,6 +450,7 @@ func (c *Call) closeLane(userID string, only *webrtc.TrackRemote) {
 	open := l != nil
 	delete(c.lanes, userID)
 	delete(c.speaking, userID)
+	c.lanesGen++
 	c.mu.Unlock()
 
 	if !open {

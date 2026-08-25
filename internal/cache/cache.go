@@ -18,8 +18,8 @@ type LRU struct {
 	index map[string]*list.Element // key -> its element in order
 }
 
-// NewLRU creates an empty recency tracker.
-func NewLRU() *LRU {
+// newLRU creates an empty recency tracker.
+func newLRU() *LRU {
 	return &LRU{order: list.New(), index: make(map[string]*list.Element)}
 }
 
@@ -58,7 +58,7 @@ type TextCache struct {
 
 // NewTextCache creates a cache holding at most limit previews.
 func NewTextCache(limit int) *TextCache {
-	return &TextCache{text: make(map[string]string), recency: NewLRU(), limit: limit}
+	return &TextCache{text: make(map[string]string), recency: newLRU(), limit: limit}
 }
 
 // Get returns the memoised preview for url, if any.

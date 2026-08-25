@@ -1573,7 +1573,7 @@ func SortCandidates(candidates []MentionCandidate) {
 // rank scores a candidate against an already-lowercased query: 0 for a prefix
 // match on the name or the alternate key, 1 for a substring, -1 for none. An
 // empty query — the bare "@" — matches everyone at 0. The receiver is a pointer
-// only because filter calls this twice per candidate per keystroke, and the
+// only because filter asks it of every candidate on every keystroke, and the
 // struct is wide.
 func (c *MentionCandidate) rank(query string) int {
 	switch {
@@ -1607,6 +1607,13 @@ type MentionPicker struct {
 	matches  []MentionCandidate
 	overflow int // matches beyond mentionMaxRows, reported by the footer
 	selected int
+
+	// filter's scratch: a candidate is ranked once, into the bucket its rank names,
+	// and the two are concatenated rather than interleaved so every prefix hit still
+	// stands above every substring one. Fixed arrays, so a keystroke allocates
+	// nothing whatever the pool holds.
+	prefixHits    [mentionMaxRows]MentionCandidate
+	substringHits [mentionMaxRows]MentionCandidate
 
 	// What the rows currently show, and whether they still reflect it. A caret move
 	// inside the same mention then costs nothing.
@@ -1733,25 +1740,46 @@ func (p *MentionPicker) Update(kind MentionKind, query string) bool {
 }
 
 // filter collects the best mentionMaxRows matches, prefix hits before substring
-// hits. Two passes beat one pass plus a sort: two walks, a string comparison per
-// entry, and nothing allocated — which is what lets it run on every keystroke.
+// hits. One walk, ranking each candidate once into the scratch buckets and taking
+// the pool's own order with it, so ordering costs no sort and nothing is
+// allocated — which is what lets it run on every keystroke.
 func (p *MentionPicker) filter(kind MentionKind, query string) {
 	all := p.pool(kind)
 
 	p.matches, p.overflow = p.matches[:0], 0
-	for pass := range 2 {
-		for i := range all {
-			candidate := &all[i]
-			if candidate.rank(query) != pass {
-				continue
+
+	// The bare marker: everyone ranks alike, so the head of the pool is the answer
+	// and nothing has to be ranked at all.
+	if query == "" {
+		p.matches = append(p.matches, all[:min(len(all), mentionMaxRows)]...)
+		p.overflow = len(all) - len(p.matches)
+
+		return
+	}
+
+	var prefixes, substrings int
+	for i := range all {
+		switch candidate := &all[i]; candidate.rank(query) {
+		case 0:
+			if prefixes < mentionMaxRows {
+				p.prefixHits[prefixes] = *candidate
 			}
-			if len(p.matches) < mentionMaxRows {
-				p.matches = append(p.matches, *candidate)
-			} else {
-				p.overflow++
+			prefixes++
+		case 1:
+			if substrings < mentionMaxRows {
+				p.substringHits[substrings] = *candidate
 			}
+			substrings++
 		}
 	}
+
+	kept := min(prefixes, mentionMaxRows)
+	p.matches = append(p.matches, p.prefixHits[:kept]...)
+	if room := mentionMaxRows - kept; room > 0 {
+		p.matches = append(p.matches, p.substringHits[:min(substrings, room)]...)
+	}
+
+	p.overflow = prefixes + substrings - len(p.matches)
 }
 
 // Step moves the highlight by delta, wrapping at both ends. Named Step because a

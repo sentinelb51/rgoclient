@@ -45,6 +45,13 @@ type windowRow struct {
 	followed bool   // the row below continues it: a tight bottom margin
 	dayLabel string // the separator above it, when it opens a day
 
+	// The invite links the body carries, scanned when the row was estimated. The
+	// scan is a markdown parse and a row is re-estimated whenever its neighbours
+	// move, so the answer is kept; scanned separates "none" — what almost every
+	// body answers — from "not looked at yet".
+	codes   []string
+	scanned bool
+
 	height   float32
 	measured bool
 }
@@ -417,9 +424,38 @@ func (l *MessageList) Replace(message *domain.Message) {
 	delete(l.mounted, message.ID)
 	l.rows[i].message = message
 	l.rows[i].measured = false // the old height stands as the estimate
+	l.rows[i].codes, l.rows[i].scanned = nil, false
 
 	l.rederive(i-1, i+1)
 	l.mount(true)
+}
+
+// SetReactions redraws the chip row of the row holding message's ID and leaves
+// the widget standing, for the one update that changes nothing else: rebuilding
+// the row for a reaction re-parses the body, re-requests its pictures and drops
+// whatever the pointer was over. It answers false when the row is not on screen,
+// or when the chip row itself has to appear or go — both of which are Replace's
+// work, and the caller's fallback.
+//
+// Nothing derive reads can have moved, so no seam is re-derived; the height can,
+// a chip being added or taken away, so the row goes back to an estimate and the
+// column settles.
+func (l *MessageList) SetReactions(message *domain.Message) bool {
+	i, ok := l.index[message.ID]
+	if !ok {
+		return false
+	}
+
+	w := l.mounted[message.ID]
+	if w == nil || !w.SetReactions(message) {
+		return false
+	}
+
+	l.rows[i].message = message
+	l.rows[i].measured = false
+	l.settle()
+
+	return true
 }
 
 // ShowStatus replaces the rows with one line, centred on what can be seen.
@@ -860,7 +896,10 @@ func (l *MessageList) estimate(row *windowRow) float32 {
 	for _, embed := range message.Embeds {
 		height += theme.Sizes.EmbedSpacing + embedHeight(embed)
 	}
-	if len(inviteCodesIn(message.Content)) > 0 {
+	if !row.scanned {
+		row.codes, row.scanned = inviteCodesIn(message.Content), true
+	}
+	if len(row.codes) > 0 {
 		height += inviteCardHeight
 	}
 	if len(message.Reactions) > 0 {

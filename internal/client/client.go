@@ -73,8 +73,13 @@ type Client struct {
 	// taken on the read path.
 	ticketMu sync.Mutex
 
-	mu       sync.Mutex      // guards the maps below and voiceNodeName
-	fetching map[string]bool // channelID -> a page request is already in flight
+	mu sync.Mutex // guards the maps below and voiceNodeName
+
+	// fetching is channelID -> the epoch of the page request already in flight.
+	// The epoch rather than a bare flag because Close clears this under requests
+	// that have not returned: a release stamped with the session that made the
+	// claim cannot hand away one the next session has since taken.
+	fetching map[string]uint64
 
 	// voiceNodeName is the media server join_call has to be asked for, resolved
 	// from the instance config on the first call and kept for the session — it is
@@ -85,7 +90,7 @@ type Client struct {
 	// rather than a shared one because the key spaces are different — these are
 	// server IDs — and a channel and a server sharing an ID is not a thing Revolt
 	// promises will never happen.
-	fetchingMembers map[string]bool
+	fetchingMembers map[string]uint64
 
 	// sessionID is *this* login's own ID, or "" where it was never recorded. No
 	// route answers "which of these sessions am I", so it is only ever known from
@@ -114,8 +119,8 @@ func New() *Client {
 		messages:        cache.NewMessageCache(settings.MessagesPerChannel, settings.CachedChannels),
 		events:          make(chan Event, eventBuffer),
 		done:            make(chan struct{}),
-		fetching:        make(map[string]bool),
-		fetchingMembers: make(map[string]bool),
+		fetching:        make(map[string]uint64),
+		fetchingMembers: make(map[string]uint64),
 		relations:       make(map[string]domain.Relationship),
 	}
 	c.store = &store{client: c}

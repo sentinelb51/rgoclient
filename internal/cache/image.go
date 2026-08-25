@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -105,14 +106,19 @@ func (s ImageStats) Add(other ImageStats) ImageStats {
 // Memory is bounded in bytes rather than entries: a 32px avatar and a 12
 // megapixel photo are one slot each, so a count is not a ceiling on anything.
 type ImageCache struct {
-	mu       sync.RWMutex // guards every map below plus recency and bytes
+	mu       sync.RWMutex // guards every map below plus recency, bytes and generation
 	memory   map[string]image.Image
 	circular map[string]image.Image // memory-only circular crops, keyed by id
 	pending  map[string]image.Image // awaiting disk write
 	inflight map[string]*imageLoad  // de-duplicates concurrent loads by id
 	sizes    map[string]int64       // resident bytes per id: its image plus its crop
+	touched  map[string]struct{}    // ids hit since the last mtime pass
 	recency  *LRU                   // decoded-image ids by recency
 	bytes    int64                  // sum of sizes; what maxMemory bounds
+
+	// generation counts Clears. A load that started before one stores nothing, so
+	// a cache the user emptied is not refilled by the downloads it interrupted.
+	generation uint64
 
 	// The budgets, read by the trimmer and by every decode without the lock.
 	maxDisk   atomic.Int64
@@ -123,10 +129,11 @@ type ImageCache struct {
 	// bound and never replaced, so it is read without the lock.
 	loaders chan struct{}
 
-	dir      string
-	client   *http.Client
-	flushNow chan struct{} // nudged when unwritten images are blocking eviction
-	stop     chan struct{}
+	dir       string
+	client    *http.Client
+	flushNow  chan struct{} // nudged when unwritten images are blocking eviction
+	stop      chan struct{}
+	closeOnce sync.Once // stop is closed here, so a second Shutdown cannot panic
 }
 
 // imageLoad tracks an in-flight load so concurrent callers for the same id share
@@ -148,7 +155,8 @@ func NewImageCache(root, folder string, limits ImageLimits) *ImageCache {
 		pending:  make(map[string]image.Image),
 		inflight: make(map[string]*imageLoad),
 		sizes:    make(map[string]int64),
-		recency:  NewLRU(),
+		touched:  make(map[string]struct{}),
+		recency:  newLRU(),
 		loaders:  make(chan struct{}, max(limits.Loaders, 1)),
 		dir:      dir,
 		client:   &http.Client{Timeout: 15 * time.Second},
@@ -168,9 +176,9 @@ func NewImageCache(root, folder string, limits ImageLimits) *ImageCache {
 }
 
 // SetLimits changes what the cache may occupy. The memory budget is enforced on
-// the next touch and the disk budget on the next trim, so nothing is discarded
-// at the moment of the change. Loaders is fixed at construction and ignored here.
-// Safe from any goroutine.
+// the next store or flush and the disk budget on the next trim, so nothing is
+// discarded at the moment of the change. Loaders is fixed at construction and
+// ignored here. Safe from any goroutine.
 func (c *ImageCache) SetLimits(limits ImageLimits) {
 	c.maxDisk.Store(limits.DiskBytes)
 	c.maxMemory.Store(limits.MemoryBytes)
@@ -188,6 +196,10 @@ func (c *ImageCache) Stats() ImageStats {
 	c.mu.RUnlock()
 
 	for _, file := range c.diskFiles() {
+		if !file.isEntry() {
+			continue
+		}
+
 		stats.Files++
 		stats.DiskBytes += file.size
 	}
@@ -202,8 +214,15 @@ type diskFile struct {
 	modified time.Time
 }
 
+// isEntry reports whether the file is a cached image rather than something else
+// the directory holds — a temp left behind by a failed encode, say. Only entries
+// count towards the stats and the disk budget.
+func (f diskFile) isEntry() bool { return strings.HasSuffix(f.name, ".png") }
+
 // diskFiles lists the cache directory, skipping subdirectories and anything
-// unreadable. It is the one walk Stats, Clear and trimDiskCache share.
+// unreadable. It is the one walk Stats, Clear and trimDiskCache share, and it
+// reports every file: Clear removes them all, and the trim sweeps stale temps,
+// so the filtering is each caller's rather than done here.
 func (c *ImageCache) diskFiles() []diskFile {
 	entries, err := os.ReadDir(c.dir)
 	if err != nil {
@@ -226,15 +245,20 @@ func (c *ImageCache) diskFiles() []diskFile {
 
 // Clear drops everything the cache holds, in memory and on disk. Images queued
 // for a write are dropped with the rest: they came off the network and will come
-// off it again. It touches disk, so keep it off the UI thread.
+// off it again. Downloads already on their way are not waited for — the cache is
+// shared with the UI thread and blocking on the network under the lock would
+// freeze every avatar lookup — they are discarded on arrival by the generation
+// they started under. It touches disk, so keep it off the UI thread.
 func (c *ImageCache) Clear() {
 	c.mu.Lock()
 	c.memory = make(map[string]image.Image)
 	c.circular = make(map[string]image.Image)
 	c.pending = make(map[string]image.Image)
 	c.sizes = make(map[string]int64)
-	c.recency = NewLRU()
+	c.touched = make(map[string]struct{})
+	c.recency = newLRU()
 	c.bytes = 0
+	c.generation++
 	c.mu.Unlock()
 
 	for _, file := range c.diskFiles() {
@@ -269,10 +293,14 @@ func CacheRoot(configured string) string {
 	return filepath.Join(".", "cache")
 }
 
-// Shutdown stops the background flush and persists any pending images.
+// Shutdown stops the background flush and persists any pending images. Calling
+// it more than once is allowed; only the first stops anything, and each one
+// still persists whatever has been queued since.
 func (c *ImageCache) Shutdown() {
-	close(c.stop)
+	c.closeOnce.Do(func() { close(c.stop) })
+
 	c.flush()
+	c.stampTouched()
 }
 
 /* Reading and writing */
@@ -295,6 +323,7 @@ func (c *ImageCache) Get(id string) image.Image {
 	}
 	if ok {
 		c.touchLocked(id)
+		c.enforceMemoryLocked()
 	}
 	c.mu.Unlock()
 
@@ -318,17 +347,10 @@ func (c *ImageCache) Get(id string) image.Image {
 	// disk.
 	img = downscale(img, int(c.maxEdge.Load()))
 
-	// Disk eviction is oldest-first by mtime, which is only ever set at write —
-	// insertion order, not recency. Stamping it on a hit is what makes the two
-	// agree, so a picture the user keeps scrolling past outlives one seen once.
-	now := time.Now()
-	if err := os.Chtimes(path, now, now); err != nil {
-		log.Printf("image cache: touch %s: %v", id, err)
-	}
-
 	c.mu.Lock()
 	c.storeLocked(id, img, false)
 	c.touchLocked(id)
+	c.enforceMemoryLocked()
 	c.mu.Unlock()
 
 	return img
@@ -343,9 +365,7 @@ func (c *ImageCache) Set(id string, img image.Image) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.storeLocked(id, img, false)
-	c.pending[id] = img
-	c.touchLocked(id)
+	c.storePendingLocked(id, img)
 }
 
 // LoadAsync loads an image and delivers it to onLoaded on the UI thread. When
@@ -365,8 +385,13 @@ func (c *ImageCache) LoadAsync(id, url string, circular bool, onLoaded func(imag
 
 	go func() {
 		// Claimed here rather than before the goroutine: acquiring on the calling
-		// thread would block the UI thread on whatever is already downloading.
-		c.loaders <- struct{}{}
+		// thread would block the UI thread on whatever is already downloading. A
+		// worker still queued for a turn when the cache shuts down leaves instead.
+		select {
+		case c.loaders <- struct{}{}:
+		case <-c.stop:
+			return
+		}
 		img := c.loadShared(id, url)
 		<-c.loaders
 
@@ -375,6 +400,16 @@ func (c *ImageCache) LoadAsync(id, url string, circular bool, onLoaded func(imag
 		}
 		if circular {
 			img = c.circularVariant(id, img)
+		}
+
+		// Once the driver has drained, DoFromGoroutine runs the callback inline on
+		// this goroutine rather than on the UI thread — and onLoaded touches
+		// widgets. The window between this check and the enqueue is the driver's to
+		// close; this closes the rest.
+		select {
+		case <-c.stop:
+			return
+		default:
 		}
 
 		// Dispatched straight to the driver rather than through ui.DoOnUI, which
@@ -404,15 +439,63 @@ func (c *ImageCache) LoadIntoContainer(id, url string, size fyne.Size, target *f
 
 /* Internals */
 
-// touchLocked marks id most recently used and evicts the least recently used
-// decoded images until the cache is back inside its byte budget. The entry just
-// touched is never a candidate, so a single image larger than the whole budget
-// still resolves rather than evicting itself. Callers must hold the write lock.
+// touchLocked marks id most recently used, in memory and on disk. It stays two
+// map operations because the UI thread runs it per avatar per frame through
+// cachedVariant: the memory budget is applied by the paths that can grow the
+// resident set, and the file's mtime is restamped by the flush goroutine, which
+// is the only one allowed in the directory. Callers must hold the write lock.
 func (c *ImageCache) touchLocked(id string) {
 	c.recency.Touch(id)
+	c.touched[id] = struct{}{}
+}
 
+// storePendingLocked makes id resident, queues it for its disk write and applies
+// the memory budget. Callers must hold the write lock.
+func (c *ImageCache) storePendingLocked(id string, img image.Image) {
+	c.storeLocked(id, img, false)
+	c.pending[id] = img
+	c.touchLocked(id)
+	c.enforceMemoryLocked()
+}
+
+// enforceMemoryLocked evicts the least recently used decoded images until the
+// cache is back inside its byte budget. The most recently used entry is never a
+// candidate, so a single image larger than the whole budget still resolves rather
+// than evicting itself. Callers must hold the write lock.
+func (c *ImageCache) enforceMemoryLocked() {
 	for c.bytes > c.maxMemory.Load() && c.recency.Len() > 1 {
 		c.releaseLocked(c.recency.EvictOldest())
+	}
+}
+
+// enforceMemory applies the memory budget from the flush goroutine, so a budget
+// lowered in the settings takes effect without waiting for the next store.
+func (c *ImageCache) enforceMemory() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.enforceMemoryLocked()
+}
+
+// stampTouched restamps the mtime of every id hit since the last pass, which is
+// what makes trimDiskCache's oldest-first eviction mean least recently *used*
+// rather than least recently written — a picture the reader keeps scrolling past
+// outliving one seen once. It runs on the flush goroutine, which owns the
+// directory, and in a batch because os.Chtimes is a syscall: stamping at the hit
+// would charge one to every avatar the UI thread draws.
+func (c *ImageCache) stampTouched() {
+	c.mu.Lock()
+	touched := c.touched
+	c.touched = make(map[string]struct{})
+	c.mu.Unlock()
+
+	now := time.Now()
+	for id := range touched {
+		// An id resident in memory need not be on disk yet: the flush that writes it
+		// stamps it, and until then there is nothing to stamp.
+		if err := os.Chtimes(filepath.Join(c.dir, id+".png"), now, now); err != nil && !os.IsNotExist(err) {
+			log.Printf("image cache: touch %s: %v", id, err)
+		}
 	}
 }
 
@@ -532,7 +615,10 @@ func downscale(img image.Image, edge int) image.Image {
 }
 
 // cachedVariant returns the in-memory image for id, the circular crop when
-// requested, or nil. It never reads disk, so it is safe on the UI thread.
+// requested, or nil. It never reads disk, so it is safe on the UI thread — and
+// it holds the write lock for a recency touch and nothing else: the LRU is a
+// list, so a read lock cannot serve it, and dropping the touch would leave the
+// hottest images looking coldest.
 func (c *ImageCache) cachedVariant(id string, circular bool) image.Image {
 	if id == "" {
 		return nil
@@ -587,6 +673,10 @@ func (c *ImageCache) load(id, url string) image.Image {
 		return img
 	}
 
+	c.mu.RLock()
+	generation := c.generation
+	c.mu.RUnlock()
+
 	resp, err := c.client.Get(url)
 	if err != nil {
 		return nil
@@ -602,9 +692,30 @@ func (c *ImageCache) load(id, url string) image.Image {
 		return nil
 	}
 	img = downscale(img, int(c.maxEdge.Load()))
-	c.Set(id, img)
+	c.setIfCurrent(id, img, generation)
 
 	return img
+}
+
+// setIfCurrent is Set for a download that was already on its way: it stores
+// nothing when the cache was emptied since generation was read, so a Clear the
+// user asked for is not undone by the loads it interrupted. The caller is still
+// given the image and paints it once. c.inflight is deliberately left alone by
+// Clear — its entries release themselves, so emptying it would only cost a
+// duplicate download to whoever would have joined this load.
+func (c *ImageCache) setIfCurrent(id string, img image.Image, generation uint64) {
+	if id == "" || img == nil {
+		return
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.generation != generation {
+		return
+	}
+
+	c.storePendingLocked(id, img)
 }
 
 // circularVariant returns the circular crop of base for id, computing it on
@@ -624,6 +735,7 @@ func (c *ImageCache) circularVariant(id string, base image.Image) image.Image {
 
 	c.storeLocked(id, clipped, true)
 	c.touchLocked(id)
+	c.enforceMemoryLocked()
 
 	return clipped
 }
@@ -650,13 +762,18 @@ func (c *ImageCache) flushLoop() {
 		select {
 		case <-flush.C:
 			c.flush()
+			c.stampTouched()
 		case <-c.flushNow:
 			c.flush()
+			c.stampTouched()
 		case <-trim.C:
+			c.stampTouched() // before the trim, so it evicts on what it has just learned
 			c.trimDiskCache()
 		case <-c.stop:
 			return
 		}
+
+		c.enforceMemory()
 	}
 }
 
@@ -704,16 +821,21 @@ func (c *ImageCache) writeToDisk(id string, img image.Image) {
 
 // trimDiskCache evicts the least recently used files until the on-disk cache
 // fits inside the budget, leaving headroom so the next trim isn't immediately due
-// again. Recency is the file's mtime, which Get stamps on every hit — so what
-// survives is what the user keeps seeing, not merely what arrived last.
+// again. Recency is the file's mtime, which stampTouched restamps for every id
+// hit since the last pass — so what survives is what the user keeps seeing, not
+// merely what arrived last. Only cache entries are counted or evicted; the
+// orphaned temps are swept first, since they are neither.
 //
 // Call from flushLoop only: it reads and sorts the whole directory.
 func (c *ImageCache) trimDiskCache() {
 	files := c.diskFiles()
+	c.removeStaleTemps(files)
 
 	var total int64
 	for _, file := range files {
-		total += file.size
+		if file.isEntry() {
+			total += file.size
+		}
 	}
 
 	budget := c.maxDisk.Load()
@@ -730,11 +852,31 @@ func (c *ImageCache) trimDiskCache() {
 		if total <= target {
 			return
 		}
+		if !file.isEntry() {
+			continue
+		}
 		if err := os.Remove(filepath.Join(c.dir, file.name)); err != nil {
 			log.Printf("image cache: remove %s: %v", file.name, err)
 			continue
 		}
 		total -= file.size
+	}
+}
+
+// removeStaleTemps deletes the temp files a crashed or failed encode leaves
+// behind. The age check is what keeps a trim from removing the file the flush is
+// about to rename into place: nothing else writes here, so anything older than a
+// flush cycle is dead. Call from flushLoop only.
+func (c *ImageCache) removeStaleTemps(files []diskFile) {
+	cutoff := time.Now().Add(-flushInterval)
+
+	for _, file := range files {
+		if !strings.HasSuffix(file.name, ".tmp") || file.modified.After(cutoff) {
+			continue
+		}
+		if err := os.Remove(filepath.Join(c.dir, file.name)); err != nil {
+			log.Printf("image cache: remove %s: %v", file.name, err)
+		}
 	}
 }
 

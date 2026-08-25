@@ -202,6 +202,10 @@ func (e *Engine) Sink() *Sink { return e.sink }
 // them, so a call joined before anything has rung would be inaudible — and with
 // the callback also being what asks for the next frame, nothing would even be
 // decoded.
+//
+// This one may not be dropped, so it waits for the engine goroutine to take it —
+// which is behind a device call once the queue's queueDepth requests are already
+// in. Call it from a worker rather than the UI thread.
 func (e *Engine) StartOutput() { e.send(request{kind: requestOpen}, true) }
 
 // Set installs a sound under a key, replacing whatever was there. Decoding
@@ -240,6 +244,10 @@ func (e *Engine) Play(key string, volume float64) {
 // UseOutput moves playback to a device, an empty id meaning the system default.
 // The call's lanes and any ringing sound move with it: there is one pair of
 // speakers, and picking them once is the whole point of the engine owning both.
+//
+// It waits for the engine goroutine the way StartOutput does — a device change
+// dropped would leave the client on the old one with nothing saying so — so it
+// belongs on a worker rather than the UI thread.
 func (e *Engine) UseOutput(id string) { e.send(request{kind: requestOutput, device: id}, true) }
 
 // SetCallVolume scales every remote participant, 0 to maxGain. Notification

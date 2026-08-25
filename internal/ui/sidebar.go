@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"image"
 	"image/color"
 
 	"fyne.io/fyne/v2"
@@ -42,11 +43,16 @@ type ServerWidget struct {
 	background  *canvas.Circle
 	marker      *canvas.Rectangle
 	iconWrapper *fyne.Container
+	iconStack   *fyne.Container // the picture, or the initial standing in for one
 
 	// The icon's size at rest and when hovered or selected, built once so hovering
 	// allocates no layout per event.
 	baseLayout  fyne.Layout
 	grownLayout fyne.Layout
+
+	// generation counts the servers this widget has been given, so a picture that
+	// arrives after SetServer moved it on is dropped rather than drawn.
+	generation uint64
 
 	selected  bool
 	mentioned bool
@@ -77,6 +83,57 @@ func NewServerWidget(images *cache.ImageCache, server domain.Server, onTap func(
 	return w
 }
 
+// SetServer re-points the icon at the server as it now is. A no-op when neither
+// the name nor the picture moved: the rail is rebuilt for an update about any
+// server the account is in, so all but one of its icons are drawing what they
+// already drew — and asking the cache for those pictures again is the cost this
+// spares.
+func (w *ServerWidget) SetServer(server domain.Server) {
+	if w.Server.Name == server.Name && w.Server.IconID == server.IconID &&
+		w.Server.IconURL == server.IconURL {
+		w.Server = server
+
+		return
+	}
+
+	w.Server = server
+	w.generation++
+
+	// Nothing has been drawn yet, and CreateRenderer reads the server when it runs.
+	if w.iconStack == nil {
+		return
+	}
+
+	w.iconStack.Objects = []fyne.CanvasObject{w.background, container.NewCenter(newInitial(server.Name))}
+	w.iconStack.Refresh()
+	w.loadIcon()
+}
+
+// loadIcon fills the icon slot with the server's picture. Not
+// ImageCache.LoadIntoContainer, which has no way to be told the widget has since
+// been given another server: this one drops an answer against a stale generation.
+func (w *ServerWidget) loadIcon() {
+	if w.iconStack == nil || w.Server.IconURL == "" {
+		return
+	}
+
+	size := fyne.NewSize(theme.Sizes.ServerIconSize, theme.Sizes.ServerIconSize)
+	generation := w.generation
+
+	w.images.LoadAsync(w.Server.IconID, w.Server.IconURL, true, func(img image.Image) {
+		if w.generation != generation {
+			return
+		}
+
+		picture := canvas.NewImageFromImage(img)
+		picture.FillMode = canvas.ImageFillContain
+		picture.SetMinSize(size)
+
+		w.iconStack.Objects = []fyne.CanvasObject{w.background, picture}
+		w.iconStack.Refresh()
+	})
+}
+
 // SetSelected updates the selection. A no-op when unchanged, so a sidebar-wide
 // sync only repaints what moved.
 func (w *ServerWidget) SetSelected(selected bool) {
@@ -103,15 +160,13 @@ func (w *ServerWidget) SetMentioned(mentioned bool) {
 func (w *ServerWidget) CreateRenderer() fyne.WidgetRenderer {
 	iconSize := fyne.NewSize(theme.Sizes.ServerIconSize, theme.Sizes.ServerIconSize)
 
-	icon := container.NewStack(w.background, container.NewCenter(newInitial(w.Server.Name)))
-	if w.Server.IconURL != "" {
-		w.images.LoadIntoContainer(w.Server.IconID, w.Server.IconURL, iconSize, icon, true, w.background)
-	}
+	w.iconStack = container.NewStack(w.background, container.NewCenter(newInitial(w.Server.Name)))
+	w.loadIcon()
 
 	grown := theme.Sizes.ServerIconSize * serverHoverGrowth
 	w.baseLayout = layout.NewGridWrapLayout(iconSize)
 	w.grownLayout = layout.NewGridWrapLayout(fyne.NewSize(grown, grown))
-	w.iconWrapper = container.New(w.baseLayout, icon)
+	w.iconWrapper = container.New(w.baseLayout, w.iconStack)
 
 	w.marker.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, theme.Sizes.ServerMarkerHeight))
 	w.refreshAppearance()
@@ -186,12 +241,14 @@ type ChannelWidget struct {
 	// Menu supplies the items right-clicking the row offers.
 	Menu func() []*fyne.MenuItem
 
+	deps Deps // kept, the row outliving the channel it was built from
+
 	background         *canvas.Rectangle
 	selectionIndicator *canvas.Rectangle
 	unreadIndicator    *canvas.Rectangle
-	mentionBadge       *MentionBadge     // the count at the trailing end, hidden at zero
-	typingMark         *TypingMark       // the trailing mark, hidden unless somebody is composing
-	leading            fyne.CanvasObject // the type glyph, or a conversation's avatar
+	mentionBadge       *MentionBadge   // the count at the trailing end, hidden at zero
+	typingMark         *TypingMark     // the trailing mark, hidden unless somebody is composing
+	leading            *fyne.Container // holds the type glyph, or a conversation's avatar
 	label              *canvas.Text
 	labelBox           *fyne.Container // label fitted to its slot; see NewEllipsisText
 
@@ -217,21 +274,19 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 	label := newText(channel.Name, theme.Colors.CategoryText, theme.Sizes.ChannelLabelSize)
 	label.Alignment = fyne.TextAlignLeading
 
-	height := theme.Sizes.ChannelItemHeight
-	if avatarLed(channel.Kind) {
-		height = theme.Sizes.ConversationItemHeight
-	}
-
 	w := &ChannelWidget{
 		Channel:            channel,
+		deps:               deps,
 		background:         canvas.NewRectangle(color.Transparent),
 		selectionIndicator: canvas.NewRectangle(color.Transparent),
 		unreadIndicator:    canvas.NewRectangle(color.Transparent),
 		mentionBadge:       NewMentionBadge(),
 		typingMark:         NewTypingMark(theme.Sizes.ChannelTypingSize, theme.Colors.TypingMark),
-		leading:            channelLeading(deps, channel),
-		height:             height,
-		label:              label,
+		// A slot rather than the object itself, so a row given another channel can
+		// put a different lead in without the renderer being rebuilt around it.
+		leading: container.NewStack(channelLeading(deps, channel)),
+		height:  channelRowHeight(channel.Kind),
+		label:   label,
 		// Wrapped here rather than in CreateRenderer, which Fyne may run again after
 		// a renderer is dropped: by then the label holds the shortened text.
 		labelBox: NewEllipsisText(label),
@@ -244,6 +299,39 @@ func NewChannelWidget(deps Deps, channel domain.Channel, onTap func()) *ChannelW
 	w.ExtendBaseWidget(w)
 
 	return w
+}
+
+// SetChannel re-points the row at its channel as it now is, a no-op when nothing
+// it draws has moved. The sidebar is rebuilt whole for an event about one channel
+// — a call joined, a permission overwrite — so most rows in a rebuild are drawing
+// exactly what they drew before, avatars included.
+func (w *ChannelWidget) SetChannel(channel domain.Channel) {
+	relabel := w.Channel.Name != channel.Name
+	relead := w.Channel.Kind != channel.Kind || w.Channel.AvatarURL != channel.AvatarURL
+
+	w.Channel = channel
+	if !relabel && !relead {
+		return
+	}
+
+	// Through the box, never the text object: ellipsisLayout rewrites that during
+	// layout, so what it holds is whatever last fitted the column.
+	if relabel {
+		SetEllipsisText(w.labelBox, channel.Name)
+	}
+	if !relead {
+		return
+	}
+
+	// Replaced rather than re-pointed: a picture already on its way lands in the
+	// container it was handed, so the slot it fills is dropped whole with it.
+	w.leading.Objects = []fyne.CanvasObject{channelLeading(w.deps, channel)}
+	w.leading.Refresh()
+
+	if height := channelRowHeight(channel.Kind); height != w.height {
+		w.height = height
+		w.background.SetMinSize(fyne.NewSize(0, height))
+	}
 }
 
 // SetState updates selection, unread and the mention count together, a no-op
@@ -681,6 +769,17 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 // whose picture would be this account's own avatar standing in for a notepad.
 func avatarLed(kind domain.ChannelKind) bool {
 	return kind.IsConversation() && kind != domain.ChannelSavedMessages
+}
+
+// channelRowHeight is how tall a row is drawn, which is decided by the same thing
+// that decides what leads it: a conversation is a card led by a picture, and a
+// channel a line led by a glyph.
+func channelRowHeight(kind domain.ChannelKind) float32 {
+	if avatarLed(kind) {
+		return theme.Sizes.ConversationItemHeight
+	}
+
+	return theme.Sizes.ChannelItemHeight
 }
 
 // channelLeading is what precedes a channel's name in its row: a conversation's

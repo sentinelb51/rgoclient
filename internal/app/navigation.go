@@ -93,6 +93,12 @@ func (a *App) buildServerList() fyne.CanvasObject {
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 	)
 
+	// Dropped rather than re-taken: refreshServerList reuses the icons the rail is
+	// holding, and the one reason this runs twice in a session is a restyle — a
+	// widget bakes the palette into its renderer, so a reused one would come back
+	// in the colours it was made in.
+	a.serverList.Objects = nil
+
 	a.refreshServerList()
 	content := container.NewBorder(top, bottom, nil, nil, container.NewVScroll(a.serverList))
 
@@ -102,11 +108,27 @@ func (a *App) buildServerList() fyne.CanvasObject {
 		ui.NewFillRow(0, content, ui.NewColumnDivider()))
 }
 
-// refreshServerList rebuilds the icons. Any tooltip is taken down first: the icon
-// that raised it is about to be replaced, and will never report the pointer
+// refreshServerList re-takes the icons. Any tooltip is taken down first: the icon
+// that raised it may be about to be dropped, and would never report the pointer
 // leaving.
+//
+// The icons already mounted are **reused**, keyed by the server they draw: an
+// update about any one server queues this, so all but one icon in a rail is
+// drawing exactly what it drew before, and a rebuilt one asks the image cache for
+// its picture again. The list itself is written only when the objects in it move,
+// a Refresh being a repaint of the whole window whatever changed.
 func (a *App) refreshServerList() {
 	a.tooltip.Hide()
+
+	held := make(map[string]*ui.ServerWidget, len(a.serverList.Objects))
+	var join fyne.CanvasObject
+	for _, obj := range a.serverList.Objects {
+		if w, ok := obj.(*ui.ServerWidget); ok {
+			held[w.Server.ID] = w
+			continue
+		}
+		join = obj
+	}
 
 	icons := make([]fyne.CanvasObject, 0, len(a.serverIDs)+1)
 	for _, serverID := range a.serverIDs {
@@ -115,17 +137,30 @@ func (a *App) refreshServerList() {
 			continue
 		}
 
-		w := ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
+		// Taken out of the pool as it is used, so a server listed twice draws two
+		// icons rather than one object mounted in two places.
+		w, reused := held[serverID]
+		delete(held, serverID)
+
+		if !reused {
+			w = ui.NewServerWidget(a.images, server, func() { a.selectServer(serverID) })
+
+			// The name is read when the pointer arrives rather than captured here:
+			// the widget outlives the value it was built from, and a renamed server
+			// would otherwise go on being labelled with the old one.
+			w.OnHover = func(hovering bool) {
+				if hovering {
+					a.tooltip.Show(w.Server.Name, w)
+					return
+				}
+				a.tooltip.Hide()
+			}
+			w.Menu = func() []*fyne.MenuItem { return a.serverMenu(serverID) }
+		}
+
+		w.SetServer(server)
 		w.SetSelected(serverID == a.currentServerID)
 		w.SetMentioned(a.serverMentioned(serverID))
-		w.OnHover = func(hovering bool) {
-			if hovering {
-				a.tooltip.Show(server.Name, w)
-				return
-			}
-			a.tooltip.Hide()
-		}
-		w.Menu = func() []*fyne.MenuItem { return a.serverMenu(serverID) }
 
 		// Bare, not wrapped in a Center: ServerWidget centres its own icon, and
 		// keeping it at the top level lets syncServerSelection find it unwrapped.
@@ -135,17 +170,18 @@ func (a *App) refreshServerList() {
 	// The join button reads as one more server icon at the end, so it lives inside
 	// the scroll rather than in the fixed bookends. The selection sync skips it,
 	// not being a ServerWidget.
-	icons = append(icons, ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer))
+	if join == nil {
+		join = ui.NewSidebarButton(fynetheme.ContentAddIcon(), a.showJoinServer)
+	}
+	icons = append(icons, join)
 
-	a.serverList.Objects = icons
-	a.serverList.Refresh()
+	if !slices.Equal(a.serverList.Objects, icons) {
+		a.serverList.Objects = icons
+		a.serverList.Refresh()
+	}
 
 	// The two fixed buttons are outside that list and so outside the walk above.
 	a.syncMentionMarks()
-
-	// Which servers the account is in is also which emoji it may type, and this runs
-	// wherever that changes: ready, joined, left.
-	a.refreshEmojiCandidates()
 }
 
 /* Channel sidebar */
@@ -182,6 +218,13 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	a.syncServerCog()
 	a.syncGroupAdd()
 
+	// As in buildServerList, and for the same reason: the rows are reused across a
+	// refresh but not across the rebuild a restyle makes. Released first — a row
+	// forgotten while its mark is sweeping is a repaint a second for nothing.
+	a.releaseChannelRows()
+	a.channelTop.Objects = nil
+	a.channelList.Objects = nil
+
 	a.refreshChannelList()
 
 	pad := theme.Sizes.ChannelSidebarPadding
@@ -211,14 +254,27 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 // the member sidebar's @mentions come off its own. The home view contributes none:
 // a conversation is not something a message can link to.
 func (a *App) refreshChannelList() {
+	// The rows already mounted, keyed by the channel they draw, so a rebuild for an
+	// event about one of them reuses the rest rather than building a widget and
+	// re-asking the image cache for every conversation's picture. Taken before the
+	// release below, which only stops what those rows are running.
+	held := make(map[string]*ui.ChannelWidget)
+	for w := range a.channelRows() {
+		held[w.Channel.ID] = w
+	}
 	a.releaseChannelRows()
 
 	animate := config.Current().Behaviour.TypingAnimation
 
 	// Written once at the end rather than through Container.Add, which refreshes
-	// the whole column per child.
+	// the whole column per child — and only when the column's objects moved, a
+	// Refresh being a repaint of the whole window whatever changed.
 	var rows []fyne.CanvasObject
 	mount := func() {
+		if slices.Equal(a.channelList.Objects, rows) {
+			return
+		}
+
 		a.channelList.Objects = rows
 		a.channelList.Refresh()
 	}
@@ -234,7 +290,7 @@ func (a *App) refreshChannelList() {
 		// nothing at all.
 		group := []fyne.CanvasObject{a.friendsRow}
 		saved := a.savedNotesID()
-		if w := a.newChannelRow(saved, animate); w != nil {
+		if w := a.newChannelRow(saved, animate, held); w != nil {
 			group = append(group, w)
 		}
 		a.setChannelGroup(group)
@@ -243,7 +299,7 @@ func (a *App) refreshChannelList() {
 			if channelID == saved {
 				continue
 			}
-			if w := a.newChannelRow(channelID, animate); w != nil {
+			if w := a.newChannelRow(channelID, animate, held); w != nil {
 				rows = append(rows, w)
 			}
 		}
@@ -278,7 +334,7 @@ func (a *App) refreshChannelList() {
 		if categorized[channelID] {
 			continue
 		}
-		if w := a.newChannelRow(channelID, animate); w != nil {
+		if w := a.newChannelRow(channelID, animate, held); w != nil {
 			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 			rows = append(rows, w)
 			rows = append(rows, a.callRows(w.Channel)...)
@@ -294,7 +350,7 @@ func (a *App) refreshChannelList() {
 
 		var under []fyne.CanvasObject
 		for _, channelID := range category.Channels {
-			if w := a.newChannelRow(channelID, animate); w != nil {
+			if w := a.newChannelRow(channelID, animate, held); w != nil {
 				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 				under = append(under, w)
 				under = append(under, a.callRows(w.Channel)...)
@@ -319,12 +375,27 @@ func (a *App) refreshChannelList() {
 // everywhere at once: this walk also feeds the composer its #mention candidates,
 // so one that never becomes a row is never a candidate either.
 //
+// held is the rows the sidebar was drawing, and one already drawing this channel
+// is taken back rather than replaced — keyed by the channel, so what its callbacks
+// captured still names the row they are on. It is shown on the way out: a row that
+// was under a collapsed category is hidden, and the category it lands in this time
+// need not be.
+//
 // animate is passed rather than read, as applyChannelState's is and for the same
 // reason: one rebuild reads the setting once for every row it makes.
-func (a *App) newChannelRow(channelID string, animate bool) *ui.ChannelWidget {
+func (a *App) newChannelRow(channelID string, animate bool, held map[string]*ui.ChannelWidget) *ui.ChannelWidget {
 	channel, ok := a.store.Channel(channelID)
 	if !ok || !a.canViewChannel(channel) {
 		return nil
+	}
+
+	if w, ok := held[channelID]; ok {
+		delete(held, channelID) // so a channel listed twice draws two rows, not one object twice
+		w.SetChannel(channel)
+		w.Show()
+		a.applyChannelState(w, animate)
+
+		return w
 	}
 
 	w := ui.NewChannelWidget(a.deps(), channel, func() { a.selectChannel(channelID) })
@@ -909,11 +980,17 @@ func (a *App) refreshChannelRow(channelID string) {
 	}
 }
 
-// setHeader updates a header label if it exists.
+// setHeader updates a header label if it exists. Guarded on the value as well as
+// on the label: this is called for every channel event Revolt sends about the open
+// server, and widget.Label.SetText refreshes unconditionally — which for Fyne is
+// the whole window. Reading the text back is safe here where it would not be on an
+// ellipsis box, a Label keeping what it was given and shortening in its provider.
 func (a *App) setHeader(label *widget.Label, text string) {
-	if label != nil {
-		label.SetText(text)
+	if label == nil || label.Text == text {
+		return
 	}
+
+	label.SetText(text)
 }
 
 // channelName returns the current channel's display name, or a fallback.

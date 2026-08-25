@@ -96,6 +96,13 @@ func (a *App) resetSessionState() {
 	a.uncached = make(map[string]*domain.Message)
 	a.fetchedReplies = make(map[string]bool)
 
+	// The page guard is released here rather than by the worker holding it: a page
+	// still in flight is now stale and skips its own cleanup, and a flag left set
+	// would stop scrollback for the rest of the run. setJumped also zeroes atOldest
+	// and re-asks the jump bar, which the next session's first channel needs down.
+	a.loadingPage = false
+	a.setJumped(false)
+
 	// A queued rebuild is of sidebars this account is about to stop having, and the
 	// membership guards belong to its view of servers the next may not be in.
 	if a.refreshTimer != nil {

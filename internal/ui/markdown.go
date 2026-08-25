@@ -34,8 +34,13 @@ import (
 //
 // onMenu is the owning message's right-click handler — see bodyText.
 func renderMessageBody(deps Deps, text string, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	doc := markdown.Parse(text)
+	return renderDocument(deps, markdown.Parse(text), onMenu)
+}
 
+// renderDocument is renderMessageBody for a body already parsed. A message row
+// wants the same document twice — once for the text and once for the invite scan
+// under it — and a parse per reader is a parse per mount.
+func renderDocument(deps Deps, doc *markdown.Document, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	if hasCodeBlock(doc.Blocks) {
 		return renderCodeColumn(deps, doc.Blocks, onMenu)
 	}

@@ -9,7 +9,7 @@ the module cache copy (`go list -m -f '{{.Dir}}' fyne.io/fyne/v2`) before acting
 on one — the shape of the claim survives a bump, the line does not.
 
 Fyne is **patched** — [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne),
-`PATCHES.md` there. Five of the levers below are ours now rather than
+`PATCHES.md` there. Most of the levers below are ours now rather than
 upstream's, and are marked where they appear.
 
 ## How Fyne draws
@@ -36,22 +36,29 @@ patch's `idleWait` (100ms) instead of at the frame rate — at `FrameRate` 600,
 raises the ceiling on animation and scroll smoothness and costs nothing at
 rest.
 
-**Dirty is one bool for the whole window.** `Canvas.dirty`
-(`internal/driver/common/canvas.go:50`), test-and-cleared by
-`CheckDirtyAndClear`. `Canvas.Refresh(obj)` (`canvas.go:280`) queues the object
-for texture freeing and then sets that same global flag. There are no damage
-rectangles at any level, and `glCanvas.paint` opens with
-`c.Painter().Clear()` — a full framebuffer clear. **Any `Refresh()` anywhere
-repaints the entire window.**
+**Dirty says whether; damage says where.** Upstream, `Canvas.dirty` is one bool
+and any `Refresh()` anywhere clears the framebuffer and redraws every visible
+object. **Patched** (the eighth, `PATCHES.md` there): each frame diffs every
+mounted object against the rect it last painted at
+(`internal/driver/common/damage.go`), keeps the previous frame as a texture
+(`internal/painter/gl/snapshot.go`), and repaints only the damaged rects — at
+most four scissored passes, each under a root clip so the painter's rect test
+culls the draw calls too. A caret blink is a restore quad plus a handful of
+draws instead of the window. Damage past 80% coverage promotes to the old full
+repaint, which is what a scroll frame is; `fyne.SetPartialRepaint(false)` is
+the escape hatch and the measuring baseline. The diff covers moves, hides,
+appearances and removals — no exported call site reports a rect, and none needs
+to.
 
-**A repaint walks every mounted object, and draws the visible ones.** The walk
-(`internal/driver/util.go:137`) prunes only on `!Visible()`; there is no rect
-prune, so a scrolled-away subtree is still descended. Culling happens one level
-down, in `painter.Paint` (`internal/painter/gl/painter.go:108`), which rect-tests
-the object against the current clip and returns before `drawObject`. So a dirty
-frame is **O(mounted) in traversal and O(on-screen) in draw calls**. Mounting
-fewer widgets buys traversal; it does not buy fill rate, which was already
-bounded by the viewport.
+**A repaint walks every mounted object, and draws the ones in the damage.** The
+walk (`internal/driver/util.go:137`) prunes only on `!Visible()`; there is no
+rect prune, so a scrolled-away subtree is still descended — once for the damage
+diff, once per damage rect painted. Culling happens one level down, in
+`painter.Paint` (`internal/painter/gl/painter.go`), which rect-tests the object
+against the current clip — now rooted at the damage rect — and returns before
+`drawObject`. So a dirty frame is **O(mounted) in traversal and O(damage) in
+draw calls**. Mounting fewer widgets buys traversal; it does not buy fill rate,
+which was already bounded by the viewport.
 
 **Text is shaped once, not per frame.** Two independent caches:
 `internal/cache/text.go` memoises measurement globally on
@@ -76,9 +83,11 @@ that being the one moment the window's GL context is current on our goroutine.
 `config.Performance.VSync` is the setting; Wayland is still left to the
 compositor.
 
-**The present gate is a stub off Wayland.** `presentGate` (`present.go`) is real
-on Wayland via `wl_surface.frame` callbacks and `noGate{}` (always ready)
-everywhere else. The seam for frame pacing exists; nothing fills it on Windows.
+**The present gate is real on Wayland and Windows.** `presentGate` is
+`wl_surface.frame` callbacks on Wayland and, **patched**, the adapter's vertical
+blank on Windows (`present_windows.go` — `D3DKMTWaitForVerticalBlankEvent`;
+DWM keeps only the newest buffer per blank, so presents past the display rate
+were drawn and discarded). Everywhere else it is `noGate{}`, always ready.
 
 ## What the client already does
 
@@ -165,15 +174,14 @@ Ranked by return.
    sort where the real one will land — otherwise the ack is an insert plus a
    delete and the row visibly jumps. Revolt accepts a client-supplied `nonce`,
    which is the reconciliation key.
-2. **`Refresh()` discipline.** Every call is a full-window repaint plus a full
-   framebuffer clear. Worth auditing what the gateway handlers and the typing
-   timer refresh: refreshing a container to update one label inside it costs the
-   same as a resize. Refresh the narrowest object that changed, and prefer *not
-   dirtying at all* when the change is invisible (the change guards already used
-   by the slowmode chip and the typing line are the pattern). The one already
-   found: `MessageInput` refreshed after `widget.Entry`'s typing methods, which
-   end in a refresh of their own — two re-wraps and two dirty windows per
-   keystroke.
+2. **`Refresh()` discipline.** Since the damage patch a call costs its own rect
+   rather than the window, but the rect is the *refreshed object's*: refreshing
+   a container to update one label inside it damages the container. Refresh the
+   narrowest object that changed, and prefer *not dirtying at all* when the
+   change is invisible (the change guards already used by the slowmode chip and
+   the typing line are the pattern). The one already found: `MessageInput`
+   refreshed after `widget.Entry`'s typing methods, which end in a refresh of
+   their own — two re-wraps and two dirty windows per keystroke.
 3. **`FYNE_CACHE`.** `internal/cache/base.go:22` reads it as a `time.Duration` in
    `init()` and it is the only Fyne env knob that touches performance. Raising it
    past a minute keeps glyph textures alive across a scroll-away-and-back at the
@@ -184,13 +192,16 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-seven patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+eight patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
 third is the font-parse cache, which is a leak fixed rather than a lever. The
+fourth gates presents on the vertical blank on Windows. The
 fifth replaced the driver's poll loop with a wait on the OS event queue, which
 is what makes the frame rate a ceiling on drawing rather than on noticing input.
+The eighth is damage-region repaint — the "How Fyne draws" section above
+describes the world with it in.
 
 The last two are **work skipped**, both found by profiling the message column
 and both in exported code rather than under `internal/`:
@@ -212,10 +223,28 @@ What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the
 fork instead.
 
+## Candidate levers in the fork, unmeasured
+
+Found by reading the GL painter (2026-08); none is measured, so none is built.
+Measure with a timer split across walk / draw / swap in `repaintWindow` first —
+these only pay if GL-call CPU dominates a full frame (a scroll), because the
+damage patch already took the partial frames.
+
+- **Per-object GL overhead.** The desktop painter sits on the GL 2.1 binding
+  (`internal/painter/gl/gl_core.go:9`). Every object is ~20 cgo calls:
+  `UseProgram`, `BufferData`, two `VertexAttribPointer`s, ~10 uniforms,
+  `DrawArrays` — and `logError` (= `glGetError`, a cgo call) after nearly every
+  step of `draw.go`. Gating `logError` behind a debug flag is the cheap third
+  of it. `SetUniform*` already memoises; `UseProgram`/`BlendFunc` don't.
+- **Per-draw allocations.** `rectCoords`, `vecRectCoordsWithPad` and
+  `lineCoords` each return a fresh `[]float32` per object per frame — GC churn
+  on the loop goroutine. A scratch slice on the painter ends it.
+- **Batching/instancing** — one VBO, every rect in one instanced draw — is the
+  "upgrade OpenGL" that would actually pay (instancing needs 3.3+). A painter
+  rewrite; only after the timer says draw-call CPU is the frame.
+
 ## Still needs more than a patch
 
-- **Damage-region redraw** would mean replacing `Canvas.dirty` with a rect list
-  and teaching `paint` to scissor. Deep, and it fights the full `Clear()`.
 - **A D3D or Vulkan painter.** `gl.Painter` is a clean, small interface
   (`internal/painter/gl/painter.go:16` — `Init`, `Clear`, `Paint`, `Free`,
   `Capture`, clipping, sizes) and a D3D11 implementation of it is a plausible
@@ -223,6 +252,9 @@ fork instead.
   concrete package's type — so it is a replacement for Fyne's painter rather
   than an addition beside it, and every window creation path has to be taught
   about it. The patched copy makes it possible; it does not make it small.
+  Rejected for now: the workload is a few hundred textured quads and the API is
+  not what is slow — with damage regions in, most frames are a restore quad
+  plus a handful of draws, and no API change improves that.
 
 ## Other toolkits, honestly
 

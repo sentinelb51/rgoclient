@@ -128,7 +128,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.4
+replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.5
 
 // libopus, vendored and statically linked, so a fresh clone builds with no
 // system libraries. The fork keeps the module path layeh.com/gopus, which is why

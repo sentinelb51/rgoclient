@@ -77,9 +77,13 @@ only.
   carries nickname, per-server avatar, role colour, presence, bot mark and the
   hoisted role it is filed under. Safe off-thread is not cheap — `Members`
   resolves all of that per member and sorts, so it belongs on a worker.
-- **`Client.Events()`** — one buffered channel, gateway order. `app.pumpEvents`
-  is its single reader; `dispatch` hops onto the UI thread once per event.
-  `client.Event`'s marker method is unexported, so the switch is exhaustive.
+- **`Client.Events()`** — one buffered channel. `app.pumpEvents` is its single
+  reader; `dispatch` hops onto the UI thread once per event. `client.Event`'s
+  marker method is unexported, so the switch is exhaustive. **Not gateway
+  order**: revoltgo dispatches frames on a goroutine each, so two events about
+  the same object can arrive inverted if both land inside one state mutation.
+  A handler must not read one event as following another — derive from the
+  store, which the gateway has already updated, rather than from arrival.
 - **Action methods** (`SendMessage`, `HistoryBefore`, …) **block**: the request
   and the cache update, no widget touched, no goroutine spawned. The caller owns
   the UI thread (`App.background`).

@@ -12,20 +12,34 @@ Item ids are the audit plan's. Verification digests (every claim re-checked
 against the real code, with current line numbers) are in the session scratchpad:
 `revoltgo-verify-digest.md`, `rgoclient-verify-digest.md`.
 
-## Do this first
+## Settled: dispatch stays parallel
 
-**revoltgo A1-3 follow-through — a regression I introduced and did not close.**
-Gateway dispatch is now serial (`ParallelEnabled: false`), which is correct:
-ordering is the gateway's contract and a join could previously apply after its
-own leave. But a handler now runs *on the read loop*, and the `EventReady`
-default handler at `session.go:196-215` calls `s.User("@me")` inline — a full
-HTTP round trip plus rate limiter. The read deadline is `HeartbeatInterval*2`
-(60s) and the REST timeout is 10s, so one round trip cannot reach it today; the
-hazard is that nothing says so. Either move the self-fetch off the read loop
-(mind the ordering constraint: `Self()` must be populated before user handlers
-see Ready, so a bare goroutine is wrong) or record in a comment why one round
-trip at connect time is safe. Same class downstream: rgoclient's `Client.emit`
-blocks on a 64-slot channel, so a stalled UI thread now stalls the socket.
+A1-3 proposed serialising gateway dispatch. It was applied, then **reverted on
+Sentinel's call** — the trade was re-examined against the real gws source
+(v1.10.1, `reader.go:283` -> `readQueue.Go` -> one goroutine per frame, bounded
+by a semaphore at `NumCPU`) rather than the audit's description.
+
+Reordering is mechanically real, but the window is one state mutation — a msgp
+decode and a single guarded map write, microseconds — and two *related* frames
+must land inside it. `handle` runs the state handler before the user handlers,
+so the slow part (rgoclient's `emit` blocking on a full 64-slot channel) happens
+after the cache is already updated. Serialising bought almost no throughput (the
+state mutex serialises the expensive half regardless) and cost liveness: a
+blocking handler would have stalled the read loop, and revoltgo's own Ready
+handler does a blocking HTTP round trip.
+
+Ruled out along the way: copy-on-write does **not** make parallel dispatch lossy.
+The mutators hold the write lock across the whole read-clone-update-swap, so
+concurrent mutators serialise properly — no lost updates.
+
+The consequence is written down where it binds: the `ClientOption` block and
+`OnMessage` in `websocket.go`, and rgoclient's root `CLAUDE.md`, which used to
+promise `Client.Events()` in gateway order and no longer does. A handler must
+derive from the store rather than reading one event as following another.
+
+If it is ever revisited, the option neither side took is a single ordered worker
+between the read loop and the handlers: ordered *and* non-blocking, at the cost
+of a queue whose depth becomes an explicit backpressure decision.
 
 ## revoltgo — not done
 

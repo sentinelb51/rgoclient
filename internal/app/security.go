@@ -5,20 +5,15 @@ package app
 //
 // **Everything here begins with a challenge.** Revolt gates every route that
 // changes how an account is *reached* behind an MFA ticket — see
-// internal/client/security.go for which and why — so the shape is always the
-// same: raise a card, mint a ticket from what is typed into it, then spend the
-// ticket on one request. The ticket is never held between two of them: it is
-// short-lived by design, and an action that reused one would be an action nobody
-// confirmed.
+// internal/client/security.go — so the shape is always: raise a card, mint a
+// ticket from what is typed into it, spend the ticket on one request. A ticket is
+// never held between two of them; reusing one would be an action nobody confirmed.
 //
-// Two of them do **not** take that shape, and for a reason rather than by
-// accident. Changing a password and changing an email each need the current
-// password in the request *as well as* a ticket, so asking for the password in a
-// challenge and then again in the card would be asking twice for one answer —
-// those two are one card that mints its own ticket. Turning an authenticator on
-// is the opposite: its confirmation is a code from the authenticator itself,
-// which is the only proof that means anything there, so it takes no ticket at
-// all.
+// Two do not take that shape. Changing a password and changing an email each need
+// the current password in the request *as well as* a ticket, so each is one card
+// that mints its own rather than asking twice for one answer. Turning an
+// authenticator on is the opposite: its confirmation is a code from the
+// authenticator itself, so it takes no ticket at all.
 
 import (
 	"errors"
@@ -149,29 +144,27 @@ func (a *App) submitChallenge(method client.MFAMethod, code string, then func(ti
 // cannot draw without any of them and three waits in a row is three times the
 // blank card.
 //
-// One error covers the lot. They come from one server over one session, so a
-// partial failure is a route being down rather than anything about the account —
-// and a section saying "could not be read" for everything is honest where one
-// saying it for a third would leave the reader guessing which third.
+// Each failure is carried on its own. They come from one server over one
+// session, so a partial failure is one route being down rather than anything
+// about the account — and greying the third that could not be read is honest
+// where greying the lot would hide two answers that did arrive. The error handed
+// back beside the state is a *total* failure, the one case where nothing on the
+// section can be believed.
 func (a *App) loadSecurity(onLoaded func(ui.SecurityState, error)) {
 	epoch := a.epoch
 
 	go func() {
 		var (
 			state ui.SecurityState
-			mu    sync.Mutex
-			first error
 			wg    sync.WaitGroup
 		)
 
-		fail := func(what string, err error) {
+		// Each goroutine writes its own fields and nothing else's, so the wait is the
+		// whole of the synchronisation — no lock is needed for disjoint writes.
+		fail := func(what string, err error) error {
 			log.Printf("%s: %v", what, err)
 
-			mu.Lock()
-			defer mu.Unlock()
-			if first == nil {
-				first = err
-			}
+			return err
 		}
 
 		wg.Add(3)
@@ -180,7 +173,7 @@ func (a *App) loadSecurity(onLoaded func(ui.SecurityState, error)) {
 
 			email, err := a.client.AccountEmail()
 			if err != nil {
-				fail("account email", err)
+				state.EmailErr = fail("account email", err)
 				return
 			}
 			state.Email = email
@@ -190,7 +183,7 @@ func (a *App) loadSecurity(onLoaded func(ui.SecurityState, error)) {
 
 			status, err := a.client.MFAStatus()
 			if err != nil {
-				fail("second factors", err)
+				state.MFAErr = fail("second factors", err)
 				return
 			}
 			state.MFA = status
@@ -200,7 +193,7 @@ func (a *App) loadSecurity(onLoaded func(ui.SecurityState, error)) {
 
 			logins, err := a.client.Sessions()
 			if err != nil {
-				fail("account sessions", err)
+				state.LoginsErr = fail("account sessions", err)
 				return
 			}
 			state.Logins = logins
@@ -209,11 +202,16 @@ func (a *App) loadSecurity(onLoaded func(ui.SecurityState, error)) {
 
 		state.SelfKnown = a.client.SessionID() != ""
 
+		var whole error
+		if state.EmailErr != nil && state.MFAErr != nil && state.LoginsErr != nil {
+			whole = state.EmailErr
+		}
+
 		a.doOnUI(func() {
 			if a.stale(epoch) {
 				return
 			}
-			onLoaded(state, first)
+			onLoaded(state, whole)
 		}, false)
 	}()
 }
@@ -429,7 +427,7 @@ func (a *App) submitTOTP(code string) {
 func (a *App) disableTOTP() {
 	a.confirm(ui.Confirm{
 		Title:  "Turn off your authenticator",
-		Body:   "Your password becomes the only thing between somebody and this account.",
+		Body:   "Your password becomes the only thing protecting this account.",
 		Action: "Turn off",
 		Tone:   ui.ToneDanger,
 		OnConfirm: func() {
@@ -439,7 +437,8 @@ func (a *App) disableTOTP() {
 					a.notifyFailure("disable totp", "Could not turn your authenticator off."),
 					func() {
 						a.refreshSecurity()
-						a.notify(ui.ToneWarning, "Your authenticator is off.")
+						a.notifyTitled(ui.ToneWarning, "Authenticator off",
+							"Your password is now the only thing protecting this account.")
 					},
 				)
 			})
@@ -548,7 +547,7 @@ func (a *App) revokeLogin(sessionID, name string) {
 					a.notifyFailure("revoke session "+sessionID, "Could not revoke that login."),
 					func() {
 						a.refreshSecurity()
-						a.notify(ui.ToneWarning, "%s was signed out.", name)
+						a.notifyTitled(ui.ToneWarning, "Login revoked", "%s was signed out.", name)
 					},
 				)
 			})
@@ -573,7 +572,8 @@ func (a *App) revokeOthers() {
 					a.notifyFailure("revoke other sessions", "Could not sign your other devices out."),
 					func() {
 						a.refreshSecurity()
-						a.notify(ui.ToneWarning, "Your other devices were signed out.")
+						a.notifyTitled(ui.ToneWarning, "Signed out elsewhere",
+							"Every other device signed in as this account was signed out.")
 					},
 				)
 			})

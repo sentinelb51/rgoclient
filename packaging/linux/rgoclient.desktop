@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Name=RGOClient
+GenericName=Chat Client
+Comment=A desktop chat client for Revolt
+Exec=rgoclient
+Icon=rgoclient
+Terminal=false
+Categories=Network;InstantMessaging;
+Keywords=revolt;stoat;chat;messaging;
+StartupNotify=true
+# GLFW reports the window class from the app's own name, which is what a shell
+# matches a running window back to this entry with. Without it the taskbar draws
+# a second, unnamed entry beside the launcher's.
+StartupWMClass=RGOClient

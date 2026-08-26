@@ -162,16 +162,33 @@ jobs:
         shell: bash
         run: mv dist/RGOClient.exe "dist/RGOClient-${{ matrix.target }}.exe"
 
+      # Linux gets the desktop entry, the icon and the installer beside the
+      # binary — nothing is packaged or signed, so this is the honest middle
+      # ground between a bare ELF and a .deb: one script, run as the user, that
+      # puts the three files where a shell looks for them. macOS gets none of it,
+      # a .app being what it would need and notarisation what that would need.
+      - name: Add the Linux desktop files
+        if: matrix.target == 'linux-amd64'
+        shell: bash
+        run: |
+          cp packaging/linux/rgoclient.desktop packaging/linux/install.sh assets/rgo.png dist/
+          chmod +x dist/install.sh
+
       # A release asset is downloaded as-is and an artifact is re-zipped, and
       # neither keeps the execute bit — so the unix builds ship in a tar, which
       # does.
+      #
+      # Staged through a directory of its own rather than tarred in place: the
+      # archive is written into dist, and tar reading the directory it is writing
+      # into can pick up its own partial output.
       - name: Archive the unix asset
         if: runner.os != 'Windows'
         shell: bash
         run: |
           chmod +x dist/RGOClient
-          tar -czf "dist/RGOClient-${{ matrix.target }}.tar.gz" -C dist RGOClient
-          rm dist/RGOClient
+          mkdir -p stage
+          mv dist/* stage/
+          tar -czf "dist/RGOClient-${{ matrix.target }}.tar.gz" -C stage .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
@@ -192,6 +209,16 @@ jobs:
           pattern: RGOClient-*
           merge-multiple: true
           path: dist
+
+      # Nothing here is signed, so a checksum is the only thing a download can be
+      # checked against at all. Written after the assets are collected and before
+      # they are published, so the file covers exactly what the release carries.
+      - name: Checksum the assets
+        shell: bash
+        working-directory: dist
+        run: |
+          sha256sum RGOClient-* > SHA256SUMS
+          cat SHA256SUMS
 
       # This is what creates the tag on the dispatch path, which is why nothing
       # earlier pushes one. target_commitish has to be named: left out, the tag

@@ -25,6 +25,13 @@ func (a *App) notify(tone ui.Tone, format string, args ...any) {
 	a.notifyNotice(ui.Notice{Tone: tone, Body: fmt.Sprintf(format, args...)})
 }
 
+// notifyTitled is notify under a heading of the caller's own, for the outcomes
+// the tone's one-word default would misname — a partial success, or something
+// that did happen and is merely worth knowing. Call on the UI thread.
+func (a *App) notifyTitled(tone ui.Tone, title, format string, args ...any) {
+	a.notifyNotice(ui.Notice{Tone: tone, Title: title, Body: fmt.Sprintf(format, args...)})
+}
+
 // notifyNotice is notify for an outcome that deserves a heading of its own,
 // rather than the one its tone would give it. Call on the UI thread.
 func (a *App) notifyNotice(notice ui.Notice) {

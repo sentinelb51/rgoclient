@@ -101,7 +101,7 @@ func TestConfirmDialogActs(t *testing.T) {
 func TestNoticeStackBounded(t *testing.T) {
 	test.NewTempApp(t)
 
-	stack := NewNoticeStack()
+	stack := NewNoticeStack(nil)
 	win := test.NewWindow(stack.Layer)
 	t.Cleanup(win.Close)
 

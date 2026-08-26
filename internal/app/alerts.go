@@ -1,7 +1,8 @@
 package app
 
 // Alerts: everything the client does about something the reader did not ask to
-// be told — a sound, and the taskbar button flashing.
+// be told — a sound, the taskbar button flashing, and a card in the corner
+// carrying the message itself where it was addressed to them.
 //
 // Revolt's own push notifications are out of reach and always will be:
 // /push/subscribe takes a Web Push subscription, which is a browser's service
@@ -16,6 +17,7 @@ import (
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
+	"RGOClient/internal/util"
 )
 
 /* The catalogue */
@@ -336,10 +338,16 @@ var soundFilter = ui.FileFilter{
 
 /* What a message is worth */
 
-// alertMessage sounds an incoming message and flashes the taskbar for one worth
-// coming back for. Our own messages are not announced to us — the send sound is
-// what answers those, and it plays where the message is sent rather than when it
-// echoes back.
+// noticePreviewRunes is how much of a message its notice carries. Shorter than
+// an island card's line: the card wraps to as many lines as it is given, and a
+// corner notice standing over what is being read has to stay a glance.
+const noticePreviewRunes = 80
+
+// alertMessage sounds an incoming message, flashes the taskbar for one worth
+// coming back for, and puts the message itself on the notice layer where it is
+// addressed to the reader. Our own messages are not announced to us — the send
+// sound is what answers those, and it plays where the message is sent rather than
+// when it echoes back.
 //
 // Call on the UI thread.
 func (a *App) alertMessage(message *domain.Message) {
@@ -355,6 +363,68 @@ func (a *App) alertMessage(message *domain.Message) {
 	if worthFlashing && notifications.FlashTaskbar {
 		ui.FlashTaskbar(a.window)
 	}
+
+	a.noticeMessage(message, notifications)
+}
+
+// noticeMessage puts an incoming message on the notice layer: who sent it, the
+// line they wrote, their face, and a tap that goes to the message. Only the two
+// kinds addressed to the reader, each answering to its own switch — anything
+// wider is a card in the corner for every message in every server.
+//
+// Never for the channel on screen, which is already showing it, and never gated
+// by the tone switches: those name which outcomes are worth reporting, and this
+// is not an outcome of anything the reader did. Call on the UI thread.
+func (a *App) noticeMessage(message *domain.Message, n config.Notifications) {
+	if message.ChannelID == a.currentChannelID {
+		return
+	}
+
+	channel, ok := a.store.Channel(message.ChannelID)
+	if !ok {
+		return
+	}
+
+	// Either switch is enough on its own: a direct message that also names the
+	// reader is both, and neither flag should be the one that swallows it.
+	mentioned := message.MentionsUser(a.store.SelfID())
+	direct := channel.Kind == domain.ChannelDM || channel.Kind == domain.ChannelGroup
+
+	if !(mentioned && n.ShowMention) && !(direct && n.ShowDirect) {
+		return
+	}
+
+	author := a.store.MessageAuthor(message)
+	channelID, messageID := message.ChannelID, message.ID
+
+	a.notices.PushNotice(ui.Notice{
+		Tone:  ui.ToneInfo,
+		Title: noticeHeading(channel, author.Name),
+		Body:  util.Truncate(a.messagePreview(message), noticePreviewRunes),
+
+		AvatarURL: author.AvatarURL,
+		Initial:   author.Name,
+
+		OnTap:      func() { a.jumpToMessageIn(channelID, messageID) },
+		Unfiltered: true,
+	})
+}
+
+// noticeHeading names a message's sender and, where that alone would not say
+// which conversation it belongs to, where they said it. A direct message is only
+// ever from the one person, so their name is the whole of it; anywhere else the
+// same name arrives from several places at once.
+func noticeHeading(channel domain.Channel, name string) string {
+	if channel.Kind == domain.ChannelDM {
+		return name
+	}
+
+	where := channel.Name
+	if channel.ServerID != "" {
+		where = "#" + channel.Name
+	}
+
+	return name + " in " + where
 }
 
 // messageAlert decides which sound a message is and whether it is worth pulling

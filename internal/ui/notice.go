@@ -20,6 +20,8 @@ import (
 	fynetheme "fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/assets"
+	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
 	"RGOClient/internal/ui/theme"
 )
@@ -50,27 +52,34 @@ func (t Tone) Color() color.Color {
 	return theme.Colors.NoticeInfo
 }
 
-// icon is the tone's glyph, tinted through the theme colour Fyne already maps to
-// the same palette entry Color returns.
+// icon is the tone's glyph in the tone's own colour. The client's marks rather
+// than Fyne's: a themed resource carries a colour *name*, and the name an info
+// mark would have to borrow is mapped to the accent a server row is selected
+// with, not to NoticeInfo — so the glyph disagreed with the card carrying it.
 func (t Tone) icon() fyne.Resource {
+	res := assets.NoticeInfoIcon
 	switch t {
 	case ToneWarning:
-		return fynetheme.NewColoredResource(fynetheme.WarningIcon(), fynetheme.ColorNameWarning)
+		res = assets.NoticeWarningIcon
 	case ToneDanger:
-		return fynetheme.NewColoredResource(fynetheme.ErrorIcon(), fynetheme.ColorNameError)
+		res = assets.NoticeDangerIcon
 	}
 
-	return fynetheme.NewColoredResource(fynetheme.InfoIcon(), fynetheme.ColorNamePrimary)
+	return tintedIcon(res, t.Color())
 }
 
-// title is the heading a notice takes when its caller gave none: what kind of
-// thing happened, which body text alone never says at a glance.
+// title is the heading a notice takes when its caller gave none: the outcome in
+// a word, which is the most a tone alone can honestly say. It is never a
+// pleasantry — a heading that carries no information is a line of the card spent
+// on nothing, so a caller whose outcome these three would misname (a partial
+// success, something that *did* happen and is merely worth knowing) supplies its
+// own rather than falling through to here.
 func (t Tone) title() string {
 	switch t {
 	case ToneWarning:
-		return "Heads up"
+		return "Not done"
 	case ToneDanger:
-		return "That didn't work"
+		return "Failed"
 	}
 
 	return "Done"
@@ -99,19 +108,43 @@ func (t Tone) weight() ButtonWeight {
 type NoticeStack struct {
 	Layer *fyne.Container // stack this over the main layout
 
-	list *fyne.Container // the cards, oldest first
+	images *cache.ImageCache // the faces a notice about a person is led by
+	list   *fyne.Container   // the cards, oldest first
 }
 
 // Notice is one transient message: what kind of thing happened, a heading, and
-// the sentence under it.
+// the sentence under it. The heading is the card's first line and the only part
+// of it read at a glance, so it says what happened in as few words as that takes
+// — never a pleasantry, which spends the line and reports nothing.
+//
+// The rest is what a notice about a *person* needs, and is what separates a ping
+// from a receipt: a face instead of the tone's disc, and somewhere to go.
 type Notice struct {
 	Tone  Tone
 	Title string // "" takes the tone's own
 	Body  string
+
+	// AvatarURL replaces the tone's disc with the face at the leading edge, and
+	// Initial is the letter it stands on until the picture lands — a message is
+	// recognised by who sent it before its heading is read. Either alone is enough
+	// to make the card a person's.
+	AvatarURL string
+	Initial   string
+
+	// OnTap is where the card leads: the message that named you, the conversation
+	// somebody wrote in. It runs on the UI thread and the card goes with it. Nil
+	// leaves the tap doing what every notice's does, which is dismiss.
+	OnTap func()
+
+	// Unfiltered puts the card up whatever the tone switches say. Those name which
+	// *outcomes* are worth reporting; a message somebody else sent is not an
+	// outcome of anything the reader did, and answers to its own setting instead.
+	Unfiltered bool
 }
 
-// NewNoticeStack builds an empty notice layer.
-func NewNoticeStack() *NoticeStack {
+// NewNoticeStack builds an empty notice layer. images is where a notice about a
+// person gets its face; nil is a stack that draws initials.
+func NewNoticeStack(images *cache.ImageCache) *NoticeStack {
 	list := container.NewVBox()
 	margin := theme.Sizes.NoticeStackMargin
 
@@ -120,7 +153,7 @@ func NewNoticeStack() *NoticeStack {
 	// the window's minimum — without it a fourth notice made the window taller.
 	layer := NewLayer(container.NewBorder(nil, nil, nil, NewInset(list, margin, margin, 0, margin)))
 
-	return &NoticeStack{Layer: layer, list: list}
+	return &NoticeStack{Layer: layer, images: images, list: list}
 }
 
 // Push puts a message on the layer under its tone's own heading. Call on the UI
@@ -135,7 +168,7 @@ func (n *NoticeStack) Push(tone Tone, text string) {
 // thread.
 func (n *NoticeStack) PushNotice(notice Notice) {
 	settings := config.Current().Notifications
-	if notice.Body == "" || !notice.Tone.enabled(settings) {
+	if notice.Body == "" || (!notice.Unfiltered && !notice.Tone.enabled(settings)) {
 		return
 	}
 	if notice.Title == "" {
@@ -151,7 +184,7 @@ func (n *NoticeStack) PushNotice(notice Notice) {
 		card.stop()
 		n.remove(card)
 	}
-	card = newNoticeCard(notice, lifetime, dismiss)
+	card = newNoticeCard(n.images, notice, lifetime, dismiss)
 
 	n.list.Add(card)
 	for len(n.list.Objects) > settings.MaxStacked {
@@ -210,65 +243,84 @@ func (n *NoticeStack) remove(card fyne.CanvasObject) {
 	}
 }
 
-// noticeCard is one message on the layer: a tone-coloured edge and glyph, a
-// heading, the sentence, a close button, and a bar draining over its lifetime.
-// The bar earns its keep — a card that simply vanishes gives no warning it is
-// about to, so anything read slowly is read twice.
+// noticeCard is one message on the layer: the tone as a disc at the leading
+// edge, a heading, the sentence, a close button, and a bar draining over its
+// lifetime. The bar earns its keep — a card that simply vanishes gives no
+// warning it is about to, so anything read slowly is read twice.
+//
+// Drawn as the call island is — the same surface, the same lighter-than-hairline
+// edge, the same shadow — because the two are the only cards the client floats
+// over what is being read, and two floating cards a shade apart read as a
+// mistake.
 type noticeCard struct {
 	tapBase
 
 	content   fyne.CanvasObject
 	countdown *fyne.Animation
+
+	// leads marks a card whose tap goes somewhere rather than only taking the card
+	// down, which is the whole of what the cursor over it has to say.
+	leads bool
 }
 
-var _ fyne.Tappable = (*noticeCard)(nil)
+var (
+	_ fyne.Tappable      = (*noticeCard)(nil)
+	_ desktop.Cursorable = (*noticeCard)(nil)
+)
 
 // newNoticeCard builds the card and starts its countdown. The whole card is
-// tappable, dismissing it; the close button inside wins the tap, being deeper,
-// and does the same thing.
-func newNoticeCard(notice Notice, lifetime time.Duration, onDismiss func()) *noticeCard {
+// tappable: it follows the notice's own action where there is one and dismisses
+// either way. The close button inside wins the tap, being deeper, and only
+// dismisses — so a card that leads somewhere can still be waved off without
+// going there.
+func newNoticeCard(images *cache.ImageCache, notice Notice, lifetime time.Duration, onDismiss func()) *noticeCard {
 	tint := notice.Tone.Color()
 
-	background := canvas.NewRectangle(theme.Colors.NoticeBg)
+	background := canvas.NewRectangle(theme.Colors.NoticeCardBg)
 	background.CornerRadius = theme.Sizes.NoticeRadius
 	Outline(background)
-
-	// Rounded like the card behind it, so the edge follows its corners rather
-	// than squaring them off.
-	edge := canvas.NewRectangle(tint)
-	edge.CornerRadius = theme.Sizes.NoticeRadius
-	edge.SetMinSize(fyne.NewSize(theme.Sizes.NoticeEdgeWidth, 0))
-
-	title := newBoldText(notice.Title, tint, theme.Sizes.NoticeTitleSize)
-
-	body := widget.NewLabel(notice.Body)
-	body.Wrapping = fyne.TextWrapWord
+	background.StrokeColor = theme.Colors.NoticeCardOutline
+	elevate(background, theme.Sizes.NoticeShadowBlur)
 
 	padV, padH := theme.Sizes.NoticePaddingV, theme.Sizes.NoticePaddingH
 	gap := theme.Sizes.NoticeCardSpacing
-	inner := theme.Sizes.NoticeWidth - padH*2 - theme.Sizes.NoticeEdgeWidth
+	inner := theme.Sizes.NoticeWidth - padH*2
+
+	mark, markWidth := noticeMark(images, notice)
+
+	// What the sentence has to wrap into: the card's inside, less the mark and the
+	// close button standing either side of it and the gap in front of each.
+	column := inner - markWidth - theme.Sizes.NoticeBadgeGap - gap - glyphButtonSize
+
+	// Ellipsised rather than laid out plain: a heading naming a person and a channel
+	// is as long as they are, and a canvas.Text draws straight past the card holding
+	// it. The box reports no width of its own, so the fill row still sizes the column.
+	title := NewEllipsisText(newBoldText(notice.Title, theme.Colors.TextPrimary, theme.Sizes.NoticeTitleSize))
 
 	bar, countdown := newCountdownBar(tint, inner, lifetime)
 
-	// Glyph and close button hang from the top rather than centring: a two-line body
-	// would otherwise push the mark into the middle of the sentence.
+	// The mark and the close button are centred against the whole row rather than
+	// hung from the first line: the mark is what the card is read by at a glance,
+	// and one level with the heading points at the heading rather than at the card.
 	head := NewFillRow(2,
-		topAligned(theme.Sizes.NoticeIconSize, theme.Sizes.NoticeTitleSize,
-			newScaledIcon(notice.Tone.icon(), theme.Sizes.NoticeIconSize)),
+		container.NewCenter(mark),
+		HorizontalSpacer(theme.Sizes.NoticeBadgeGap),
+		VBoxNoSpacing(title, VerticalSpacer(theme.Sizes.NoticeTitleGap), newNoticeBody(notice.Body, column)),
 		HorizontalSpacer(gap),
-		VBoxNoSpacing(title, VerticalSpacer(theme.Sizes.NoticeTitleGap), newFlushContainer(body)),
-		HorizontalSpacer(gap),
-		topAligned(glyphButtonSize, theme.Sizes.NoticeTitleSize, NewCloseButton(onDismiss)),
+		container.NewCenter(NewCloseButton(onDismiss)),
 	)
 
-	c := &noticeCard{countdown: countdown}
+	c := &noticeCard{countdown: countdown, leads: notice.OnTap != nil}
 	c.content = NewFixedWidthContainer(theme.Sizes.NoticeWidth, container.NewStack(
 		background,
-		container.NewHBox(edge),
-		NewInset(VBoxNoSpacing(head, VerticalSpacer(gap), bar),
-			padV, padV, padH+theme.Sizes.NoticeEdgeWidth, padH),
+		NewInset(VBoxNoSpacing(head, VerticalSpacer(gap), bar), padV, padV, padH, padH),
 	))
-	c.onTap = onDismiss
+	c.onTap = func() {
+		onDismiss() // first: what the action opens must not be drawn under the card
+		if notice.OnTap != nil {
+			notice.OnTap()
+		}
+	}
 	c.ExtendBaseWidget(c)
 
 	countdown.Start()
@@ -276,8 +328,74 @@ func newNoticeCard(notice Notice, lifetime time.Duration, onDismiss func()) *not
 	return c
 }
 
+// noticeMark is what stands at the card's leading edge, and how wide it is: a
+// face for a notice about a person, the tone's disc for one about an outcome.
+// The width comes back beside it because the sentence is wrapped by hand and the
+// two marks are not the same size.
+func noticeMark(images *cache.ImageCache, notice Notice) (fyne.CanvasObject, float32) {
+	if notice.AvatarURL == "" && notice.Initial == "" {
+		return newNoticeBadge(notice.Tone), theme.Sizes.NoticeBadgeSize
+	}
+
+	side := theme.Sizes.NoticeAvatarSize
+
+	return newInitialIcon(images, imageCacheID(notice.AvatarURL), notice.AvatarURL, notice.Initial,
+		fyne.NewSize(side, side)), side
+}
+
+// How far the disc and its ring are carried from the card's own colour towards
+// the tone. The plate is a place for the mark to stand rather than a second
+// button, so it stays nearly the card; the ring is what separates it from the
+// card at all, so it is most of the way to the tone.
+const (
+	noticeBadgeFill = 0.20
+	noticeBadgeRing = 0.60
+)
+
+// newNoticeBadge is the tone's mark on a disc of the tone's own colour, centred
+// at the card's leading edge. It replaces the coloured strip that used to run
+// down that edge: a strip says a colour, where a disc carrying the mark says
+// which colour it is and what it is about in the one object.
+func newNoticeBadge(tone Tone) fyne.CanvasObject {
+	side := theme.Sizes.NoticeBadgeSize
+	tint := tone.Color()
+
+	disc := canvas.NewCircle(theme.Mix(theme.Colors.NoticeCardBg, tint, noticeBadgeFill))
+	disc.StrokeColor = theme.Mix(theme.Colors.NoticeCardBg, tint, noticeBadgeRing)
+	disc.StrokeWidth = theme.Sizes.NoticeBadgeRing
+
+	return NewFixedSizeContainer(fyne.NewSize(side, side), disc,
+		container.NewCenter(newScaledIcon(tone.icon(), theme.Sizes.NoticeIconSize)))
+}
+
+// newNoticeBody is the sentence under a notice's heading, wrapped by hand to what
+// the card leaves it. A widget.Label is what wraps text in Fyne and it brings
+// InnerPadding on all four sides, which on a card this size is a line's worth of
+// air the heading above it does not have.
+func newNoticeBody(text string, width float32) fyne.CanvasObject {
+	wrapped := wrapText(text, width, theme.Sizes.NoticeBodySize, fyne.TextStyle{})
+
+	rows := make([]fyne.CanvasObject, len(wrapped))
+	for i, line := range wrapped {
+		rows[i] = newText(line, theme.Colors.NoticeCardBody, theme.Sizes.NoticeBodySize)
+	}
+
+	return VBoxNoSpacing(rows...)
+}
+
 func (c *noticeCard) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(c.content)
+}
+
+// Cursor answers with a hand only where the tap leads somewhere. A card that
+// merely dismisses is a message about to leave on its own, and a pointer over
+// one says it is a control.
+func (c *noticeCard) Cursor() desktop.Cursor {
+	if c.leads {
+		return desktop.PointerCursor
+	}
+
+	return desktop.DefaultCursor
 }
 
 // stop halts the countdown. Safe to call more than once, which it is: a card
@@ -310,14 +428,6 @@ func newCountdownBar(tint color.Color, width float32, lifetime time.Duration) (f
 		})
 
 	return strip, animation
-}
-
-// topAligned pins obj to the top of the row it is in, centred on a line of text
-// of the given size rather than on the row's whole height.
-func topAligned(width, lineSize float32, obj fyne.CanvasObject) fyne.CanvasObject {
-	offset := max((lineHeight(lineSize)-obj.MinSize().Height)/2, 0)
-
-	return container.New(&columnLayout{width: width, topOffset: offset, collapse: true}, obj)
 }
 
 /* The centred notice */
@@ -701,10 +811,7 @@ type Confirm struct {
 // already say, and no tone glyph because the confirming button already carries
 // the tone — as a fill, which is the loudest thing on the card.
 func NewConfirmDialog(confirm Confirm, onClose func()) fyne.CanvasObject {
-	card := canvas.NewRectangle(theme.Colors.ViewerCardBg)
-	card.CornerRadius = theme.Sizes.ConfirmRadius
-	Outline(card)
-	Elevate(card)
+	card := newDialogCard()
 
 	title := newBoldText(confirm.Title, theme.Colors.TextPrimary, theme.Sizes.ConfirmTitleSize)
 	title.Alignment = fyne.TextAlignCenter

@@ -819,6 +819,44 @@ func callVolumeLabel(db int) string {
 
 /* Devices, for the settings page */
 
+// loadVoiceNodes records the media servers this instance offers, so the settings
+// page can put the choice in front of the reader without a request of its own.
+// Asked once per session off Ready, beside the node warm-up that shares its
+// round trip — the list is instance configuration and cannot change under a
+// running client. Call off the UI thread.
+func (a *App) loadVoiceNodes() {
+	epoch := a.epoch
+
+	nodes, err := a.client.VoiceNodes()
+	if err != nil {
+		log.Printf("list voice servers: %v", err)
+		return
+	}
+
+	a.doOnUI(func() {
+		if a.stale(epoch) {
+			return
+		}
+		a.voiceNodes = toVoiceNodes(nodes)
+	}, false)
+}
+
+// voiceNodeList is what the settings page reads. A plain read of what landed
+// above, never a request, so the index pass may call it like any other hook.
+// Call on the UI thread.
+func (a *App) voiceNodeList() []ui.VoiceNode { return a.voiceNodes }
+
+// toVoiceNodes converts what the client knows into what a widget may see, the
+// way toAudioDevices does.
+func toVoiceNodes(nodes []domain.VoiceNode) []ui.VoiceNode {
+	out := make([]ui.VoiceNode, 0, len(nodes))
+	for _, node := range nodes {
+		out = append(out, ui.VoiceNode{Name: node.Name, URL: node.URL})
+	}
+
+	return out
+}
+
 // inputDevices and outputDevices answer the settings page's two pickers. Both
 // enumerate the backend, which is not UI-thread work — the page asks them from a
 // worker and mounts the answer.
@@ -1140,7 +1178,7 @@ func (a *App) followVoiceMove(subject string) {
 		// Dropped out of voice entirely: disconnected by a moderator, or from
 		// another device.
 		a.leaveCall()
-		a.notify(ui.ToneWarning, "You were disconnected from the call.")
+		a.notifyTitled(ui.ToneWarning, "Call ended", "You were disconnected from the call.")
 
 	default:
 		// Moved. Rejoining is the whole of following: the token is per channel.

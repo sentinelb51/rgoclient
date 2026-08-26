@@ -3,7 +3,6 @@ package ui
 import (
 	"fmt"
 	"image/color"
-	"net/url"
 	"strings"
 	"unicode"
 
@@ -610,8 +609,7 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Code:
 			b.code(n.Text, em, base)
 		case *markdown.Link:
-			u, _ := url.Parse(n.URL)
-			b.segs = append(b.segs, &widget.HyperlinkSegment{Text: markdown.PlainText(n.Children), URL: u})
+			b.link(n, base)
 		case *markdown.UserMention:
 			userID := n.UserID
 			b.mention("@"+mentionName(b.deps.Store.UserName(userID)), em, base, func(anchor fyne.CanvasObject) {
@@ -631,6 +629,29 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 			b.mention(util.MessageTimestamp(n.Time, n.Style), em, base, nil)
 		}
 	}
+}
+
+// link renders a masked or bare link. The tap is the controller's rather than
+// Fyne's default: what is behind fyne.App.OpenURL is the system's own opener,
+// which runs whatever a scheme is registered to, and the URL here is a string
+// somebody else typed. A destination the client will not open is drawn as plain
+// text carrying the label, so the reader sees what was written and nothing is a
+// click away from the shell.
+func (b *mdBuilder) link(n *markdown.Link, base widget.RichTextStyle) {
+	label := markdown.PlainText(n.Children)
+
+	parsed, ok := util.SafeLink(n.URL)
+	if !ok {
+		b.inlines(n.Children, emphasis{}, base, nil)
+		return
+	}
+
+	raw := n.URL
+	b.segs = append(b.segs, &widget.HyperlinkSegment{
+		Text:     label,
+		URL:      parsed,
+		OnTapped: func() { b.deps.Actions.OnLinkTapped(raw, label) },
+	})
 }
 
 // mention renders an already-marked "@Name" or "#channel" as bold accent text

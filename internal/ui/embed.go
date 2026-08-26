@@ -27,16 +27,12 @@ import (
 // attachments. Each row is boxed horizontally so the card keeps its own width
 // rather than stretching to the message column's.
 func buildEmbeds(deps Deps, embeds []*domain.Embed, onMenu func(*fyne.PointEvent)) *fyne.Container {
-	rows := make([]fyne.CanvasObject, 0, max(len(embeds)*2-1, 0))
-
-	for i, embed := range embeds {
-		if i > 0 {
-			rows = append(rows, VerticalSpacer(theme.Sizes.EmbedSpacing))
-		}
+	rows := make([]fyne.CanvasObject, 0, len(embeds))
+	for _, embed := range embeds {
 		rows = append(rows, HBoxNoSpacing(buildEmbed(deps, embed, onMenu)))
 	}
 
-	return container.NewVBox(rows...)
+	return stackSpaced(theme.Sizes.EmbedSpacing, rows...)
 }
 
 // buildEmbed renders one embed. One with nothing to say — a bare image kind, or
@@ -101,7 +97,7 @@ func buildEmbedBody(deps Deps, embed *domain.Embed, width float32, onMenu func(*
 		add(buildEmbedSite(deps.Images, embed))
 	}
 	if embed.Title != "" {
-		add(buildEmbedTitle(embed, onMenu))
+		add(buildEmbedTitle(deps, embed, onMenu))
 	}
 	if embed.Description != "" {
 		// The message body renderer, so markdown, mentions and selection behave here
@@ -129,7 +125,9 @@ func buildEmbedSite(images *cache.ImageCache, embed *domain.Embed) fyne.CanvasOb
 	side := theme.Sizes.EmbedIconSize
 	size := fyne.NewSize(side, side)
 	icon := container.NewGridWrap(size, canvas.NewRectangle(theme.Colors.EmbedBg))
-	images.LoadIntoContainer(imageCacheID(embed.IconURL), embed.IconURL, size, icon, false, nil)
+	// An embed's mark is fetched from whatever host the unfurl named, so it is
+	// keyed by its URL rather than by a path that may be shaped like an ID.
+	images.LoadIntoContainer(urlCacheID(embed.IconURL), embed.IconURL, size, icon, false, nil)
 
 	return NewFillRow(2, container.NewCenter(icon), HorizontalSpacer(theme.Sizes.EmbedIconGap), NewEllipsisText(name))
 }
@@ -138,7 +136,7 @@ func buildEmbedSite(images *cache.ImageCache, embed *domain.Embed) fyne.CanvasOb
 // one and drawn in the accent either way. One line that shortens rather than a
 // wrapping paragraph: a card is a summary, and a title long enough to wrap is one
 // the description already says more usefully.
-func buildEmbedTitle(embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
+func buildEmbedTitle(deps Deps, embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	title := newBoldText(embed.Title, theme.Colors.EmbedTitle, theme.Sizes.EmbedTitleTextSize)
 
 	line := NewFillRow(0, NewEllipsisText(title))
@@ -146,7 +144,7 @@ func buildEmbedTitle(embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.Ca
 		return line
 	}
 
-	return newEmbedLink(line, embed.URL, onMenu)
+	return newEmbedLink(deps, line, embed.URL, embed.Title, onMenu)
 }
 
 // embedLink is the tappable title — a widget of its own rather than a
@@ -163,9 +161,9 @@ var (
 	_ fyne.SecondaryTappable = (*embedLink)(nil)
 )
 
-func newEmbedLink(content fyne.CanvasObject, link string, onMenu func(*fyne.PointEvent)) *embedLink {
+func newEmbedLink(deps Deps, content fyne.CanvasObject, link, label string, onMenu func(*fyne.PointEvent)) *embedLink {
 	l := &embedLink{content: content}
-	l.onTap = func() { openURL(link) }
+	l.onTap = func() { deps.Actions.OnLinkTapped(link, label) }
 	l.onSecondaryTap = onMenu
 	l.ExtendBaseWidget(l)
 

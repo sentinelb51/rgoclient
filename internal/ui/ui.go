@@ -10,7 +10,6 @@ import (
 	"image/color"
 	"image/png"
 	"log"
-	"net/url"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
@@ -22,6 +21,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 /* Dependencies */
@@ -69,6 +69,15 @@ type MessageActions interface {
 	// controller remembers it: the same card remounts on every scroll past it.
 	ResolveInvite(code string, done func(domain.Invite, error))
 
+	// OnLinkTapped opens a link that arrived in content this client did not write
+	// — a body, an embed, an attachment's own URL. The controller owns it because
+	// opening one is a decision rather than an action: the system opener runs
+	// whatever a scheme is registered to, and a masked link reads as the site it
+	// names while going somewhere else, so both are questions only the layer that
+	// can ask one may answer. label is the link's visible text, "" where it has
+	// none of its own.
+	OnLinkTapped(raw, label string)
+
 	OnAttachmentTapped(attachment *domain.File)
 	OnReply(message *domain.Message)
 	OnEdit(message *domain.Message)
@@ -87,6 +96,17 @@ type MessageActions interface {
 	// one request where unreacting for everybody is one per person per emoji.
 	OnClearReactions(message *domain.Message)
 
+	// OnSelectMessages puts the column into selection mode with message already in
+	// the set, which is the only way in. The controller owns the mode because what
+	// stands over the composer while it is on is the composer's, not the column's.
+	OnSelectMessages(message *domain.Message)
+
+	// OnToggleSelected adds or removes one row. extend is Shift being held, which
+	// takes everything between the last row picked and this one — the widget reads
+	// it because ui.ShiftHeld is the only thing that can answer, and a context
+	// menu reports no modifier at all.
+	OnToggleSelected(message *domain.Message, extend bool)
+
 	// OnAttachFile asks for a file to hang on the next message and reports what was
 	// picked, or nothing. The controller owns the ask because the picker is the OS
 	// one, which needs a window this package is never handed.
@@ -95,7 +115,12 @@ type MessageActions interface {
 	// OnPickEmoji opens the emoji picker beside anchor and reports what is chosen.
 	// The controller opens it because what is on offer is a walk of every server the
 	// account is in, ordered around the open one, which no widget knows.
-	OnPickEmoji(anchor fyne.CanvasObject, onPick func(EmojiChoice))
+	//
+	// allowed narrows that to exactly the emoji named, for a message restricting
+	// what may be reacted to it; nil is the ordinary case and offers everything. An
+	// empty non-nil slice would offer nothing, so a caller holding one leaves the
+	// affordance off rather than opening an empty picker.
+	OnPickEmoji(anchor fyne.CanvasObject, allowed []string, onPick func(EmojiChoice))
 
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message
@@ -235,17 +260,7 @@ func (m *contextMenu) CreateRenderer() fyne.WidgetRenderer {
 // ShowAtPosition drops the menu at pos, pulled back inside the canvas where it
 // would otherwise hang off the right or bottom edge.
 func (m *contextMenu) ShowAtPosition(pos fyne.Position) {
-	size := m.MinSize()
-	_, area := m.canvas.InteractiveArea()
-
-	if pos.X+size.Width > area.Width {
-		pos.X = max(area.Width-size.Width, 0)
-	}
-	if pos.Y+size.Height > area.Height {
-		pos.Y = max(area.Height-size.Height, 0)
-	}
-
-	m.popUp.ShowAtPosition(pos)
+	m.popUp.ShowAtPosition(keepInside(pos, m.MinSize(), m.canvas))
 	m.canvas.Focus(m)
 }
 
@@ -330,12 +345,20 @@ func CopyImageToClipboard(img image.Image) {
 // openURL hands a link to the system browser. Fyne only does this for its own
 // hyperlink widget and segment; an embed's title and the viewer's browser button
 // are drawn from plainer parts and ask for themselves.
+//
+// The last gate rather than the only one: what OpenURL reaches is ShellExecute
+// on Windows and xdg-open elsewhere, either of which launches whatever the
+// scheme is registered to. Callers holding a Deps go through
+// MessageActions.OnLinkTapped, which can say why a link was refused; this
+// refuses in silence so that a caller added later cannot open one by default.
 func openURL(raw string) {
-	link, err := url.Parse(raw)
-	if err == nil {
-		err = fyne.CurrentApp().OpenURL(link)
+	link, ok := util.SafeLink(raw)
+	if !ok {
+		log.Printf("refused link %q: not a web address", raw)
+		return
 	}
-	if err != nil {
+
+	if err := fyne.CurrentApp().OpenURL(link); err != nil {
 		log.Printf("open %s: %v", raw, err)
 	}
 }

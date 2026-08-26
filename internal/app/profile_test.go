@@ -52,7 +52,7 @@ func TestProfileButtons(t *testing.T) {
 		{name: "a bot", userID: "01BOT", bot: true, want: []string{"Message", copyID}},
 		{name: "a stranger", userID: "01U", want: []string{"Add friend", "Block (menu)", copyID}},
 		{name: "a friend", userID: "01U", relationship: domain.RelationshipFriend,
-			want: []string{"Message", "Remove friend (menu)", "Block (menu)", copyID}},
+			want: []string{"Message", "Remove (menu)", "Block (menu)", copyID}},
 		{name: "they asked", userID: "01U", relationship: domain.RelationshipIncoming,
 			want: []string{"Accept request", "Ignore request", copyID}},
 		{name: "we asked", userID: "01U", relationship: domain.RelationshipOutgoing,

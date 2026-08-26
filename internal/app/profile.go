@@ -170,6 +170,7 @@ func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
 	resolved := ui.MutualProfile{
 		ServerCount: len(mutual.ServerIDs),
 		FriendCount: len(mutual.UserIDs),
+		GroupCount:  len(mutual.ChannelIDs),
 	}
 
 	for _, serverID := range mutual.ServerIDs {
@@ -195,6 +196,23 @@ func (a *App) mutualProfile(mutual domain.Mutual) ui.MutualProfile {
 		resolved.Friends = append(resolved.Friends, ui.MutualEntry{
 			Name: name,
 			Open: func() { a.showProfileDialog(userID) },
+		})
+	}
+
+	// A group is a channel, so its chip leads where the sidebar's row does: the
+	// layer comes down and the conversation opens behind it.
+	for _, channelID := range mutual.ChannelIDs {
+		channel, ok := a.store.Channel(channelID)
+		if !ok || channel.Name == "" {
+			continue
+		}
+
+		resolved.Groups = append(resolved.Groups, ui.MutualEntry{
+			Name: channel.Name,
+			Open: func() {
+				a.closeOverlay()
+				a.OnChannelTapped(channelID)
+			},
 		})
 	}
 
@@ -285,7 +303,7 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 	switch profile.Relationship {
 	case domain.RelationshipFriend:
 		return []ui.ProfileButton{message,
-			overflow(act("Remove friend", ui.ProfileActionRemove, true,
+			overflow(act("Remove", ui.ProfileActionRemove, true,
 				func() { a.confirmRemoveFriend(userID, name) }), fynetheme.ContentRemoveIcon()),
 			block}
 

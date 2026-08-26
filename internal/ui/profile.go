@@ -151,10 +151,18 @@ type MutualProfile struct {
 
 	Friends     []MutualEntry
 	FriendCount int
+
+	// Groups is the third thing two accounts share, and the only one whose entries
+	// lead somewhere the reader can already be: a group is a channel, so opening one
+	// is the same move the sidebar makes.
+	Groups     []MutualEntry
+	GroupCount int
 }
 
 // any reports whether there is anything to draw.
-func (m MutualProfile) any() bool { return m.ServerCount > 0 || m.FriendCount > 0 }
+func (m MutualProfile) any() bool {
+	return m.ServerCount > 0 || m.FriendCount > 0 || m.GroupCount > 0
+}
 
 /* Cards */
 
@@ -236,6 +244,10 @@ func (c *ProfileCard) SetMutual(mutual MutualProfile) {
 	if mutual.ServerCount > 0 {
 		sections = append(sections, profileSection("Mutual servers",
 			mutualChips(mutual.Servers, mutual.ServerCount, c.inner)))
+	}
+	if mutual.GroupCount > 0 {
+		sections = append(sections, profileSection("Mutual groups",
+			mutualChips(mutual.Groups, mutual.GroupCount, c.inner)))
 	}
 	if mutual.FriendCount > 0 {
 		sections = append(sections, profileSection("Mutual friends",

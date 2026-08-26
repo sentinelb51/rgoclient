@@ -531,19 +531,32 @@ func (a *App) moveChannel(channelID string, up bool) {
 	a.publishCategories(serverID, buckets, "Could not move that channel.")
 }
 
+// categoryAt locates a category in the server's arrangement. Index 0 is the
+// uncategorised bucket, which is not a category, so a hit there is a miss —
+// as is a category the arrangement no longer holds, an edit from another client
+// being able to land while the page is open.
+func (a *App) categoryAt(serverID, categoryID string) ([]channelBucket, int, bool) {
+	buckets, ok := a.channelBuckets(serverID)
+	if !ok {
+		return nil, 0, false
+	}
+
+	at := slices.IndexFunc(buckets, func(bucket channelBucket) bool { return bucket.ID == categoryID })
+	if at <= 0 {
+		return nil, 0, false
+	}
+
+	return buckets, at, true
+}
+
 // moveCategory swaps a category with the neighbour above or below it. The
 // uncategorised bucket is not one and is never swapped: it is first because it is
 // what no category claimed, not because of where it sits. Call on the UI thread.
 func (a *App) moveCategory(categoryID string, up bool) {
 	serverID := a.serverSettingsID
 
-	buckets, ok := a.channelBuckets(serverID)
+	buckets, at, ok := a.categoryAt(serverID, categoryID)
 	if !ok {
-		return
-	}
-
-	at := slices.IndexFunc(buckets, func(bucket channelBucket) bool { return bucket.ID == categoryID })
-	if at <= 0 {
 		return
 	}
 
@@ -607,13 +620,8 @@ func (a *App) promptRenameCategory(categoryID string) {
 		return
 	}
 
-	buckets, ok := a.channelBuckets(serverID)
+	buckets, at, ok := a.categoryAt(serverID, categoryID)
 	if !ok {
-		return
-	}
-
-	at := slices.IndexFunc(buckets, func(bucket channelBucket) bool { return bucket.ID == categoryID })
-	if at <= 0 {
 		return
 	}
 
@@ -635,13 +643,8 @@ func (a *App) renameCategory(serverID, categoryID, title string) {
 		return
 	}
 
-	buckets, ok := a.channelBuckets(serverID)
+	buckets, at, ok := a.categoryAt(serverID, categoryID)
 	if !ok {
-		return
-	}
-
-	at := slices.IndexFunc(buckets, func(bucket channelBucket) bool { return bucket.ID == categoryID })
-	if at <= 0 {
 		return
 	}
 
@@ -656,13 +659,8 @@ func (a *App) renameCategory(serverID, categoryID, title string) {
 func (a *App) deleteCategory(categoryID string) {
 	serverID := a.serverSettingsID
 
-	buckets, ok := a.channelBuckets(serverID)
+	buckets, at, ok := a.categoryAt(serverID, categoryID)
 	if !ok {
-		return
-	}
-
-	at := slices.IndexFunc(buckets, func(bucket channelBucket) bool { return bucket.ID == categoryID })
-	if at <= 0 {
 		return
 	}
 

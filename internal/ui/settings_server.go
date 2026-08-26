@@ -28,6 +28,7 @@ import (
 	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 /* Sections */
@@ -319,27 +320,16 @@ type ServerSettingsHooks struct {
 const listTTL = 30 * time.Second
 
 // cachedList is one fetched section as the page last saw it, held for **the life
-// of one opening and no longer**. Three rules in one type, and each of them was a
-// request the page would otherwise have made:
+// of one opening and no longer**. Three rules, each of them a request the page
+// would otherwise have made: **held**, nothing announcing a revoked invite or a
+// lifted ban; **single-flight** through inflight, a plain bool rather than a
+// sync.Once because the point is "not again *yet*" and everything here is
+// UI-thread confined; and **expiring**, at being when the answer landed.
 //
-//   - **Held.** Nothing announces a revoked invite or a lifted ban, so a second
-//     fetch could only answer what the first did. Without this, tapping between
-//     Bans and Invites was a request every time.
-//   - **Single-flight.** `inflight` is claimed before the request goes out and
-//     released when it answers, so re-mounting a section whose first answer is
-//     still on its way waits for it rather than sending a second. It is a plain
-//     bool, not a sync.Once: everything here is UI-thread confined, and the point
-//     is not "exactly once" but "not again *yet*" — the entry is re-askable the
-//     moment it goes stale.
-//   - **Expiring.** `at` is when the answer landed, and one older than listTTL is
-//     re-asked on the next mount.
-//
-// It is also what a late answer is written to. The reader may be two sections
-// away by then, so *drawing* is guarded on the section still being mounted, while
-// the answer itself is always recorded — which is what makes going back free
-// rather than another request. Recorded only for the request it was asked as,
-// though: drop supersedes whatever is out, so this client revoking an invite
-// cannot be answered by a fetch that went out before the revoke.
+// A late answer is always recorded — which is what makes going back free — while
+// *drawing* it is guarded on the section still being mounted. Recorded only for
+// the request it was asked as, though: drop supersedes whatever is out, so this
+// client revoking an invite cannot be answered by a fetch that predates it.
 //
 // err is held beside the entries rather than instead of them: a failure is a
 // state the section draws, and re-mounting it must not read as "no bans".
@@ -451,14 +441,10 @@ type ServerSettingsPage struct {
 	// rebuild so a role event — this account's own edit echoing back included —
 	// leaves the reader where they were.
 	//
-	// roleAllow and roleDeny are that role's permissions as the editor last sent
-	// them, re-read from the store on every build. A second change made before the
-	// first has echoed back computes from these rather than from the role the row
-	// was built with, which would still be the one before the first change.
-	roleID    string
-	roleName  string
-	roleAllow domain.Permission
-	roleDeny  domain.Permission
+	// What the grid is working from lives on the shell as gridAllow / gridDeny —
+	// three pages draw one now.
+	roleID   string
+	roleName string
 
 	// channelID is the channel the Channels section is drilled into, "" for its
 	// list, and channelName what the back line out of a role says it was. It is
@@ -555,27 +541,14 @@ func (p *ServerSettingsPage) buildIdentity() fyne.CanvasObject {
 	}
 
 	side := theme.Sizes.SessionCardAvatarSize
-	name := newBoldText(server.Name, theme.Colors.TextPrimary, theme.Sizes.SettingsRailTextSize)
 
-	return NewFillRow(2,
-		p.serverIcon(server, fyne.NewSize(side, side)),
-		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
-		vcenter(NewEllipsisText(name)),
-	)
+	return p.identityStrip(p.serverIcon(server, fyne.NewSize(side, side)), server.Name)
 }
 
-// serverIcon is the server's picture over the letter it falls back to — the same
-// circle the rail and an invite card draw, so one server reads the same wherever
-// it is shown.
+// serverIcon is the same circle the rail and an invite card draw, so one server
+// reads the same wherever it is shown.
 func (p *ServerSettingsPage) serverIcon(server ServerSummary, size fyne.Size) fyne.CanvasObject {
-	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
-	slot := container.NewStack(background, container.NewCenter(newInitial(server.Name)))
-
-	if server.IconURL != "" {
-		p.hooks.Deps.Images.LoadIntoContainer(imageCacheID(server.IconURL), server.IconURL, size, slot, true, background)
-	}
-
-	return container.NewGridWrap(size, slot)
+	return newInitialIcon(p.hooks.Deps.Images, imageCacheID(server.IconURL), server.IconURL, server.Name, size)
 }
 
 /* Moving between sections */
@@ -679,7 +652,7 @@ func (p *ServerSettingsPage) showChannels() {
 // that finds the role gone and for a rail tap leaving the section entirely.
 func (p *ServerSettingsPage) closeRole() {
 	p.roleID, p.roleName = "", ""
-	p.roleAllow, p.roleDeny = 0, 0
+	p.gridAllow, p.gridDeny = 0, 0
 }
 
 // closeDrilldown is closeRole plus the outer level the Channels section adds, for
@@ -777,12 +750,12 @@ func (p *ServerSettingsPage) overviewSection() []settingsGroup {
 			p.iconRow(server),
 			p.bannerRow(server),
 		),
-		p.group("Facts", "What the store can say about this server. None of it is settable.",
+		p.group("Facts", "Information about this server. None of it can be changed.",
 			p.readOnlyRow("Owner", server.Owner),
 			p.readOnlyRow("Created", server.Created),
-			p.readOnlyRow("Channels", plural(server.Channels, "channel")),
+			p.readOnlyRow("Channels", util.Quantity(server.Channels, "channel")),
 		),
-		p.group("Identifier", "The server's own ID, which every route naming it takes.",
+		p.group("Identifier", "The server's ID, which the API and bots identify it by.",
 			p.actionRow("Server ID", server.ID, "Copy", ToneInfo, func() {
 				CopyToClipboard(server.ID)
 			}),
@@ -807,30 +780,15 @@ func (p *ServerSettingsPage) nameRow(server ServerSummary) fyne.CanvasObject {
 }
 
 func (p *ServerSettingsPage) descriptionRow(server ServerSummary) fyne.CanvasObject {
-	if !p.hooks.Can(domain.PermissionManageServer) {
-		description := server.Description
-		if description == "" {
-			description = "None"
-		}
-
-		return p.readOnlyRow("Description", description)
-	}
-
-	entry := newCommitArea(server.Description, p.hooks.SetDescription)
-	entry.PlaceHolder = "What this server is for"
-
-	return p.stackedRow("Description",
-		"Shown on the invite people join through, saved when you click away. Clear it to remove it.",
-		wideField(entry))
+	return p.descriptionRowOf(server.Description, "What this server is for",
+		"Shown on the invite people join through. Saved when you click away.",
+		p.hooks.Can(domain.PermissionManageServer), p.hooks.SetDescription)
 }
 
-// iconRow and bannerRow are the server's two pictures. Both are left out
-// entirely where the account may not manage the server: the strip above the rail
-// already draws the icon, and a read-only row would state it twice, while a
-// banner nothing in this client draws has nothing to say read-only at all.
-//
-// Remove is drawn disabled rather than left out, so neither row changes shape the
-// moment a picture lands.
+// iconRow and bannerRow are the server's two pictures. Both are left out entirely
+// where the account may not manage the server: the strip above the rail already
+// draws the icon, and a banner nothing in this client draws has nothing to say
+// read-only at all.
 func (p *ServerSettingsPage) iconRow(server ServerSummary) fyne.CanvasObject {
 	if !p.hooks.Can(domain.PermissionManageServer) {
 		return nil
@@ -840,15 +798,9 @@ func (p *ServerSettingsPage) iconRow(server ServerSummary) fyne.CanvasObject {
 	enableIf(remove, server.IconURL != "")
 
 	side := theme.Sizes.SessionCardAvatarSize
-	control := HBoxNoSpacing(
-		container.NewCenter(p.serverIcon(server, fyne.NewSize(side, side))),
-		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
-		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeIcon)),
-		HorizontalSpacer(theme.Sizes.ChipSpacing),
-		container.NewCenter(remove),
-	)
 
-	return p.row("Icon", "Shown wherever the server is named.", control)
+	return p.pictureRow("Icon", "Shown wherever the server is named.",
+		p.serverIcon(server, fyne.NewSize(side, side)), remove, p.hooks.ChangeIcon)
 }
 
 func (p *ServerSettingsPage) bannerRow(server ServerSummary) fyne.CanvasObject {
@@ -859,29 +811,14 @@ func (p *ServerSettingsPage) bannerRow(server ServerSummary) fyne.CanvasObject {
 	remove := newRowButton("Remove", ToneWarning, p.hooks.RemoveBanner)
 	enableIf(remove, server.BannerURL != "")
 
-	control := HBoxNoSpacing(
-		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeBanner)),
-		HorizontalSpacer(theme.Sizes.ChipSpacing),
-		container.NewCenter(remove),
-	)
-
-	return p.row("Banner", "Drawn by clients that show one. Here it appears on an invite card.", control)
-}
-
-// plural counts something and names it, so a row says "1 channel" rather than
-// "1" under a label that has to be read to know what was counted.
-func plural(count int, noun string) string {
-	if count == 1 {
-		return fmt.Sprintf("1 %s", noun)
-	}
-
-	return fmt.Sprintf("%d %ss", count, noun)
+	return p.pictureRow("Banner", "Shown on the invite people join through.",
+		nil, remove, p.hooks.ChangeBanner)
 }
 
 /* Channels */
 
-const channelsDetail = "Every channel this account can see, in the order the sidebar draws them. " +
-	"A category names the ones under it, and moving a channel past the end of one is how it joins the next."
+const channelsDetail = "Every channel you can see, in the order the sidebar draws them. " +
+	"Move a channel past the end of a category to put it in the next one."
 
 // channelsSection is the sidebar's own arrangement as a list: the channels no
 // category claimed, then each category and what it holds. One list rather than a
@@ -953,7 +890,7 @@ func (p *ServerSettingsPage) categoryRow(entry ServerCategoryEntry, at, count in
 		)
 	}
 
-	return p.entryRow(nil, entry.Title, plural(len(entry.Channels), "channel"), controls...)
+	return p.entryRow(nil, entry.Title, util.Quantity(len(entry.Channels), "channel"), controls...)
 }
 
 func (p *ServerSettingsPage) channelRow(channel ServerChannelEntry,
@@ -1015,7 +952,7 @@ func (p *ServerSettingsPage) confirmDeleteCategory(entry ServerCategoryEntry) {
 	p.hooks.Confirm(Confirm{
 		Title: "Delete category",
 		Body: fmt.Sprintf("%s goes away and the %s in it move to the top of the sidebar. No channel is deleted.",
-			entry.Title, plural(len(entry.Channels), "channel")),
+			entry.Title, util.Quantity(len(entry.Channels), "channel")),
 		Action:    "Delete",
 		Tone:      ToneDanger,
 		OnConfirm: func() { p.hooks.DeleteCategory(entry.ID) },
@@ -1024,8 +961,8 @@ func (p *ServerSettingsPage) confirmDeleteCategory(entry ServerCategoryEntry) {
 
 /* One channel's permissions */
 
-const channelOverridesDetail = "What this channel changes about the permissions the server already gives. " +
-	"Inherit is whatever the role holds elsewhere; allowing or denying a bit here decides it for this channel alone."
+const channelOverridesDetail = "What this channel changes about the permissions the server already grants. " +
+	"Inherit is whatever the role holds elsewhere; Allow and Deny decide it for this channel alone."
 
 // channelGroups is one channel's overrides: every role beside what this channel
 // changes about it, or the grid for the one it is drilled into. It is the Roles
@@ -1087,9 +1024,9 @@ func overrideSummary(role ServerRoleEntry) string {
 	case allowed > 0 && denied > 0:
 		summary = fmt.Sprintf("%d allowed · %d denied", allowed, denied)
 	case allowed > 0:
-		summary = plural(allowed, "permission") + " allowed"
+		summary = util.Quantity(allowed, "permission") + " allowed"
 	case denied > 0:
-		summary = plural(denied, "permission") + " denied"
+		summary = util.Quantity(denied, "permission") + " denied"
 	}
 
 	if !role.Default && !role.Editable {
@@ -1106,7 +1043,7 @@ func overrideSummary(role ServerRoleEntry) string {
 func (p *ServerSettingsPage) channelRoleGroups(overrides ServerChannelOverrides,
 	role ServerRoleEntry) []settingsGroup {
 
-	p.roleAllow, p.roleDeny = role.Allow, role.Deny
+	p.gridAllow, p.gridDeny = role.Allow, role.Deny
 
 	groups := []settingsGroup{p.group(roleCaption(role), "", p.channelRoleNote(overrides, role))}
 
@@ -1121,15 +1058,13 @@ func (p *ServerSettingsPage) channelRoleNote(overrides ServerChannelOverrides,
 
 	switch {
 	case !overrides.Held.Has(domain.PermissionManagePermissions):
-		return p.note("You may not manage permissions in this channel, so this is what it does " +
-			"rather than something to change.")
+		return p.note("You may not manage permissions in this channel. These are read-only.")
 	case !role.Editable:
-		return p.note("This role is more senior than yours, so Revolt refuses a change to what it " +
-			"may do here. It is listed for reading.")
+		return p.note("This role is more senior than yours, so it is read-only here.")
 	}
 
-	return p.note("Allow and Deny decide the bit for this channel alone. Inherit leaves it to the " +
-		"role and to the server, which is what a channel changing nothing looks like.")
+	return p.note("Allow and Deny decide a permission for this channel alone. Inherit leaves it to the " +
+		"role and the server.")
 }
 
 /* Roles */
@@ -1215,7 +1150,7 @@ func (p *ServerSettingsPage) roleRow(role ServerRoleEntry, ranked []ServerRoleEn
 // allows, and whether it files the members holding it under its own name. A
 // denial is not counted — it takes nothing away that the role itself gave.
 func roleSummary(role ServerRoleEntry) string {
-	summary := plural(bits.OnesCount64(uint64(role.Allow)), "permission")
+	summary := util.Quantity(bits.OnesCount64(uint64(role.Allow)), "permission")
 
 	switch {
 	case role.Default:
@@ -1342,7 +1277,7 @@ func rankedRoles(roles []ServerRoleEntry) []ServerRoleEntry {
 // a reader holding one and not the other gets the other half read-only rather
 // than a page that lies about what it will accept.
 func (p *ServerSettingsPage) roleGroups(role ServerRoleEntry, roles []ServerRoleEntry) []settingsGroup {
-	p.roleAllow, p.roleDeny = role.Allow, role.Deny
+	p.gridAllow, p.gridDeny = role.Allow, role.Deny
 
 	groups := []settingsGroup{p.group(roleCaption(role), "", p.roleRows(role, roles)...)}
 	groups = append(groups, p.permissionGroups(p.serverScope(role))...)
@@ -1527,6 +1462,11 @@ type permissionScope struct {
 	// about rather than repeating a server's wording one level down.
 	channel bool
 
+	// group marks the one scope that is a conversation rather than part of a
+	// server, which is what groupDetails rewords a handful of entries for — see
+	// settings_group.go. A group is a channel, so it takes the channel captions too.
+	group bool
+
 	// can reports whether one bit may be moved here, which is two questions at
 	// once: the permission to manage permissions at this scope, and holding the bit
 	// being handed out — Revolt refuses an override granting what the actor lacks.
@@ -1593,7 +1533,7 @@ func (p *ServerSettingsPage) channelScope(overrides ServerChannelOverrides, role
 // permissionGroups is the grid: one card per category, each holding the bits the
 // scope draws. A category the mask empties is left off entirely rather than drawn
 // as a caption over nothing.
-func (p *ServerSettingsPage) permissionGroups(scope permissionScope) []settingsGroup {
+func (p *settingsShell) permissionGroups(scope permissionScope) []settingsGroup {
 	groups := make([]settingsGroup, 0, len(permissionCategories))
 
 	for _, category := range permissionCategories {
@@ -1624,15 +1564,15 @@ func (p *ServerSettingsPage) permissionGroups(scope permissionScope) []settingsG
 // as the state in words — Revolt refuses a change to a bit the actor does not
 // hold themselves, so a grid drawn from `ManagePermissions` alone would offer
 // picks the server would only refuse.
-func (p *ServerSettingsPage) permissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
+func (p *settingsShell) permissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
 	if !scope.tri {
 		return p.setPermissionRow(scope, entry)
 	}
 
-	state := permissionState(p.roleAllow, p.roleDeny, entry.permission)
+	state := permissionState(p.gridAllow, p.gridDeny, entry.permission)
 
 	if !scope.can(entry.permission) {
-		row, marker := p.markedRow(entry.label, entry.detail, stateText(optionLabel(permissionStates, state)))
+		row, marker := p.markedRow(entry.label, detailFor(scope, entry), stateText(optionLabel(permissionStates, state)))
 		markPermission(marker, state)
 
 		return row
@@ -1644,13 +1584,13 @@ func (p *ServerSettingsPage) permissionRow(scope permissionScope, entry permissi
 	)
 
 	control = newOptionControl(state, permissionStates, func(picked string) {
-		p.roleAllow, p.roleDeny = setPermissionState(p.roleAllow, p.roleDeny, entry.permission, picked)
-		scope.send(p.roleAllow, p.roleDeny)
+		p.gridAllow, p.gridDeny = setPermissionState(p.gridAllow, p.gridDeny, entry.permission, picked)
+		scope.send(p.gridAllow, p.gridDeny)
 		control.set(picked)
 		markPermission(marker, picked)
 	})
 
-	row, rowMarker := p.markedRow(entry.label, entry.detail, control)
+	row, rowMarker := p.markedRow(entry.label, detailFor(scope, entry), control)
 	marker = rowMarker
 	markPermission(marker, state)
 
@@ -1660,23 +1600,23 @@ func (p *ServerSettingsPage) permissionRow(scope permissionScope, entry permissi
 // setPermissionRow is one bit of a plain set, which is a switch rather than a
 // choice: there is nothing beneath it to inherit from, so a bit is held or it is
 // not. The server's own default is the only scope shaped this way.
-func (p *ServerSettingsPage) setPermissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
-	held := p.roleAllow.Has(entry.permission)
+func (p *settingsShell) setPermissionRow(scope permissionScope, entry permissionEntry) fyne.CanvasObject {
+	held := p.gridAllow.Has(entry.permission)
 
 	if !scope.can(entry.permission) {
-		row, marker := p.markedRow(entry.label, entry.detail, stateText(yesNo(held)))
+		row, marker := p.markedRow(entry.label, detailFor(scope, entry), stateText(yesNo(held)))
 		markRow(marker, held)
 
 		return row
 	}
 
-	return p.boolRow(entry.label, entry.detail, held, func(on bool) {
-		p.roleAllow = p.roleAllow &^ entry.permission
+	return p.boolRow(entry.label, detailFor(scope, entry), held, func(on bool) {
+		p.gridAllow = p.gridAllow &^ entry.permission
 		if on {
-			p.roleAllow |= entry.permission
+			p.gridAllow |= entry.permission
 		}
 
-		scope.send(p.roleAllow, 0)
+		scope.send(p.gridAllow, 0)
 	})
 }
 
@@ -1900,9 +1840,8 @@ var permissionCategories = []permissionCategory{
 
 /* Invites */
 
-const invitesDetail = "Every invite to this server that still stands. Revolt sets no expiry and " +
-	"counts no uses, so one lasts until it is revoked — and is made from a channel's own menu, " +
-	"there being no server-wide invite."
+const invitesDetail = "Every invite to this server that still stands. An invite has no expiry and no use limit, " +
+	"so it lasts until it is revoked. New ones are made from a channel's menu."
 
 func (p *ServerSettingsPage) invitesSection() []settingsGroup {
 	group, _ := p.islandGroup("Invites", invitesDetail, p.inviteRows())

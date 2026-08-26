@@ -1,7 +1,7 @@
 package ui
 
-// The surface both settings pages are drawn on: an icon rail of sections beside
-// a scrolling pane of captioned cards.
+// The surface all three settings pages are drawn on: an icon rail of sections
+// beside a scrolling pane of captioned cards.
 //
 // A *layer* rather than a canvas overlay: the modal layer holds one thing at a
 // time, and a page has to ask "lift this ban?" over itself. Stacked into the
@@ -16,6 +16,7 @@ package ui
 // knows nothing about either.
 
 import (
+	"cmp"
 	"image/color"
 	"slices"
 	"strings"
@@ -27,6 +28,7 @@ import (
 	"fyne.io/fyne/v2/layout"
 	"fyne.io/fyne/v2/widget"
 
+	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
 )
 
@@ -104,6 +106,19 @@ type settingsShell struct {
 	// flash is the wash marking the group a jump landed on. One at a time — a
 	// second jump hands the first one's card back before starting its own.
 	flash *fyne.Animation
+
+	// gridAllow and gridDeny are what the permission grid is working from, re-seeded
+	// on every build of whatever it is aimed at. They live here rather than on a
+	// page because three grids are drawn from them — a server role or its default,
+	// a role inside one channel or that channel's, and a group's own — and the rows
+	// that read them are shell methods for the same reason.
+	//
+	// A row computes from *these* rather than from the entry it was built with: a
+	// second change made before the first has echoed back would otherwise send the
+	// first one's absence. deny stays zero for the two scopes that are a plain set
+	// rather than an overwrite.
+	gridAllow domain.Permission
+	gridDeny  domain.Permission
 
 	// islands marks the list on screen as a card per entry rather than rows sharing
 	// one, which is what stands between two of its rows. Set as the list is built,
@@ -1121,6 +1136,54 @@ func (p *settingsShell) readOnlyRow(label, value string) fyne.CanvasObject {
 	text := newText(value, theme.Colors.TimestampText, theme.Sizes.SettingsLabelSize)
 
 	return p.row(label, "", text)
+}
+
+// identityStrip is the subject's picture and name, pinned above the rail on the
+// two pages that are about one thing rather than about the client.
+func (p *settingsShell) identityStrip(icon fyne.CanvasObject, name string) fyne.CanvasObject {
+	title := newBoldText(name, theme.Colors.TextPrimary, theme.Sizes.SettingsRailTextSize)
+
+	return NewFillRow(2,
+		icon,
+		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
+		vcenter(NewEllipsisText(title)),
+	)
+}
+
+// descriptionRowOf is the free-text field a server and a group each carry, stated
+// read-only where the account may not change it. Nothing writes back what it
+// sent: the edit returns as an update the store answers for.
+func (p *settingsShell) descriptionRowOf(value, placeholder, detail string, editable bool, onCommit func(string)) fyne.CanvasObject {
+	if !editable {
+		return p.readOnlyRow("Description", cmp.Or(value, "None"))
+	}
+
+	entry := newCommitArea(value, onCommit)
+	entry.PlaceHolder = placeholder
+
+	return p.stackedRow("Description", detail, wideField(entry))
+}
+
+// pictureRow offers to change or take off one picture, with the current one
+// beside the buttons where there is something to preview. Remove is passed in
+// rather than built here — a page holds on to it where what it can do is only
+// known once a fetch lands — and is drawn disabled rather than left out, so the
+// row does not change shape the moment a picture arrives.
+func (p *settingsShell) pictureRow(label, detail string, preview fyne.CanvasObject,
+	remove *Button, onChange func()) fyne.CanvasObject {
+
+	controls := make([]fyne.CanvasObject, 0, 5)
+	if preview != nil {
+		controls = append(controls,
+			container.NewCenter(preview),
+			HorizontalSpacer(theme.Sizes.SettingsPreviewGap))
+	}
+	controls = append(controls,
+		container.NewCenter(newRowButton("Change", ToneInfo, onChange)),
+		HorizontalSpacer(theme.Sizes.ChipSpacing),
+		container.NewCenter(remove))
+
+	return p.row(label, detail, HBoxNoSpacing(controls...))
 }
 
 // textField is an entry drawn as a control: the box a dropdown and a colour row

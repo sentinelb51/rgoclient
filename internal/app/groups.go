@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"log"
 	"slices"
+	"strings"
 
 	"fyne.io/fyne/v2"
 	fynetheme "fyne.io/fyne/v2/theme"
@@ -24,6 +25,7 @@ import (
 	"RGOClient/internal/client"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
+	"RGOClient/internal/util"
 )
 
 /* Making one */
@@ -141,7 +143,8 @@ func (a *App) submitInviteToGroup(channelID string, userIDs []string) {
 			}
 
 			a.closeOverlay()
-			a.notify(ui.ToneWarning, "Added %d of %d — the rest were refused.", added, len(userIDs))
+			a.notifyTitled(ui.ToneWarning, "Partly added",
+				"Added %d of %d — the rest were refused.", added, len(userIDs))
 		}, false)
 	}()
 }
@@ -263,4 +266,233 @@ func (a *App) friendCandidates(already []string) []ui.GroupCandidate {
 	}
 
 	return people
+}
+
+/* Its settings */
+
+// openGroupSettings covers the client with the group's own page. Offered on the
+// channel's menu wherever the account may change something about it — which for
+// a group is anybody holding ManageChannel or ManagePermissions, and the owner
+// unconditionally. Call on the UI thread.
+func (a *App) openGroupSettings(channelID string) {
+	if a.groupSettings == nil || !a.canManageGroup(channelID) {
+		return
+	}
+
+	a.closeOverlay() // a lightbox left up would draw over the page it was opened from
+	a.closeSettings()
+	a.closeServerSettings()
+
+	a.groupSettingsID = channelID
+	a.groupSettings.Open()
+	a.bindKeys()
+}
+
+// closeGroupSettings takes the layer down. Call on the UI thread.
+func (a *App) closeGroupSettings() {
+	if a.groupSettings == nil || !a.groupSettings.IsOpen() {
+		return
+	}
+
+	a.groupSettings.Close()
+	a.groupSettingsID = ""
+	a.bindKeys()
+	a.focusInput()
+}
+
+// groupSettingsOpen reports whether the page is covering the client, for bindKeys
+// and for the handlers that repaint it.
+func (a *App) groupSettingsOpen() bool {
+	return a.groupSettings != nil && a.groupSettings.IsOpen()
+}
+
+// canManageGroup reports whether there is anything on that page to do. Two
+// permissions, either one being enough: the page lists both sections for anybody
+// who reaches it and states read-only whatever the other does not cover.
+func (a *App) canManageGroup(channelID string) bool {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.Kind != domain.ChannelGroup {
+		return false
+	}
+
+	permissions := a.store.Permissions(channelID)
+
+	return permissions.Has(domain.PermissionManageChannel) ||
+		permissions.Has(domain.PermissionManagePermissions)
+}
+
+// groupSettingsHooks is everything ui.GroupSettingsPage asks of the controller.
+// Every one of them reads a.groupSettingsID rather than closing over a channel,
+// so opening the page on another group is a field and a rebuild — the same shape
+// a server's page has.
+func (a *App) groupSettingsHooks() ui.GroupSettingsHooks {
+	return ui.GroupSettingsHooks{
+		Deps:    a.deps(),
+		Close:   a.closeGroupSettings,
+		Confirm: a.confirm,
+		Group:   a.groupSummary,
+		Can: func(permission domain.Permission) bool {
+			return a.store.Permissions(a.groupSettingsID).Has(permission)
+		},
+		SetName:        a.setGroupName,
+		SetDescription: a.setGroupDescription,
+		SetNSFW:        a.setGroupNSFW,
+		ChangeIcon:     a.changeGroupIcon,
+		RemoveIcon:     a.removeGroupIcon,
+		SetPermissions: a.setGroupPermissions,
+	}
+}
+
+// groupSummary resolves the group the page is open on. Answering false is a group
+// closed while its settings were up, which the page draws as a sentence rather
+// than as an empty surface.
+func (a *App) groupSummary() (ui.GroupSummary, bool) {
+	channel, ok := a.store.Channel(a.groupSettingsID)
+	if !ok || channel.Kind != domain.ChannelGroup {
+		return ui.GroupSummary{}, false
+	}
+
+	summary := ui.GroupSummary{
+		ID:          channel.ID,
+		Name:        channel.Name,
+		Description: channel.Description,
+		IconURL:     channel.AvatarURL,
+		Owner:       a.store.UserName(channel.OwnerID),
+		Members:     len(channel.Recipients),
+		Permissions: channel.Permissions,
+		Owned:       channel.OwnerID != "" && channel.OwnerID == a.store.SelfID(),
+		NSFW:        channel.NSFW,
+	}
+
+	// An owner is somebody in the group, so the store almost always has them — but
+	// a group opened before its people resolved has not, and an ID says more than
+	// "Unknown" for the one account every action here defers to.
+	if summary.Owner == "" {
+		summary.Owner = channel.OwnerID
+	}
+	if created, err := util.Timestamp(channel.ID); err == nil {
+		summary.Created = util.FullDate(created)
+	}
+
+	return summary, true
+}
+
+// setGroupName renames the group the page is open on. An empty name is refused
+// here rather than sent: Revolt takes 1–32 characters, so the request could only
+// come back as a status code with nothing to say.
+func (a *App) setGroupName(name string) {
+	channelID := a.groupSettingsID
+
+	if strings.TrimSpace(name) == "" {
+		a.notify(ui.ToneWarning, "A group needs a name.")
+		return
+	}
+
+	a.background(
+		func() error { return a.client.EditChannel(channelID, a.groupEdit(channelID, name, nil)) },
+		a.notifyFailure("rename group "+channelID, "Could not rename the group."),
+	)
+}
+
+// setGroupDescription publishes the blurb, blank removing it.
+func (a *App) setGroupDescription(description string) {
+	channelID := a.groupSettingsID
+
+	a.background(
+		func() error { return a.client.EditChannel(channelID, a.groupEdit(channelID, "", &description)) },
+		a.notifyFailure("describe group "+channelID, "Could not save that description."),
+	)
+}
+
+// groupEdit is the whole channel as one field of it is being changed. The route
+// checks its one permission once and applies every field it was given, and
+// ChannelEdit refuses a blank name — so a description sent alone would clear the
+// name. Whichever half the caller is not changing is read back out of the store,
+// the same read-and-resend this account's own status line needs.
+func (a *App) groupEdit(channelID, name string, description *string) client.ChannelEdit {
+	channel, _ := a.store.Channel(channelID)
+
+	edit := client.ChannelEdit{Name: channel.Name, Description: channel.Description, NSFW: channel.NSFW}
+	if name != "" {
+		edit.Name = name
+	}
+	if description != nil {
+		edit.Description = *description
+	}
+
+	return edit
+}
+
+// setGroupNSFW moves the age gate. The one field of the channel edit card this
+// page took over, so a group has one surface rather than a card and a page both
+// naming it.
+func (a *App) setGroupNSFW(nsfw bool) {
+	channelID := a.groupSettingsID
+
+	edit := a.groupEdit(channelID, "", nil)
+	edit.NSFW = nsfw
+
+	a.background(
+		func() error { return a.client.EditChannel(channelID, edit) },
+		a.notifyFailure("age-gate group "+channelID, "Could not change that."),
+	)
+}
+
+// refreshGroupSettings rebuilds the page against the store, or takes it down when
+// the group has stopped being one this account is in. Call on the UI thread.
+func (a *App) refreshGroupSettings() {
+	if !a.groupSettingsOpen() {
+		return
+	}
+
+	// Gone, or nothing left on it to do — the owner can take ManageChannel and
+	// ManagePermissions off everybody in one edit, and the page would otherwise
+	// stay up stating a dozen values nobody can move.
+	if !a.canManageGroup(a.groupSettingsID) {
+		a.closeGroupSettings()
+		return
+	}
+
+	a.groupSettings.Rebuild()
+}
+
+// groupPageOn reports whether the page is up on one named group, which is what
+// decides whether a channel event is worth a rebuild.
+func (a *App) groupPageOn(channelID string) bool {
+	return channelID != "" && channelID == a.groupSettingsID && a.groupSettingsOpen()
+}
+
+// changeGroupIcon and removeGroupIcon are the one picture a group has. Both come
+// back as a ChannelUpdate, which repaints the sidebar row, the strip above the
+// page's rail and the row offering to remove one — so nothing is recorded here.
+func (a *App) changeGroupIcon() {
+	channelID := a.groupSettingsID
+
+	a.choosePicture("Choose a group icon", func(path, name string) {
+		a.background(
+			func() error { return a.client.SetGroupIcon(channelID, path, name) },
+			a.notifyFailure("set icon on group "+channelID, "Could not change the icon. It may be too large."),
+		)
+	})
+}
+
+func (a *App) removeGroupIcon() {
+	channelID := a.groupSettingsID
+
+	a.background(
+		func() error { return a.client.RemoveGroupIcon(channelID) },
+		a.notifyFailure("remove icon from group "+channelID, "Could not remove the icon."),
+	)
+}
+
+// setGroupPermissions publishes what everybody in the group may do. Unconfirmed,
+// like every other switch on a settings page: it is undone by setting it back,
+// and the grid states what it is now.
+func (a *App) setGroupPermissions(permissions domain.Permission) {
+	channelID := a.groupSettingsID
+
+	a.background(
+		func() error { return a.client.SetGroupPermissions(channelID, permissions) },
+		a.notifyFailure("set permissions on group "+channelID, "Could not save those permissions."),
+	)
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"time"
@@ -577,6 +578,9 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 		return
 	}
 
+	// The decode's peak is mapped whether or not the fetch succeeded.
+	a.scheduleHeapTrim()
+
 	if a.memberLoading == serverID {
 		a.memberLoading = ""
 		a.stopMemberWatchdog()
@@ -595,6 +599,25 @@ func (a *App) finishMembers(epoch uint64, serverID string, err error) {
 	}
 	a.refreshMemberList()
 }
+
+// scheduleHeapTrim returns a membership fetch's peak to the OS once nothing has
+// fetched for a while. Decoding a whole membership allocates a few times its
+// resting size, the runtime keeps the peak mapped, and nothing in the client
+// ever grows back into it — so without this a large server's worth of pages
+// stays on the process for the session. Debounced so a burst of servers trims
+// once; the forced collection runs on the timer's goroutine, not the UI's.
+// Call on the UI thread.
+func (a *App) scheduleHeapTrim() {
+	if a.heapTrim != nil {
+		a.heapTrim.Stop()
+	}
+	a.heapTrim = time.AfterFunc(heapTrimDelay, func() { debug.FreeOSMemory() })
+}
+
+// heapTrimDelay is how long after the last membership fetch the trim waits —
+// past the resolve-and-sort that follows the fetch, and long enough that a
+// reader clicking through servers coalesces into one collection.
+const heapTrimDelay = 15 * time.Second
 
 /* A conversation's own people */
 

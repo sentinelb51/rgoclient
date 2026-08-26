@@ -49,7 +49,10 @@ DAG and conventions.
    what makes presence work — `State.updateUser` drops an update for an account it
    has never seen, so an unfetched member could never be seen to come online.
    Lazy per-author resolution stays for what it does not reach: webhooks, people
-   who have left, a failed fetch, conversations.
+   who have left, a failed fetch, conversations. `finishMembers` also arms
+   `scheduleHeapTrim` (`App.heapTrim`, debounced 15 s): decoding a whole
+   membership peaks at a few times its resting size and the runtime keeps the
+   peak mapped, so the trim runs `debug.FreeOSMemory` once the fetches settle.
 4. **Mounting a channel.** `selectChannel` → cached messages, else
    `Client.LatestMessages` (deduped per channel); ack unread. Callers render from
    the *cache* (`displayCached`), never from a page captured off-thread.

@@ -275,6 +275,10 @@ type App struct {
 	memberWatchdog *time.Timer
 	memberFailed   map[string]bool
 
+	// heapTrim returns a membership fetch's peak to the OS once the dust
+	// settles — see scheduleHeapTrim. UI thread only.
+	heapTrim *time.Timer
+
 	/* Read-ack coalescing, see events.go */
 
 	ackTimer     *time.Timer

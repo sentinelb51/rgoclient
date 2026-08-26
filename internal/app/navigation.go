@@ -23,18 +23,15 @@ import (
 // members. Only the message area (index 2) stretches; the rest keep their fixed
 // widths, which is what makes the sections sit flush.
 //
-// Five layers sit over the row — the call island, notices, the tooltip (a server
-// icon's name has to overhang the narrow column it is anchored in) and the two
-// settings pages. None of them matches a pointer event bar the island and a
-// notice card themselves, so the row keeps receiving every click and hover.
-// Settings is a layer rather than an overlay because the modal layer holds one
-// thing at a time, and a confirmation raised from the page has to draw over it.
-// Only one of the two pages is ever up: a server's is opened from the sidebar the
-// client's own covers.
+// Six layers sit over the row — the call island, notices, the tooltip and the
+// three settings pages — and none matches a pointer event bar the island and a
+// notice card themselves, so the row keeps every click and hover. Settings is a
+// layer rather than an overlay because the modal layer holds one thing at a time
+// and a confirmation raised from a page has to draw over it; only one of the
+// three is ever up, each opening by closing the other two.
 //
-// The island is the lowest of the five: it is a standing report rather than an
-// answer to anything, so a notice pushed over it wins, and the settings page — a
-// surface of its own — covers it outright.
+// The island is the lowest of the six, being a standing report rather than an
+// answer to anything.
 func (a *App) buildUI() fyne.CanvasObject {
 	a.callIsland = ui.NewCallIsland(a.images, ui.CallIslandActions{
 		OnMute:    a.toggleMute,
@@ -57,7 +54,8 @@ func (a *App) buildUI() fyne.CanvasObject {
 	// it matters most, and it is click-through, so covering a settings page costs
 	// that page nothing.
 	return container.NewStack(a.mainRow, a.callIslandLayer, a.notices.Layer,
-		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer, a.modal.Layer)
+		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer, a.groupSettings.Layer,
+		a.modal.Layer)
 }
 
 /* Server sidebar */
@@ -574,7 +572,17 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 		)
 	}
 
-	if a.canEditChannel(channelID) {
+	// A group is configured on a page of its own rather than through the edit card:
+	// it has a picture and a say in what the people in it may do, neither of which
+	// is a field. So the two are alternatives — one surface per channel, never a
+	// card and a page both offering to rename it.
+	switch {
+	case a.canManageGroup(channelID):
+		items = append(items,
+			fyne.NewMenuItemWithIcon("Group settings", fynetheme.SettingsIcon(),
+				func() { a.openGroupSettings(channelID) }),
+		)
+	case a.canEditChannel(channelID):
 		items = append(items,
 			fyne.NewMenuItemWithIcon("Edit channel", fynetheme.SettingsIcon(),
 				func() { a.editChannel(channelID) }),
@@ -847,6 +855,11 @@ func (a *App) selectChannel(channelID string) {
 	a.stopTyping(a.currentChannelID)
 	a.leaveFriendsPage()
 
+	// A selection belongs to the channel it was picked in: the window is about to
+	// be replaced, and a set carried across the switch is one the reader can no
+	// longer see they hold. Before syncComposer, which reads the mode.
+	a.endSelection()
+
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)
 	permissions := a.store.Permissions(channelID)
@@ -900,6 +913,7 @@ func (a *App) selectChannel(channelID string) {
 func (a *App) clearChannelSelection() {
 	a.stopTyping(a.currentChannelID)
 	a.leaveFriendsPage()
+	a.endSelection()
 
 	a.currentChannelID = ""
 	a.clearMessages()

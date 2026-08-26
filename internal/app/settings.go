@@ -30,6 +30,7 @@ import (
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 /* Opening and closing */
@@ -42,6 +43,18 @@ func (a *App) openSettings() {
 
 	a.closeOverlay() // a lightbox left up would draw over the page it was opened from
 	a.settings.Open()
+	a.bindKeys()
+}
+
+// openSettingsAt opens the page on one section rather than on the last one shown,
+// for a notice offering to show what it is about. Call on the UI thread.
+func (a *App) openSettingsAt(section ui.SettingsSection) {
+	if a.settings == nil {
+		return
+	}
+
+	a.closeOverlay()
+	a.settings.OpenAt(section)
 	a.bindKeys()
 }
 
@@ -77,6 +90,8 @@ func (a *App) bindKeys() {
 		onEscape = a.closeSettings
 	case a.serverSettingsOpen():
 		onEscape = a.closeServerSettings
+	case a.groupSettingsOpen():
+		onEscape = a.closeGroupSettings
 	case a.messages != nil:
 		onEscape = a.escapeToPresent
 	}
@@ -132,15 +147,18 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 	applyAffinity()
 }
 
-// applyPacing hands the frame settings to the toolkit. Both are patches to the
-// patched Fyne — stock Fyne has no setting for either — and both are read by the
-// driver on its next tick, so neither needs a restart.
+// applyPacing hands the frame settings to the toolkit, and the caret with them:
+// all four are patches to the patched Fyne — stock Fyne has a setting for none of
+// them — and all four are read where they are used rather than at startup, so
+// none needs a restart. The caret is the one that does not apply at once: an
+// entry already focused keeps the caret it has until its next refresh.
 func applyPacing() {
-	performance := config.Current().Performance
+	settings := config.Current()
 
-	fyne.SetFrameRate(performance.FrameRate)
-	fyne.SetVSync(performance.VSync)
-	fyne.SetPartialRepaint(performance.PartialRepaint)
+	fyne.SetFrameRate(settings.Performance.FrameRate)
+	fyne.SetVSync(settings.Performance.VSync)
+	fyne.SetPartialRepaint(settings.Performance.PartialRepaint)
+	fyne.SetCursorBlink(settings.Behaviour.CursorBlink)
 }
 
 // applyAffinity restricts the process to the cores the setting names.
@@ -334,6 +352,7 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		Version: a.info.Version,
 		Build:   a.info.Build,
 
+		VoiceNodes:        a.voiceNodeList,
 		InputDevices:      a.inputDevices,
 		OutputDevices:     a.outputDevices,
 		StartInputMonitor: a.startInputMonitor,
@@ -379,8 +398,12 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 
 		CPUCores: settingsCPUCores,
 
+		UpdateStatus: func() ui.UpdateState { return a.updates },
+		CheckUpdate:  a.checkUpdates,
+
 		ConfigPath: settingsPath,
 		OpenPath:   a.openPath,
+		OpenLink:   a.openLink,
 	}
 }
 
@@ -842,5 +865,28 @@ func (a *App) openPath(path string) {
 	if err := a.fyne.OpenURL(link); err != nil {
 		log.Printf("open %s: %v", path, err)
 		a.notify(ui.ToneWarning, "Couldn't open that file.")
+	}
+}
+
+// openLink hands a URL to the system browser: openPath's counterpart for
+// something that is already a link rather than a file on this machine.
+//
+// The scheme is checked here as well as in OnLinkTapped, which is where a link
+// out of a message is judged and refused with a sentence. This is the last gate:
+// what OpenURL reaches runs whatever a scheme is registered to, and openPath is
+// the one caller allowed past it — a "file:" URL this client built for a folder
+// it owns is not somebody else's string.
+func (a *App) openLink(raw string) {
+	link, ok := util.SafeLink(raw)
+	if !ok {
+		log.Printf("refused link %q: not a web address", raw)
+		a.notify(ui.ToneWarning, "That isn't a link this client will open.")
+
+		return
+	}
+
+	if err := a.fyne.OpenURL(link); err != nil {
+		log.Printf("open %s: %v", raw, err)
+		a.notify(ui.ToneWarning, "Couldn't open that link.")
 	}
 }

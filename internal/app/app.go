@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/url"
 	"runtime"
 	"runtime/pprof"
 	"strings"
@@ -137,6 +138,7 @@ type App struct {
 	input           *ui.MessageInput
 	composerEntry   *fyne.Container     // the entry row, hidden where the account may not write
 	composerNotice  *ui.ComposerNotice  // what stands in its place then
+	selectionBar    *ui.SelectionBar    // and what stands there while messages are being picked
 	jumpBar         *ui.JumpBar         // the way back to the live tail, over that card
 	slowmodeBadge   *ui.SlowmodeBadge   // the cooldown chip above that card's top-right corner
 	typingIndicator *ui.TypingIndicator // who is composing, at the other end of that row
@@ -162,6 +164,12 @@ type App struct {
 	// rebuild rather than a widget tree.
 	serverSettings   *ui.ServerSettingsPage
 	serverSettingsID string
+
+	// groupSettings is the third, for one group conversation, and the same rule
+	// again: one page, opened on whichever group groupSettingsID names. Only ever
+	// one of the three layers is up — each opens by closing the other two.
+	groupSettings   *ui.GroupSettingsPage
+	groupSettingsID string
 
 	overlay       *ui.Overlay          // nil when nothing is showing
 	joinDialog    *ui.JoinServerDialog // the invite dialog on the modal layer, if any
@@ -320,6 +328,12 @@ type App struct {
 	// microphone.
 	callJoining bool
 
+	// voiceNodes is the media servers this instance offers, fetched once off Ready
+	// beside the node warm-up that shares its round trip. Only the settings page
+	// reads it, and only to offer the choice: which node a call actually dials is
+	// the client's, resolved from the setting this fills in.
+	voiceNodes []ui.VoiceNode
+
 	// callGen retires an in-flight join. dropCall bumps it and joinCall captures
 	// it, so a join whose connection lands *after* the reader gave up is closed
 	// rather than installed — otherwise it would be a live call with an open
@@ -377,6 +391,14 @@ type App struct {
 
 	info Info // version and build, for the About section
 
+	// updates is what the last update check found, and its Checking flag is the
+	// claim single-flighting the request — see updates.go. Not session state: what
+	// GitHub publishes outlives a sign-out, so nothing here is cleared with one.
+	// updateAsked is the once-per-run guard on the startup check, Ready being an
+	// event a reconnect repeats.
+	updates     ui.UpdateState
+	updateAsked bool
+
 	// stylesDirty records that the tables have moved under a client that has not
 	// been rebuilt from them yet, because the settings page was covering it.
 	stylesDirty bool
@@ -411,14 +433,20 @@ type App struct {
 	// settleTimer is the pending re-scroll to the bottom after a channel's tail
 	// is mounted, see settleAtBottom.
 	//
-	// editMarkTimer is the clock rewriting the "edited N ago" spans on the mounted
-	// rows, armed only while one of them carries a mark — see refreshEditMarks.
+	// timeSpanTimer is the clock re-reading what the mounted rows say about time —
+	// the "edited N ago" spans and a relative timestamp in a body — armed only
+	// while one of them still has something to re-read; see refreshTimeSpans.
 	loadingPage bool
 	jumped      bool
 	atOldest    bool
 
+	// refetching single-flights the request behind refetchMounted: an edit and the
+	// reaction after it are two events about one message, and a mounted message the
+	// cache cannot answer for costs a request each time one lands.
+	refetching map[string]bool
+
 	settleTimer   *time.Timer
-	editMarkTimer *time.Timer
+	timeSpanTimer *time.Timer
 }
 
 var _ ui.MessageActions = (*App)(nil)
@@ -435,6 +463,10 @@ func New(fyneApp fyne.App, info Info) *App {
 	settings := config.Current().Cache
 	assetDir := cache.CacheRoot(settings.AssetDir)
 
+	// Hoisted out of the literal below, which cannot name a field it has just set:
+	// the notice layer draws the faces on a message notice out of this same cache.
+	images := cache.NewImageCache(assetDir, cache.ImagesFolder, imageLimits(settings))
+
 	a := &App{
 		fyne:                fyneApp,
 		window:              window,
@@ -442,7 +474,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		client:              revolt,
 		store:               revolt.Store(),
 		assetDir:            assetDir,
-		images:              cache.NewImageCache(assetDir, cache.ImagesFolder, imageLimits(settings)),
+		images:              images,
 		emojis:              cache.NewImageCache(assetDir, cache.EmojisFolder, emojiLimits(settings)),
 		texts:               cache.NewTextCache(settings.TextPreviews),
 		sounds:              audio.NewEngine(),
@@ -450,7 +482,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		channelTop:          ui.VBoxNoSpacing(),
 		channelList:         container.NewVBox(),
 		tooltip:             ui.NewTooltip(),
-		notices:             ui.NewNoticeStack(),
+		notices:             ui.NewNoticeStack(images),
 		modal:               ui.NewModalNotice(),
 		collapsedCategories: make(map[string]bool),
 		unreadChannels:      make(map[string]bool),
@@ -469,6 +501,7 @@ func New(fyneApp fyne.App, info Info) *App {
 	// can stack: both pages have to survive the rebuild a style change asks for.
 	a.settings = ui.NewSettingsPage(a.settingsHooks())
 	a.serverSettings = ui.NewServerSettingsPage(a.serverSettingsHooks())
+	a.groupSettings = ui.NewGroupSettingsPage(a.groupSettingsHooks())
 
 	return a
 }
@@ -655,6 +688,58 @@ func (a *App) OnReply(message *domain.Message) {
 // OnAttachmentTapped opens an attachment in the viewer.
 func (a *App) OnAttachmentTapped(attachment *domain.File) {
 	a.showAttachmentViewer(attachment)
+}
+
+// linkPreviewLen is how much of a refused link is quoted back. Enough to
+// recognise what was tapped, short enough that a notice stays a sentence.
+const linkPreviewLen = 96
+
+// OnLinkTapped opens a link that arrived in content this client did not write.
+// Two things stand between the tap and the system opener, which is ShellExecute
+// on Windows and xdg-open elsewhere and runs whatever the scheme is registered
+// to: the scheme has to be one a page can live at, and a link whose visible text
+// names a different site than it opens has to be agreed to. Both are questions
+// about somebody else's string, so neither is a widget's to answer.
+func (a *App) OnLinkTapped(raw, label string) {
+	parsed, ok := util.SafeLink(raw)
+	if !ok {
+		a.notifyNotice(ui.Notice{
+			Tone:  ui.ToneWarning,
+			Title: "Link not opened",
+			Body: fmt.Sprintf("%s isn't a web address, and opening one would hand it to whatever this machine has registered for it.",
+				util.Truncate(strings.TrimSpace(raw), linkPreviewLen)),
+		})
+
+		return
+	}
+
+	if !util.LinkDeceives(label, parsed) {
+		a.openLink(raw)
+
+		return
+	}
+
+	a.confirm(ui.Confirm{
+		Title:     "This link goes somewhere else",
+		Body:      deceptiveLinkBody(label, parsed),
+		Action:    "Open anyway",
+		Tone:      ui.ToneWarning,
+		OnConfirm: func() { a.openLink(raw) },
+	})
+}
+
+// deceptiveLinkBody says how the link differs from what it reads as. A link with
+// no visible text of its own — the viewer's browser button — can still deceive,
+// by carrying a name in front of an "@" that the host is not.
+func deceptiveLinkBody(label string, parsed *url.URL) string {
+	host := util.LinkHost(parsed)
+
+	if label == "" || parsed.User != nil {
+		return fmt.Sprintf("It is written to read as somewhere else, and opens %s.", host)
+	}
+
+	return fmt.Sprintf("It reads as %s, and opens %s.",
+		util.Truncate(strings.TrimSpace(label), linkPreviewLen), host)
 }
 
 // OnUserTapped opens a profile; it lives in profile.go with the rest of them.

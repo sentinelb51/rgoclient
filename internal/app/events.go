@@ -26,29 +26,20 @@ func ackDelay() time.Duration { return config.Current().Behaviour.AckDelay() }
 /* The refresh queue */
 
 // refreshTarget names a whole surface a gateway event can invalidate. Each is a
-// rebuild that walks something — every server icon, every channel against its
-// permissions, every member, every emoji — so none is worth making once per
-// event.
+// walk — every server icon, every channel against its permissions, every member,
+// every emoji — so none is worth making once per event. Only these nine: what an
+// event changes about the *open* thing is a setter and a lookup, and deferring
+// those would feel slow to save nothing.
 //
-// Deliberately only these seven. What an event changes about the *open* thing — a
-// header, the channel glyph, whether the composer takes a message — is a setter
-// and a lookup, and deferring those would feel slow to save nothing.
+// refreshPresence is refreshMembers' cheap half, rebuilt from the membership
+// already resolved: presence moves a member between sections and not their name,
+// so not the order. refreshFriends is that same walk, queued only while the page
+// is open.
 //
-// refreshPresence is refreshMembers' cheap half: the same sidebar, rebuilt from
-// the membership already resolved rather than from a fresh walk. Presence moves
-// a member between sections and nothing else — not their name, so not the order
-// — which is what lets the two be different amounts of work.
-//
-// refreshFriends is queued only while that page is open, where it is the same
-// walk the member sidebar does and drawn the same way: presence moves nobody's
-// name, but a row's ring is the only thing on the page that says who is here.
-//
-// refreshServerPage is the settings page for one server, and it is apart from
-// refreshChannels because it is about a *named* server where that column is about
-// the open one: it rebuilds every section, permission grid included, and puts the
-// reader back at the top of the page. So it is queued only by an event naming the
-// server the page is on — somebody joining a call in the open server is not one.
-type refreshTarget uint8
+// refreshServerPage and refreshGroupPage are about a *named* server or group
+// rather than the open one, rebuild every section and put the reader back at the
+// top — so each is queued only by an event naming what its page is on.
+type refreshTarget uint16
 
 const (
 	refreshServers refreshTarget = 1 << iota
@@ -58,6 +49,8 @@ const (
 	refreshPresence
 	refreshFriends
 	refreshServerPage
+	refreshGroupPage
+	refreshPins
 )
 
 // refreshDelay is how long a queued rebuild waits for more of the same burst.
@@ -108,6 +101,12 @@ func (a *App) flushRefresh() {
 	// After the column, so the page is rebuilt against a sidebar that has settled.
 	if targets&refreshServerPage != 0 {
 		a.refreshServerSettings()
+	}
+	if targets&refreshGroupPage != 0 {
+		a.refreshGroupSettings()
+	}
+	if targets&refreshPins != 0 {
+		a.reloadPins()
 	}
 
 	if targets&refreshMembers != 0 {
@@ -220,7 +219,10 @@ func (a *App) onReady(event client.Ready) {
 	for _, channelID := range event.UnreadChannelIDs {
 		a.unreadChannels[channelID] = true
 	}
+	a.restoreDismissedMentions() // before the filter below, which is what it feeds
 	a.mentions = a.keepDismissed(event.MentionIDs)
+
+	a.resolveRelated(event.RelatedIDs)
 
 	a.showMainUI()
 
@@ -236,12 +238,19 @@ func (a *App) onReady(event client.Ready) {
 	// for far more than these and must not imply the walk.
 	a.refreshEmojiCandidates()
 
+	// One request to GitHub, once a run, for a client that is otherwise never told
+	// it has been superseded — see updates.go.
+	a.checkUpdatesOnReady()
+
 	// The voice node is instance configuration and cannot change under a running
 	// client, but it is resolved lazily — so without this the first join of a
 	// session pays a REST round trip for it at the moment somebody is waiting on a
 	// call. Nothing depends on the answer arriving.
+	// The same round trip answers both: the node this session will dial, and the
+	// list the settings page offers to override it with.
 	a.background(func() error {
 		a.client.WarmVoiceNode()
+		a.loadVoiceNodes()
 
 		return nil
 	}, func(error) {})
@@ -343,6 +352,14 @@ func (a *App) onMessageCreated(event client.MessageCreated) {
 // an edit and a reaction both arriving as the same "this message changed".
 func (a *App) onMessageUpdated(event client.MessageUpdated) {
 	a.refreshMessage(event.ChannelID, event.MessageID)
+	a.refreshPanelMessage(event.ChannelID, event.MessageID)
+
+	// A pin moved, so the panel listing them is now wrong. Queued, not called:
+	// Revolt sends one of these per message, and the panel follows a pin by
+	// asking again — see pins.go.
+	if event.Pinning && a.pins != nil && a.pinsChannelID == event.ChannelID {
+		a.queueRefresh(refreshPins)
+	}
 
 	if event.ReactedBy != "" {
 		a.alertReaction(event.ChannelID, event.MessageID, event.ReactedBy)
@@ -528,6 +545,12 @@ func (a *App) onChannelUpdated(event client.ChannelUpdated) {
 		a.queueRefresh(refreshServerPage)
 	}
 
+	// A group's own page is about this one channel, so the event names it directly:
+	// the name, the picture, the age gate and the permission value are all on it.
+	if a.groupPageOn(event.ChannelID) {
+		a.queueRefresh(refreshGroupPage)
+	}
+
 	if a.currentChannelID != event.ChannelID {
 		return
 	}
@@ -583,6 +606,13 @@ func (a *App) onChannelClosed(event client.ChannelClosed) {
 	// so there is nothing left to ask which server it was in.
 	if a.serverSettingsOpen() {
 		a.queueRefresh(refreshServerPage)
+	}
+
+	// Immediate rather than queued, for the reason a server left is: every section
+	// of that page is about a conversation the account is no longer in, and a
+	// settling window would leave it up saying so.
+	if a.groupPageOn(event.ChannelID) {
+		a.closeGroupSettings()
 	}
 
 	if a.currentChannelID != event.ChannelID {
@@ -643,6 +673,11 @@ func (a *App) onRecipientsChanged(event client.RecipientsChanged) {
 
 	if event.ChannelID == a.currentChannelID {
 		a.refreshRecipients()
+	}
+
+	// The group's own page counts them on its Facts card.
+	if a.groupPageOn(event.ChannelID) {
+		a.queueRefresh(refreshGroupPage)
 	}
 }
 

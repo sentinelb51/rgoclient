@@ -14,8 +14,10 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
+	"RGOClient/internal/ui/theme"
 )
 
 const sessionsFile = ".rgoclient_sessions.json"
@@ -28,11 +30,12 @@ const sessionsFile = ".rgoclient_sessions.json"
 // in..." forever, the one failure that looks like a hang rather than an error.
 const readyTimeout = 20 * time.Second
 
-// loginWindowWidth is how wide the screens before Ready are. There is no height
-// beside it: what they measure is what the window is resized to, the saved-session
-// list being as long as it is — a number here is a gap under one screen and a
-// scrollbar on the other.
-const loginWindowWidth = 300
+// loginMargin is the gutter around the card on the screens before Ready. Neither
+// dimension is a number here: the card names its own width (ui.NewAuthCard) and
+// what it measures is what the window is resized to, the saved-login list being
+// as long as it is — a fixed height is a gap under one screen and a scrollbar on
+// the other.
+const loginMargin = 24
 
 // registerURL is Stoat's signup page. Registration cannot happen in the client:
 // POST /auth/account/create takes an hCaptcha token, which needs a browser to
@@ -165,6 +168,7 @@ func (a *App) resetSessionState() {
 	// a.stale is about to swallow, leaving the section claiming to be fetching for
 	// as long as it stayed open. Closing it drops both halves.
 	a.closeServerSettings()
+	a.closeGroupSettings() // about a conversation the account signing out is in
 
 	// The profile and the fields the Account section was drawn from belong to the
 	// account signing out.
@@ -173,6 +177,7 @@ func (a *App) resetSessionState() {
 
 	a.unreadChannels = make(map[string]bool)
 	a.mentions = make(map[string][]string)
+	a.refetching = nil                            // claims belonging to a window this session was drawing
 	a.dismissedMentions = make(map[string]bool)   // another account's mentions are not these
 	a.collapsedCategories = make(map[string]bool) // keyed per server, so another account's keys are noise
 	a.serverIDs = nil
@@ -240,17 +245,12 @@ func (a *App) showLogin() {
 		log.Printf("load sessions: %v", err)
 	}
 
-	form, focus := a.buildLoginForm()
+	rows, focus := a.buildLoginForm()
 
-	content := container.NewVBox(
-		widget.NewLabelWithStyle("Authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewSeparator(),
-		a.buildSavedSessions(sessions),
-		widget.NewSeparator(),
-		form,
-		a.buildRegisterLink(),
-	)
-	a.mountLogin(content, focus)
+	rows = append([]fyne.CanvasObject{a.buildSavedSessions(sessions), ui.NewRowDivider()}, rows...)
+	rows = append(rows, a.buildRegisterLink())
+
+	a.mountLogin(ui.NewAuthCard("Sign in to Stoat", rows...), focus)
 }
 
 // mountLogin puts one of the screens before Ready up: the card, the modal notice
@@ -262,10 +262,16 @@ func (a *App) showLogin() {
 // The order is load-bearing twice over: a container reports a minimum only once
 // it holds something, and canvas focus is a property of the tree that is up.
 func (a *App) mountLogin(card fyne.CanvasObject, focus fyne.Focusable) {
-	content := container.NewStack(container.NewPadded(card), a.modal.Layer)
+	framed := ui.NewInset(container.NewCenter(card), loginMargin, loginMargin, loginMargin, loginMargin)
+	content := container.NewStack(framed, a.modal.Layer)
 
 	a.window.SetContent(content)
-	a.window.Resize(fyne.NewSize(loginWindowWidth, content.MinSize().Height))
+
+	size := content.MinSize()
+	a.window.Resize(fyne.NewSize(size.Width, size.Height))
+
+	// Nil for the screen with nothing to type into — the one held while a saved
+	// token is exchanged — which Fyne reads as "focus nothing".
 	a.window.Canvas().Focus(focus)
 }
 
@@ -290,30 +296,40 @@ func (a *App) reportLogin(tone ui.Tone, message string) {
 	a.notifyModal(tone, "%s", message)
 }
 
-// buildSavedSessions lists the saved sessions as clickable cards.
+// buildSavedSessions lists the saved sessions as clickable cards, under the same
+// caption a field carries. An account with none is told so rather than shown a
+// caption over nothing.
 func (a *App) buildSavedSessions(sessions []SavedSession) fyne.CanvasObject {
 	if len(sessions) == 0 {
-		return widget.NewLabel("No recent sessions")
+		return ui.NewAuthNote("No saved logins yet. Sign in below and this one is kept.")
 	}
 
-	cards := make([]fyne.CanvasObject, len(sessions))
+	rows := []fyne.CanvasObject{
+		ui.NewAuthCaption("Saved logins"),
+		ui.VerticalSpacer(theme.Sizes.DialogLabelGap),
+	}
 	for i, session := range sessions {
-		cards[i] = ui.NewSessionCard(a.images, session.Username, session.avatarURL(),
+		if i > 0 {
+			rows = append(rows, ui.VerticalSpacer(theme.Sizes.DialogLabelGap))
+		}
+
+		rows = append(rows, ui.NewSessionCard(a.images, session.Username, session.avatarURL(),
 			func() { a.loginWithToken(session) },
 			func() {
 				_ = RemoveSession(session.UserID)
 				a.showLogin()
 			},
-		)
+		))
 	}
 
-	return container.NewVBox(widget.NewLabel("Recent Sessions"), container.NewVBox(cards...))
+	return ui.VBoxNoSpacing(rows...)
 }
 
-// buildLoginForm builds the email/password form, handing back the field the
-// screen opens focused on. On success onReady swaps in the main UI and persists
+// buildLoginForm builds the email/password rows, handing back the field the
+// screen opens focused on. Rows rather than a container: they are spaced by the
+// card holding them, at the gap every other card sets its fields at. On success onReady swaps in the main UI and persists
 // the token; only failures come back here.
-func (a *App) buildLoginForm() (fyne.CanvasObject, fyne.Focusable) {
+func (a *App) buildLoginForm() ([]fyne.CanvasObject, fyne.Focusable) {
 	email := widget.NewEntry()
 	email.SetPlaceHolder("Email")
 
@@ -353,14 +369,11 @@ func (a *App) buildLoginForm() (fyne.CanvasObject, fyne.Focusable) {
 	email.OnSubmitted = func(string) { a.window.Canvas().Focus(password) }
 	password.OnSubmitted = func(string) { login.Tap() }
 
-	form := container.NewVBox(
-		widget.NewLabel("Enter credentials"),
-		ui.WithCaret(email),
-		ui.WithCaret(password),
+	return []fyne.CanvasObject{
+		ui.NewAuthField("Email", email),
+		ui.NewAuthField("Password", password),
 		login,
-	)
-
-	return form, email
+	}, email
 }
 
 /* The second factor */
@@ -405,44 +418,38 @@ func (a *App) showMFAChallenge(challenge client.Login) {
 	})
 	code.OnSubmitted = func(string) { submit.Tap() }
 
-	rows := []fyne.CanvasObject{
-		widget.NewLabelWithStyle("Two-factor authentication", fyne.TextAlignCenter, fyne.TextStyle{Bold: true}),
-		widget.NewSeparator(),
-	}
+	var rows []fyne.CanvasObject
 	if len(challenge.Methods) > 1 {
 		rows = append(rows, mfaMethodPicker(challenge.Methods, method, func(picked client.MFAMethod) {
 			method = picked
 		}))
 	}
 	rows = append(rows,
-		widget.NewLabel(mfaPrompt(method)),
-		ui.WithCaret(code),
+		ui.NewAuthNote(mfaPrompt(method)),
+		ui.NewAuthField("Code", code),
 		submit,
 		ui.NewButton("Cancel", a.showLogin),
 	)
 
-	a.mountLogin(container.NewVBox(rows...), code)
+	a.mountLogin(ui.NewAuthCard("Two-factor authentication", rows...), code)
 }
 
 // mfaMethodPicker offers the factors this account will accept. The labels are
 // what the user picks between, so the selection is mapped back rather than the
 // method being read off the string.
 func mfaMethodPicker(methods []client.MFAMethod, selected client.MFAMethod, onPick func(client.MFAMethod)) fyne.CanvasObject {
-	byLabel := make(map[string]client.MFAMethod, len(methods))
-	labels := make([]string, 0, len(methods))
-	for _, method := range methods {
-		byLabel[method.Label()] = method
-		labels = append(labels, method.Label())
+	labels := make([]string, len(methods))
+	for i, method := range methods {
+		labels[i] = method.Label()
 	}
 
-	picker := widget.NewSelect(labels, func(label string) {
-		if method, known := byLabel[label]; known {
-			onPick(method)
-		}
-	})
-	picker.SetSelected(selected.Label())
+	chosen := max(slices.Index(methods, selected), 0)
 
-	return picker
+	return ui.NewAuthField("Method", ui.NewAuthChoice(labels, chosen, func(index int) {
+		if index >= 0 && index < len(methods) {
+			onPick(methods[index])
+		}
+	}))
 }
 
 // preferredMethod picks what to ask for first. An authenticator app is what
@@ -480,7 +487,8 @@ func mfaPrompt(method client.MFAMethod) string {
 // stays on the "Logging in..." screen until onReady swaps in the main UI —
 // building it here too would construct the whole layout twice.
 func (a *App) loginWithToken(session SavedSession) {
-	a.window.SetContent(container.NewCenter(widget.NewLabel("Logging in...")))
+	a.mountLogin(ui.NewAuthCard("Signing in",
+		ui.NewAuthNote("Opening the session for "+session.Username+".")), nil)
 
 	go func() {
 		err := a.startWithToken(session)
@@ -582,7 +590,10 @@ func RemoveSession(userID string) error {
 	return saveSessions(kept)
 }
 
-// saveSessions writes the full session list to disk.
+// saveSessions writes the full session list to disk. Through config.WriteAtomic
+// rather than os.WriteFile: this one file holds every saved login, so a write cut
+// short is not one session lost but all of them, and the tokens in it are the
+// account — it is written at a mode nobody else on the machine can read.
 func saveSessions(sessions []SavedSession) error {
 	path, err := sessionsPath()
 	if err != nil {
@@ -594,7 +605,7 @@ func saveSessions(sessions []SavedSession) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0o600)
+	return config.WriteAtomic(path, data)
 }
 
 // sessionsPath returns the path to the saved-sessions file in the home dir.

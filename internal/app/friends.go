@@ -265,6 +265,26 @@ func (a *App) friendEntry(user domain.User) ui.FriendEntry {
 
 /* Keeping it current */
 
+// resolveRelated fetches the accounts Ready named a relationship with but did
+// not send. Revolt states the graph on the account's own record and sends the
+// people in it only where something else already needed them, so somebody
+// befriended long ago and not spoken to since is a relationship with no account
+// behind it — and this list, which is a walk of the cached accounts, has no row
+// to draw for one.
+//
+// Queued as a message author is, so it costs one batched fetch rather than a
+// request each, and flushAuthors refills the list as they land. Call on the UI
+// thread.
+func (a *App) resolveRelated(userIDs []string) {
+	for _, userID := range userIDs {
+		if a.store.HasUser(userID) {
+			continue
+		}
+
+		a.ensureAuthor("", userID)
+	}
+}
+
 // friendsChanged follows a relationship change into this list. The account may be
 // one State has never cached — EventUserRelationship carries the user and nothing
 // files it — so it is queued as a message author would be, and flushAuthors

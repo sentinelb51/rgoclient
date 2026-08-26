@@ -35,6 +35,13 @@ type Ready struct {
 	// Revolt kept them, which is oldest first. A channel with any is unread by
 	// that alone.
 	MentionIDs map[string][]string
+
+	// RelatedIDs is everybody this account stands in some relationship to, taken
+	// from the `relations` array on its own record — the whole graph, where
+	// User.Relationship is one value per account Ready happened to send. An ID here
+	// that State cannot name is somebody the friends list would otherwise never
+	// show, so the controller fetches them.
+	RelatedIDs []string
 }
 
 // Disconnected reports the session dropping. Fatal marks the credentials as
@@ -73,6 +80,14 @@ type MessageUpdated struct {
 	MessageID string
 
 	ReactedBy string
+
+	// Pinning marks an update that moved the pin flag, which is what the pins panel
+	// re-asks on. It is read off the wire rather than off the cache: a pinned
+	// message is routinely older than anything cached, and for one of those nothing
+	// else about this event says a pin was what changed. It says only that a pin
+	// moved, never which way — an unpin carries no field at all (see pinnedAfter),
+	// so the direction is only knowable for a message the cache holds.
+	Pinning bool
 }
 
 // MessageDeleted names messages already dropped from the cache. A moderation
@@ -292,6 +307,7 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 			ServerIDs:        make([]string, 0, len(event.Servers)),
 			UnreadChannelIDs: unread,
 			MentionIDs:       mentions,
+			RelatedIDs:       c.recordRelations(event),
 		}
 		for _, server := range event.Servers {
 			ready.ServerIDs = append(ready.ServerIDs, server.ID)
@@ -336,6 +352,67 @@ func (c *Client) registerSession(session *revoltgo.Session, epoch uint64) {
 
 		c.emit(epoch, SessionsChanged{})
 	})
+}
+
+// recordRelations files the whole relationship graph and answers with who is in
+// it. The graph is the `relations` array on the account's *own* record, which is
+// the only complete statement of it Revolt makes: User.Relationship is filled
+// per account, so a relationship is otherwise only known for the people Ready
+// happened to send, and somebody befriended long ago whose account nothing has
+// touched since is invisible.
+//
+// Filed into Client.relations rather than read at the point of use, since that
+// is what relationshipWith consults first and it survives State never caching
+// the account at all. The IDs go back to the controller, which fetches whoever
+// cannot be named — a relationship with nobody attached draws no row.
+func (c *Client) recordRelations(event *revoltgo.EventReady) []string {
+	self := c.selfIn(event)
+	if self == nil {
+		return nil
+	}
+
+	related := make([]string, 0, len(self.Relations))
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for _, relation := range self.Relations {
+		relationship := toRelationship(relation.Status)
+		if relation.ID == "" || relation.ID == self.ID || !relationship.Known() {
+			continue
+		}
+
+		c.relations[relation.ID] = relationship
+		related = append(related, relation.ID)
+	}
+
+	return related
+}
+
+// selfIn finds the account's own record in a Ready. Read out of the event rather
+// than out of State: revoltgo files the snapshot from a handler of its own, and
+// which of the two runs first is not something to depend on.
+//
+// By ID where State has already been built, and otherwise by the relations array
+// itself — Revolt sends one on the authenticated account's record and on no
+// other, so it identifies the record when nothing else here can.
+func (c *Client) selfIn(event *revoltgo.EventReady) *revoltgo.User {
+	selfID := c.store.SelfID()
+
+	var fallback *revoltgo.User
+	for _, user := range event.Users {
+		if user == nil {
+			continue
+		}
+		if selfID != "" && user.ID == selfID {
+			return user
+		}
+		if fallback == nil && len(user.Relations) > 0 {
+			fallback = user
+		}
+	}
+
+	return fallback
 }
 
 // revokedHere reports whether an Auth event names *this* session. The comparison
@@ -473,8 +550,19 @@ func (c *Client) registerMessages(session *revoltgo.Session, epoch uint64) {
 			return moved
 		})
 
-		if changed {
-			c.emit(epoch, MessageUpdated{ChannelID: event.Channel, MessageID: event.ID})
+		// Whether a *pin* moved is answered off the event rather than off what the
+		// cache did with it. A pinned message reaches as far back as anybody cared
+		// to keep one, so the pins panel routinely holds messages the cache never
+		// had — and for those reviseMessage finds nothing and reports no change, so
+		// an unpin made elsewhere would announce nothing at all.
+		pinning := event.Data.Pinned != nil || slices.Contains(event.Clear, revoltgo.MessageClearPinned)
+
+		if changed || pinning {
+			c.emit(epoch, MessageUpdated{
+				ChannelID: event.Channel,
+				MessageID: event.ID,
+				Pinning:   pinning,
+			})
 		}
 	})
 

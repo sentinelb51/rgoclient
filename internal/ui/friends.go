@@ -1,27 +1,19 @@
 package ui
 
-// The friends list: the row at the top of the home sidebar and the page it
-// opens. Revolt has no collection of relationships to fetch — each is filed on
-// the person it is with — so the controller resolves them and this draws what it
-// is handed.
+// The friends list: the row at the top of the home sidebar and the page it opens.
+// Revolt has no collection of relationships to fetch — each is filed on the person
+// it is with — so the controller resolves them and this draws what it is handed.
 //
-// A page where the messages go rather than a card on the modal layer. The list
-// is four sections deep and every row carries what can be done about somebody,
-// which is a surface rather than an answer to a question: a dialog holding it had
-// to cap its own height, crowd its rows and put a wall of labelled buttons down
-// its right-hand edge. Standing in the message area it is read the way the
-// settings page is — one column, centred, captioned sections — and it refills in
-// place, accepting a request being an action whose whole result is the list
-// moving.
+// A page where the messages go rather than a card on the modal layer: four
+// captioned sections whose rows each carry what can be done about somebody is a
+// surface rather than an answer to a question. It refills in place, accepting a
+// request being an action whose whole result is the list moving.
 //
-// A row is the settings page's invite card: the same island, the same rim, the
-// same outlined marks at its end. It is the one island in the client that is also
-// a target — the card *is* the row's primary action, writing to somebody where
-// there is a conversation to open — so it fills and lifts its rim under the
-// pointer where an invite card, the same island, only sits there. What is left at
-// its end is the rare and the destructive, which is the whole reason the common
-// one is not a button beside them. The picture leading the card is the way to the
-// profile, and the only part of the card that does not do what the card does.
+// A row is the settings page's invite card, and the one island here that is also
+// a target: the card *is* the row's primary action, writing to somebody, so it
+// fills and lifts its rim under the pointer. What is left at its end is the rare
+// and the destructive. The picture leading it is the way to the profile, and the
+// only part of the card that does not do what the card does.
 
 import (
 	"image/color"
@@ -208,9 +200,15 @@ type FriendsPage struct {
 	// category outlives a sidebar rebuild and dies with the session.
 	folded map[string]bool
 
+	// filter narrows the cards to the people whose name or handle contains it,
+	// folded to one case. It is the reader's, not the controller's: a refill
+	// redraws through whatever is standing, so presence moving somebody about does
+	// not put back a card the filter had taken away.
+	filter string
+
 	/* Asking somebody new */
 
-	handle *widget.Entry
+	handle *askEntry
 	ask    *Button
 }
 
@@ -250,11 +248,21 @@ func (p *FriendsPage) CreateRenderer() fyne.WidgetRenderer {
 // buildHeader is the row over the list, built as the message header is: the same
 // padding, the same bold label and the same kind of glyph in front of it, so
 // swapping one view for the other moves nothing along the top of the window.
+// The filter rides in the header's trailing edge rather than in the list: the
+// list is replaced wholesale on every refill, and presence alone refills it — a
+// field rebuilt under somebody typing would lose what they had typed, which is
+// the same reason the ask row stands where it does.
 func (p *FriendsPage) buildHeader() fyne.CanvasObject {
 	title := widget.NewLabelWithStyle("Friends", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
+	filter, _ := newFilterField("Filter by name", func(query string) {
+		p.filter = strings.ToLower(strings.TrimSpace(query))
+		p.redraw()
+	})
+
 	return container.NewPadded(
-		container.NewBorder(nil, nil, container.NewHBox(GroupIcon(), title), nil))
+		container.NewBorder(nil, nil, container.NewHBox(GroupIcon(), title),
+			NewFixedWidthContainer(theme.Sizes.FriendsFilterWidth, filter)))
 }
 
 // buildAsk is the row that reaches somebody the client has never drawn. Every
@@ -264,11 +272,27 @@ func (p *FriendsPage) buildHeader() fyne.CanvasObject {
 // up by the name *and* the discriminator and guesses at neither, so a bare name
 // finds nobody.
 //
-// It is a card in the column the list stands in rather than a control in the
-// header: it is one of the things this page is for, not a way to look at it.
+// It stands in the column the list is in rather than in the header: it is one of
+// the things this page is for, not a way to look at it. One surface, not a field
+// on a card — the button is seated *inside* the field's trailing edge, the two
+// being one control: type a handle, send it. A box in a box is what two of them
+// looked like.
 func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) fyne.CanvasObject {
-	p.handle = widget.NewEntry()
-	p.handle.SetPlaceHolder("name#0000")
+	field := canvas.NewRectangle(theme.Colors.ComposerBg)
+	field.CornerRadius = theme.Sizes.FriendsAskRadius
+	Outline(field)
+
+	p.handle = &askEntry{onFocus: func(focused bool) {
+		edge := theme.Colors.Outline
+		if focused {
+			edge = ToneInfo.Color()
+		}
+
+		field.StrokeColor = edge
+		field.Refresh()
+	}}
+	p.handle.ExtendBaseWidget(p.handle)
+	p.handle.PlaceHolder = "name#0000"
 
 	// Tap rather than the action: it is the only path that reads the disabled state,
 	// so Enter cannot send a second request while the first is out.
@@ -290,14 +314,48 @@ func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) 
 	})
 
 	gap := theme.Sizes.FriendsGap
-	padV, padH := theme.Sizes.FriendsCardPaddingV, theme.Sizes.FriendsCardPaddingH
+	inset := theme.Sizes.FriendsAskInset
 	padding := theme.Sizes.FriendsPagePadding
 
-	row := NewFillRow(0, vcenter(fieldSurface(p.handle)), HorizontalSpacer(gap), vcenter(p.ask))
-	card := container.NewStack(newIslandCard(),
-		NewMinHeightContainer(theme.Sizes.FriendsRowHeight, NewInset(row, padV, padV, padH, padH)))
+	// The mark starts where a card's picture does, so the bar and the rows under it
+	// share one left edge.
+	mark := newScaledIcon(tintedIcon(assets.SystemAddedIcon, theme.Colors.IslandHintText),
+		theme.Sizes.FriendsAskGlyph)
 
-	return friendsCentred(NewInset(card, padding, 0, padding, padding))
+	row := NewFillRow(2,
+		container.NewCenter(mark),
+		HorizontalSpacer(gap),
+		vcenter(WithCaret(p.handle)),
+		NewInset(p.ask, inset, inset, gap, 0),
+	)
+
+	bar := NewFixedHeightContainer(theme.Sizes.FriendsAskHeight,
+		container.NewStack(field,
+			NewInset(row, 0, 0, theme.Sizes.FriendsCardPaddingH, inset)))
+
+	// The gap below is the one between sections: the first heading is as far from
+	// the bar as it would be from the section before it.
+	return friendsCentred(NewInset(bar, padding, theme.Sizes.FriendsGroupGap, padding, padding))
+}
+
+// askEntry is the handle field, extended only to report the caret. The bar has no
+// focus edge of its own — WithCaret makes Fyne's input border transparent, which
+// is what stops every entry in the client drawing a box inside the one it is
+// already in — so the surface around it lights instead.
+type askEntry struct {
+	widget.Entry
+
+	onFocus func(focused bool)
+}
+
+func (e *askEntry) FocusGained() {
+	e.Entry.FocusGained()
+	e.onFocus(true)
+}
+
+func (e *askEntry) FocusLost() {
+	e.Entry.FocusLost()
+	e.onFocus(false)
 }
 
 // SetSections replaces the whole list, dropping the sections nobody is in. Call
@@ -319,20 +377,24 @@ func (p *FriendsPage) redraw() {
 	var rows []fyne.CanvasObject
 
 	for _, section := range p.sections {
-		if len(section.Entries) == 0 {
+		entries := p.matching(section.Entries)
+		if len(entries) == 0 {
 			continue
 		}
 		if len(rows) > 0 {
 			rows = append(rows, VerticalSpacer(theme.Sizes.FriendsGroupGap))
 		}
 
-		folded := p.isFolded(section)
-		rows = append(rows, p.header(section, folded))
+		// A filter unfolds what it matched: a section shut days ago holding the one
+		// person being searched for would otherwise answer with a heading and a count,
+		// which is a hit the reader cannot see.
+		folded := p.isFolded(section) && p.filter == ""
+		rows = append(rows, p.header(section, len(entries), folded))
 		if folded {
 			continue
 		}
 
-		for i, entry := range section.Entries {
+		for i, entry := range entries {
 			if i > 0 {
 				rows = append(rows, VerticalSpacer(theme.Sizes.FriendsCardGap))
 			}
@@ -340,7 +402,11 @@ func (p *FriendsPage) redraw() {
 		}
 	}
 
-	if len(rows) == 0 {
+	switch {
+	case len(rows) > 0:
+	case p.filter != "":
+		rows = []fyne.CanvasObject{p.note("Nobody here matches that.")}
+	default:
 		rows = []fyne.CanvasObject{p.empty()}
 	}
 
@@ -380,12 +446,14 @@ func (p *FriendsPage) fold(title string, shut bool) {
 // The explanation goes *inside* the heading rather than under it, so the whole
 // block is one target and a shut section costs one line instead of two: what it
 // explains is rows that are not on screen.
-func (p *FriendsPage) header(section FriendSection, folded bool) fyne.CanvasObject {
+// count is what is being drawn rather than what the section holds, so a filtered
+// heading says how many survived it rather than how many it is hiding.
+func (p *FriendsPage) header(section FriendSection, count int, folded bool) fyne.CanvasObject {
 	h := &friendsHeader{background: canvas.NewRectangle(color.Transparent)}
 	h.background.CornerRadius = theme.Sizes.ButtonRadius
 	h.onTap = func() { p.fold(section.Title, !folded) }
 
-	caption := newBoldText(strings.ToUpper(section.Title)+" — "+strconv.Itoa(len(section.Entries)),
+	caption := newBoldText(strings.ToUpper(section.Title)+" — "+strconv.Itoa(count),
 		theme.Colors.CategoryText, theme.Sizes.FriendsCaptionSize)
 
 	gap := theme.Sizes.FriendsGap
@@ -458,14 +526,38 @@ func (h *friendsHeader) fill(colour color.Color) {
 // an island of its own rather than a bare line, so a page with nothing to say is
 // still the page rather than a sentence floating on the background.
 func (p *FriendsPage) empty() fyne.CanvasObject {
-	line := newText("Nobody yet. Open somebody's profile to ask them to be friends.",
-		theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
+	return p.note("Nobody yet. Open somebody's profile to ask them to be friends.")
+}
+
+// note is one sentence on a card of its own, standing where the list would be.
+// The card rather than loose text: the page is a column of them, and a line
+// floating in that column reads as something that failed to draw.
+func (p *FriendsPage) note(text string) fyne.CanvasObject {
+	line := newText(text, theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
 
 	padV, padH := theme.Sizes.FriendsCardPaddingV, theme.Sizes.FriendsCardPaddingH
 
 	return container.NewStack(newIslandCard(),
 		NewMinHeightContainer(theme.Sizes.FriendsRowHeight,
 			NewInset(vcenter(NewEllipsisText(line)), padV, padV, padH, padH)))
+}
+
+// matching is a section's people narrowed to the filter. The whole slice is
+// returned unchanged where nothing is being filtered, so the ordinary redraw
+// allocates nothing.
+func (p *FriendsPage) matching(entries []FriendEntry) []FriendEntry {
+	if p.filter == "" {
+		return entries
+	}
+
+	kept := make([]FriendEntry, 0, len(entries))
+	for _, entry := range entries {
+		if matchesFilter(p.filter, entry.Name, entry.Handle) {
+			kept = append(kept, entry)
+		}
+	}
+
+	return kept
 }
 
 /* One person */

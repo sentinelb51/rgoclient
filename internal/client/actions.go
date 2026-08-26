@@ -25,6 +25,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"github.com/sentinelb51/revoltgo"
 
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 )
 
@@ -156,6 +157,33 @@ func (c *Client) DeleteMessage(channelID, messageID string) error {
 	}
 
 	return session.ChannelMessageDelete(channelID, messageID)
+}
+
+// DeleteMessages deletes a run of messages, a request per domain.MaxBulkDelete.
+// Two things separate it from DeleteMessage beyond the count: Revolt asks for
+// ManageMessages here even over the account's own words, authorship buying
+// nothing, and it refuses the whole batch over one message older than
+// domain.MaxBulkDeleteAge — so the age is a rule the *caller* applies, this
+// package having no ULID reader (see the DAG).
+//
+// The response is a bare 204 whatever matched. What actually went is the
+// BulkMessageDelete event, which names only the IDs that were in this channel —
+// one from elsewhere is dropped in silence — so nothing is written here, as with
+// a single delete.
+func (c *Client) DeleteMessages(channelID string, messageIDs []string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	for chunk := range slices.Chunk(messageIDs, domain.MaxBulkDelete) {
+		if err := session.ChannelMessageDeleteBulk(channelID,
+			revoltgo.ChannelMessageBulkDeleteParams{IDs: chunk}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // PinMessage pins or unpins a message and records the result, so the menu that
@@ -561,16 +589,43 @@ func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message,
 // route selects which limit messages come back before it orders them, so asking
 // for the oldest hundred and asking for the newest hundred reversed are two
 // different sets, and Relevance is a ranking nothing in the response carries.
-func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort, limit int) ([]*domain.Message, error) {
+//
+// after and before bound the answer in time, either of them zero for an end left
+// open. They are the *only* narrowing this route takes beyond the query — there
+// is no author, attachment or reaction filter on the wire — and they are also
+// the only way past the hundred it caps at, a narrower window being what a
+// hundred-and-first result has to be asked for through.
+func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort, limit int, after, before time.Time) ([]*domain.Message, error) {
 	query = trimTo(query, maxSearchQuery)
 	if query == "" {
 		return nil, nil
 	}
 
 	return c.search(channelID, sort, revoltgo.ChannelSearchParams{
-		Limit: limit,
-		Query: query,
+		Limit:  limit,
+		After:  boundaryID(after),
+		Before: boundaryID(before),
+		Query:  query,
 	})
+}
+
+// boundaryID is the message ID standing for an instant, the route bounding a
+// search by an ID rather than by a time. A ULID's leading 48 bits are its
+// millisecond and the rest is entropy, so one built with no entropy at all sorts
+// below every message minted in that same millisecond — which is what makes it
+// an inclusive floor for after and an exclusive ceiling for before. Zero time is
+// no bound, and the field is left off.
+func boundaryID(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	var id ulid.ULID
+	if err := id.SetTime(ulid.Timestamp(t)); err != nil {
+		return "" // a time outside the 48 bits a ULID has for one; no bound is better than a wrong one
+	}
+
+	return id.String()
 }
 
 // search is the request both share. IncludeUsers is named here for the same
@@ -1146,6 +1201,65 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 	return err
 }
 
+// SetGroupIcon uploads a picture and hands the ID to the same channel edit every
+// other field goes through. The bucket is `icons`, which is half of what
+// identifies a file to Revolt — an attachment's ID offered here is a file that
+// does not exist — and is the server's bucket too: an icon is an icon.
+//
+// Nothing is recorded. The picture returns as a ChannelUpdate the store answers
+// for, exactly as a rename does.
+func (c *Client) SetGroupIcon(channelID, path, name string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	id, err := uploadFile(session, revoltgo.FileTagIcons, path, name)
+	if err != nil {
+		return err
+	}
+
+	_, err = session.ChannelEdit(channelID, revoltgo.ChannelEditParams{Icon: id})
+
+	return err
+}
+
+// RemoveGroupIcon takes the picture off. A cleared field is a name in `remove`
+// and never a blank, every string on the params being omitzero.
+func (c *Client) RemoveGroupIcon(channelID string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	_, err := session.ChannelEdit(channelID, revoltgo.ChannelEditParams{
+		Remove: []revoltgo.ChannelClearType{revoltgo.ChannelClearIcon},
+	})
+
+	return err
+}
+
+// SetGroupPermissions publishes what everybody in a group may do. It is the same
+// route a server channel's default overwrite takes and it is **not** the same
+// request: `permissions_set_default.rs` branches on the channel being a group and
+// takes a plain value there where a server channel takes `{allow, deny}` — the
+// wrong shape is `InvalidOperation` and nothing more. Hence
+// GroupPermissionsSetDefault beside ChannelPermissionsSetDefault.
+//
+// The value is an *allow* set over a view-only floor: Revolt resolves a group as
+// `DEFAULT_PERMISSION_VIEW_ONLY | permissions`, so seeing the group and reading
+// it back cannot be taken away and the owner holds everything regardless. Gated
+// on ManagePermissions in the group.
+func (c *Client) SetGroupPermissions(channelID string, permissions domain.Permission) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	return session.GroupPermissionsSetDefault(channelID,
+		revoltgo.PermissionsSetDefaultParams{Permissions: int64(permissions)})
+}
+
 /* Calls */
 
 // voiceNodeProbe bounds how long the media servers are given to answer when
@@ -1168,17 +1282,17 @@ func (c *Client) pickVoiceNode(session *revoltgo.Session) (string, error) {
 		return cached, nil
 	}
 
-	config, err := session.Instance()
+	instance, err := session.Instance()
 	if err != nil {
 		return "", fmt.Errorf("instance config: %w", err)
 	}
 
-	live := config.Features.LiveKit
+	live := instance.Features.LiveKit
 	if !live.Enabled || len(live.Nodes) == 0 {
 		return "", errors.New("this instance offers no voice servers")
 	}
 
-	name := nearestVoiceNode(live.Nodes)
+	name := chosenVoiceNode(live.Nodes, config.Current().Voice.Node)
 	if name == "" {
 		return "", errors.New("the instance named no voice server")
 	}
@@ -1188,6 +1302,55 @@ func (c *Client) pickVoiceNode(session *revoltgo.Session) (string, error) {
 	c.mu.Unlock()
 
 	return name, nil
+}
+
+// VoiceNodes is the media servers this instance offers, for the settings page to
+// put in front of the reader. A request, and not a cheap one — it is the whole
+// instance config — so the controller asks once and holds the answer.
+func (c *Client) VoiceNodes() ([]domain.VoiceNode, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+
+	instance, err := session.Instance()
+	if err != nil {
+		return nil, fmt.Errorf("instance config: %w", err)
+	}
+
+	live := instance.Features.LiveKit
+	if !live.Enabled {
+		return nil, nil
+	}
+
+	nodes := make([]domain.VoiceNode, 0, len(live.Nodes))
+	for _, node := range live.Nodes {
+		if node.Name == "" {
+			continue
+		}
+
+		nodes = append(nodes, domain.VoiceNode{Name: node.Name, URL: node.PublicURL})
+	}
+
+	return nodes, nil
+}
+
+// chosenVoiceNode honours the reader's pick where the instance still offers it,
+// and measures otherwise. A named node that has gone is not an error: the
+// instance's node list is its own to change, and refusing to join over a setting
+// somebody made months ago would be a call that fails for no visible reason.
+func chosenVoiceNode(nodes []revoltgo.InstanceConfigVoiceNode, want string) string {
+	if want != "" {
+		if slices.ContainsFunc(nodes, func(node revoltgo.InstanceConfigVoiceNode) bool {
+			return node.Name == want
+		}) {
+			return want
+		}
+
+		log.Printf("client: voice node %q is not offered by this instance; measuring instead", want)
+	}
+
+	return nearestVoiceNode(nodes)
 }
 
 // WarmVoiceNode resolves the node ahead of anybody asking for a call, so the
@@ -1650,19 +1813,16 @@ const MaxCategoryTitle = 32
 var ErrCategoryTitleEmpty = errors.New("category title is empty")
 
 // SetServerCategories publishes a server's category structure. Unlike every other
-// server field this is a **replacement**: the route takes the whole arrangement
-// and stores it as sent, so moving one channel means sending every category the
-// server has.
+// server field this is a **replacement**: the route stores the whole arrangement
+// as sent, so moving one channel means sending every category the server has.
 //
-// What is sent has to be the server's own arrangement rearranged rather than the
-// part of it this account can see. Revolt drops any channel it cannot find in the
-// server and refuses the edit outright if one appears twice, so a channel hidden
-// from the reader must still be carried through the move that passes it — leaving
-// it out files it out of its category.
+// It must be the server's own arrangement rearranged, not the part of it this
+// account can see: Revolt drops a channel it cannot find and refuses the edit if
+// one appears twice, so a channel hidden from the reader still has to be carried
+// through the move that passes it.
 //
-// A category with no ID is a new one. Which ID it gets is the client's to choose,
-// Revolt asking only that it be unique in the server, so a ULID is minted here as
-// every other Revolt client does.
+// A category with no ID is a new one, and which ID it gets is the client's to
+// choose — Revolt asks only that it be unique in the server.
 //
 // Categories is `omitzero`, so no categories at all is a name in `remove` rather
 // than an empty array — the shape a description already takes.
@@ -2569,8 +2729,8 @@ func (c *Client) UserProfile(userID string) (domain.UserProfile, error) {
 	return out, nil
 }
 
-// Mutual fetches the servers and friends this account has in common with
-// somebody, a request of its own made once the dialog is up.
+// Mutual fetches the servers, friends and groups this account has in common
+// with somebody, a request of its own made once the dialog is up.
 //
 // Session.UserMutual decodes one object into a *slice* of them, a shape the
 // response can never take, so the call could only ever fail — hence sending it
@@ -2586,5 +2746,9 @@ func (c *Client) Mutual(userID string) (domain.Mutual, error) {
 		return domain.Mutual{}, err
 	}
 
-	return domain.Mutual{UserIDs: response.Users, ServerIDs: response.Servers}, nil
+	return domain.Mutual{
+		UserIDs:    response.Users,
+		ServerIDs:  response.Servers,
+		ChannelIDs: response.Channels,
+	}, nil
 }

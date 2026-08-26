@@ -683,6 +683,15 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		}
 	case domain.ChannelGroup:
 		out.OwnerID = channel.Owner
+
+		// A group that has never been given one reads as Revolt's own conversation
+		// preset, which is what it resolves as — never as zero, which is the value
+		// somebody sets to deny everything.
+		out.Permissions = permissionInConversation
+		if channel.Permissions != nil {
+			out.Permissions = domain.Permission(*channel.Permissions)
+		}
+
 		if channel.Icon != nil {
 			out.AvatarURL = channel.Icon.URL(avatarSize)
 		}

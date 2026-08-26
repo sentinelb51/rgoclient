@@ -29,6 +29,13 @@ var Colors = struct {
 
 	MessageEditBackground color.Color
 
+	MessageSelectedBackground      color.Color
+	MessageSelectedHoverBackground color.Color
+	MessageSelectTickEdge          color.Color
+	MessageSelectTickOn            color.Color
+	MessageSelectTickOff           color.Color
+	MessageSelectMark              color.Color
+
 	ChannelHoverBackground color.Color
 	ChannelSelectedBg      color.Color
 	ServerDefaultBg        color.Color
@@ -46,6 +53,9 @@ var Colors = struct {
 	SettingsBackText       color.Color
 	TooltipBg              color.Color
 	NoticeBg               color.Color
+	NoticeCardBg           color.Color
+	NoticeCardOutline      color.Color
+	NoticeCardBody         color.Color
 	SliderCardTrack        color.Color
 	SliderDetent           color.Color
 	OverlayBackdrop        color.Color
@@ -209,6 +219,11 @@ var Colors = struct {
 	ButtonDisabledBg   color.Color
 	ButtonDisabledText color.Color
 
+	// ButtonFocusRing is the edge a button wears when it is what Tab has reached.
+	// Its own entry rather than the accent: it has to be legible against a tone
+	// fill as well as against the plain surface, which the accent is not.
+	ButtonFocusRing color.Color
+
 	/* Chips */
 
 	ChipBg      color.Color
@@ -282,6 +297,21 @@ var Colors = struct {
 	// for, where a jump answers one they did.
 	MessageEditBackground: color.RGBA{R: 34, G: 52, B: 66, A: 255}, // #223442
 
+	// A row picked for a bulk delete. It is a *rest* colour like the mention wash
+	// and moves with the pointer the same way — but it is the accent rather than
+	// the warm ramp, the set being something the reader built and is about to act
+	// on, and it outranks the mention wash for exactly that reason.
+	MessageSelectedBackground:      color.RGBA{R: 38, G: 46, B: 76, A: 255}, // #262E4C
+	MessageSelectedHoverBackground: color.RGBA{R: 47, G: 57, B: 94, A: 255}, // #2F395E
+
+	// The tick itself: an empty ring until it is picked, the accent filled behind a
+	// dark mark once it is, and the disabled grey on a row Revolt's week-long
+	// window or this channel's permissions put out of reach.
+	MessageSelectTickEdge: color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274
+	MessageSelectTickOn:   color.RGBA{R: 91, G: 124, B: 250, A: 255},  // #5B7CFA accent
+	MessageSelectTickOff:  color.RGBA{R: 58, G: 63, B: 78, A: 255},    // #3A3F4E
+	MessageSelectMark:     color.RGBA{R: 255, G: 255, B: 255, A: 255}, // #FFFFFF, over the accent
+
 	ChannelHoverBackground: color.RGBA{R: 38, G: 43, B: 58, A: 255},   // #262B3A
 	ChannelSelectedBg:      color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
 	ServerDefaultBg:        color.RGBA{R: 43, G: 49, B: 66, A: 255},   // #2B3142
@@ -317,9 +347,19 @@ var Colors = struct {
 	SettingsBackText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	TooltipBg:        color.RGBA{R: 8, G: 9, B: 12, A: 240},      // darker than any column it floats over
 	NoticeBg:         color.RGBA{R: 43, G: 49, B: 66, A: 250},    // #2B3142, lifted off whatever it floats over
-	OverlayBackdrop:  color.RGBA{R: 8, G: 9, B: 12, A: 200},      // dim behind a modal
-	ViewerCardBg:     color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card
-	ViewerBodyBg:     color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well
+	// The transient card is the call island's surface rather than the centred
+	// notice's: both float over whatever is being read, and two floating cards a
+	// shade apart read as a mistake. Darker than anything below it, with an edge
+	// lighter than the client's one hairline — that hairline is where two surfaces
+	// *meet*, and drawn here it would be a groove cut into the column behind.
+	// Opaque, unlike the centred notice: the tone's disc is mixed *against* it (see
+	// theme.Mix), which a translucent surface would make a guess rather than a sum.
+	NoticeCardBg:      color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C
+	NoticeCardOutline: color.RGBA{R: 52, G: 60, B: 80, A: 255},    // #343C50
+	NoticeCardBody:    color.RGBA{R: 168, G: 176, B: 191, A: 255}, // #A8B0BF, quieter than the heading
+	OverlayBackdrop:   color.RGBA{R: 8, G: 9, B: 12, A: 200},      // dim behind a modal
+	ViewerCardBg:      color.RGBA{R: 31, G: 35, B: 48, A: 255},    // #1F2330, the modal card
+	ViewerBodyBg:      color.RGBA{R: 19, G: 21, B: 28, A: 255},    // #13151C, inset well
 
 	// A slider's own track is the colour a lifted card is, so on one it has to be
 	// darker than the surface rather than lighter: unfilled travel reads as a
@@ -584,6 +624,11 @@ var Colors = struct {
 	ButtonDisabledBg:   color.RGBA{R: 29, G: 33, B: 44, A: 255},    // #1D212C
 	ButtonDisabledText: color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 
+	// Near-white rather than the accent, so the ring reads against a Danger fill
+	// as well as against the plain surface — the two places a focused button is
+	// most likely to be answered from the keyboard.
+	ButtonFocusRing: color.RGBA{R: 247, G: 248, B: 251, A: 255}, // #F7F8FB
+
 	// A chip is a surface in its own right, so it takes the same slate the banner
 	// does and wears the shared hairline: its text is whatever colour the thing it
 	// names carries, and a coloured word alone on the card read as loose text.
@@ -797,6 +842,8 @@ var Sizes = struct {
 	MessageTimestampSize          float32
 	MessagePinMarkSize            float32
 	MessageEditMarkSize           float32
+	MessageSelectTickSize         float32
+	MessageSelectMarkSize         float32
 	ReactionEmojiSize             float32
 	ReactionCountSize             float32
 	ReactionRadius                float32
@@ -923,6 +970,12 @@ var Sizes = struct {
 	JumpBarTextSize     float32
 	JumpBarDockGap      float32
 
+	// The bar standing where the composer's entry is while messages are being
+	// picked for a bulk delete.
+	SelectionBarTextSize float32
+	SelectionBarNoteSize float32
+	SelectionBarGap      float32
+
 	/* User profiles */
 
 	ProfileCardWidth          float32
@@ -959,6 +1012,11 @@ var Sizes = struct {
 	ButtonPaddingH  float32
 	ButtonMinWidth  float32
 	ButtonMinHeight float32
+
+	// ButtonFocusWidth is the ring Tab draws. Wider than the hairline on purpose:
+	// at one pixel a focused plain button and an unfocused one differ only in the
+	// colour of an edge nobody is looking at.
+	ButtonFocusWidth float32
 
 	// An icon button with an edge: the square it occupies, the mark inside it, and
 	// the gap between two of them in a row. Sized apart from a text button — what
@@ -1017,12 +1075,24 @@ var Sizes = struct {
 
 	/* Notices and confirmations */
 
-	NoticeWidth       float32
-	NoticeRadius      float32
-	NoticeEdgeWidth   float32
-	NoticeIconSize    float32
-	NoticePaddingV    float32
-	NoticePaddingH    float32
+	NoticeWidth      float32
+	NoticeRadius     float32
+	NoticeShadowBlur float32
+	NoticePaddingV   float32
+	NoticePaddingH   float32
+
+	// The disc the tone's mark stands on at the card's leading edge, its ring, and
+	// the gap between it and the heading.
+	NoticeBadgeSize float32
+	NoticeBadgeRing float32
+	NoticeBadgeGap  float32
+	NoticeIconSize  float32
+
+	// NoticeAvatarSize is the face standing in that same slot on a notice about a
+	// person rather than an outcome. Larger than the disc: a glyph is legible at any
+	// size and a face is not.
+	NoticeAvatarSize float32
+
 	NoticeStackMargin float32
 	NoticeTitleSize   float32
 	NoticeBodySize    float32
@@ -1050,6 +1120,10 @@ var Sizes = struct {
 	/* Login */
 
 	SessionCardAvatarSize float32
+	SessionCardRadius     float32
+	SessionCardPadding    float32
+	SessionCardGap        float32
+	SessionCardNameSize   float32
 	WindowDefaultWidth    float32
 	WindowDefaultHeight   float32
 
@@ -1065,19 +1139,14 @@ var Sizes = struct {
 	ViewerCornerRadius float32
 	ViewerTitleSize    float32
 
-	/* Join-server dialog */
-
-	JoinDialogWidth        float32
-	JoinDialogCornerRadius float32
-	JoinDialogTextSize     float32
-
-	/* Channel editor, and the fields any card holds */
+	/* Every card on the modal layer, and the fields it holds */
 
 	ChannelDialogWidth float32
 	DialogPadding      float32
 	DialogLabelSize    float32
 	DialogLabelGap     float32
 	DialogFieldGap     float32
+	DialogDetailSize   float32
 
 	/* Friends page */
 
@@ -1087,6 +1156,11 @@ var Sizes = struct {
 	FriendsPageWidth   float32
 	FriendsPagePadding float32
 
+	// FriendsFilterWidth is the box in the header's trailing edge. Fixed rather
+	// than filling: the header is a title and this, and a field taking the whole
+	// remainder of a maximised window reads as the page's subject.
+	FriendsFilterWidth float32
+
 	FriendsRowHeight    float32
 	FriendsCardPaddingH float32
 	FriendsCardPaddingV float32
@@ -1094,6 +1168,15 @@ var Sizes = struct {
 	FriendsNameSize     float32
 	FriendsHandleSize   float32
 	FriendsCaptionSize  float32
+
+	// The ask bar at the head of the page: one field surface with the button seated
+	// inside its trailing edge, so the two read as one control rather than a box in
+	// a box. FriendsAskInset is the clearance around that button, and the height is
+	// chosen against it — ButtonMinHeight plus twice the inset.
+	FriendsAskHeight float32
+	FriendsAskRadius float32
+	FriendsAskInset  float32
+	FriendsAskGlyph  float32
 
 	// FriendsGap separates what is on a row, FriendsCardGap one card from the next
 	// and FriendsGroupGap one section from the one before it.
@@ -1121,6 +1204,10 @@ var Sizes = struct {
 	SearchFieldHeight float32
 	SearchFieldRadius float32
 	SearchFieldGlyph  float32
+
+	SearchDrawerPadding float32
+	SearchDateWidth     float32
+	SearchLabelSize     float32
 
 	IslandChipHeight   float32
 	IslandChipRadius   float32
@@ -1336,6 +1423,8 @@ var Sizes = struct {
 	MessageTimestampSize:          12,
 	MessagePinMarkSize:            11,
 	MessageEditMarkSize:           10,
+	MessageSelectTickSize:         20,
+	MessageSelectMarkSize:         12,
 
 	// A reaction chip. The emoji is drawn a little above body size — it is the
 	// whole of what the chip says, and a custom one is a picture of that side —
@@ -1520,6 +1609,10 @@ var Sizes = struct {
 	JumpBarTextSize: 13,
 	JumpBarDockGap:  6,
 
+	SelectionBarTextSize: 14,
+	SelectionBarNoteSize: 12,
+	SelectionBarGap:      10,
+
 	// The avatar overhangs the banner by half its height, so the banner is sized
 	// against it: too short and the avatar hangs off the card's top edge.
 	ProfileCardWidth:          320,
@@ -1560,6 +1653,8 @@ var Sizes = struct {
 	ButtonMinWidth:  76,
 	ButtonMinHeight: 32,
 
+	ButtonFocusWidth: 2,
+
 	// Square, and the same height as a text button so a row can hold either. The
 	// mark is a little over half of it: any larger and the edge reads as a box drawn
 	// round an icon rather than as the button's own shape.
@@ -1598,12 +1693,21 @@ var Sizes = struct {
 	TooltipPaddingH: 9,
 	TooltipGap:      8,
 
-	NoticeWidth:       320,
-	NoticeRadius:      8,
-	NoticeEdgeWidth:   3,
-	NoticeIconSize:    18,
-	NoticePaddingV:    10,
-	NoticePaddingH:    12,
+	NoticeWidth:  320,
+	NoticeRadius: 10,
+	// The same spread the call island floats on: how far a shadow reaches is the
+	// whole of how high a card reads as floating, and this one hangs over a column
+	// that is being read.
+	NoticeShadowBlur: 22,
+	NoticePaddingV:   11,
+	NoticePaddingH:   13,
+
+	NoticeBadgeSize:  30,
+	NoticeBadgeRing:  1,
+	NoticeBadgeGap:   11,
+	NoticeIconSize:   16,
+	NoticeAvatarSize: 36,
+
 	NoticeStackMargin: 12,
 	NoticeTitleSize:   13,
 	NoticeBodySize:    12,
@@ -1629,6 +1733,10 @@ var Sizes = struct {
 	ModalNoticeBodyGap:  6,
 
 	SessionCardAvatarSize: 32,
+	SessionCardRadius:     6,
+	SessionCardPadding:    8,
+	SessionCardGap:        10,
+	SessionCardNameSize:   13,
 	WindowDefaultWidth:    1200,
 	WindowDefaultHeight:   600,
 
@@ -1642,18 +1750,16 @@ var Sizes = struct {
 	ViewerCornerRadius: 6,
 	ViewerTitleSize:    13,
 
-	JoinDialogWidth:        320,
-	JoinDialogCornerRadius: 6,
-	JoinDialogTextSize:     12,
-
 	ChannelDialogWidth: 380,
 	DialogPadding:      14,
 	DialogLabelSize:    11,
 	DialogLabelGap:     5,
 	DialogFieldGap:     14,
+	DialogDetailSize:   12,
 
 	FriendsPageWidth:   620,
 	FriendsPagePadding: 20,
+	FriendsFilterWidth: 220,
 
 	FriendsRowHeight:    56,
 	FriendsCardPaddingH: 14,
@@ -1662,6 +1768,11 @@ var Sizes = struct {
 	FriendsNameSize:     15,
 	FriendsHandleSize:   12,
 	FriendsCaptionSize:  11,
+
+	FriendsAskHeight: 44,
+	FriendsAskRadius: 12,
+	FriendsAskInset:  6,
+	FriendsAskGlyph:  16,
 
 	FriendsGap:      10,
 	FriendsCardGap:  8,
@@ -1685,6 +1796,10 @@ var Sizes = struct {
 	SearchFieldHeight: 38,
 	SearchFieldRadius: 10,
 	SearchFieldGlyph:  16,
+
+	SearchDrawerPadding: 10,
+	SearchDateWidth:     148,
+	SearchLabelSize:     11,
 
 	IslandChipHeight:   26,
 	IslandChipRadius:   13,

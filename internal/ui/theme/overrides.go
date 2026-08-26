@@ -262,6 +262,22 @@ func Lighten(c color.Color, amount float64) color.Color {
 	return color.RGBA{R: lift(rgba.R), G: lift(rgba.G), B: lift(rgba.B), A: rgba.A}
 }
 
+// Mix walks a colour amount of the way towards another, keeping the first's
+// alpha. It is how a tone is drawn *on* a surface rather than through it: the
+// palette writes straight alpha into color.RGBA and every painter reads one back
+// premultiplied (see toRGBA), so a fill faded towards nothing is the one thing
+// that cannot be handed to a canvas object — it composites as a different colour
+// entirely. Mixing against the surface the object stands on is exact, and it
+// follows an accent override, which a hand-picked palette entry would not.
+func Mix(base, towards color.Color, amount float64) color.Color {
+	from, to := toRGBA(base), toRGBA(towards)
+	step := func(a, b uint8) uint8 {
+		return uint8(float64(a) + (float64(b)-float64(a))*amount)
+	}
+
+	return color.RGBA{R: step(from.R, to.R), G: step(from.G, to.G), B: step(from.B, to.B), A: from.A}
+}
+
 // toRGBA reads a colour's channels with its alpha left *straight*, which is what
 // every caller here needs and what the color.Color interface will not give.
 //

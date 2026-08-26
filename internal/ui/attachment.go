@@ -38,16 +38,12 @@ const (
 // No left spacer — attachments share the body's content padding with the header
 // above, so a preview lines up flush with the message text.
 func buildAttachments(deps Deps, attachments []*domain.File, onMenu func(*fyne.PointEvent)) *fyne.Container {
-	rows := make([]fyne.CanvasObject, 0, max(len(attachments)*2-1, 0))
-
-	for i, attachment := range attachments {
-		if i > 0 {
-			rows = append(rows, VerticalSpacer(theme.Sizes.MessageAttachmentSpacing))
-		}
+	rows := make([]fyne.CanvasObject, 0, len(attachments))
+	for _, attachment := range attachments {
 		rows = append(rows, container.NewHBox(buildAttachment(deps, attachment, onMenu)))
 	}
 
-	return container.NewVBox(rows...)
+	return stackSpaced(theme.Sizes.MessageAttachmentSpacing, rows...)
 }
 
 // buildAttachment renders one attachment as an image, a text preview or a generic

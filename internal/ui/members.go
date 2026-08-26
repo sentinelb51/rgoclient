@@ -310,37 +310,6 @@ func visibleRange(offsets []float32, y, height float32, overscan int) (first, la
 	return max(first-overscan, 0), min(last+overscan, n)
 }
 
-// memberSlot is where one mounted entry goes. Index-aligned with the container's
-// Objects, which is why the two are always rebuilt together.
-type memberSlot struct{ top, height float32 }
-
-// memberListLayout places mounted entries at the absolute position their index
-// has in the whole model, and reports that model's height.
-//
-// MinSize is O(1) and **must stay so**: container.Scroll asks its content for a
-// minimum on every offset write, so a walk here would put the cost of the list
-// back on the scroll path. The width is zero for the sidebar reason — a vertical
-// scroll takes its content's minimum width as its own.
-type memberListLayout struct {
-	slots []memberSlot
-	total float32
-}
-
-func (l *memberListLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	for i, child := range objects {
-		if i >= len(l.slots) {
-			return
-		}
-
-		child.Resize(fyne.NewSize(size.Width, l.slots[i].height))
-		child.Move(fyne.NewPos(0, l.slots[i].top))
-	}
-}
-
-func (l *memberListLayout) MinSize([]fyne.CanvasObject) fyne.Size {
-	return fyne.NewSize(0, l.total)
-}
-
 /* The list */
 
 // MemberList is the member sidebar: a scrolling list that mounts only what is on
@@ -357,7 +326,7 @@ type MemberList struct {
 	deps    Deps
 	scroll  *ObservableScroll
 	content *fyne.Container
-	layout  *memberListLayout
+	layout  *slotLayout
 	status  *memberStatus
 
 	// column is the strip stacked over the scroller, held because showing or
@@ -381,7 +350,7 @@ type MemberList struct {
 func NewMemberList(deps Deps) *MemberList {
 	w := &MemberList{
 		deps:    deps,
-		layout:  &memberListLayout{},
+		layout:  &slotLayout{},
 		status:  newMemberStatus(),
 		mounted: make(map[int]fyne.CanvasObject),
 		rows:    make(map[string]*MemberRow),
@@ -489,10 +458,10 @@ func (w *MemberList) mount(force bool) {
 	}
 
 	objects := make([]fyne.CanvasObject, 0, last-first)
-	slots := make([]memberSlot, 0, last-first)
+	slots := make([]slot, 0, last-first)
 	for i := first; i < last; i++ {
 		objects = append(objects, w.acquire(i))
-		slots = append(slots, memberSlot{top: w.offsets[i], height: w.offsets[i+1] - w.offsets[i]})
+		slots = append(slots, slot{top: w.offsets[i], height: w.offsets[i+1] - w.offsets[i]})
 	}
 
 	w.layout.slots = slots

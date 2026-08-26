@@ -86,6 +86,64 @@ func NewGapBlock(gap float32, objects ...fyne.CanvasObject) *fyne.Container {
 	return container.New(&noSpacingLayout{fill: -1, gap: gap, edges: true}, objects...)
 }
 
+/* Virtualised lists */
+
+// slot is where one mounted child of a virtualised list goes. Index-aligned with
+// the container's objects, not with the model behind them.
+type slot struct{ top, height float32 }
+
+// slotLayout places mounted children at the absolute position their slot names
+// and reports the whole model's height. Both virtualised lists use it — the
+// member sidebar, whose rows are a fixed height, and the message column, whose
+// are not and which passes a measure hook.
+//
+// MinSize is O(1) and **must stay so**: container.Scroll asks its content for a
+// minimum on every offset write, so a walk here would put the cost of the list
+// back on the scroll path. The width is zero because a vertical scroll takes its
+// content's minimum width as its own.
+type slotLayout struct {
+	// measure runs before placement for a list whose heights are only known once
+	// the children exist. Nil for one whose are not.
+	measure func(objects []fyne.CanvasObject, width float32)
+
+	slots []slot
+	total float32
+}
+
+func (l *slotLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
+	if l.measure != nil {
+		l.measure(objects, size.Width)
+	}
+
+	for i, child := range objects {
+		if i >= len(l.slots) {
+			return
+		}
+
+		child.Resize(fyne.NewSize(size.Width, l.slots[i].height))
+		child.Move(fyne.NewPos(0, l.slots[i].top))
+	}
+}
+
+func (l *slotLayout) MinSize([]fyne.CanvasObject) fyne.Size {
+	return fyne.NewSize(0, l.total)
+}
+
+// stackSpaced stacks rows with one gap between them and none at the ends. A
+// NewGapColumn charges its gap around the block as well, and a VBox's spacing is
+// the theme's; this is the arrangement a message's attachments and embeds want.
+func stackSpaced(gap float32, rows ...fyne.CanvasObject) *fyne.Container {
+	spaced := make([]fyne.CanvasObject, 0, max(len(rows)*2-1, 0))
+	for i, row := range rows {
+		if i > 0 {
+			spaced = append(spaced, VerticalSpacer(gap))
+		}
+		spaced = append(spaced, row)
+	}
+
+	return container.NewVBox(spaced...)
+}
+
 // NewWrapColumn stacks objects top to bottom, each given the column's full width
 // *before* it is measured. A wrapping widget answers MinSize with whatever width
 // it was last laid out at, so a column that measured first — VBoxNoSpacing does —
@@ -671,6 +729,22 @@ func placeBeside(anchor fyne.Position, anchorSize, card, bounds fyne.Size) fyne.
 		clamp(x, margin, bounds.Width-card.Width-margin),
 		clamp(y, margin, bounds.Height-card.Height-margin),
 	)
+}
+
+// keepInside pulls a pop-up back inside the canvas where it would otherwise hang
+// off the right or bottom edge. Both pop-ups the client draws itself carry it —
+// widget.PopUp does nothing of the kind, and only NewPopUpMenu did.
+func keepInside(pos fyne.Position, size fyne.Size, c fyne.Canvas) fyne.Position {
+	_, area := c.InteractiveArea()
+
+	if pos.X+size.Width > area.Width {
+		pos.X = max(area.Width-size.Width, 0)
+	}
+	if pos.Y+size.Height > area.Height {
+		pos.Y = max(area.Height-size.Height, 0)
+	}
+
+	return pos
 }
 
 // clamp holds v between low and high, preferring low when the two cross — a card

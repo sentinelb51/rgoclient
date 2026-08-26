@@ -297,13 +297,7 @@ func (c *InviteCard) bannerStrip(state inviteState) fyne.CanvasObject {
 // server yet passes no initial and keeps the empty circle — a letter taken from
 // "Resolving invite" would name a server that does not exist.
 func (c *InviteCard) icon(initial string, size fyne.Size) fyne.CanvasObject {
-	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
-	slot := container.NewStack(background, container.NewCenter(newInitial(initial)))
-	if c.iconURL != "" {
-		c.deps.Images.LoadIntoContainer(imageCacheID(c.iconURL), c.iconURL, size, slot, true, background)
-	}
-
-	return container.NewGridWrap(size, slot)
+	return newInitialIcon(c.deps.Images, imageCacheID(c.iconURL), c.iconURL, initial, size)
 }
 
 // inviteFailedMark stands where the picture would on a card that never resolved.
@@ -455,14 +449,10 @@ func codesIn(doc *markdown.Document) []string {
 // separates embeds. Codes rather than URLs: the same server is routinely linked
 // twice in one message, bare and masked, and two identical cards would be a bug.
 func buildInvites(deps Deps, codes []string) *fyne.Container {
-	rows := make([]fyne.CanvasObject, 0, max(len(codes)*2-1, 0))
-
-	for i, code := range codes {
-		if i > 0 {
-			rows = append(rows, VerticalSpacer(theme.Sizes.EmbedSpacing))
-		}
+	rows := make([]fyne.CanvasObject, 0, len(codes))
+	for _, code := range codes {
 		rows = append(rows, HBoxNoSpacing(NewInviteCard(deps, code).Content))
 	}
 
-	return container.NewVBox(rows...)
+	return stackSpaced(theme.Sizes.EmbedSpacing, rows...)
 }

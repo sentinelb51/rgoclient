@@ -110,19 +110,31 @@ func (a *App) loadPinned(channelID string) {
 	}()
 }
 
-// unknownAuthors is who among a page of messages the store cannot yet name. Safe
-// off the UI thread — the store's reads are, and unlike ensureAuthor this touches
-// none of the controller's guards: the panel is opened by a click and asks once.
+// unknownAuthors is who among a page of messages from one server the store
+// cannot yet name.
 func (a *App) unknownAuthors(serverID string, messages []*domain.Message) []client.AuthorRef {
+	return a.unresolvedAuthors(messages, func(string) string { return serverID })
+}
+
+// unresolvedAuthors is the walk every surface listing messages resolves its
+// authors by. serverOf names the server a message's channel is in, "" for a DM,
+// where there is no member record carrying a nickname or a role colour.
+//
+// Safe off the UI thread — the store's reads are, and unlike ensureAuthor this
+// touches none of the controller's guards: a panel is opened by a click and asks
+// once.
+func (a *App) unresolvedAuthors(messages []*domain.Message, serverOf func(channelID string) string) []client.AuthorRef {
 	var targets []client.AuthorRef
 
 	seen := make(map[string]bool, len(messages))
 	for _, message := range messages {
+		serverID := serverOf(message.ChannelID)
+
 		userID := message.AuthorID
-		if userID == "" || seen[userID] {
+		if userID == "" || seen[serverID+":"+userID] {
 			continue
 		}
-		seen[userID] = true
+		seen[serverID+":"+userID] = true
 
 		if a.store.HasUser(userID) && (serverID == "" || a.store.HasMember(serverID, userID)) {
 			continue
@@ -262,4 +274,127 @@ func (a *App) dropPinned(messageID string) {
 		return message.ID == messageID
 	})
 	a.showPinned()
+}
+
+/* Keeping the three panels current */
+
+// All three surfaces listing messages are *fetched* snapshots — a pin, a search
+// result and a mention alike reach further back than the message cache — so none
+// is drawn from it or written by the handlers keeping the column right. What
+// follows is the little that can be kept current without asking again.
+//
+// A **deletion** is free, a removal from a slice, and is the staleness worth
+// fixing first: a card for a message that no longer exists leads nowhere. A
+// **pin** is the pins panel re-asking, which is what that panel is.
+//
+// An **edit** is bound to the cache, the new content being knowable only for a
+// message the cache holds — so a card inside the channel's cached tail follows
+// one and an older card keeps the line it was fetched with. Re-asking would be a
+// request per keystroke somebody else makes.
+
+// dropPanelMessages takes deleted messages out of whichever panels are holding
+// them and redraws. Called for *any* channel, like the mention set it sits
+// beside: the inbox lists messages from as many channels as the account is in.
+// Call on the UI thread.
+func (a *App) dropPanelMessages(channelID string, messageIDs []string) {
+	if len(messageIDs) == 0 {
+		return
+	}
+
+	doomed := make(map[string]bool, len(messageIDs))
+	for _, id := range messageIDs {
+		doomed[id] = true
+	}
+
+	gone := func(message *domain.Message) bool {
+		return message.ChannelID == channelID && doomed[message.ID]
+	}
+
+	if a.pins != nil {
+		if kept := slices.DeleteFunc(slices.Clone(a.pinned), gone); len(kept) != len(a.pinned) {
+			a.pinned = kept
+			a.showPinned()
+		}
+	}
+	if a.search != nil {
+		if kept := slices.DeleteFunc(slices.Clone(a.searchFound), gone); len(kept) != len(a.searchFound) {
+			a.searchFound = kept
+			a.drawSearchResults()
+		}
+	}
+	if a.inbox != nil {
+		if kept := slices.DeleteFunc(slices.Clone(a.mentioned), gone); len(kept) != len(a.mentioned) {
+			a.mentioned = kept
+			a.showMentioned()
+		}
+	}
+}
+
+// refreshPanelMessage re-reads one edited message in whichever panels hold it,
+// from the cache and only from the cache — see above. Silently does nothing for a
+// message older than the channel's cached tail, which is most pins.
+// Call on the UI thread.
+func (a *App) refreshPanelMessage(channelID, messageID string) {
+	if a.pins == nil && a.search == nil && a.inbox == nil {
+		return
+	}
+
+	fresh := a.client.Messages().Find(channelID, messageID)
+	if fresh == nil {
+		return
+	}
+
+	// The slices are replaced rather than written into: a card was built from the
+	// value at the index, and the widget holding it outlives this call.
+	replace := func(held []*domain.Message) ([]*domain.Message, bool) {
+		i := slices.IndexFunc(held, func(m *domain.Message) bool {
+			return m.ChannelID == channelID && m.ID == messageID
+		})
+		if i == -1 {
+			return held, false
+		}
+
+		out := slices.Clone(held)
+		out[i] = fresh
+
+		return out, true
+	}
+
+	if a.pins != nil {
+		if out, moved := replace(a.pinned); moved {
+			a.pinned = out
+			a.showPinned()
+		}
+	}
+	if a.search != nil {
+		if out, moved := replace(a.searchFound); moved {
+			a.searchFound = out
+			a.drawSearchResults()
+		}
+	}
+	if a.inbox != nil {
+		if out, moved := replace(a.mentioned); moved {
+			a.mentioned = out
+			a.showMentioned()
+		}
+	}
+}
+
+// reloadPins re-asks for the channel's pins, which is the whole of how that panel
+// follows a pin made anywhere — it is one search, so there is nothing finer to
+// do. Queued rather than called: Revolt sends an event per pin and a moderator
+// clearing a channel's pins would otherwise be a request each.
+//
+// It also re-asks after an unpin made *here*, which dropPinned has already drawn:
+// the echo says a pin moved and nothing distinguishes it from somebody else's.
+// The cost is one redundant search per settling window, and the alternative is a
+// marker for "our own action" that has to be right every time — where being
+// wrong leaves the panel stale, which is the thing this exists to fix.
+// Call on the UI thread.
+func (a *App) reloadPins() {
+	if a.pins == nil || a.pinsChannelID == "" {
+		return
+	}
+
+	a.loadPinned(a.pinsChannelID)
 }

@@ -27,6 +27,7 @@ import (
 	"RGOClient/assets"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 /* One message as a card draws it */
@@ -624,7 +625,7 @@ func (d *MentionsDialog) SetGroups(groups []MentionGroup) {
 	}
 
 	d.island.setBlocks(blocks)
-	d.island.setCount(plural(total, "mention"))
+	d.island.setCount(util.Quantity(total, "mention"))
 	d.island.say("")
 }
 
@@ -633,7 +634,7 @@ func (d *MentionsDialog) SetGroups(groups []MentionGroup) {
 // answer given per place, and a heading in the card's own weight would compete
 // with the names in them.
 func newMentionGroup(deps Deps, group MentionGroup) fyne.CanvasObject {
-	heading := newText(plural(len(group.Entries), "mention")+" in "+group.Where,
+	heading := newText(util.Quantity(len(group.Entries), "mention")+" in "+group.Where,
 		theme.Colors.IslandCountText, theme.Sizes.IslandCountTextSize)
 
 	column := []fyne.CanvasObject{
@@ -673,6 +674,6 @@ func (d *messageIsland) fill(entries []MessageCard, noun, empty string) {
 		return
 	}
 
-	d.setCount(plural(len(entries), noun))
+	d.setCount(util.Quantity(len(entries), noun))
 	d.say("")
 }

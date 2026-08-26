@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"RGOClient/internal/client"
+	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/util"
@@ -55,6 +56,20 @@ func (a *App) recordMention(message *domain.Message) {
 
 	a.mentions[channelID] = append(a.mentions[channelID], message.ID)
 	a.syncMentionMarks()
+}
+
+// restoreDismissedMentions takes back what was waved off in an earlier run.
+// Ready is where it belongs: the stored set is keyed by account, and this is the
+// first moment the account is known.
+//
+// Merged rather than assigned. A dismissal made this run is already in the map
+// and is written to the file behind it, so the two hold the same thing — but a
+// reconnect must not narrow the set to what the last debounced write happened to
+// have reached. Call on the UI thread.
+func (a *App) restoreDismissedMentions() {
+	for _, messageID := range config.DismissedMentions(a.store.SelfID()) {
+		a.dismissedMentions[messageID] = true
+	}
 }
 
 // keepDismissed is a set of mentions with what the reader has waved off taken
@@ -269,7 +284,9 @@ func (a *App) loadMentions() {
 		// does it: a webhook or somebody departed would otherwise be a raw ID the panel
 		// mounts and fills in a moment later. Each is paired with the server whose
 		// member record names them, the rows spanning as many as the mentions do.
-		a.client.ResolveAuthors(a.unknownMentionAuthors(messages, channels))
+		a.client.ResolveAuthors(a.unresolvedAuthors(messages, func(channelID string) string {
+			return channels[channelID]
+		}))
 
 		a.doOnUI(func() {
 			if a.stale(epoch) {
@@ -340,32 +357,6 @@ func (a *App) mentionTargets() ([]client.MessageRef, map[string]string) {
 	}
 
 	return refs, channels
-}
-
-// unknownMentionAuthors is who among the resolved messages the store cannot yet
-// name, each paired with the server whose member record carries their nickname
-// and role colour. Safe off the UI thread — the store's reads are, and the
-// channel-to-server map was taken before leaving it.
-func (a *App) unknownMentionAuthors(messages []*domain.Message, channels map[string]string) []client.AuthorRef {
-	var targets []client.AuthorRef
-
-	seen := make(map[string]bool, len(messages))
-	for _, message := range messages {
-		serverID := channels[message.ChannelID]
-
-		userID := message.AuthorID
-		if userID == "" || seen[serverID+":"+userID] {
-			continue
-		}
-		seen[serverID+":"+userID] = true
-
-		if a.store.HasUser(userID) && (serverID == "" || a.store.HasMember(serverID, userID)) {
-			continue
-		}
-		targets = append(targets, client.AuthorRef{ServerID: serverID, UserID: userID})
-	}
-
-	return targets
 }
 
 // showMentioned fills the open panel from what was resolved, newest first and
@@ -457,12 +448,14 @@ func (a *App) mentionWhere(channelID string) string {
 // dismissMention takes one mention off: the mark it put in the sidebar, and the
 // card in the panel. Nothing is sent — Revolt has no route dropping a single
 // mention, an account's record being cleared by acknowledging a message, which
-// would mark everything before it read as well. The ID is remembered instead, so
-// that a reconnect handing the set back does not undo it; opening the channel
-// acknowledges it for real, and a restart is what forgets the decision.
+// would mark everything before it read as well. The ID is remembered instead —
+// in the map a reconnect's Ready is filtered through, and in the settings file
+// behind it, so a restart before the channel is ever opened does not hand the
+// mention back either. Opening the channel acknowledges it for real.
 // Call on the UI thread.
 func (a *App) dismissMention(channelID, messageID string) {
 	a.dismissedMentions[messageID] = true
+	config.RememberDismissedMention(a.store.SelfID(), messageID)
 
 	if a.forgetMentions(channelID, []string{messageID}) {
 		a.refreshChannelRow(channelID)

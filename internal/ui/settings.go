@@ -6,6 +6,8 @@ package ui
 // server's settings share.
 
 import (
+	"time"
+
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/container"
 
@@ -31,6 +33,7 @@ const (
 	SectionVoice
 	SectionCache
 	SectionPerformance
+	SectionUpdates
 	SectionAdvanced
 	SectionAbout
 )
@@ -45,6 +48,7 @@ var railEntries = []railEntry{
 	{int(SectionVoice), "Voice", assets.MicIcon},
 	{int(SectionCache), "Cache", assets.CacheIcon},
 	{int(SectionPerformance), "Performance", assets.PerformanceIcon},
+	{int(SectionUpdates), "Updates", assets.UpdatesIcon},
 	{int(SectionAdvanced), "Advanced", assets.AdvancedIcon},
 	{int(SectionAbout), "About", assets.AboutIcon},
 }
@@ -77,6 +81,12 @@ type SettingsHooks struct {
 	// the audio backend, so both are stubbed out for the index pass.
 	InputDevices  func() []AudioDevice
 	OutputDevices func() []AudioDevice
+
+	// VoiceNodes is the media servers the instance offers, crossing as a value the
+	// way an AudioDevice does. A plain read of what the controller fetched once
+	// when the session landed — never a request, so the index pass may call it.
+	// Empty is an instance offering no choice, and the row is left off.
+	VoiceNodes func() []VoiceNode
 
 	// StartInputMonitor opens the microphone and reports its level until
 	// StopInputMonitor. The controller samples — a level arrives off the audio
@@ -202,10 +212,61 @@ type SettingsHooks struct {
 	// what a kind of core is *for* on its own side.
 	CPUCores func() CPUCores
 
+	/* Updates */
+
+	// UpdateStatus is what the last check found. A plain read, never a request:
+	// the check itself is the controller's, run once when the session lands, so
+	// building this section — or indexing it — costs nothing.
+	UpdateStatus func() UpdateState
+
+	// CheckUpdate asks now, for the row that does. onDone runs on the UI thread and
+	// only once, whatever the answer; the page re-reads UpdateStatus for it.
+	CheckUpdate func(onDone func())
+
 	/* About */
 
 	ConfigPath func() string
 	OpenPath   func(path string)
+
+	// OpenLink hands a URL to the system browser. OpenPath's counterpart for
+	// something that is already a link rather than a file on this machine.
+	OpenLink func(url string)
+}
+
+// UpdateState is what the client knows about newer builds of itself: whether a
+// check has been made, what it found, and how it failed if it did. Checking and
+// a held answer are not exclusive — a re-check redraws the section without
+// clearing what is on it.
+type UpdateState struct {
+	Current  string    // the running build's version
+	Platform string    // what this machine is, for a sentence about the download
+	Checked  time.Time // when the last answer landed; zero means none has
+
+	Release UpdateRelease
+
+	Checking  bool
+	Available bool
+	// Err is why the last check found nothing, in the reader's terms. Held rather
+	// than reported as a notice: nobody asked for a startup check, so nobody should
+	// be interrupted by it failing.
+	Err string
+}
+
+// UpdateRelease is the newest published release as the section draws it. It
+// crosses as a value the way an AudioDevice does — `ui` does not import
+// `internal/update`, and which asset belongs to this platform is decided there.
+type UpdateRelease struct {
+	Version   string // the tag, less the v the older ones carry
+	Notes     string // the body, Markdown as it was written
+	PageURL   string // the release page, which lists every asset
+	Published time.Time
+
+	// AssetURL is the build for this machine, "" where the release carries none —
+	// no platform outside the release matrix has one. AssetName and AssetSize
+	// describe it, so the row can say what pressing the button downloads.
+	AssetURL  string
+	AssetName string
+	AssetSize int64
 }
 
 // CPUCores is what the settings page is told about the machine's cores: one
@@ -245,6 +306,12 @@ type SecurityState struct {
 	MFA       domain.MFAStatus
 	Logins    []domain.AccountSession
 	SelfKnown bool
+
+	// The three requests' own failures. They are carried separately because one
+	// route being down has to grey its own rows and no others; the holder's shared
+	// error is a *total* failure, which is the only case where nothing on the
+	// section can be believed.
+	EmailErr, MFAErr, LoginsErr error
 }
 
 // SettingsSession is one saved login as the Account section lists it.
@@ -293,7 +360,7 @@ type SettingsPage struct {
 	// field is the box itself, kept so the results page's back line can empty it.
 	// Leaving results is the one exit that has to move the field as well as the
 	// pane, the query being what put them there.
-	field *searchEntry
+	field *filterEntry
 
 	// index is every setting the search can find, built once per open and lazily —
 	// most opens never search. See settings_search.go.
@@ -323,6 +390,11 @@ type SettingsPage struct {
 	// list: every row in it is drawn from that one answer, not just the list.
 	security cachedOne[SecurityState]
 
+	// changelog is whether the Updates section's release notes are unfolded. Shut
+	// by default and kept for the life of the page: a body is as long as the
+	// release was, and the row above it is what the reader came for.
+	changelog bool
+
 	// visit counts openings, and every fetch captures it. An answer for a visit
 	// that has ended must not be recorded either: the page can be closed and
 	// reopened — on another account, after a sign-out — before one lands, and
@@ -351,6 +423,13 @@ func (p *SettingsPage) Open() {
 	p.visit++
 	p.Rebuild()
 	p.Layer.Show()
+}
+
+// OpenAt opens the page on one section rather than on the last one shown, for a
+// notice offering to show what it is about. Call on the UI thread.
+func (p *SettingsPage) OpenAt(section SettingsSection) {
+	p.section = section
+	p.Open()
 }
 
 // Close hides the page and drops what it built, so nothing it mounted keeps a
@@ -530,6 +609,8 @@ func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 		return p.cacheSection()
 	case SectionPerformance:
 		return p.performanceSection()
+	case SectionUpdates:
+		return p.updatesSection()
 	case SectionAdvanced:
 		return p.advancedSection()
 	case SectionAbout:

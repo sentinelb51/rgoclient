@@ -151,6 +151,16 @@ were drawn and discarded). Everywhere else it is `noGate{}`, always ready.
   hoisted roles: **188 µs / 1.72 MB / 41 allocations → 71 µs / 0.53 MB / 11**.
   This runs on every presence change, which is what makes it worth the second
   pass.
+- **The heap trims itself after a membership fetch.** Pulling a whole
+  membership (a six-figure server decodes through a few times its resting size)
+  leaves the peak mapped on the process for the session — the runtime's
+  scavenger returns it too slowly to matter. `App.scheduleHeapTrim`
+  (`app/members.go`) runs `debug.FreeOSMemory` on a timer 15 s after the last
+  fetch settles, debounced so clicking through servers trims once. Measured on
+  a ~114k-member server: private bytes **537 → 443 MB**, working set
+  **406 → 313 MB**, with `HeapIdle` fully released. The live set (~200 MB with
+  that server fetched) is the whole-membership design itself, which is
+  deliberate — see `internal/app/CLAUDE.md` item 3.
 - **Nothing is resolved twice on a walk.** `Store.Relationships` carries the
   relationship it filtered on into the resolution rather than asking again. With
   the friends dialog down, `awaitingAnswer` does not call it at all:
@@ -193,7 +203,7 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-eight patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+ten patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
@@ -202,10 +212,19 @@ fourth gates presents on the vertical blank on Windows. The
 fifth replaced the driver's poll loop with a wait on the OS event queue, which
 is what makes the frame rate a ceiling on drawing rather than on noticing input.
 The eighth is damage-region repaint — the "How Fyne draws" section above
-describes the world with it in.
+describes the world with it in. The ninth is `RGO_FRAMETIME=1`, a per-frame
+cost split logged every 120 painted frames (see Measuring). The tenth skips
+what a frame repeats: GL state that has not moved (program, blend, buffer,
+texture bindings, attribute pointers — each was a cgo call per object), the
+per-draw coordinate slices (now painter-owned scratch), the cache-entry
+allocation `EnsureMinSize` made per mounted object per dirty frame (~57k/s
+during a scroll here), and the expired-texture sweep that ranged every cached
+texture every frame for entries that expire at minute granularity (now once a
+second). Measured with patch 9 on a message-column scroll: draw phase
+**~1.74 → ~1.43 µs of CPU per drawn object**.
 
-The last two are **work skipped**, both found by profiling the message column
-and both in exported code rather than under `internal/`:
+The sixth and seventh are **work skipped**, both found by profiling the message
+column and both in exported code rather than under `internal/`:
 
 - **`widget.RichText.Resize` re-wrapped on a height.** Row bounds are wrapped
   against the width alone, but any change of size called `Refresh` — which
@@ -224,25 +243,39 @@ What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the
 fork instead.
 
-## Candidate levers in the fork, unmeasured
+## What a frame measured as (2026-08)
 
-Found by reading the GL painter (2026-08); none is measured, so none is built.
-Measure with a timer split across walk / draw / swap in `repaintWindow` first —
-these only pay if GL-call CPU dominates a full frame (a scroll), because the
-damage patch already took the partial frames.
+`RGO_FRAMETIME=1` on a 1216×639 window, 540 fps cap, vsync on, partial repaint
+on, Ryzen 9 9950X3D, scrolling the message column flat out at ~60 painted
+frames a second, after the tenth patch:
 
-- **Per-object GL overhead.** The desktop painter sits on the GL 2.1 binding
-  (`internal/painter/gl/gl_core.go:9`). Every object is ~20 cgo calls:
-  `UseProgram`, `BufferData`, two `VertexAttribPointer`s, ~10 uniforms,
-  `DrawArrays` — and `logError` (= `glGetError`, a cgo call) after nearly every
-  step of `draw.go`. Gating `logError` behind a debug flag is the cheap third
-  of it. `SetUniform*` already memoises; `UseProgram`/`BlendFunc` don't.
-- **Per-draw allocations.** `rectCoords`, `vecRectCoordsWithPad` and
-  `lineCoords` each return a fresh `[]float32` per object per frame — GC churn
-  on the loop goroutine. A scratch slice on the painter ends it.
+| phase | avg | what it is |
+|---|---|---|
+| prep | ~420 µs | `EnsureMinSize` (a `MinSize()` per mounted object) + the refresh-queue drain |
+| damage | ~180 µs | the diff walk |
+| draw | ~400 µs | GL calls for ~270 drawn objects, ~1.43 µs each |
+| swap | ~500 µs | present, paced by vsync |
+
+Scroll frames never promote to a full repaint at this window size — the message
+column is under the 80% coverage threshold — and the worst draw (~20 ms spikes)
+is glyph-run texture upload for rows newly scrolled into the overscan, not draw
+calls. Idle with a quiet channel on screen is ~0.4% of one core, and that is
+the gateway plus the 100 ms `idleWait` wakeups, not painting. What remains, in
+order of size:
+
+- **The prep walk is the frame's biggest CPU phase** and is structural:
+  `obj.MinSize()` per mounted object goes through a renderer cache lookup each.
+  Skipping the walk on frames whose refresh queue drained nothing was
+  considered and rejected — a min-size change without a `Refresh` is legal API,
+  and the walk is upstream's catch-all for it.
+- **`logError` was a false lever.** `build.Mode` is a build-tag constant, so in
+  a normal build `logGLError` compiles to an empty function and the calls cost
+  nothing. The earlier claim here that gating it was "the cheap third" was
+  wrong.
 - **Batching/instancing** — one VBO, every rect in one instanced draw — is the
-  "upgrade OpenGL" that would actually pay (instancing needs 3.3+). A painter
-  rewrite; only after the timer says draw-call CPU is the frame.
+  "upgrade OpenGL" that would pay next (instancing needs 3.3+). A painter
+  rewrite; at ~400 µs of draw per scroll frame it is not where the frame goes,
+  so it stays unbuilt.
 
 ## Still needs more than a patch
 
@@ -325,11 +358,14 @@ driver — open, wheel tick, a page of history, a live message, the per-frame
 min-size walk and the live heap of a mount — and is where the numbers above come
 from; run it before and after touching the column. Beyond that:
 
-- Frame cost is now observable from inside the loop — the fork is
-  ours to instrument — but nothing there is instrumented, so measure from
-  outside first: a GPU/frame profiler, or wall-clock around `App.doOnUI` work.
-  A timer added to `repaintWindow` is a patch to carry forward; be sure it is
-  worth carrying.
+- **`RGO_FRAMETIME=1`** logs a frame-cost split every 120 painted frames —
+  prep / damage / draw / swap, full-repaint count, objects drawn — the fork's
+  ninth patch. Off it costs one bool test per frame. This is what the numbers
+  in "What a frame measured as" are, and where any new frame claim starts.
+- `pprof`'s CPU profile is close to useless on Windows for the loop goroutine:
+  the profiler samples threads blocked in cgo, so `glfwWaitEventsTimeout`
+  swallows the profile. Attribute idle cost with per-thread
+  `TotalProcessorTime` deltas instead, and frame cost with `RGO_FRAMETIME`.
 - `pprof` on the loop goroutine catches layout and measurement cost, which is
   where our own code lives; it will not catch GL or driver time. Reading one:
   the mark phase is most of the profile by samples and almost none of it by wall

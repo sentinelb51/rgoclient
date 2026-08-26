@@ -2,3 +2,7 @@ dist/
 .idea/
 .claude/settings.local.json
 *.exe
+
+# Dev-only: points the fyne replace at a local rgoclient-fyne checkout.
+go.work
+go.work.sum

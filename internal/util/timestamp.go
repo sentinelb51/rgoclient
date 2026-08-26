@@ -111,10 +111,10 @@ func NiceTime(t time.Time) string {
 	case days < daysInMonth:
 		return strconv.Itoa(days) + " days ago, " + t.Format(timeLayout())
 	case days < daysInYear:
-		return quantity(days/daysInMonth, "month") + " ago"
+		return Quantity(days/daysInMonth, "month") + " ago"
 	}
 
-	return quantity(days/daysInYear, "year") + " ago"
+	return Quantity(days/daysInYear, "year") + " ago"
 }
 
 // MessageTimestamp renders the instant a <t:seconds:style> in a body names. The
@@ -169,15 +169,15 @@ func relativeSpan(distance time.Duration) string {
 	var span string
 	switch {
 	case distance < time.Hour:
-		span = quantity(max(int(distance/time.Minute), 1), "minute")
+		span = Quantity(max(int(distance/time.Minute), 1), "minute")
 	case distance < day:
-		span = quantity(int(distance/time.Hour), "hour")
+		span = Quantity(int(distance/time.Hour), "hour")
 	case distance < daysInMonth*day:
-		span = quantity(int(distance/day), "day")
+		span = Quantity(int(distance/day), "day")
 	case distance < daysInYear*day:
-		span = quantity(int(distance/(daysInMonth*day)), "month")
+		span = Quantity(int(distance/(daysInMonth*day)), "month")
 	default:
-		span = quantity(int(distance/(daysInYear*day)), "year")
+		span = Quantity(int(distance/(daysInYear*day)), "year")
 	}
 
 	if ahead {
@@ -212,8 +212,10 @@ func ShortDuration(d time.Duration) string {
 	return strconv.Itoa(seconds) + "s"
 }
 
-// quantity renders "1 month" / "3 months".
-func quantity(count int, unit string) string {
+// Quantity renders "1 month" / "3 months" — a count and the unit it counts,
+// pluralised. Here rather than beside either caller: the spans below and the
+// controller's notices ask the same question of different units.
+func Quantity(count int, unit string) string {
 	if count == 1 {
 		return "1 " + unit
 	}

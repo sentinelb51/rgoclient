@@ -873,7 +873,10 @@ func GroupIcon() fyne.CanvasObject {
 
 /* Saved sessions */
 
-// SessionCard is a clickable card for a saved login, with a remove button.
+// SessionCard is a clickable card for a saved login, with a remove button. It is
+// a row on the sign-in card and wears what every card here wears: the client's
+// one hairline, a theme radius and a name in the client's own type — a Fyne
+// label would be the only widget-drawn text on the first surface anybody sees.
 type SessionCard struct {
 	widget.BaseWidget
 	background *canvas.Rectangle
@@ -886,7 +889,8 @@ type SessionCard struct {
 // NewSessionCard creates a saved-session card, loading the avatar if available.
 func NewSessionCard(images *cache.ImageCache, username, avatarURL string, onTap, onRemove func()) *SessionCard {
 	background := canvas.NewRectangle(theme.Colors.SessionCardBg)
-	background.CornerRadius = 4
+	background.CornerRadius = theme.Sizes.SessionCardRadius
+	Outline(background)
 
 	side := theme.Sizes.SessionCardAvatarSize
 
@@ -903,12 +907,24 @@ func NewSessionCard(images *cache.ImageCache, username, avatarURL string, onTap,
 }
 
 func (c *SessionCard) CreateRenderer() fyne.WidgetRenderer {
-	label := widget.NewLabel(c.username)
-	label.TextStyle.Bold = true
+	// Ellipsised rather than clipped: a canvas.Text draws its whole width whatever
+	// the row is resized to, and a handle is as long as somebody made it.
+	name := NewEllipsisText(newBoldText(c.username,
+		theme.Colors.TextPrimary, theme.Sizes.SessionCardNameSize))
 
-	remove := container.NewCenter(NewCloseButton(c.onRemove))
-	content := container.NewBorder(nil, nil, c.avatar, remove, label)
-	tappable := NewTappableContainer(content, c.onTap)
+	// Index 2 is the name: NewFillRow addresses the stretching child by position,
+	// and the spacer before it is index 1.
+	gap := theme.Sizes.SessionCardGap
+	row := NewFillRow(2,
+		container.NewCenter(c.avatar),
+		HorizontalSpacer(gap),
+		name,
+		HorizontalSpacer(gap),
+		container.NewCenter(NewCloseButton(c.onRemove)),
+	)
 
-	return widget.NewSimpleRenderer(container.NewStack(c.background, container.NewPadded(tappable)))
+	padding := theme.Sizes.SessionCardPadding
+	tappable := NewTappableContainer(NewInset(row, padding, padding, padding, padding), c.onTap)
+
+	return widget.NewSimpleRenderer(container.NewStack(c.background, tappable))
 }

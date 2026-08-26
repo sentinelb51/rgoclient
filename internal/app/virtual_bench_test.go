@@ -77,7 +77,7 @@ func benchApp(tb testing.TB, n int) (*App, fyne.Window, []*domain.Message) {
 // reply fetches — which the test driver would otherwise run on their own
 // goroutines against the tree being measured.
 func quiet(a *App) {
-	for _, timer := range []*time.Timer{a.settleTimer, a.authorTimer, a.replyTimer, a.editMarkTimer} {
+	for _, timer := range []*time.Timer{a.settleTimer, a.authorTimer, a.replyTimer, a.timeSpanTimer} {
 		if timer != nil {
 			timer.Stop()
 		}

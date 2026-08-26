@@ -23,19 +23,22 @@ func (stubActions) OnChannelTapped(string)                     {}
 func (stubActions) OnServerTapped(string)                      {}
 func (stubActions) OnJoinInvite(string)                        {}
 func (stubActions) OnAttachmentTapped(*domain.File)            {}
+func (stubActions) OnLinkTapped(_, _ string)                   {}
 func (stubActions) OnReply(*domain.Message)                    {}
 func (stubActions) OnEdit(*domain.Message)                     {}
 func (stubActions) OnDelete(*domain.Message)                   {}
 func (stubActions) OnPin(*domain.Message, bool)                {}
 func (stubActions) OnReact(*domain.Message, string, bool)      {}
 func (stubActions) OnClearReactions(*domain.Message)           {}
+func (stubActions) OnSelectMessages(*domain.Message)           {}
+func (stubActions) OnToggleSelected(*domain.Message, bool)     {}
 func (stubActions) ResolveMessage(_, _ string) *domain.Message { return nil }
 func (stubActions) OnJumpToMessage(_, _ string)                {}
 func (stubActions) OnAttachFile(func(string))                  {}
 
 // OnPickEmoji never opens anything: the picker is a pop-up on a canvas, which a
 // widget test has no business raising.
-func (stubActions) OnPickEmoji(fyne.CanvasObject, func(EmojiChoice)) {}
+func (stubActions) OnPickEmoji(fyne.CanvasObject, []string, func(EmojiChoice)) {}
 
 // ResolveInvite never answers, which leaves an invite card in the state it
 // mounts in — the state every test that isn't about one wants it to stay in.

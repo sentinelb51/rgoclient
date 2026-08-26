@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -166,7 +167,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 // pickEmoji opens the picker beside the button and writes back what it answers.
 // The controller owns the picker, so this hands it an anchor.
 func (m *MessageInput) pickEmoji() {
-	m.deps.Actions.OnPickEmoji(m.EmojiButton, func(choice EmojiChoice) {
+	m.deps.Actions.OnPickEmoji(m.EmojiButton, nil, func(choice EmojiChoice) {
 		m.insert(choice.Token() + " ")
 	})
 }
@@ -318,6 +319,120 @@ func (w *ComposerNotice) Set(reason string) {
 
 	SetEllipsisText(w.box, reason)
 	w.Show()
+}
+
+/* The bar that stands in for the entry while messages are being picked */
+
+// SelectionBar is what the composer card carries while the column is selecting
+// messages for a bulk delete. It stands in the entry's place rather than over the
+// column for the reason ComposerNotice does: nothing is typed in that mode, and
+// the one place a reader already looks for what a keystroke will do is the card.
+//
+// It says the count rather than listing anything. The rows themselves are the
+// list, each wearing its own tick, and a panel repeating them would be a second
+// copy of the column disagreeing with the first.
+type SelectionBar struct {
+	widget.BaseWidget
+
+	// OnResize fires when the bar appears, disappears, or gains and loses the line
+	// under the count — the three things that change the dock's height. The count
+	// itself moving does not: it is one line either way, and re-hanging the dock
+	// per tick would re-mount the message column per click.
+	OnResize func()
+
+	count   *canvas.Text
+	limit   *canvas.Text
+	action  *Button
+	row     *fyne.Container // relaid by Set: both lines change width as the count does
+	content fyne.CanvasObject
+}
+
+var _ fyne.Widget = (*SelectionBar)(nil)
+
+// NewSelectionBar builds the bar, hidden. onDelete deletes what is picked and
+// onCancel leaves the mode; Set is what puts it up.
+func NewSelectionBar(onDelete, onCancel func()) *SelectionBar {
+	w := &SelectionBar{
+		count:  newBoldText("", theme.Colors.TextPrimary, theme.Sizes.SelectionBarTextSize),
+		limit:  newText("", theme.Colors.TimestampText, theme.Sizes.SelectionBarNoteSize),
+		action: NewWeightedButton("Delete", ButtonDanger, onDelete),
+	}
+
+	// Cancel is the plain one and Delete the weighted: only one button in a card
+	// wears a tone, and it is the one the card is for. The zero-width spacer takes
+	// the row's fill so the pair stays at the trailing edge — the badge row above
+	// is pinned the same way, and for the same reason a hidden child would
+	// otherwise hand the fill to whatever is left.
+	//
+	// Both lines are centred boxes rather than bare text: a canvas.Text stretched
+	// to a button's height draws from the top of it.
+	w.row = NewFillRow(3,
+		container.NewCenter(w.count),
+		HorizontalSpacer(theme.Sizes.SelectionBarGap),
+		container.NewCenter(w.limit),
+		HorizontalSpacer(0),
+		NewButton("Cancel", onCancel),
+		HorizontalSpacer(theme.Sizes.SelectionBarGap),
+		w.action,
+	)
+
+	// The same InnerPadding the entry pays around its text, so the card keeps the
+	// height it had while the entry was there — see ComposerNotice.
+	pad := fyne.CurrentApp().Settings().Theme().Size(fynetheme.SizeNameInnerPadding)
+	w.content = NewInset(w.row, pad, pad, pad, pad)
+
+	w.Hide()
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *SelectionBar) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.content)
+}
+
+// Set puts the bar up for n picked messages, or takes it down when the mode ends.
+// Delete is inert at nothing picked: the mode is entered from a message, so zero
+// is a set the reader emptied rather than a state it opens in, and taking the bar
+// away under them would be a mode ending itself. Call on the UI thread.
+func (w *SelectionBar) Set(selecting bool, n int) {
+	resized := selecting != w.Visible()
+
+	if !selecting {
+		w.Hide()
+		w.reportResize(resized)
+
+		return
+	}
+
+	w.count.Text = fmt.Sprintf("%s selected", util.Quantity(n, "message"))
+	w.count.Refresh()
+
+	// Revolt takes a hundred per request and the client sends as many as it takes,
+	// so the ceiling is worth saying only once it is in sight.
+	limit := ""
+	if n > domain.MaxBulkDelete {
+		limit = fmt.Sprintf("in %d requests", (n+domain.MaxBulkDelete-1)/domain.MaxBulkDelete)
+	}
+	resized = resized || (limit == "") != (w.limit.Text == "")
+	w.limit.Text = limit
+	w.limit.Refresh()
+
+	if n == 0 {
+		w.action.Disable()
+	} else {
+		w.action.Enable()
+	}
+
+	w.Show()
+	Relayout(w.row) // the count has just changed width, so the pair moves
+	w.reportResize(resized)
+}
+
+func (w *SelectionBar) reportResize(resized bool) {
+	if resized && w.OnResize != nil {
+		w.OnResize()
+	}
 }
 
 // growingMinSize sizes an entry that grows with its text: one line per *wrapped*
@@ -561,6 +676,14 @@ type AudioDevice struct {
 	Default bool
 }
 
+// VoiceNode is one media server the instance offers calls through, crossing the
+// seam an AudioDevice does and for the same reason: `ui` has no business knowing
+// what LiveKit is, and which node to prefer stays on the controller's side.
+type VoiceNode struct {
+	Name string
+	URL  string
+}
+
 type Keystroke int
 
 const (
@@ -766,8 +889,7 @@ func cursorPosition(text string, offset int) (row, col int) {
 func (m *MessageInput) pasteAsAttachment() bool {
 	if clipboard.Init() == nil {
 		if img, err := clipboard.Read(context.Background(), clipboard.FmtImage); err == nil && len(img) > 0 {
-			path := filepath.Join(os.TempDir(), fmt.Sprintf("%d.png", time.Now().UnixNano()))
-			if os.WriteFile(path, img, 0o644) == nil {
+			if path := writeTempImage(img); path != "" {
 				return m.AddAttachment(path)
 			}
 		}
@@ -781,6 +903,34 @@ func (m *MessageInput) pasteAsAttachment() bool {
 	}
 
 	return false
+}
+
+// writeTempImage spills a pasted picture to a file so it can be uploaded as an
+// attachment, reporting "" if it could not. Through os.CreateTemp rather than a
+// name built from the clock: the temp directory is shared with every other
+// account on the machine, and CreateTemp is the only way to get a name nobody
+// can have guessed *and* a file only this account can read. Whoever pasted it is
+// shown the preview before anything is sent.
+func writeTempImage(img []byte) string {
+	file, err := os.CreateTemp("", "rgoclient-paste-*.png")
+	if err != nil {
+		log.Printf("paste image: %v", err)
+
+		return ""
+	}
+
+	_, err = file.Write(img)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		log.Printf("paste image: %v", err)
+		_ = os.Remove(file.Name())
+
+		return ""
+	}
+
+	return file.Name()
 }
 
 // RegisterDropHandler attaches files dropped onto the composer's window. The

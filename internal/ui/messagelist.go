@@ -140,12 +140,17 @@ type MessageList struct {
 	// re-mounted for it. Programmatic scrolls do not report.
 	OnScroll func()
 
+	// OnSelectionChanged reports the size of the selection every time it or the
+	// mode moves, so the bar over the composer can say how many without asking. It
+	// fires for a delete landing too: a removed row leaves the set with it.
+	OnSelectionChanged func(count int)
+
 	deps    Deps
 	dock    fyne.CanvasObject // what floats over the column's bottom, see NewDockReserve
 	scroll  *ObservableScroll
 	reserve *fyne.Container // the scroller's content: rows plus the room under the dock
 	content *fyne.Container // the rows themselves, placed by layout
-	layout  *messageListLayout
+	layout  *slotLayout
 
 	rows    []windowRow
 	offsets []float32      // the top of each row, plus the total, so a range is two binary searches
@@ -159,6 +164,14 @@ type MessageList struct {
 	// status is the one line standing in for rows — loading, empty, refused. While
 	// it is up there are no rows.
 	status fyne.CanvasObject
+
+	// The selection a bulk delete is built from. It is keyed by message ID for the
+	// reason mounted is: an index moves under a prepend, and history keeps arriving
+	// while the reader picks. anchor is the last row picked, which a Shift-click
+	// extends from.
+	selecting bool
+	selected  map[string]bool
+	anchor    string
 
 	// width is the column width the measured heights are good for. A different one
 	// re-wraps every body, so it sends every row back to an estimate.
@@ -175,7 +188,7 @@ func NewMessageList(deps Deps, dock fyne.CanvasObject) *MessageList {
 		index:   make(map[string]int),
 		mounted: make(map[string]*MessageWidget),
 	}
-	l.layout = &messageListLayout{list: l}
+	l.layout = &slotLayout{measure: l.measure}
 	l.content = container.New(l.layout)
 	l.reserve = NewDockReserve(l.content, dock)
 
@@ -249,6 +262,139 @@ func (l *MessageList) Mounted(messageID string) *MessageWidget {
 func (l *MessageList) EachMounted(fn func(*MessageWidget)) {
 	for _, w := range l.mounted {
 		fn(w)
+	}
+}
+
+/* Selecting */
+
+// Selecting reports whether the column is picking messages for a bulk delete.
+func (l *MessageList) Selecting() bool { return l.selecting }
+
+// SetSelecting turns the mode on or off. Leaving it empties the set — a
+// selection nothing is drawing is one the reader cannot see they still have.
+func (l *MessageList) SetSelecting(on bool) {
+	if on == l.selecting {
+		return
+	}
+
+	l.selecting = on
+	l.anchor = ""
+	if on {
+		l.selected = make(map[string]bool)
+	} else {
+		l.selected = nil
+	}
+
+	for id, w := range l.mounted {
+		w.SetSelecting(on, l.selected[id])
+	}
+	l.reportSelection()
+}
+
+// Select adds one message to the set and, with extend, everything between it and
+// the last row picked. Only rows the route would accept are taken — see
+// selectable — so an extend across a week-old message steps over it rather than
+// poisoning the batch.
+//
+// A row already picked is dropped again, unless the reader is extending: a Shift
+// that both grew and shrank the set would be unreadable.
+func (l *MessageList) Select(messageID string, extend bool) {
+	if !l.selecting {
+		return
+	}
+
+	to, ok := l.index[messageID]
+	if !ok {
+		return
+	}
+
+	from := to
+	if extend {
+		if i, ok := l.index[l.anchor]; ok {
+			from = i
+		}
+	}
+
+	if from == to && !extend {
+		// Turning one *off* is always allowed: a row that has aged past the window
+		// while it sat in the set has to be removable, and only adding can poison a
+		// batch.
+		picked := !l.selected[messageID]
+		if picked && !l.selectable(l.rows[to].message) {
+			return
+		}
+
+		l.setSelected(messageID, picked)
+		l.anchor = messageID
+		l.reportSelection()
+
+		return
+	}
+
+	lo, hi := min(from, to), max(from, to)
+	for i := lo; i <= hi; i++ {
+		if message := l.rows[i].message; l.selectable(message) {
+			l.setSelected(message.ID, true)
+		}
+	}
+	l.anchor = messageID
+	l.reportSelection()
+}
+
+// Selected is the picked messages in the column's own order, oldest first, which
+// is the order the request is built in.
+func (l *MessageList) Selected() []string {
+	ids := make([]string, 0, len(l.selected))
+	for i := range l.rows {
+		if id := l.rows[i].message.ID; l.selected[id] {
+			ids = append(ids, id)
+		}
+	}
+
+	return ids
+}
+
+// selectable is whether a row may join a bulk delete, asked of the *model* rather
+// than of a widget: an extend spans rows that are not mounted. It reads the same
+// two rules MessageWidget.canBulkSelect does.
+func (l *MessageList) selectable(message *domain.Message) bool {
+	return withinBulkWindow(message.ID) &&
+		l.deps.Store.Permissions(message.ChannelID).Has(domain.PermissionManageMessages)
+}
+
+// setSelected writes one entry and repaints the row if it happens to be mounted.
+func (l *MessageList) setSelected(messageID string, on bool) {
+	if on {
+		l.selected[messageID] = true
+	} else {
+		delete(l.selected, messageID)
+	}
+
+	if w, ok := l.mounted[messageID]; ok {
+		w.SetSelected(on)
+	}
+}
+
+// forgetSelected drops the messages that have just left the window, so a delete
+// landing empties the set that caused it. Reports whether anything went.
+func (l *MessageList) forgetSelected(doomed map[string]bool) bool {
+	dropped := false
+	for id := range l.selected {
+		if doomed[id] {
+			delete(l.selected, id)
+			dropped = true
+		}
+	}
+	if doomed[l.anchor] {
+		l.anchor = ""
+	}
+
+	return dropped
+}
+
+func (l *MessageList) reportSelection() {
+	if l.OnSelectionChanged != nil {
+		l.OnSelectionChanged(len(l.selected))
 	}
 }
 
@@ -388,6 +534,9 @@ func (l *MessageList) Remove(doomed map[string]bool) int {
 	}
 	if len(seams) == 0 {
 		return 0
+	}
+	if l.forgetSelected(doomed) {
+		l.reportSelection()
 	}
 
 	removed := len(l.rows) - len(kept)
@@ -640,6 +789,15 @@ func (l *MessageList) dropRows() {
 	l.first, l.last = 0, 0
 	l.content.Objects = nil
 	l.reindex()
+
+	// The window this set was picked out of has gone — a channel switch, or a jump
+	// that replaced it. The *mode* is the controller's and stays; keeping the IDs
+	// would be holding a selection the reader can no longer see.
+	if len(l.selected) > 0 {
+		clear(l.selected)
+		l.anchor = ""
+		l.reportSelection()
+	}
 }
 
 func (l *MessageList) clearStatus() {
@@ -661,7 +819,7 @@ func (l *MessageList) sizeStatus() {
 		height = h
 	}
 
-	l.layout.slots = []messageSlot{{height: height}}
+	l.layout.slots = []slot{{height: height}}
 	l.layout.total = height
 	l.settle()
 }
@@ -727,7 +885,12 @@ func (l *MessageList) build(row *windowRow) *MessageWidget {
 		l.OnMount(row.message, row.grouped)
 	}
 
-	return NewMessageWidget(l.deps, row.message, row.dayLabel, row.grouped, row.followed)
+	w := NewMessageWidget(l.deps, row.message, row.dayLabel, row.grouped, row.followed)
+	if l.selecting {
+		w.SetSelecting(true, l.selected[row.message.ID])
+	}
+
+	return w
 }
 
 // syncSlots points each mounted object at its row's place in the column.
@@ -738,13 +901,13 @@ func (l *MessageList) syncSlots() {
 
 	l.layout.slots = slices.Grow(l.layout.slots[:0], len(l.content.Objects))
 	for _, obj := range l.content.Objects {
-		var slot messageSlot
+		var placed slot
 		if w, ok := obj.(*MessageWidget); ok {
 			if i, ok := l.index[w.message.ID]; ok {
-				slot = messageSlot{top: l.offsets[i], height: l.rows[i].height}
+				placed = slot{top: l.offsets[i], height: l.rows[i].height}
 			}
 		}
-		l.layout.slots = append(l.layout.slots, slot)
+		l.layout.slots = append(l.layout.slots, placed)
 	}
 }
 
@@ -820,39 +983,6 @@ func (l *MessageList) measure(objects []fyne.CanvasObject, width float32) {
 }
 
 /* Layout */
-
-// messageSlot is where one mounted row goes. Index-aligned with the content's
-// Objects, which is why the two are always rebuilt together.
-type messageSlot struct{ top, height float32 }
-
-// messageListLayout places mounted rows at the absolute position their row has
-// in the whole window, and reports that window's height.
-//
-// MinSize is O(1) and **must stay so**: container.Scroll asks its content for a
-// minimum on every offset write, so a walk here would put the cost of the whole
-// window back on the scroll path.
-type messageListLayout struct {
-	list  *MessageList
-	slots []messageSlot
-	total float32
-}
-
-func (l *messageListLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
-	l.list.measure(objects, size.Width)
-
-	for i, child := range objects {
-		if i >= len(l.slots) {
-			return
-		}
-
-		child.Resize(fyne.NewSize(size.Width, l.slots[i].height))
-		child.Move(fyne.NewPos(0, l.slots[i].top))
-	}
-}
-
-func (l *messageListLayout) MinSize([]fyne.CanvasObject) fyne.Size {
-	return fyne.NewSize(0, l.total)
-}
 
 /* Estimates */
 

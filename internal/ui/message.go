@@ -104,6 +104,11 @@ type MessageWidget struct {
 	// was rendered from. Nil for the great majority of messages.
 	codes []string
 
+	// relativeTime marks a body carrying a <t:…:R>, whose reading is resolved at
+	// mount and goes out of date on screen. False for the great majority, which is
+	// what keeps the clock in app off every other row.
+	relativeTime bool
+
 	// reactionRow is the box the chips are drawn in, kept so a reaction anybody
 	// adds repaints them alone — see SetReactions. Nil while the message carries
 	// none, that box not being built at all.
@@ -113,6 +118,19 @@ type MessageWidget struct {
 	// pointer never touches builds no buttons. actionsOverlay is empty until then.
 	actionsOverlay *fyne.Container
 	actions        *fyne.Container
+
+	// selectOverlay holds the tick while the column is picking messages for a bulk
+	// delete, in the same trailing corner the quick-actions use: the two are never
+	// up together, selecting being a mode in which nothing else about a message is
+	// on offer. Empty until the first time this row is asked to select.
+	selectOverlay *fyne.Container
+	selectTick    *selectTick
+
+	// selecting is the column in that mode and selected this row being in the set.
+	// Both are pushed in by MessageList rather than read from it — a row is built
+	// already knowing, so one scrolling back in does not come back unticked.
+	selecting bool
+	selected  bool
 
 	// mentioned warms the row's background. Decided once: it is a fact about the
 	// message, and every path that re-evaluates one rebuilds the widget.
@@ -179,8 +197,12 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 		content,
 	)
 
+	// The tick sits inside the row rather than bleeding above it the way the
+	// quick-actions do: it is up for as long as the mode is, so a row overlapping
+	// the one above would put two ticks in one gutter at the seam between groups.
 	w.actionsOverlay = container.New(&overlayLayout{yOffset: -16, rightOffset: 6})
-	w.content = container.NewStack(inner, w.actionsOverlay)
+	w.selectOverlay = container.New(&overlayLayout{yOffset: 2, rightOffset: 6})
+	w.content = container.NewStack(inner, w.actionsOverlay, w.selectOverlay)
 
 	if dayLabel != "" {
 		w.daySeparator = newDaySeparator(dayLabel)
@@ -304,6 +326,27 @@ func (w *MessageWidget) canPin(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionManageMessages)
 }
 
+// canBulkSelect: whether this row may join a bulk delete. Not canDelete with a
+// count — Revolt asks for ManageMessages over the bulk route even for the
+// account's own words, where a single delete takes authorship instead, and it
+// refuses the *whole* batch over one message past domain.MaxBulkDeleteAge. So a
+// row it would refuse is never offered rather than selected and then dropped.
+func (w *MessageWidget) canBulkSelect(permissions domain.Permission) bool {
+	return permissions.Has(domain.PermissionManageMessages) && withinBulkWindow(w.message.ID)
+}
+
+// withinBulkWindow reports whether a message is young enough for a bulk delete.
+// An unreadable ID answers false: the route reads the same ULID and refuses one
+// it cannot parse.
+func withinBulkWindow(messageID string) bool {
+	when, err := util.Timestamp(messageID)
+	if err != nil {
+		return false
+	}
+
+	return time.Since(when) < domain.MaxBulkDeleteAge
+}
+
 // canClearReactions: a message carrying none is not asked about, which also
 // covers a system message — Revolt refuses a reaction to one.
 func (w *MessageWidget) canClearReactions(permissions domain.Permission) bool {
@@ -313,6 +356,15 @@ func (w *MessageWidget) canClearReactions(permissions domain.Permission) bool {
 // canReact gates whether the chips answer a click.
 func (w *MessageWidget) canReact(permissions domain.Permission) bool {
 	return w.message.System == nil && permissions.Has(domain.PermissionReact)
+}
+
+// canAddReaction is canReact plus the message's own say. One restricting
+// reactions to nothing at all is offered no way in: the picker would open empty,
+// and every pick from it would be refused by the server.
+func (w *MessageWidget) canAddReaction(permissions domain.Permission) bool {
+	allowed, restricted := w.message.ReactionsAllowed()
+
+	return w.canReact(permissions) && (!restricted || len(allowed) > 0)
 }
 
 // permissions is asked when something needs it — a hover, a right-click, and a
@@ -343,7 +395,7 @@ func (w *MessageWidget) buildActions() *fyne.Container {
 	permissions := w.permissions()
 
 	var buttons []fyne.CanvasObject
-	if w.canReact(permissions) {
+	if w.canAddReaction(permissions) {
 		react := NewIconButton(actionMark(assets.ActionAddIcon), nil, onHover)
 		react.onTap = func() { w.react(react) }
 		buttons = append(buttons, react)
@@ -377,7 +429,7 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 	permissions := w.permissions()
 
 	var items []*fyne.MenuItem
-	if w.canReact(permissions) {
+	if w.canAddReaction(permissions) {
 		items = append(items, fyne.NewMenuItemWithIcon("Add reaction", actionMark(assets.ActionAddIcon), func() {
 			w.react(w)
 		}))
@@ -432,6 +484,15 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 			tintedIcon(assets.ActionDeleteIcon, theme.Colors.SwiftActionDanger), func() { act.OnDelete(w.message) }))
 	}
 
+	// The way into selecting, and the only one: a bulk delete is a mode, and a mode
+	// entered by a stray click is a mode nobody meant to be in. This row joins the
+	// set on the way in, the reader having already named a message by opening the
+	// menu on it.
+	if w.canBulkSelect(permissions) {
+		items = append(items, fyne.NewMenuItemWithIcon("Select messages",
+			actionMark(assets.ActionSaveIcon), func() { act.OnSelectMessages(w.message) }))
+	}
+
 	return items
 }
 
@@ -439,7 +500,9 @@ func (w *MessageWidget) menuItems() []*fyne.MenuItem {
 // message carrying none. Picking one already there is a request to have reacted,
 // which is already true.
 func (w *MessageWidget) react(anchor fyne.CanvasObject) {
-	w.deps.Actions.OnPickEmoji(anchor, func(choice EmojiChoice) {
+	allowed, _ := w.message.ReactionsAllowed()
+
+	w.deps.Actions.OnPickEmoji(anchor, allowed, func(choice EmojiChoice) {
 		w.deps.Actions.OnReact(w.message, choice.Value(), true)
 	})
 }
@@ -499,6 +562,32 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 	return entry
 }
 
+// HasRelativeTime reports whether this row's body carries a <t:…:R>. The
+// controller asks so its clock can re-render the few rows that need it rather
+// than every row on screen.
+func (w *MessageWidget) HasRelativeTime() bool { return w.relativeTime }
+
+// RefreshRelativeTime re-renders the body, which is what re-reads a relative
+// timestamp against the clock: "in 5 minutes" would otherwise say that for as
+// long as the row stayed mounted. A no-op where the body carries none, and while
+// the message is being edited — the slot holds an entry then, and replacing it
+// under somebody typing would lose what they had written.
+func (w *MessageWidget) RefreshRelativeTime() {
+	if !w.relativeTime || w.editing {
+		return
+	}
+
+	w.body = newFlushContainer(renderMessageBody(w.deps, w.message.Content, w.TappedSecondary))
+	w.bodySlot.Objects = []fyne.CanvasObject{w.body}
+	w.bodySlot.Refresh()
+
+	// The reading can change width and so a wrapped body's height — "in 1 minute"
+	// becoming "just now" — and the column places rows from measured heights, so
+	// the row is re-measured rather than repainted into the space the old text
+	// asked for.
+	w.Refresh()
+}
+
 // CancelEdit restores the rendered body and the hover quick-actions without
 // invoking the edit callbacks. Safe to call when no edit is active.
 func (w *MessageWidget) CancelEdit() {
@@ -540,9 +629,16 @@ func (w *MessageWidget) MouseOut() {
 
 // updateHover shows the action buttons while the pointer is over the message or
 // over them, hiding them after a grace period otherwise. Suspended while editing,
-// which paints its own highlight and overlay.
+// which paints its own highlight and overlay, and while selecting, where the row
+// offers one thing and the quick-actions would share the corner the tick is in.
+// The wash still follows the pointer either way — see setHighlighted.
 func (w *MessageWidget) updateHover() {
 	if w.editing {
+		return
+	}
+
+	if w.selecting {
+		w.setHighlighted(w.overMessage || w.overChild)
 		return
 	}
 
@@ -594,6 +690,174 @@ func (w *MessageWidget) ensureActions() {
 	w.actions = w.buildActions()
 	w.actionsOverlay.Objects = []fyne.CanvasObject{w.actions}
 	w.actionsOverlay.Refresh()
+}
+
+/* Selecting */
+
+// SetSelecting puts the row in or out of selection mode, picked saying whether it
+// is in the set. Both arrive together because a row scrolling back in is built
+// and told once: asking twice would draw it unticked for a frame.
+//
+// A row the route would refuse (canBulkSelect) wears no tick and takes no click,
+// but still enters the mode — greyed out rather than looking ordinary, or a
+// column with a week's history in it reads as half broken.
+func (w *MessageWidget) SetSelecting(on, picked bool) {
+	w.selecting = on
+	w.selected = on && picked
+
+	if on {
+		w.ensureTick()
+		w.selectTick.set(w.selected)
+		w.selectTick.Show()
+	} else if w.selectTick != nil {
+		w.selectTick.Hide()
+	}
+
+	// The quick-actions go with the mode: they are built lazily, so a row the
+	// pointer never visited has none to hide.
+	if w.actions != nil {
+		w.actions.Hide()
+	}
+	w.stopHideTimer()
+	w.setHighlighted(w.overMessage || w.overChild)
+}
+
+// SetSelected marks or unmarks a row already in the mode.
+func (w *MessageWidget) SetSelected(picked bool) {
+	if !w.selecting || picked == w.selected {
+		return
+	}
+
+	w.selected = picked
+	w.selectTick.set(picked)
+	w.setHighlighted(w.overMessage || w.overChild)
+}
+
+// Selected reports whether the row is in the set.
+func (w *MessageWidget) Selected() bool { return w.selected }
+
+// ensureTick builds the tick on the first time this row is asked to select, the
+// way the quick-actions are built on the first hover.
+func (w *MessageWidget) ensureTick() {
+	if w.selectTick != nil {
+		return
+	}
+
+	offered := w.canBulkSelect(w.permissions())
+	w.selectTick = newSelectTick(offered, func(extend bool) {
+		w.deps.Actions.OnToggleSelected(w.message, extend)
+	})
+	w.selectTick.onHover = func(hovering bool) {
+		w.overChild = hovering
+		w.updateHover()
+	}
+
+	// A right-click anywhere in the row has to reach the row's own menu, this one
+	// included — the driver gives the press to the innermost object that takes one
+	// and does not walk back up.
+	w.selectTick.onSecondaryTap = w.TappedSecondary
+
+	w.selectOverlay.Objects = []fyne.CanvasObject{w.selectTick}
+	w.selectOverlay.Refresh()
+}
+
+// selectTick is the box a row wears while the column is selecting, and the whole
+// of the target: the row itself cannot take the click, its body being a
+// selectable Label that answers one already — innermost wins, see
+// internal/ui/CLAUDE.md. Shift extends from the last row picked, which is read
+// here rather than passed, ui.ShiftHeld being the only thing that can answer it.
+type selectTick struct {
+	tapBase
+
+	background *canvas.Rectangle
+	mark       *canvas.Image
+	content    fyne.CanvasObject
+	onHover    func(bool)
+
+	// offered is a row this channel's permissions or Revolt's week-long window put
+	// out of reach. It keeps its box so the column does not change shape down its
+	// edge, and answers nothing.
+	offered bool
+	on      bool
+	hovered bool
+}
+
+var (
+	_ fyne.Tappable     = (*selectTick)(nil)
+	_ desktop.Hoverable = (*selectTick)(nil)
+)
+
+func newSelectTick(offered bool, onPick func(extend bool)) *selectTick {
+	t := &selectTick{
+		background: canvas.NewRectangle(color.Transparent),
+		mark:       newScaledIcon(tintedIcon(assets.ActionSaveIcon, theme.Colors.MessageSelectMark), theme.Sizes.MessageSelectMarkSize),
+		offered:    offered,
+	}
+	t.background.CornerRadius = theme.Sizes.MessageSelectTickSize / 2
+	t.background.StrokeWidth = theme.Sizes.OutlineWidth
+
+	if offered {
+		t.onTap = func() { onPick(ShiftHeld()) }
+	}
+
+	t.content = container.NewStack(t.background, container.NewCenter(t.mark))
+	t.ExtendBaseWidget(t)
+	t.repaint()
+
+	return t
+}
+
+func (t *selectTick) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(t.content)
+}
+
+// MinSize is the circle, whatever the mark inside it measures.
+func (t *selectTick) MinSize() fyne.Size {
+	side := theme.Sizes.MessageSelectTickSize
+
+	return fyne.NewSize(side, side)
+}
+
+// Cursor keeps the arrow over a tick offering nothing — tapBase promises a
+// pointer unconditionally, which here is a lie the reader acts on.
+func (t *selectTick) Cursor() desktop.Cursor {
+	if !t.offered {
+		return desktop.DefaultCursor
+	}
+
+	return desktop.PointerCursor
+}
+
+func (t *selectTick) MouseIn(*desktop.MouseEvent) { t.hovered = true; t.repaint() }
+func (t *selectTick) MouseOut()                   { t.hovered = false; t.repaint() }
+
+func (t *selectTick) set(on bool) {
+	t.on = on
+	t.repaint()
+}
+
+// repaint is the tick's whole appearance in one place: filled and marked when it
+// is in the set, an empty ring when it is not, and dimmed throughout when the row
+// is one the route would refuse.
+func (t *selectTick) repaint() {
+	edge, fill := theme.Colors.MessageSelectTickEdge, color.Color(color.Transparent)
+	if t.on {
+		edge, fill = theme.Colors.MessageSelectTickOn, theme.Colors.MessageSelectTickOn
+	}
+	if t.hovered && t.offered {
+		edge = solidColor(theme.Lighten(edge, 0.25))
+	}
+	if !t.offered {
+		edge, fill = theme.Colors.MessageSelectTickOff, color.Transparent
+	}
+
+	t.background.StrokeColor = solidColor(edge)
+	t.background.FillColor = fill
+	t.mark.Hidden = !t.on
+	t.background.Refresh()
+	t.mark.Refresh()
+
+	reportHover(t.onHover, t.hovered)
 }
 
 // setHighlighted paints (or clears) the row's hover background.
@@ -686,6 +950,13 @@ func mixColor(from, to color.Color, at float32) color.Color {
 // addressed — so hovering lifts the colour rather than replacing it.
 func (w *MessageWidget) fill(hovered bool) color.Color {
 	switch {
+	// A picked row outranks a mention wash: the mention is a fact about the
+	// message and the tick is a state the reader put it in, and only one of the two
+	// is about to be acted on.
+	case w.selected && hovered:
+		return theme.Colors.MessageSelectedHoverBackground
+	case w.selected:
+		return theme.Colors.MessageSelectedBackground
 	case w.mentioned && hovered:
 		return theme.Colors.MessageMentionHoverBackground
 	case w.mentioned:
@@ -725,6 +996,7 @@ func (w *MessageWidget) buildAuthoredContent(grouped bool, shortTime, fullTime s
 	// over the body on every mount.
 	doc := markdown.Parse(message.Content)
 	w.codes = inviteCodesInParsed(message.Content, doc)
+	w.relativeTime = markdown.HasRelativeTimestamp(doc)
 
 	// Every interactive piece of the row takes the same menu, so the pointer never
 	// lands somewhere that swallows a right-click.

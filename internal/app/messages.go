@@ -2,6 +2,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"slices"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 const (
@@ -33,9 +35,10 @@ const (
 	// layout is a frame away.
 	settleDelay = 120 * time.Millisecond
 
-	// editMarkTick is how often a mounted message's "edited N ago" span is
-	// rewritten. A minute, because that is the finest span the mark ever names.
-	editMarkTick = time.Minute
+	// timeSpanTick is how often a mounted message's spans against the clock are
+	// re-read — the "edited N ago" mark, and a <t:…:R> in the body. A minute,
+	// because that is the finest span either of them ever names.
+	timeSpanTick = time.Minute
 
 	// maxUncachedMessages bounds what is held outside the message cache: quoted
 	// messages older than a channel's cached tail, and the window a jump landed
@@ -130,6 +133,12 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// The notice replaces the row rather than joining it — see ui.ComposerNotice.
 	a.composerNotice = ui.NewComposerNotice()
 
+	// The selection bar stands in the same place for the same reason: while the
+	// column is picking messages nothing is being typed, and the card is where a
+	// reader already looks for what the next keystroke does.
+	a.selectionBar = ui.NewSelectionBar(a.confirmDeleteSelected, a.endSelection)
+	a.selectionBar.OnResize = a.resizeDock
+
 	// Everything above the entry is one block with a gap around it and between its
 	// rows — see ui.NewGapBlock. ComposerPaddingV is what the card is worth around
 	// the *entry*, which brings InnerPadding of its own; a reply card brings none
@@ -144,6 +153,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		),
 		a.composerEntry,
 		a.composerNotice,
+		a.selectionBar,
 	)
 	padV, padH := theme.Sizes.ComposerPaddingV, theme.Sizes.ComposerPaddingH
 	card := container.NewStack(dockBg, ui.NewInset(inner, padV, padV, padH, padH))
@@ -172,6 +182,7 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 	// what is on screen has a widget. OnMount is where a row's lazy lookups go.
 	a.messages = ui.NewMessageList(a.deps(), a.composerDock)
 	a.messages.OnMount = a.onMessageMounted
+	a.messages.OnSelectionChanged = a.syncSelectionBar
 	a.messages.OnScroll = func() {
 		a.syncJumpBar()
 		if a.messages.AtTop() {
@@ -271,6 +282,24 @@ func (a *App) syncComposer() {
 		return
 	}
 
+	// Selecting hides both: the bar is standing where they are, and a permission
+	// arriving mid-selection must not put the entry back under it. A permission
+	// *lost* mid-selection ends the mode instead — a role change is the one thing
+	// that moves the answer without the channel moving, and a set nothing can be
+	// done with is worse than no set.
+	if a.messages != nil && a.messages.Selecting() {
+		if !permissions.Has(domain.PermissionManageMessages) {
+			a.endSelection()
+			return
+		}
+
+		a.composerNotice.Set("")
+		a.composerEntry.Hide()
+		a.resizeDock()
+
+		return
+	}
+
 	a.composerNotice.Set(reason)
 	if reason == "" {
 		a.composerEntry.Show()
@@ -278,6 +307,100 @@ func (a *App) syncComposer() {
 		a.composerEntry.Hide()
 	}
 	a.resizeDock()
+}
+
+/* Selecting messages */
+
+// OnSelectMessages puts the column into selection mode with message picked, which
+// is the only way in — see MessageWidget.menuItems. Call on the UI thread.
+func (a *App) OnSelectMessages(message *domain.Message) {
+	if message == nil || a.messages == nil {
+		return
+	}
+
+	a.messages.SetSelecting(true)
+	a.messages.Select(message.ID, false)
+	a.syncComposer()
+}
+
+// OnToggleSelected adds or removes one row, extend taking everything back to the
+// last one picked. Call on the UI thread.
+func (a *App) OnToggleSelected(message *domain.Message, extend bool) {
+	if message == nil || a.messages == nil {
+		return
+	}
+
+	a.messages.Select(message.ID, extend)
+}
+
+// endSelection leaves the mode and gives the composer back. Also the way out of
+// a mode the reader cannot finish — a channel switch, a lost permission.
+// Call on the UI thread.
+func (a *App) endSelection() {
+	if a.messages == nil || !a.messages.Selecting() {
+		return
+	}
+
+	a.messages.SetSelecting(false)
+	a.syncComposer()
+}
+
+// syncSelectionBar matches the bar to the set. It is what ui.MessageList reports
+// selection changes to, so it also runs when a delete lands and takes the rows it
+// removed out of the set with them. The dock is re-hung by the bar's own
+// OnResize, which fires only when its height moved. Call on the UI thread.
+func (a *App) syncSelectionBar(count int) {
+	if a.selectionBar == nil {
+		return
+	}
+
+	a.selectionBar.Set(a.messages.Selecting(), count)
+}
+
+// confirmDeleteSelected asks before deleting the picked messages, the set being
+// the one thing a confirmation cannot quote back. Call on the UI thread.
+func (a *App) confirmDeleteSelected() {
+	channelID, ids := a.currentChannelID, a.messages.Selected()
+	if channelID == "" || len(ids) == 0 {
+		return
+	}
+
+	a.confirm(ui.Confirm{
+		Title:     "Delete messages",
+		Body:      fmt.Sprintf("%s will be deleted for everyone. This cannot be undone.", util.Quantity(len(ids), "message")),
+		Action:    "Delete",
+		Tone:      ui.ToneDanger,
+		OnConfirm: func() { a.deleteSelected(channelID, ids) },
+	})
+}
+
+// deleteSelected sends the bulk delete and leaves the mode at once: the rows go
+// through BulkMessageDelete like any other deletion, so a refused request leaves
+// them where they are and says so.
+//
+// The set is re-read against Revolt's week-long window on the way out rather than
+// trusted from when it was built — the route refuses the *whole* batch over one
+// message past it, and a selection is something a reader can sit on.
+func (a *App) deleteSelected(channelID string, ids []string) {
+	fresh := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
+		when, err := util.Timestamp(id)
+
+		return err != nil || time.Since(when) >= domain.MaxBulkDeleteAge
+	})
+
+	a.endSelection()
+	if stale := len(ids) - len(fresh); stale > 0 {
+		a.notify(ui.ToneWarning, "%s too old to delete in bulk — Revolt allows a week.",
+			util.Quantity(stale, "message"))
+	}
+	if len(fresh) == 0 {
+		return
+	}
+
+	a.background(
+		func() error { return a.client.DeleteMessages(channelID, fresh) },
+		a.notifyFailure("bulk delete in "+channelID, "Could not delete those messages."),
+	)
 }
 
 // OnAttachFile asks for a file to hang on the next message. No filter: what a
@@ -463,9 +586,7 @@ func (a *App) onMessageMounted(message *domain.Message, grouped bool) {
 	if !grouped {
 		a.ensureReplies(message)
 	}
-	if message.Edited != nil {
-		a.armEditMarks()
-	}
+	a.armTimeSpans()
 }
 
 /* Lazy reply resolution */
@@ -954,7 +1075,15 @@ func (a *App) backToPresent() {
 // escapeToPresent is Escape doing what tapping the bar does, and nothing at all
 // when the bar is down — Escape in a column already at the tail should not move
 // it, and it still has to reach the entry that pressed it.
+//
+// Selecting takes it first: it is the mode the reader is in, the composer is not
+// even mounted, and a mode with no key out of it is one to be stuck in.
 func (a *App) escapeToPresent() {
+	if a.messages != nil && a.messages.Selecting() {
+		a.endSelection()
+		return
+	}
+
 	if !a.viewingOlder() {
 		return
 	}
@@ -994,6 +1123,11 @@ func (a *App) removeMessages(channelID string, messageIDs []string) {
 		a.refreshChannelRow(channelID)
 	}
 
+	// Also for any channel, and for the same reason: the mention inbox lists
+	// messages from as many channels as the account is in, and a card leading to a
+	// message that no longer exists leads nowhere.
+	a.dropPanelMessages(channelID, messageIDs)
+
 	if channelID != a.currentChannelID {
 		return
 	}
@@ -1028,6 +1162,11 @@ func (a *App) refreshMessage(channelID, messageID string) {
 
 	message := a.client.Messages().Find(channelID, messageID)
 	if message == nil {
+		// Mounted but not cached, which is what a jump window is made of: every
+		// handler writes to the cache, so the page a jump landed on cannot be told
+		// what changed. The message is fetched instead — see refetchMounted.
+		a.refetchMounted(channelID, messageID)
+
 		return
 	}
 
@@ -1052,6 +1191,55 @@ func (a *App) refreshMessage(channelID, messageID string) {
 			w.FlashEdit()
 		}
 	}
+}
+
+// refetchMounted asks for a mounted message the cache does not hold, so a jump
+// window follows an edit, a pin or a reaction the same way the live column does.
+//
+// A request rather than a cache read because there is nothing to read: the
+// gateway names the message and hands the change to the client, which applies it
+// to the cache — and a jump page is precisely the messages the cache does not
+// have. The window it mounts is the whole of what this can cost, and only a
+// message on it that somebody changes while it is up.
+//
+// Single-flighted per message: an edit and the reaction that follows it are two
+// events about one message, and a burst of them must not become a request each.
+// The claim is released when the answer lands, so a later change is fetched
+// again. Call on the UI thread.
+func (a *App) refetchMounted(channelID, messageID string) {
+	if a.refetching[messageID] {
+		return
+	}
+	if a.refetching == nil {
+		a.refetching = make(map[string]bool)
+	}
+	a.refetching[messageID] = true
+
+	epoch := a.epoch
+	ref := client.MessageRef{ChannelID: channelID, MessageID: messageID}
+
+	go func() {
+		fetched, gone := a.client.ResolveMessages([]client.MessageRef{ref})
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+			delete(a.refetching, messageID)
+
+			// Deleted between the event and the answer. The delete event removes the
+			// row on its own, so there is nothing left to do about it here.
+			if len(gone) > 0 || len(fetched) == 0 {
+				return
+			}
+			if channelID != a.currentChannelID || a.messages.Index(messageID) == -1 {
+				return // the reader has moved on, or the window no longer holds it
+			}
+
+			a.holdUncached(fetched)
+			a.messages.Replace(fetched[0])
+		}, false)
+	}()
 }
 
 // newlyEdited reports whether next carries an edit the mounted copy did not. A
@@ -1397,28 +1585,37 @@ func (a *App) scrollToBottom() {
 	a.syncJumpBar()
 }
 
-/* The edit marks' clock */
+/* The clock behind what a row says about time */
 
-// armEditMarks starts the clock rewriting the mounted rows' "edited N ago" spans
-// if it is not already running. Called as a row carrying a mark is mounted, so
-// one can never be on screen without it. Call on the UI thread.
-func (a *App) armEditMarks() {
-	if a.editMarkTimer == nil {
-		a.refreshEditMarks()
+// armTimeSpans starts the clock re-reading the mounted rows' spans if it is not
+// already running. Called as a row is mounted, without asking whether that row
+// needs it: the walk below is what decides, and one wasted tick per channel
+// visit is cheaper than a second parse of every body to find out. Call on the UI
+// thread.
+func (a *App) armTimeSpans() {
+	if a.timeSpanTimer == nil {
+		a.refreshTimeSpans()
 	}
 }
 
-// refreshEditMarks rewrites those spans and re-arms while any row still carries
-// one, so a channel with none costs nothing. Nothing else redraws a message that
-// has stopped changing: without this a mark written as "just now" would still say
-// it an hour later. Call on the UI thread.
-func (a *App) refreshEditMarks() {
-	a.editMarkTimer = nil
+// refreshTimeSpans re-reads both of the things a mounted row says about the
+// clock — the "edited N ago" mark, and a relative timestamp in the body — and
+// re-arms only while some row still carries one, so a channel with neither costs
+// a single tick and stops. Nothing else redraws a message that has stopped
+// changing: without this a mark written as "just now" would still say it an hour
+// later, and "in 5 minutes" would stay that until a scroll remounted the row.
+// Call on the UI thread.
+func (a *App) refreshTimeSpans() {
+	a.timeSpanTimer = nil
 
 	var marked bool
 	if a.messages != nil {
 		a.messages.EachMounted(func(w *ui.MessageWidget) {
 			if w.RefreshEditMark() {
+				marked = true
+			}
+			if w.HasRelativeTime() {
+				w.RefreshRelativeTime()
 				marked = true
 			}
 		})
@@ -1428,7 +1625,7 @@ func (a *App) refreshEditMarks() {
 		return
 	}
 
-	a.editMarkTimer = time.AfterFunc(editMarkTick, func() {
-		a.doOnUI(a.refreshEditMarks, false)
+	a.timeSpanTimer = time.AfterFunc(timeSpanTick, func() {
+		a.doOnUI(a.refreshTimeSpans, false)
 	})
 }

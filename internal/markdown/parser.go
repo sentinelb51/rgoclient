@@ -59,6 +59,54 @@ func Links(doc *Document) []string {
 	return found
 }
 
+// HasRelativeTimestamp reports whether the body carries a <t:…:R>, the one
+// reading of an instant that goes out of date while it is on screen. Every other
+// style names a fixed moment and is drawn once for good.
+//
+// Asked rather than re-rendering every body on a clock: a message carrying one
+// is rare, and this is what keeps the cost to the rows that actually have one.
+func HasRelativeTimestamp(doc *Document) bool {
+	var found bool
+	eachInline(doc.Blocks, func(nodes []Inline) {
+		found = found || hasRelativeIn(nodes)
+	})
+
+	return found
+}
+
+func hasRelativeIn(nodes []Inline) bool {
+	for _, n := range nodes {
+		switch v := n.(type) {
+		case *Timestamp:
+			if v.Style == "R" {
+				return true
+			}
+		case *Strong:
+			if hasRelativeIn(v.Children) {
+				return true
+			}
+		case *Emphasis:
+			if hasRelativeIn(v.Children) {
+				return true
+			}
+		case *Underline:
+			if hasRelativeIn(v.Children) {
+				return true
+			}
+		case *Strike:
+			if hasRelativeIn(v.Children) {
+				return true
+			}
+		case *Spoiler:
+			if hasRelativeIn(v.Children) {
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
 // eachInline visits every run of inline content in blocks, in reading order,
 // descending into quotes and list items.
 func eachInline(blocks []Block, visit func([]Inline)) {

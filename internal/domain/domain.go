@@ -139,6 +139,14 @@ type File struct {
 	Size   int
 	Width  int
 	Height int
+
+	// Foreign marks a URL served by somebody other than the instance's own CDN —
+	// an embed's picture, fetched from whatever host the unfurl named. It is not
+	// about trust in the picture but in the *name*: a CDN URL's file ID is what
+	// every cache entry is keyed by, and a foreign path shaped like one would
+	// otherwise be filed under an ID it does not own, so one message's embed could
+	// replace an avatar or a server icon everywhere it is drawn.
+	Foreign bool
 }
 
 /* Messages */
@@ -181,7 +189,50 @@ type Message struct {
 	// Reactions are in the order client/convert.go put them in; Revolt has no
 	// opinion about it — see toReactions.
 	Reactions []Reaction
+
+	// Interactions is what the message allows to be done with it, and is nil for
+	// almost every message: only one posted by a bot carries one.
+	Interactions *Interactions
 }
+
+// Interactions is a message's own rules about reacting to it. Reactions is the
+// emoji it names and RestrictReactions is whether that list is the whole of what
+// may be added — Revolt refuses anything outside it, so the client offers the
+// list rather than a pick the server would reject.
+//
+// The two are independent: an unrestricted list is a suggestion, which this
+// client does not draw, so only the restricted case reaches a widget.
+type Interactions struct {
+	Reactions         []string
+	RestrictReactions bool
+}
+
+// ReactionsAllowed is the emoji this message may be reacted with. restricted is
+// false when anything goes, which is every message but a bot's; a restricted
+// message naming nothing allows no reaction at all, and the surfaces offering
+// one leave it off rather than opening a picker with nothing in it.
+func (m *Message) ReactionsAllowed() (emoji []string, restricted bool) {
+	if m.Interactions == nil || !m.Interactions.RestrictReactions {
+		return nil, false
+	}
+
+	return m.Interactions.Reactions, true
+}
+
+// MaxBulkDelete is how many messages one bulk delete may name, and
+// MaxBulkDeleteAge how old the oldest of them may be. Both are Revolt's, and
+// both live here for the reason MessageSort does: the surface offering the
+// selection has to refuse exactly what the request would, and neither end may
+// name the other's type.
+//
+// The route walks every ID before it looks at a permission and refuses the whole
+// batch over one that is too old, so a message a week and a minute past would
+// cost the ninety-nine beside it. Hence the age is a rule the client applies
+// rather than a rejection it reports.
+const (
+	MaxBulkDelete    = 100
+	MaxBulkDeleteAge = 7 * 24 * time.Hour
+)
 
 // MessageSort is the order a channel search asks its answer back in. It lives
 // here rather than in the client because both ends need it: the widget offering
@@ -497,6 +548,14 @@ type Channel struct {
 	// group's own moderation on that one account: whoever owns it is the only one
 	// who may put somebody out of it.
 	OwnerID string
+
+	// Permissions is what everybody in a **group** may do, and is meaningless for
+	// every other kind. Revolt resolves a group as a view-only floor *or*ed with
+	// this, so it is an allow set rather than an overwrite and cannot take away
+	// seeing the group; the owner holds everything whatever it says. A group that
+	// has never been given one reads as Revolt's own conversation preset rather
+	// than as zero — nobody set "deny everything" by not answering.
+	Permissions Permission
 
 	Recipients    []string
 	LastMessageID string
@@ -828,12 +887,24 @@ type UserProfile struct {
 	BackgroundURL string // the profile banner; "" leaves the accent colour showing
 }
 
+// VoiceNode is one media server the instance offers calls through. The name is
+// what join_call is asked for; the URL is what a probe dials and what tells two
+// nodes apart on a page, an instance being free to name them anything.
+type VoiceNode struct {
+	Name string
+	URL  string
+}
+
 // Mutual is what this account has in common with somebody else. Like
 // UserProfile it is a request of its own, and IDs alone: naming them is a lookup
 // the controller makes, since the account holds both sides already.
 type Mutual struct {
 	UserIDs   []string
 	ServerIDs []string
+
+	// ChannelIDs is the groups the two are both in — the third thing two accounts
+	// can share, and one Revolt answers with beside the other two.
+	ChannelIDs []string
 }
 
 // Profile is everything the two profile presentations draw, resolved in one

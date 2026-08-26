@@ -21,11 +21,18 @@ func TestParseColor(t *testing.T) {
 		{"#f00", color.NRGBA{R: 255, G: 0, B: 0, A: 255}, true},
 		{"#5B7CFA", color.NRGBA{R: 0x5B, G: 0x7C, B: 0xFA, A: 255}, true},
 		{"#000000", color.NRGBA{A: 255}, true},
-		{"5B7CFA", nil, false},                     // missing #
-		{"#5B7CF", nil, false},                     // wrong length
-		{"#GGGGGG", nil, false},                    // not hex
-		{"linear-gradient(red, blue)", nil, false}, // named stops carry no triple
+		{"5B7CFA", nil, false},  // missing #
+		{"#5B7CF", nil, false},  // wrong length
+		{"#GGGGGG", nil, false}, // not hex
 		{"", nil, false},
+
+		{"red", color.NRGBA{R: 255, A: 255}, true},
+		{"REBECCAPURPLE", color.NRGBA{R: 0x66, G: 0x33, B: 0x99, A: 255}, true},
+		{"rgb(91, 124, 250)", color.NRGBA{R: 0x5B, G: 0x7C, B: 0xFA, A: 255}, true},
+		{"rgb(100% 0% 0% / 50%)", color.NRGBA{R: 255, A: 128}, true},
+		{"hsl(120, 100%, 50%)", color.NRGBA{G: 255, A: 255}, true},
+		{"#f008", color.NRGBA{R: 255, A: 136}, true},
+		{"to right", nil, false}, // a gradient's own words are not colours
 	}
 
 	for _, tt := range tests {

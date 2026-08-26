@@ -74,7 +74,7 @@ var appIconPNG []byte
 // them, and the few it does have are filled where these are stroked, so the rail
 // would read as two icon sets sitting together.
 //
-//go:embed account.svg security.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg advanced.svg about.svg
+//go:embed account.svg security.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg updates.svg advanced.svg about.svg
 //go:embed server-overview.svg server-channels.svg server-roles.svg server-invites.svg server-bans.svg
 var settingsIcons embed.FS
 
@@ -110,6 +110,16 @@ var searchIcons embed.FS
 //
 //go:embed profile-*.svg
 var profileIcons embed.FS
+
+// The mark a notice wears, one per tone. Fyne's own set has all three, but they
+// arrive as themed resources — a colour *name* rather than a colour — and the
+// name a tone would have to borrow is mapped to something else here, so an info
+// mark drawn through it disagreed with the card carrying it. Stroked, like the
+// rest of the client's marks, which is what lets ui.tintedIcon give one the
+// tone's exact colour.
+//
+//go:embed notice-*.svg
+var noticeIcons embed.FS
 
 var (
 	// MentionIcon marks the "also mention the author" toggle on a reply card.
@@ -190,6 +200,7 @@ var (
 	NotifyIcon      = settingsIcon("notify.svg")
 	CacheIcon       = settingsIcon("cache.svg")
 	PerformanceIcon = settingsIcon("performance.svg")
+	UpdatesIcon     = settingsIcon("updates.svg")
 	AdvancedIcon    = settingsIcon("advanced.svg")
 	AboutIcon       = settingsIcon("about.svg")
 )
@@ -274,10 +285,18 @@ var (
 	SearchLinkIcon       = searchIcon("search-link.svg")
 	SearchReactionIcon   = searchIcon("search-reaction.svg")
 	SearchJumpIcon       = searchIcon("search-jump.svg")
+	SearchDateIcon       = searchIcon("search-date.svg")
 
 	SearchRelevanceIcon = searchIcon("search-relevance.svg")
 	SearchNewestIcon    = searchIcon("search-newest.svg")
 	SearchOldestIcon    = searchIcon("search-oldest.svg")
+)
+
+// The three tones a notice or a confirmation is drawn in, one mark each.
+var (
+	NoticeInfoIcon    = noticeIcon("notice-info.svg")
+	NoticeWarningIcon = noticeIcon("notice-warning.svg")
+	NoticeDangerIcon  = noticeIcon("notice-danger.svg")
 )
 
 // settingsIcon reads one of the embedded section marks. The file list is a
@@ -305,6 +324,11 @@ func actionIcon(name string) fyne.Resource {
 // profileIcon reads one of the embedded profile marks.
 func profileIcon(name string) fyne.Resource {
 	return embedded(profileIcons, name)
+}
+
+// noticeIcon reads one of the embedded tone marks.
+func noticeIcon(name string) fyne.Resource {
+	return embedded(noticeIcons, name)
 }
 
 // embedded reads a file out of one of the icon sets. Every set is a compile-time

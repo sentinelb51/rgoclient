@@ -1,9 +1,11 @@
 package cache
 
 import (
+	"bytes"
 	"image"
 	"image/draw"
 	"image/png"
+	"io"
 	"log"
 	"math"
 	"net/http"
@@ -687,12 +689,62 @@ func (c *ImageCache) load(id, url string) image.Image {
 		return nil
 	}
 
-	img, _, err := image.Decode(resp.Body)
-	if err != nil {
+	img := decodeBounded(resp.Body, url)
+	if img == nil {
 		return nil
 	}
 	img = downscale(img, int(c.maxEdge.Load()))
 	c.setIfCurrent(id, img, generation)
+
+	return img
+}
+
+// What a downloaded picture may cost before it is refused. Both are ceilings on
+// somebody else's file: an embed's picture is fetched from whatever host the
+// unfurl named, and a few hundred compressed bytes can name a canvas of billions
+// of pixels — decoding one is a crash rather than a slow load. The pixel bound
+// is the one that matters; the byte bound is what stops a body that never ends.
+//
+// 32 Mpx is past any photograph a person posts (a 50 MP phone picture is 50) and
+// costs 128 MB while it decodes, of which downscale keeps the visible fraction.
+const (
+	decodeMaxBytes  = 32 << 20
+	decodeMaxPixels = 32 << 20
+)
+
+// decodeBounded reads a picture from the network under those two ceilings,
+// reporting nil for anything refused. The body is read into memory first because
+// the dimensions have to be read *before* the pixels are allocated, and a
+// decoder handed a stream has already consumed the header by the time it has
+// answered.
+func decodeBounded(body io.Reader, url string) image.Image {
+	// One past the ceiling, so a file sitting exactly on it is told apart from one
+	// that was cut short.
+	raw, err := io.ReadAll(io.LimitReader(body, decodeMaxBytes+1))
+	if err != nil {
+		return nil
+	}
+	if len(raw) > decodeMaxBytes {
+		log.Printf("image %s: larger than %d bytes", url, decodeMaxBytes)
+
+		return nil
+	}
+
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil {
+		return nil
+	}
+	if config.Width <= 0 || config.Height <= 0 ||
+		int64(config.Width)*int64(config.Height) > decodeMaxPixels {
+		log.Printf("image %s: %dx%d is past what will be decoded", url, config.Width, config.Height)
+
+		return nil
+	}
+
+	img, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return nil
+	}
 
 	return img
 }

@@ -31,6 +31,11 @@ import (
 	"RGOClient/internal/ui/theme"
 )
 
+// groupFilterFrom is how many people a card has to offer before it also offers a
+// way to search them. Below it the field would be a control standing over a list
+// already readable in one glance.
+const groupFilterFrom = 8
+
 /* What a card is offered */
 
 // GroupCandidate is one person a group card can be answered with. The same
@@ -85,7 +90,7 @@ func NewGroupDialog(deps Deps, people []GroupCandidate,
 	return newGroupDialog(deps, groupCard{
 		title:   "New group",
 		label:   "People",
-		empty:   "Add a friend first — a group is made from people you know.",
+		empty:   "Add a friend first. Groups are made from people you know.",
 		action:  "Create",
 		pending: "Creating...",
 		named:   true,
@@ -144,7 +149,7 @@ func newGroupDialog(deps Deps, card groupCard, people []GroupCandidate,
 	})
 	enableIf(d.action, !card.needsAny)
 
-	rows := []fyne.CanvasObject{dialogHeader(card.title, onClose), widget.NewSeparator()}
+	rows := []fyne.CanvasObject{dialogHeader(card.title, onClose), NewRowDivider()}
 	if name != nil {
 		rows = append(rows, dialogField("Name", fieldSurface(name)))
 	}
@@ -178,11 +183,17 @@ type groupPicker struct {
 
 	count *canvas.Text
 	field fyne.CanvasObject // the caption and the list, built as one of the card's fields
+
+	// list is the column the rows are in, kept so filtering can hide and show them
+	// rather than rebuild it. A rebuilt row is a row whose pick is gone, and
+	// somebody who has been chosen and then filtered out of sight is still chosen —
+	// which is what lets the list be searched twice and answered once.
+	list *fyne.Container
 }
 
 func newGroupPicker(deps Deps, card groupCard, people []GroupCandidate, onPick func(picked int)) *groupPicker {
 	p := &groupPicker{
-		count: newText("", theme.Colors.TimestampText, theme.Sizes.JoinDialogTextSize),
+		count: newText("", theme.Colors.TimestampText, theme.Sizes.DialogDetailSize),
 	}
 
 	// The caption is a field's label with the count held at the far end, so the two
@@ -194,9 +205,37 @@ func newGroupPicker(deps Deps, card groupCard, people []GroupCandidate, onPick f
 
 	// Bound to its caption by the gap every other field on the card uses, rather
 	// than by the wider one between fields.
-	p.field = VBoxNoSpacing(caption, VerticalSpacer(theme.Sizes.DialogLabelGap), body)
+	parts := []fyne.CanvasObject{caption, VerticalSpacer(theme.Sizes.DialogLabelGap)}
+
+	// The filter is only worth its own row where there is a list to narrow. Below
+	// the caption rather than beside it: the caption's far end is already carrying
+	// the count, which is what says how far the card has been answered.
+	if len(people) > groupFilterFrom {
+		filter, _ := newFilterField("Filter by name", p.narrow)
+		parts = append(parts, filter, VerticalSpacer(theme.Sizes.DialogLabelGap))
+	}
+
+	p.field = VBoxNoSpacing(append(parts, body)...)
 
 	return p
+}
+
+// narrow hides the rows nobody was looking for. Hidden rather than dropped, so a
+// pick made under an earlier query survives the next one — see groupPicker.list.
+func (p *groupPicker) narrow(query string) {
+	query = strings.ToLower(strings.TrimSpace(query))
+
+	for _, row := range p.rows {
+		if matchesFilter(query, row.name, row.handle) {
+			row.Show()
+			continue
+		}
+		row.Hide()
+	}
+
+	if p.list != nil {
+		Relayout(p.list)
+	}
 }
 
 // buildBody is the list itself, or what stands in its place when nobody is on
@@ -218,11 +257,13 @@ func (p *groupPicker) buildBody(deps Deps, card groupCard,
 
 	// The list is measured rather than the scroller: a scroller has no opinion about
 	// its own height, so a card of forty friends would be taller than the window.
-	list := NewGapColumn(theme.Sizes.FriendsCardGap, rows...)
+	// The gaps go between the *visible* rows, which is what lets the filter hide one
+	// without leaving its space behind.
+	p.list = NewGapColumn(theme.Sizes.FriendsCardGap, rows...)
 
 	return container.New(
-		&cappedHeightLayout{content: list, max: theme.Sizes.GroupPickerHeight},
-		NewPlainVScroll(list))
+		&cappedHeightLayout{content: p.list, max: theme.Sizes.GroupPickerHeight},
+		NewPlainVScroll(p.list))
 }
 
 // picked is who the card is answered with, in the order they were offered.
@@ -280,7 +321,13 @@ type pickRow struct {
 	mark       *pickMark
 	content    fyne.CanvasObject
 
-	userID  string
+	userID string
+
+	// name and handle are what the filter reads. Kept on the row rather than looked
+	// up again: the row is the only thing that outlives the candidate slice.
+	name   string
+	handle string
+
 	hovered bool
 	chosen  bool
 }
@@ -295,6 +342,8 @@ func newPickRow(deps Deps, candidate GroupCandidate, onPick func()) *pickRow {
 		background: newIslandCard(),
 		mark:       newPickMark(),
 		userID:     candidate.UserID,
+		name:       candidate.Name,
+		handle:     candidate.Handle,
 	}
 	w.onTap = func() {
 		w.chosen = !w.chosen

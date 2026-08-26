@@ -114,6 +114,21 @@ func newInitial(name string) *canvas.Text {
 	return initial
 }
 
+// newInitialIcon draws a picture in a circle over the letter it falls back to —
+// the mark a server, a group, an invite card, the emoji rail and the call island
+// all name their subject with. cacheID names the rendition: a file ID and the URL
+// it came from disagree once a size query is on the URL.
+func newInitialIcon(images *cache.ImageCache, cacheID, imageURL, initial string, size fyne.Size) *fyne.Container {
+	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
+	slot := container.NewStack(background, container.NewCenter(newInitial(initial)))
+
+	if imageURL != "" && images != nil {
+		images.LoadIntoContainer(cacheID, imageURL, size, slot, true, background)
+	}
+
+	return container.NewGridWrap(size, slot)
+}
+
 // newBoldText is the same in the one style anything here asks for.
 func newBoldText(text string, fill color.Color, size float32) *canvas.Text {
 	obj := newText(text, fill, size)
@@ -582,8 +597,9 @@ func (w ButtonWeight) fill() (color.Color, bool) {
 // makes that a button rather than a smudge — there is no theme name for it, the
 // background being a rectangle inside a renderer nothing reaches.
 //
-// Not focusable, unlike Fyne's. A field that submits through one does it from
-// OnSubmitted (see Tap), and nothing here is driven by tabbing onto a button.
+// Focusable, so Tab reaches one and Space or Enter presses it. A card is still
+// answerable from its *field* where it has one (OnSubmitted → Tap), which is the
+// shorter way round; this is what answers a card that has no field at all.
 type Button struct {
 	tapBase
 	background *canvas.Rectangle
@@ -597,11 +613,13 @@ type Button struct {
 	tint color.Color
 
 	hovered  bool
+	focused  bool
 	disabled bool
 }
 
 var (
 	_ fyne.Tappable      = (*Button)(nil)
+	_ fyne.Focusable     = (*Button)(nil)
 	_ desktop.Hoverable  = (*Button)(nil)
 	_ desktop.Cursorable = (*Button)(nil)
 )
@@ -718,6 +736,41 @@ func (b *Button) setHovered(on bool) {
 	b.refreshAppearance()
 }
 
+/* Focus */
+
+// FocusGained and FocusLost draw the ring and take it away. A disabled button
+// still accepts focus rather than being skipped — Fyne's manager walks the tree
+// and does not ask — but it presses no more from the keyboard than from the
+// pointer, Tap refusing either way.
+func (b *Button) FocusGained() { b.setFocused(true) }
+func (b *Button) FocusLost()   { b.setFocused(false) }
+
+// TypedRune answers the space bar, which arrives as a rune rather than a key.
+func (b *Button) TypedRune(r rune) {
+	if r == ' ' {
+		b.Tap()
+	}
+}
+
+// TypedKey answers Enter and Return, the two the rest of this client's cards are
+// submitted with. Everything else is left alone: a key this button does not use
+// is one the canvas may still want.
+func (b *Button) TypedKey(e *fyne.KeyEvent) {
+	switch e.Name {
+	case fyne.KeyReturn, fyne.KeyEnter:
+		b.Tap()
+	}
+}
+
+func (b *Button) setFocused(on bool) {
+	if b.focused == on {
+		return
+	}
+
+	b.focused = on
+	b.refreshAppearance()
+}
+
 // refreshAppearance repaints the surface for the state it is now in. Disabled
 // outranks everything, tone outranks hover: a filled button lifts its own colour
 // rather than taking the plain one's hover, there being no palette entry for a
@@ -762,6 +815,7 @@ func (b *Button) refreshAppearance() {
 	if !tinted {
 		Outline(b.background)
 	}
+	b.focusRing()
 	b.background.FillColor = fill
 	b.background.Refresh()
 
@@ -789,10 +843,86 @@ func (b *Button) refreshOutlined() {
 	b.background.FillColor = fill
 	b.background.StrokeColor = tint
 	b.background.StrokeWidth = theme.Sizes.OutlineWidth
+	b.focusRing()
 	b.background.Refresh()
 
 	b.label.Color = solidColor(tint)
 	b.label.Refresh()
+}
+
+// focusRing replaces whatever edge the button had settled on. It overwrites
+// rather than adding a second stroke — a rectangle has one — so the hairline and
+// the tint are both painted first and this has the last word.
+func (b *Button) focusRing() {
+	if !b.focused || b.disabled {
+		return
+	}
+
+	b.background.StrokeColor = theme.Colors.ButtonFocusRing
+	b.background.StrokeWidth = theme.Sizes.ButtonFocusWidth
+}
+
+/* Narrowing a list */
+
+// newFilterField is the box a list is narrowed from: a mark, a field, and the
+// surface both sit on. Three surfaces mount one — the settings rail, the friends
+// page and the group picker — so it is built here rather than three times, a
+// filter that looks different on each being how one of them stops reading as a
+// filter at all.
+//
+// Answers the container and the entry, callers wanting the second to focus it or
+// to read it back.
+func newFilterField(placeholder string, onChange func(string)) (fyne.CanvasObject, *filterEntry) {
+	entry := &filterEntry{}
+	entry.ExtendBaseWidget(entry)
+	entry.PlaceHolder = placeholder
+	entry.OnChanged = onChange
+
+	mark := newScaledIcon(tintedIcon(assets.SearchIcon, theme.Colors.CategoryText),
+		theme.Sizes.SettingsIconSize)
+
+	row := NewFillRow(2,
+		container.NewCenter(mark),
+		HorizontalSpacer(theme.Sizes.ChipDotGap),
+		WithCaret(entry),
+	)
+
+	return NewFixedHeightContainer(theme.Sizes.SettingsInputHeight,
+		container.NewStack(newFieldBackground(),
+			NewInset(row, 0, 0, theme.Sizes.ChipPaddingH, theme.Sizes.ChipPaddingH))), entry
+}
+
+// filterEntry is that field. Escape empties it rather than reaching the surface
+// as "close", but only while there is something to empty: a filter is what the
+// reader wants out of first, and once it is gone the key means what it means
+// everywhere else in the client.
+type filterEntry struct {
+	widget.Entry
+}
+
+func (e *filterEntry) TypedKey(key *fyne.KeyEvent) {
+	if key.Name == fyne.KeyEscape && e.Text != "" {
+		e.SetText("")
+		return
+	}
+
+	e.Entry.TypedKey(key)
+}
+
+// matchesFilter reports whether any of fields contains the query, folded to one
+// case. A blank query matches everything, which is what an untouched field is.
+func matchesFilter(query string, fields ...string) bool {
+	if query == "" {
+		return true
+	}
+
+	for _, field := range fields {
+		if strings.Contains(strings.ToLower(field), query) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // IconButton is a flat, icon-only button used for the per-message quick actions
@@ -843,22 +973,16 @@ func (b *IconButton) setHovered(on bool) {
 	reportHover(b.onHover, on)
 }
 
-// OutlinedIconButton is an icon button that wears its own edge, in the icon's own
-// colour — the hairline an expired invite card draws in red, put round a target
-// rather than round a message.
+// OutlinedIconButton is an icon button wearing its own edge in the icon's own
+// colour. A plain IconButton is a *mark* that lights under the pointer — right
+// where the row has already said what is going on, wrong where the icon is the
+// only thing offering the action at all — and an edge says "this is a button"
+// without spending a word on it.
 //
-// It exists because a plain IconButton is a *mark* that lights under the pointer:
-// right where the row it sits in has already said what is going on (a message's
-// own actions, revealed on hover), and wrong where the icon is the only thing
-// offering the action at all. An edge is what says "this is a button" without
-// spending a word on it — which is the whole reason a row can carry two of these
-// where two labelled buttons would be more to read than the row itself.
-//
-// The tint is the icon's, so a destructive one is outlined in the colour it is
-// drawn in and needs nothing else to read as destructive. Hover fills with the
-// neutral ButtonHoverBg rather than a wash of the tint: the fill has to work on
-// any surface this is laid on, and a tinted one mixed against the wrong card
-// would be a different colour on each.
+// The tint is the icon's, so a destructive one needs nothing else to read as
+// destructive. Hover fills with the neutral ButtonHoverBg rather than a wash of
+// that tint, which mixed against a different card would be a different colour on
+// each.
 type OutlinedIconButton struct {
 	tapBase
 
@@ -1341,10 +1465,32 @@ func imageCacheID(imageURL string) string {
 		return id
 	}
 
+	return urlCacheID(imageURL)
+}
+
+// urlCacheID keys a picture by the whole of where it came from, for a URL whose
+// path may not be read as a name. The "~" is what keeps the two namespaces
+// apart: an Autumn ID is alphanumerics and "_-", so no ID can spell one of these
+// and no URL can be filed under an ID it does not own.
+func urlCacheID(imageURL string) string {
 	sum := fnv.New64a()
 	sum.Write([]byte(imageURL))
 
-	return strconv.FormatUint(sum.Sum64(), 16)
+	return "~" + strconv.FormatUint(sum.Sum64(), 16)
+}
+
+// fileCacheID is imageCacheID for a file that says where it is served from. A
+// foreign one is keyed by its URL however its path is shaped — see
+// domain.File.Foreign.
+func fileCacheID(file *domain.File) string {
+	if file == nil || file.URL == "" {
+		return ""
+	}
+	if file.Foreign {
+		return urlCacheID(file.URL)
+	}
+
+	return imageCacheID(file.URL)
 }
 
 // imageFrame is a picture in the box it is drawn in, at most bounds and never
@@ -1374,7 +1520,7 @@ func imageFrame(images *cache.ImageCache, file *domain.File, bounds, reserve fyn
 		return frame
 	}
 
-	images.LoadAsync(imageCacheID(file.URL), file.URL, false, func(img image.Image) {
+	images.LoadAsync(fileCacheID(file), file.URL, false, func(img image.Image) {
 		pixels := img.Bounds()
 
 		fitted := size

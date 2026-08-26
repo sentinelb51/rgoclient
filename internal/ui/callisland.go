@@ -22,31 +22,16 @@ import (
 // account is in, the voice channel it is looking at, or both — and nothing at
 // all when neither.
 //
-// It is one widget in one place rather than a surface per view. A call outlives
-// leaving the channel, the server and the view, so the only slot that can hold
-// it is the window's own: it is not a messageIsland (the modal layer's surface
-// for the three message lists), not a composer dock badge (everything in that
-// stack is about the open channel), and not a strip under the message header,
-// which every view without one would have to draw for itself.
+// One widget on the window's own layer rather than a surface per view, a call
+// outliving the channel, the server and the view. Drawn as the settings page's
+// invite card, two cards a shade apart reading as a mistake.
 //
-// It is drawn as the settings page's invite card — same radius, same padding,
-// same two lines and same lifted outline — because it is the same shape doing
-// the same job somewhere else, and two cards a shade apart read as a mistake.
+// Two halves, either of which stands alone: the running call, and a voice channel
+// on screen the account is *not* in. The state bar under the live half reports
+// that call alone, which is why it stops at the rule between them.
 //
-// Two halves, either of which stands alone: the running call, and the voice
-// channel on screen the account is *not* in. Each is a channel over the server
-// it belongs to, with what can be done about it at its end. Both are up when a
-// reader in one call is looking at another channel, with a rule between them.
-//
-// Under the live half — and only that half — runs the state bar: the
-// connection's health as a colour, the word itself being what its tooltip is for.
-// It ends at the rule rather than at the card's far edge, because what it reports
-// is the running call and the other half is an offer with no state to report.
-//
-// Floating, so nothing below reserves room for it — see NewCallIslandLayer, and
-// note that the card hides itself when it has nothing to say. Every setter
-// leaves the card's own size to be settled by Sync, which is what the caller
-// finishes with.
+// Floating, so nothing below reserves room for it — see NewCallIslandLayer. Every
+// setter leaves the card's own size to Sync, which the caller finishes with.
 type CallIsland struct {
 	widget.BaseWidget
 
@@ -542,18 +527,11 @@ func (i *islandIcon) MinSize() fyne.Size {
 func (i *islandIcon) setPicture(images *cache.ImageCache, iconURL, initial string) {
 	side := theme.Sizes.CallIslandIconSize
 
-	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
-	slot := container.NewStack(background, container.NewCenter(newInitial(initial)))
-
 	i.width = side
-	i.body.Objects = []fyne.CanvasObject{container.NewGridWrap(fyne.NewSize(side, side), slot)}
-	i.body.Refresh()
-
-	if iconURL == "" || images == nil {
-		return
+	i.body.Objects = []fyne.CanvasObject{
+		newInitialIcon(images, imageCacheID(iconURL), iconURL, initial, fyne.NewSize(side, side)),
 	}
-
-	images.LoadIntoContainer(imageCacheID(iconURL), iconURL, fyne.NewSize(side, side), slot, true, background)
+	i.body.Refresh()
 }
 
 // setFaces draws the people in a group instead, overlapping. Each wears a band of

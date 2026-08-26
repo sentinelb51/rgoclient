@@ -13,6 +13,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -38,6 +39,72 @@ type Settings struct {
 	Voice         Voice         `json:"voice"`
 	Cache         Cache         `json:"cache"`
 	Performance   Performance   `json:"performance"`
+	Updates       Updates       `json:"updates"`
+	State         State         `json:"state"`
+}
+
+// State is what the client remembers rather than what the reader has chosen.
+// Nothing here is a setting and no row on the settings page writes to it — it is
+// persisted because losing it would quietly undo a decision somebody made.
+type State struct {
+	// DismissedMentions is what the reader has waved off, oldest first, and
+	// DismissedAccount is whose they are. Revolt has no route dropping a single
+	// mention and hands the whole set back on every Ready, so without this a
+	// restart brings back every mention dismissed in a channel never since opened.
+	//
+	// Bounded by MaxDismissedMentions: opening the channel is what drops one for
+	// real, and one in a channel nobody returns to would otherwise be kept forever.
+	// The account is stored beside them because another account's mentions are not
+	// these — a different one signing in replaces the set rather than inheriting it.
+	DismissedAccount  string   `json:"dismissed_account,omitempty"`
+	DismissedMentions []string `json:"dismissed_mentions,omitempty"`
+}
+
+// MaxDismissedMentions is how many waved-off mentions are carried between runs.
+// Past it the oldest goes, which is the one most likely to have been acknowledged
+// by opening its channel since.
+const MaxDismissedMentions = 500
+
+// RememberDismissedMention records one so the next Ready cannot hand it back.
+// account re-keys the set where it differs, another account's mentions not being
+// these.
+func RememberDismissedMention(account, messageID string) {
+	if account == "" || messageID == "" {
+		return
+	}
+
+	Update(func(s *Settings) {
+		if s.State.DismissedAccount != account {
+			s.State.DismissedAccount, s.State.DismissedMentions = account, nil
+		}
+		if slices.Contains(s.State.DismissedMentions, messageID) {
+			return
+		}
+
+		s.State.DismissedMentions = append(s.State.DismissedMentions, messageID)
+		if extra := len(s.State.DismissedMentions) - MaxDismissedMentions; extra > 0 {
+			s.State.DismissedMentions = slices.Delete(s.State.DismissedMentions, 0, extra)
+		}
+	})
+}
+
+// DismissedMentions is what was waved off under this account, or nothing where
+// the file belongs to another one.
+func DismissedMentions(account string) []string {
+	state := Current().State
+	if account == "" || state.DismissedAccount != account {
+		return nil
+	}
+
+	return state.DismissedMentions
+}
+
+// ForgetDismissedMentions drops the lot, for a sign-out: the next account to use
+// this file starts with nobody else's decisions.
+func ForgetDismissedMentions() {
+	Update(func(s *Settings) {
+		s.State.DismissedAccount, s.State.DismissedMentions = "", nil
+	})
 }
 
 // Interface is the friendly layer: choices made in the user's terms, each of
@@ -134,6 +201,12 @@ type Behaviour struct {
 
 	ScrollSpeed int  `json:"scroll_speed"`
 	EnterSends  bool `json:"enter_sends"`
+
+	// CursorBlink fades the caret of whichever entry has focus. Off is not the
+	// toolkit's own default: a blink is a repaint twice a second for as long as a
+	// box is focused, and the composer is focused most of the time the client is
+	// open.
+	CursorBlink bool `json:"cursor_blink"`
 }
 
 // Notifications configures the transient notice layer, what the client does
@@ -147,6 +220,14 @@ type Notifications struct {
 	ShowInfo    bool `json:"show_info"`
 	ShowWarning bool `json:"show_warning"`
 	ShowDanger  bool `json:"show_danger"`
+
+	// ShowMention and ShowDirect put the message itself on that layer — the sender's
+	// face, their name and the line they wrote, tapping through to it. The three
+	// switches above name which *outcomes* are worth reporting and do not cover
+	// these: a message somebody else sent is not an outcome of anything the reader
+	// did. Neither fires for the channel already on screen, which is showing it.
+	ShowMention bool `json:"show_mention"`
+	ShowDirect  bool `json:"show_direct"`
 
 	// ModalSeconds is how long the centred notice holds the middle of the window.
 	// Shorter than a corner card's lifetime by default: that one waits to be read
@@ -257,6 +338,20 @@ type Performance struct {
 	Cores string `json:"cores"`
 }
 
+// Updates is what the client does about a newer build of itself. Nothing is ever
+// downloaded here: a check reads the repository's newest release and the reader
+// is handed the link to it.
+type Updates struct {
+	// Check asks GitHub once per run, after the account's own session has landed.
+	// Off, the Updates section still checks when asked to.
+	Check bool `json:"check"`
+
+	// Announced is the version the startup modal has already been raised for. A
+	// release interrupts once; after that the Updates section is where it is, which
+	// is the difference between telling somebody and nagging them.
+	Announced string `json:"announced"`
+}
+
 // Voice is the call: which devices it uses, what it does to the microphone on
 // the way out, and what state it joins in.
 //
@@ -329,6 +424,13 @@ type Voice struct {
 
 	JoinMuted    bool `json:"join_muted"`
 	JoinDeafened bool `json:"join_deafened"`
+
+	// Node names the media server to join calls through. Empty is the default and
+	// means measure it — every node the instance offers is dialled and the first
+	// handshake wins, the coordinates each carries needing the reader's own
+	// position to be worth anything. A name the instance no longer offers falls
+	// back to that same measurement rather than failing the join.
+	Node string `json:"node"`
 }
 
 // What a voice gain may be set to, in decibels. Decibels rather than a
@@ -431,6 +533,8 @@ func Default() Settings {
 			ShowInfo:        true,
 			ShowWarning:     true,
 			ShowDanger:      true,
+			ShowMention:     true,
+			ShowDirect:      true,
 			ModalSeconds:    3,
 
 			FlashTaskbar:   true,
@@ -494,6 +598,11 @@ func Default() Settings {
 			FrameRate:      120,
 			VSync:          true,
 			PartialRepaint: true,
+		},
+		Updates: Updates{
+			// On: one request per run, and a client nobody updates is one running
+			// against a backend that has moved on.
+			Check: true,
 		},
 	}
 }
@@ -736,15 +845,19 @@ func Save() error {
 		return err
 	}
 
-	return writeFile(path, data)
+	return WriteAtomic(path, data)
 }
 
-// writeFile puts data at path through a temp file renamed into place, so a crash
-// part-way through leaves the previous settings rather than a truncated file that
-// Load would report and ignore — which would be the whole tree gone. The Sync is
-// what carries that past a lost machine and not only a lost process; a settings
-// write is one debounced file every second at worst, so it is affordable here.
-func writeFile(path string, data []byte) error {
+// WriteAtomic puts data at path through a temp file renamed into place, at a
+// mode only this account can read, so a crash part-way through leaves the
+// previous file rather than a truncated one — which for the settings would be
+// the whole tree gone and for the saved logins every login at once. The Sync is
+// what carries that past a lost machine and not only a lost process; both
+// callers write a small file rarely, so it is affordable.
+//
+// Exported for the saved-session store, which is the client's other file of
+// record and wants exactly these guarantees. Everything else here is settings.
+func WriteAtomic(path string, data []byte) error {
 	writeMu.Lock()
 	defer writeMu.Unlock()
 
@@ -810,6 +923,11 @@ func (s *Settings) clone() *Settings {
 	next.Styles.Colors = maps.Clone(s.Styles.Colors)
 	next.Notifications.SoundFiles = maps.Clone(s.Notifications.SoundFiles)
 	next.Voice.UserGainsDB = maps.Clone(s.Voice.UserGainsDB)
+
+	// A slice rather than a map, and the one here that is trimmed from the front:
+	// slices.Delete shifts in place, which without this would rewrite the elements
+	// a reader is still holding the previous snapshot for.
+	next.State.DismissedMentions = slices.Clone(s.State.DismissedMentions)
 
 	return &next
 }

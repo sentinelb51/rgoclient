@@ -5,6 +5,7 @@ package ui
 
 import (
 	"image/color"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,6 +32,7 @@ func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu fu
 	}
 
 	self := deps.Store.SelfID()
+	allowed, restricted := message.ReactionsAllowed()
 
 	chips := make([]fyne.CanvasObject, 0, len(message.Reactions)*2+1)
 	add := func(chip fyne.CanvasObject) {
@@ -47,8 +49,13 @@ func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu fu
 		// and a pointer into a message since replaced is a stale read.
 		emoji, mine, users := reaction.Emoji, reaction.By(self), reaction.Users
 
+		// Joining one the message forbids would be refused by the server, so the chip
+		// says who chose it and answers nothing. Leaving one already joined stays
+		// open either way — a restriction is on what may be added.
+		joinable := mine || !restricted || slices.Contains(allowed, emoji)
+
 		var onTap func()
-		if canReact {
+		if canReact && joinable {
 			onTap = func() { deps.Actions.OnReact(message, emoji, !mine) }
 		}
 
@@ -58,8 +65,8 @@ func buildReactions(deps Deps, message *domain.Message, canReact bool, onMenu fu
 		add(chip.saying(deps.Tooltip, func() string { return reactorNames(deps.Store, users) }))
 	}
 
-	if canReact {
-		add(newAddReactionChip(deps, message, onMenu, onHover))
+	if canReact && (!restricted || len(allowed) > 0) {
+		add(newAddReactionChip(deps, message, allowed, onMenu, onHover))
 	}
 
 	return HBoxNoSpacing(chips...)
@@ -106,12 +113,12 @@ func newReactionChip(deps Deps, emoji string, count int, mine bool, onTap func()
 
 // newAddReactionChip is the chip at the end of the row that opens the picker; it
 // carries a mark rather than an emoji since it stands for all of them.
-func newAddReactionChip(deps Deps, message *domain.Message, onMenu func(*fyne.PointEvent), onHover func(bool)) *reactionChip {
+func newAddReactionChip(deps Deps, message *domain.Message, allowed []string, onMenu func(*fyne.PointEvent), onHover func(bool)) *reactionChip {
 	mark := newScaledIcon(tintedIcon(assets.ActionAddIcon, theme.Colors.ReactionCount), theme.Sizes.ReactionEmojiSize)
 
 	var chip *reactionChip
 	chip = newChipOf(container.NewCenter(mark), false, func() {
-		deps.Actions.OnPickEmoji(chip, func(choice EmojiChoice) {
+		deps.Actions.OnPickEmoji(chip, allowed, func(choice EmojiChoice) {
 			deps.Actions.OnReact(message, choice.Value(), true)
 		})
 	}, onMenu, onHover)

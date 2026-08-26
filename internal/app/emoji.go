@@ -16,6 +16,7 @@ import (
 	"fyne.io/fyne/v2"
 
 	"RGOClient/internal/ui"
+	"RGOClient/internal/util"
 )
 
 // onEmojisChanged follows an emoji being added to or removed from a server the
@@ -29,9 +30,58 @@ func (a *App) onEmojisChanged() {
 	a.queueRefresh(refreshEmojis)
 }
 
-// OnPickEmoji opens the picker beside anchor. Call on the UI thread.
-func (a *App) OnPickEmoji(anchor fyne.CanvasObject, onPick func(ui.EmojiChoice)) {
-	ui.ShowEmojiPicker(a.deps(), anchor, a.emojiGroups(), onPick)
+// OnPickEmoji opens the picker beside anchor. A non-nil allowed is a message
+// restricting what may be reacted to it, and narrows the picker to exactly that
+// list — anything else would be refused by the server. Call on the UI thread.
+func (a *App) OnPickEmoji(anchor fyne.CanvasObject, allowed []string, onPick func(ui.EmojiChoice)) {
+	groups := a.emojiGroups()
+	if allowed != nil {
+		groups = a.allowedEmojiGroups(allowed)
+	}
+
+	ui.ShowEmojiPicker(a.deps(), anchor, groups, onPick)
+}
+
+// allowedEmojiGroups is the one group a restricted message offers, in the order
+// the message named rather than the picker's own: the list is the author's, and
+// short enough that a rail jumping between servers would head nothing.
+//
+// An entry is a custom emoji's ULID or a character, told apart the way a
+// reaction is — Revolt uses one field for both. A custom one the account holds
+// no server for still draws, the CDN serving the picture either way; only its
+// name is unavailable, and the ID stands in so the cell can still be told from
+// its neighbours.
+func (a *App) allowedEmojiGroups(allowed []string) []ui.EmojiGroup {
+	choices := make([]ui.EmojiChoice, 0, len(allowed))
+
+	for _, value := range allowed {
+		if name := a.store.EmojiName(value); name != "" {
+			choices = append(choices, ui.EmojiChoice{ID: value, Name: name})
+			continue
+		}
+
+		if util.IsEmojiID(value) {
+			choices = append(choices, ui.EmojiChoice{ID: value, Name: value})
+			continue
+		}
+
+		choices = append(choices, unicodeChoice(value))
+	}
+
+	return []ui.EmojiGroup{{Title: "Allowed here", Choices: choices}}
+}
+
+// unicodeChoice names a character out of the built-in set where it is one of
+// them, so the search field and the preview line read the same as they do in the
+// ordinary picker. Anything else is its own name.
+func unicodeChoice(char string) ui.EmojiChoice {
+	for _, known := range ui.UnicodeEmoji {
+		if known.Char == char {
+			return known
+		}
+	}
+
+	return ui.EmojiChoice{Char: char, Name: char}
 }
 
 // refreshEmojiCandidates hands the composer what a typed ":" completes against —

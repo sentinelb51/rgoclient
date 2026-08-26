@@ -812,15 +812,8 @@ func newRailIcon(deps Deps, group EmojiGroup) fyne.CanvasObject {
 	}
 
 	side := theme.Sizes.EmojiPickerRailIconSize
-	size := fyne.NewSize(side, side)
 
-	background := canvas.NewCircle(theme.Colors.ServerDefaultBg)
-	icon := container.NewStack(background, container.NewCenter(newInitial(group.Title)))
-	if group.IconURL != "" {
-		deps.Images.LoadIntoContainer(group.IconID, group.IconURL, size, icon, true, background)
-	}
-
-	return container.NewGridWrap(size, icon)
+	return newInitialIcon(deps.Images, group.IconID, group.IconURL, group.Title, fyne.NewSize(side, side))
 }
 
 // newPreviewEmoji draws one emoji at the size the header names it at — the

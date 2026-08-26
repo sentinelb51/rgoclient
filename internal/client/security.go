@@ -1,29 +1,22 @@
 package client
 
 // What an account is secured with: its logins, its password and email, and the
-// second factor guarding all of it. Filed apart from actions.go because it is a
-// different kind of request — most of these change how the account is *reached*
-// rather than what is in it, and Revolt gates them behind a proof of identity
-// nothing else here needs.
+// second factor guarding all of it. Filed apart from actions.go because Revolt
+// gates most of these behind a proof of identity nothing else here needs.
 //
-// **That proof is an MFA ticket.** A ticket is minted by answering a challenge —
-// a password, a TOTP code or a recovery code — and is then presented in the
-// `x-mfa-ticket` header, for a few minutes, on the routes that take one. Which
-// routes those are is not guessable and is not symmetric: the spec's own guard
-// lists say reading is free, renaming a session is free, and *enabling* TOTP is
-// free because its answer rides in the body — while revoking a session, changing
-// a password or an email, disabling TOTP and every recovery-code route are
-// gated. Sending a ticket where none is wanted is ignored, so the split is worth
-// getting right for the reverse case only: a gated route asked without one is
-// refused with nothing to say why.
+// **That proof is an MFA ticket**, minted by answering a challenge and then sent
+// in the `x-mfa-ticket` header for a few minutes. Which routes take one is not
+// guessable and not symmetric: reading, renaming a session and *enabling* TOTP
+// are free, while revoking a session, changing a password or an email, disabling
+// TOTP and every recovery-code route are gated. A ticket sent where none is
+// wanted is ignored; a gated route asked without one is refused with nothing to
+// say why.
 //
-// revoltgo's REST layer has no per-request headers, so the ticket is set on the
-// session's shared header map for the length of one call and taken off again.
-// That map is guarded by the HTTP client's own lock, so this is safe; what it
-// cannot promise is that no *other* request overlaps and carries the header too.
-// Harmless — it is this account's own ticket, and a route that does not declare
-// the guard never reads it — but it is why every gated call goes through
-// withTicket rather than setting the header where it is convenient.
+// revoltgo's REST layer has no per-request headers, so withTicket sets the ticket
+// on the session's shared header map for one call and takes it off again. The map
+// is guarded by the HTTP client's own lock, so an overlapping request carrying it
+// too is harmless — it is this account's own ticket — but it is why no gated call
+// sets the header where it is convenient.
 
 import (
 	"errors"

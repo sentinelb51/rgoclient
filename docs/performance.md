@@ -44,7 +44,9 @@ mounted object against the rect it last painted at
 (`internal/painter/gl/snapshot.go`), and repaints only the damaged rects — at
 most four scissored passes, each under a root clip so the painter's rect test
 culls the draw calls too. A caret blink is a restore quad plus a handful of
-draws instead of the window. Damage past 80% coverage promotes to the old full
+draws instead of the window — and is off by default anyway
+(`config.Behaviour.CursorBlink`, the eleventh patch), so a focused composer
+nobody is typing in asks for no frames at all. Damage past 80% coverage promotes to the old full
 repaint, which is what a scroll frame is; `fyne.SetPartialRepaint(false)` is
 the escape hatch and the measuring baseline, and
 `config.Performance.PartialRepaint` is its setting. The diff covers moves, hides,

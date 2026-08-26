@@ -623,23 +623,16 @@ const heapTrimDelay = 15 * time.Second
 
 // refreshRecipients draws a conversation's participants: the group's member
 // sidebar, and the people mentionable in whatever is open. One walk feeds both,
-// which is the arrangement the server path already has — there refreshMemberList
-// resolves a membership once and pushes the sidebar and the picker from it.
+// the arrangement refreshMemberList already has on the server path.
 //
-// A server's people are deliberately not its business: that walk is far too much
-// for the UI thread, and refreshMemberList already makes it off-thread and pushes
-// the result through setMentionCandidates. Every path into a server channel goes
-// through enterServer first, so the pool is already there — asking again would
-// walk a whole membership a second time, on the wrong thread, to arrive at what
-// the picker is holding. Channels are pushed separately by refreshChannelList.
+// A server's people are deliberately not its business — that walk is far too much
+// for the UI thread, and every path into a server channel goes through
+// enterServer, so the pool is already there. This walk is cheap enough for the UI
+// thread: a conversation carries its participants, Revolt caps a group well under
+// a thousand, and every lookup is the store answering from what it holds.
 //
 // Only a **group** fills the sidebar. A direct message is two people the header
-// has already named and saved notes is one, so either would be a column drawing
-// what is written across the top of the window.
-//
-// This one is cheap enough for the UI thread where a membership is not: a
-// conversation carries its participants, Revolt caps a group well under a
-// thousand, and every lookup is the store answering from what it holds.
+// has already named and saved notes is one.
 //
 // Call on the UI thread, when the open conversation or its recipients change.
 func (a *App) refreshRecipients() {

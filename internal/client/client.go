@@ -16,9 +16,10 @@
 //   - Actions block. They do the request and the cache update, and return; they
 //     never touch a widget and never spawn a goroutine of their own. The caller
 //     owns the UI thread, so the caller decides when to leave it.
-//   - Events arrive on one buffered channel, in the order the gateway produced
-//     them. A single reader linearises them, which is what makes the whole
-//     backend drivable without a UI.
+//   - Events arrive on one buffered channel with a single reader, which is what
+//     makes the whole backend drivable without a UI. Not gateway order: revoltgo
+//     dispatches each frame on a goroutine of its own, so a handler must derive
+//     from the store rather than from arrival.
 //
 // A session is not required to exist. Being logged out is a valid state: reads
 // report nothing known and actions return ErrNoSession.
@@ -182,21 +183,15 @@ func (c *Client) start(session *revoltgo.Session) error {
 	return nil
 }
 
-// Logout drops the session and revokes its token, which is what signing out
-// means: Close alone only forgets the token locally, leaving it valid for
-// anyone holding it — and the client writes it to disk, so "logged out" and
-// "still usable" was a real difference.
+// Logout drops the session and revokes its token. Close alone only forgets the
+// token locally, leaving it valid for anyone holding it — and the client writes
+// it to disk.
 //
-// The drop comes first and the revocation second, in that order deliberately.
-// Being logged out is a local fact and must not wait on the network or depend on
-// it succeeding: a token the server has already forgotten fails here and is no
-// less revoked for it, and one that could not be reached is no reason to leave
-// somebody's messages on screen. So the error is the caller's to report, never
-// to act on — by the time it is returned the client is logged out either way.
-//
-// Revoking through the captured session is what makes that ordering possible.
-// Close only takes the websocket down; the token and the HTTP client it is sent
-// with belong to the session value, which stays usable for exactly this.
+// The drop comes first, deliberately: being logged out is a local fact and must
+// not depend on the network succeeding. The error is the caller's to report,
+// never to act on — by the time it returns the client is logged out either way.
+// Revoking through the *captured* session is what allows that ordering, Close
+// taking down only the websocket while the token stays on the session value.
 //
 // It blocks, like every other action.
 func (c *Client) Logout() error {

@@ -137,6 +137,55 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   distinguishable from an edit that never mentioned reactions, so a clear made
   elsewhere lands. `EventMessageRemoveReaction` is a *single* emoji taken off
   wholesale and is a different event.
+- **A bulk delete is not a loop of deletes, and its rules are the route's.**
+  `DELETE /channels/{id}/messages/bulk` (`ChannelMessageDeleteBulk`, whose
+  `ChannelMessageBulkDeleteParams` is `{ids}`) differs from the single delete on
+  three counts, all read off `message_bulk_delete.rs` rather than the spec:
+  - **`ManageMessages` always**, even over the account's own words, where a single
+    delete takes authorship instead. So it is a moderator's action wherever it is
+    offered.
+  - **Every ID must be under a week old**, checked by parsing the ULID *before*
+    the permission is looked at, and one that is not — or one that will not parse
+    — refuses the **whole batch** with `InvalidOperation`. Nothing partial: a
+    ninety-ninth message a week and a minute past costs the other ninety-eight.
+    Hence `domain.MaxBulkDeleteAge`, applied by the caller (this package has no
+    ULID reader, see the DAG) and re-applied at submit, a selection being
+    something a reader can sit on.
+  - **1–100 ids**, validated server-side, so `Client.DeleteMessages` chunks by
+    `domain.MaxBulkDelete`.
+
+  The answer is a bare **204 whatever matched**. `Message::bulk_delete` filters
+  the IDs to the ones actually in that channel and drops the rest in silence, then
+  publishes `BulkMessageDelete` carrying only what went — so the *event* is the
+  truth and nothing is written to the cache here, as with a single delete. The
+  route also takes an `X-Audit-Log-Reason` header, which revoltgo cannot send (no
+  per-request headers, see the MFA note) and which only writes an audit entry for
+  a channel in a server.
+- **A group's default permissions are a different request from a channel's.**
+  `PUT /channels/{id}/permissions/default` branches on the channel: a `Group` takes
+  `{"permissions": <u64>}` and a `TextChannel` takes `{"permissions": {allow, deny}}`,
+  and the wrong shape is `InvalidOperation` with nothing else said. Hence
+  `GroupPermissionsSetDefault` (`PermissionsSetDefaultParams`) beside
+  `ChannelPermissionsSetDefault` (`Override`), and `Client.SetGroupPermissions`
+  beside `SetChannelDefaultPermissions`. Three more things off
+  `permissions_set_default.rs`:
+  - It is gated on **`ManagePermissions` in the channel**, which for a group's
+    owner is everything (`do_we_own_the_channel` short-circuits to `GrantAllSafe`).
+  - The group arm makes **no** `throw_permission_override` check, unlike the
+    server-channel arm and unlike `permissions_set.rs` — so somebody who may manage
+    a group's permissions can grant bits they do not hold themselves. The client's
+    grid is gated to match rather than being stricter than the route.
+  - The value is written to `Channel.permissions` and resolves as
+    `DEFAULT_PERMISSION_VIEW_ONLY | permissions`, so ViewChannel and
+    ReadMessageHistory cannot be denied and a nil field means the DM preset rather
+    than zero (`client/store.go`'s `conversationPermissions`, and the same
+    resolution again in `domain.Channel.Permissions`).
+- **A group's icon is `ChannelEdit` with the `icons` bucket.** `ChannelEditParams.Icon`
+  takes an Autumn ID and `ChannelClearIcon` is how one comes off, every string on
+  those params being `omitzero` so a blank reads as "leave it alone". Same bucket a
+  server's icon uses — a bucket is half of what identifies a file, and an icon is an
+  icon. `DataEditChannel` also carries an `owner` field (transferring a group), which
+  nothing here sends.
 - **Pin state comes off the update, not the system line.** Revolt announces a pin
   twice — the partial above, and a `message_pinned` system message in the
   channel. The line is a message like any other and the client renders it as one;
@@ -147,6 +196,13 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   sent. `Pinned` and `Reactions` echo `PinMessage` and `ClearReactions`, which
   write the cache the moment the server agrees — so they report a change only
   when there is one, or one tap repaints twice.
+  **`MessageUpdated.Pinning` is the one thing on that event read off the wire
+  rather than off the cache.** `reviseMessage` finds nothing for a message the
+  cache never had, and a *pinned* message routinely is one — a pin reaches as far
+  back as anybody cared to keep something — so an unpin made elsewhere announced
+  nothing at all. It says a pin moved and never which way: an unpin carries no
+  field, only `Pinned` in `clear`, so the direction is knowable only for a message
+  the cache holds. The pins panel re-asks on it rather than reading it.
 - **`Session.ChannelSearch` returns `ChannelMessages`**, normalising both shapes
   the route answers in — `BulkMessageResponse` is an `anyOf`, an array without
   `include_users` and an object with it — so `Client.search` asks for the users
@@ -154,6 +210,15 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   **alternatives** (Revolt refuses them together), so the two callers share
   `Client.search` and differ in which one they fill; a query is 1–64 characters,
   past which the request is refused rather than cut, hence `maxSearchQuery`.
+  `ChannelSearchParams` embeds `ChannelMessagesParams`, so the route also takes
+  **`before`/`after`** — the only narrowing on it beyond the query, and the only
+  way past its hundred-result cap. Both are message IDs rather than times, hence
+  `boundaryID`: a ULID's leading 48 bits are its millisecond, so one built with no
+  entropy sorts below everything minted in that same millisecond and is an
+  inclusive floor for `after` and an exclusive ceiling for `before`. Whether
+  `delta` honours them on `/search` as it does on `/messages` is **not verified
+  against the backend** — `app.withinSpan` re-checks the window locally for that
+  reason.
 - `Session.ServerCreate` and `Session.InviteJoin` decode their own responses now
   (`ServerCreateResponse`, `InviteJoin` — server plus default channels either
   way), but `Client.CreateServer` and `Client.JoinInvite` still ignore them and
@@ -330,6 +395,28 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   for a profile button, `AddFriendByHandle` takes one somebody typed — and the
   answer to the second names an account nothing has cached, which is why the
   friends list waits for the gateway to file it rather than drawing it at once.
+- **The whole relationship graph is on the account's own record, and only there.**
+  `User.Relationship` is filled per account, so it answers only for the people a
+  `Ready` happened to send; `User.Relations` — the `relations` array, which Revolt
+  puts on the authenticated account's record and on no other — is the complete
+  statement. `Client.recordRelations` files it into the same `Client.relations`
+  overlay at `Ready` and answers with the IDs, so a relationship survives `State`
+  never caching the account at all. `selfIn` finds that record by ID where `State`
+  is already built and by the presence of the array otherwise, revoltgo filing the
+  snapshot from a handler of its own whose ordering against this one is not
+  something to depend on.
+- **`MessageInteractions` is two independent things.** `Reactions` is a list of
+  emoji and `RestrictReactions` says whether it is a *restriction* or a set of
+  suggested quick picks. `toInteractions` keeps only the restricting case — this
+  client draws no quick-pick row — and keeps it even when the list is empty, an
+  empty restriction being what forbids every reaction.
+- **A colour is any CSS value, and role presets use most of them.** `parseColor`
+  reads a hex run of 3/4/6/8 digits, `rgb()`/`rgba()`, `hsl()`/`hsla()` in the
+  comma form and the space-and-slash one, and the 148 CSS keywords; a gradient is
+  every stop it finds, in order. The scanner steps *into* a function it does not
+  know rather than over it, which is how `linear-gradient(...)`'s stops are
+  reached. `transparent` and `currentcolor` are left out of the keyword table on
+  purpose: falling back to the default text colour beats an invisible name.
 - **An MFA ticket is a header, and revoltgo has no per-request headers.** Every
   route that changes how an account is *reached* is guarded by one:
   `x-mfa-ticket`, minted by `PUT /auth/mfa/ticket` from a password, a TOTP code or

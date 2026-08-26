@@ -24,6 +24,7 @@ written against the domain. The dependency graph is a strict DAG:
 
 ```
 domain, markdown, config       no internal dependencies
+update                         no internal dependencies    (GitHub releases, net/http)
 cpu                            no internal dependencies    (Win32 / sysfs, no cgo)
 audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
 audio      -> audio/rnnoise                  (+ malgo, go-mp3)
@@ -32,7 +33,7 @@ util       -> config
 cache      -> domain
 client     -> cache, config, domain          (+ revoltgo)
 ui         -> cache, config, domain, markdown, util
-app        -> audio, voice, cache, client, config, cpu, domain, ui, util
+app        -> audio, voice, cache, client, config, cpu, domain, ui, update, util
 ```
 
 `config` is a leaf so everything above can read a setting. `cache` and `audio`
@@ -148,7 +149,10 @@ internal/
   config/config.go       Settings tree, Default, Load/Save/Path, Current/Update.
                          Styles holds *overrides* keyed by theme field name, so a
                          newly named size arrives with its default intact. Current
-                         is an atomic.Pointer snapshot; writes debounced
+                         is an atomic.Pointer snapshot; writes debounced. State is
+                         the one section no settings row writes to — what the
+                         client remembers rather than what was chosen, kept
+                         because losing it would undo a decision quietly
   domain/                domain.go (value types; Embed is one shape for every kind,
                          so renderers branch on what is filled in) + store.go
   client/                client.go, auth.go, security.go, convert.go, store.go,
@@ -196,14 +200,17 @@ internal/
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          groups.go, pins.go, search.go, mentions.go, emoji.go,
                          notify.go, alerts.go, security.go, settings.go,
-                         serversettings.go
+                         serversettings.go, updates.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
                          embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, group.go, panels.go, notice.go,
-                         settings*.go, theme/, titlebar_*.go, filedialog*.go (the OS
-                         picker — Fyne's is drawn in the canvas and is not used)
+                         login.go (the card the screens before Ready are drawn on,
+                         the only one here with no close button), settings*.go,
+                         theme/, titlebar_*.go, filedialog_{windows,darwin,linux}.go
+                         (the OS picker — Fyne's is drawn in the canvas and is the
+                         fallback, not the dialog)
   voice/                 the media half of a call: voice.go (Call, its own event
                          set with an unexported marker, so app's switch is
                          exhaustive; `dial`, which publishes the microphone *in*
@@ -226,7 +233,22 @@ internal/
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
                          over each block's whole text
-  util/                  pure helpers: sizes, IDs, truncation, ULID timestamps
+  update/                whether a newer release of this client exists. One route —
+                         GitHub's /releases/latest for this repository — plus the
+                         calendar-version comparison (a -dev build precedes the
+                         number it is stamped with) and the table saying which
+                         asset release.yml builds for which platform, so a
+                         platform outside that matrix is told it has none rather
+                         than handed the wrong binary
+  util/                  pure helpers: sizes, IDs, truncation, ULID timestamps, and
+                         link.go — which schemes a link out of somebody else's
+                         message may be opened with, and whether its visible text
+                         claims a host it does not open
+
+packaging/linux/         the .desktop entry and the install.sh filing it, the
+                         icon and the binary under ~/.local. Carried in the
+                         release tarball; nothing is signed, so this is as far as
+                         packaging goes — see docs/known-gaps.md
 
 scripts/                 update-deps.sh — every module *except* Fyne and the
                          versions its go.mod pins, which is why it is not a
@@ -240,7 +262,10 @@ package's own `CLAUDE.md`; this is the map:
   a rebuild is what most of those handlers do.
 - `app/messages.go` — the message area end to end: composer dock, submit,
   slowmode, the window and what mounting a row asks for (`onMessageMounted`),
-  load/render, jumps and paging.
+  load/render, jumps and paging. Also **selecting** messages for a bulk delete,
+  which is filed here rather than beside the other destructive confirmations
+  because what it is is a state of the composer: the bar stands where the entry
+  does, and `syncComposer` is the one thing deciding which of the three is up.
 - `app/navigation.go` — `buildUI` (the 4-column fill row), both sidebars,
   selection, sidebar context menus, the home/DM view. `#mention` candidates come
   off the channel sidebar's own walk as `@` ones come off the member sidebar's,
@@ -258,7 +283,12 @@ package's own `CLAUDE.md`; this is the map:
 - `app/groups.go` — making a group and changing who is in it, which is all that a
   group is beyond a channel: its rows, header, messages and edit card are every
   channel's, and leaving one is closing a conversation. Both cards are picked from
-  `Store.Relationships`, Revolt taking friends alone.
+  `Store.Relationships`, Revolt taking friends alone. It also holds the group's
+  own **settings page** — the third settings layer — because the two things that
+  page exists for are the two Revolt files on a group rather than on a channel: a
+  picture, which is an upload rather than a field, and a say in what everybody in
+  it may do, which Revolt takes as a plain value rather than an override. It
+  *replaces* the channel edit card for a group rather than joining it.
 - `app/security.go` — the Security section's half: the challenge card every action
   there begins with, and the half-dozen things a ticket unlocks. Filed apart from
   `settings.go` because none of it is a setting — nothing here writes to config,
@@ -275,7 +305,9 @@ package's own `CLAUDE.md`; this is the map:
   rail marks off) and the inbox, those IDs fetched back into messages — because
   a channel gaining one moves both and neither is legible without the other.
 - `app/alerts.go` — everything the client does about something the reader did
-  not ask to be told: the sound, the taskbar flash, and the catalogue binding a
+  not ask to be told: the sound, the taskbar flash, the notice carrying the
+  message itself where it was addressed to them — a face, a line and a tap
+  through to it — and the catalogue binding a
   sound to the setting that turns it on and the copy it is listed under. One
   table, because playing one, listing them all and pointing one at a file are
   three walks of the same set.
@@ -284,7 +316,7 @@ package's own `CLAUDE.md`; this is the map:
   group, neither legible without the other.
 - `ui/members.go` — the member list end to end, its own subsystem: the flat
   model (`NewMemberModel`), the geometry (`memberOffsets`, `visibleRange`,
-  `memberListLayout`), the virtualised `MemberList`, the recycled `MemberRow` /
+  `memberOffsets`, `visibleRange`), the virtualised `MemberList`, the recycled `MemberRow` /
   `MemberSectionRow`, and `memberStatus`, the strip that speaks for the rows
   when there are none. The model is pure and theme-free so `App` can build it
   off the UI thread.
@@ -320,7 +352,10 @@ package's own `CLAUDE.md`; this is the map:
   is the only way to get the text out). A body carrying one is a column
   (`renderCodeColumn`) rather than a single widget, the card being block-level —
   the only reason `ui/markdown.go` renders *runs* of blocks.
-- `ui/layouts.go` — every custom layout, `fitWithin`, `Relayout`.
+- `ui/layouts.go` — every custom layout, `fitWithin`, `Relayout`. Also `slotLayout`,
+  the placement both virtualised lists share (the message column passing a
+  `measure` hook where the member sidebar's heights are known up front), and
+  `stackSpaced` / `keepInside`.
 - `ui/message.go` — also the system line, the day separator and reply previews.
 - `ui/callisland.go` — the call card and the layer it floats on, at the top of the
   window over every view, drawn as the settings page's invite card. Two halves in
@@ -375,9 +410,14 @@ package's own `CLAUDE.md`; this is the map:
   resolved for a summary the controller assembles.
 - `ui/search.go` — channel search: the same island, plus what only a question
   being refined needs. `SearchQuery` is the whole of what it asks —
-  `SameRequest` is what tells a filter from the two things the route is sent —
-  and `searchChip` is the pill both the filter run and the three orders are made
-  of.
+  `SameRequest` is what tells the narrowing done locally from the four things the
+  route is sent — and `searchChip` is the pill the filter run, the three orders
+  and the date presets are all made of. Three of those chips stand for a *value*
+  rather than a bit, which a bitset cannot hold, so two of them open a **drawer**
+  under the run: `authorDrawer`, which is a field over the composer's own
+  `MentionPicker`, and `dateDrawer`, which is the two ends of a `span` typed out
+  beside the runs of days worth not typing. One drawer at a time, each hidden with
+  the gap above it (`drawerSlot`) so a shut one costs no height.
 - `ui/modal.go` — the cards that are not lists: the attachment viewer, the join
   dialog (which previews what a pasted code opens once the typing settles),
   `PromptDialog` (a field per answer and one button), `BanDialog` (a
@@ -385,21 +425,27 @@ package's own `CLAUDE.md`; this is the map:
   and a window of the member's recent messages), and the `dialogHeader` they all
   wear. `SliderCard` is the one that is not a modal: a range hung beside what it
   belongs to, for a value a `fyne.MenuItem` has no shape for.
-- `ui/settings_shell.go` — the surface *both* settings pages are drawn on (the
-  layer, the rail, the pane, the vocabulary of rows), embedded by value so a
-  section reaches every row shape by promotion. `settings.go` is then the
+- `ui/settings_shell.go` — the surface *all three* settings pages are drawn on
+  (the layer, the rail, the pane, the vocabulary of rows, and the permission grid),
+  embedded by value so a section reaches every row shape by promotion. `settings.go` is then the
   client's own sections and the controls that write to config;
   `settings_server.go` is one server's, almost all lists rather than switches
   (`entryRow`) — and the two sections that drill into a row of their own. Roles
   drills once, into an editor whose permission grid is the whole of what Revolt
   defines in the three states it stores each bit in; Channels drills *twice*, a
   channel's overrides being a channel and a role, and draws that same grid
-  narrowed to the bits a channel decides. One `permissionScope` serves both, plus
-  the two defaults. Two of those lists are also *ordered* by the rows
+  narrowed to the bits a channel decides. `settings_group.go` is the third and
+  smallest — two sections, no lists, nothing fetched — and is why that grid lives
+  on the shell: one `permissionScope` serves five scopes now, those two plus the
+  two defaults and a group's, which is the odd one (a plain set, not an
+  overwrite). Two of those lists are also *ordered* by the rows
   in them (`moveButtons`): the roles by seniority, and the channels by the
   arrangement they are drawn in — which for a channel is its category as well as
   its place, a move past the end of one being how it joins the next. `settings_controls.go` holds the controls, none
-  of them a Fyne form widget.
+  of them a Fyne form widget. `settings_updates.go` is the one section that draws
+  a *release* rather than a setting: two switchable rows and, under a fold, the
+  release notes rendered through the client's own Markdown — the only place
+  outside a message where `renderDocument` is called.
 - `ui/settings_search.go` — the box at the head of the rail and the page of
   results it puts in the pane. Its index is taken by *building every section
   twice*, once as each mode lists them, the rows answering with their names
@@ -516,7 +562,7 @@ Fyne is **patched**, and the patched copy is a repository of its own —
 `replace` in `go.mod` and fetched like any other module. Nothing is vendored and
 there is no checkout step: a fresh clone builds. The fork keeps the module path
 `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside it. Its
-`PATCHES.md` lists the ten, and `./update-fyne.sh vX.Y.Z` there carries them
+`PATCHES.md` lists the eleven, and `./update-fyne.sh vX.Y.Z` there carries them
 onto a new Fyne by rebasing onto a pristine upstream branch. A bare `go get -u`
 floats what that frozen Fyne compiles against, so everything else updates
 through `scripts/update-deps.sh`.

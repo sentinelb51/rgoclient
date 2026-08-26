@@ -133,10 +133,14 @@ DAG and conventions.
    does not cover, only a row on screen having a widget to wash. The optimistic
    copy carries no stamp, so the author's own edit flashes once, off the gateway
    echo, rather than twice.
-   The span goes stale on a row nothing else redraws, so `refreshEditMarks` walks
-   the mounted widgets every `editMarkTick` and re-arms only while one carries a
-   mark; `onMessageMounted` arms it for a row that has one, rows mounting on every
-   scroll now.
+   The span goes stale on a row nothing else redraws, so `refreshTimeSpans` walks
+   the mounted widgets every `timeSpanTick` (a minute) and re-arms only while one
+   still has something to re-read. It covers **both** things a row says about the
+   clock: the "edited N ago" mark, and a `<t:…:R>` in the body, which
+   `MessageWidget.RefreshRelativeTime` re-renders and `markdown.HasRelativeTimestamp`
+   is what marks a row as carrying. `onMessageMounted` arms it unconditionally —
+   the walk is what decides, and one wasted tick per channel visit is cheaper than
+   a second parse of every body to find out.
 8. **Mentions.** `@`, `#` or `:` at the start or after a space opens the picker,
    which gets first refusal on Up/Down/Enter/Tab/Esc. The marker decides which of
    the three pools is filtered and what the span is rewritten as — Revolt's
@@ -179,6 +183,16 @@ DAG and conventions.
    a body that answers a click (`decoratedText`) carries `onMenu` for the same
    reason: the driver gives the press to the innermost object accepting one and
    does not walk back up, so a word without the message's menu is a hole in it.
+   A **link** in a body is the third thing there that answers a click, and the
+   only one whose destination somebody else chose: `Actions.OnLinkTapped(raw,
+   label)`. The controller owns it because both questions it raises are its to
+   ask — a scheme outside http/https/mailto is refused with a notice saying so
+   (`fyne.App.OpenURL` reaches ShellExecute and xdg-open, which run whatever a
+   scheme is registered to), and a link whose visible text names a host it does
+   not open raises `App.confirm` naming the real one before anything is opened.
+   A refused destination never becomes a segment at all — `mdBuilder.link` draws
+   it as plain text — so the check is made twice on purpose.
+
    A message naming the account is washed warm rather than transparent
    (`MessageWidget.fill`, decided once at construction from
    `Message.MentionsUser(Store.SelfID())`). It reads Revolt's own `mentions` plus
@@ -271,6 +285,11 @@ DAG and conventions.
     click-through except for itself, a tap on it dismisses it early — so a message
     nobody has to answer never stops the client answering.
     A `ui.Tone` is the *only* thing deciding colour, icon and button weight.
+    **A heading says what happened.** `Tone.title()` is the fallback and is one
+    word — Done, Not done, Failed — because that is the most a tone alone can
+    honestly say; a caller those would misname takes `notifyTitled` and supplies
+    its own. Never a pleasantry: a heading carrying no information spends the card's
+    first line on nothing.
     Destructive actions share one shape: a `can…` check decides whether to offer
     it, `confirm…` asks, the action fires through `App.background`, and the
     **gateway event** updates the UI. Nothing is removed optimistically.
@@ -296,12 +315,14 @@ DAG and conventions.
     A change goes `SettingsPage.change` → `App.updateSettings` → `config.Update`,
     which is all a Behaviour flag needs: they are read where they are used
     (`store.Members`, `continuesGroup`, `messages.go`'s mount caps). Performance
-    reaches past the client on both counts: `applyPacing` hands the frame rate and
-    vsync to the patched Fyne (`rgoclient-fyne`), which picks both up on its next
-    tick, and `applyAffinity` hands the process itself to a set of cores through
-    `internal/cpu`. `Run` calls both once at startup. The core setting is the one
-    on the page that moves things nothing here draws — the gateway, the image
-    loaders, miniaudio's callback — and `resolveCores` is the whole of the policy
+    reaches past the client on both counts: `applyPacing` hands the frame rate,
+    vsync, partial repaint and whether the caret blinks to the patched Fyne
+    (`rgoclient-fyne`), which picks each up where it uses it — the caret at the
+    next refresh of an entry, the rest on the next tick — and `applyAffinity`
+    hands the process itself to a set of cores through `internal/cpu`. `Run`
+    calls both once at startup. The core setting is the one on the page that
+    moves things nothing here draws — the gateway, the image loaders,
+    miniaudio's callback — and `resolveCores` is the whole of the policy
     (`cpu` says which cores are which and never which to take): an unset or
     foreign value collapses to the machine's default and is written back, so the
     file always names an actual set. A style goes through `restyle` →
@@ -947,6 +968,16 @@ DAG and conventions.
     Somebody the gateway names that `State` has never cached has no name to draw —
     `EventUserRelationship` carries the account and nothing files it — so
     `friendsChanged` queues them through `ensureAuthor`, and `flushAuthors` refills.
+    The same hole exists at `Ready` and is filled the same way: `Ready.RelatedIDs`
+    is the whole graph off the account's own `relations` array, and
+    `resolveRelated` queues whoever `Store.HasUser` cannot answer for — otherwise
+    somebody befriended long ago and not spoken to since is a relationship with no
+    account behind it, and this list is a walk of the accounts.
+    The page is **filtered** by name or handle from the field in its header, which
+    is built once in the constructor: the list is replaced wholesale on every
+    refill and presence alone refills it, so a field inside it would lose what was
+    being typed. A filter also unfolds what it matched — a hit inside a shut
+    section is a hit nobody can see.
 28. **Jumping to a message.** Tapping a quoted line is `Actions.OnJumpToMessage` →
     `App.OnJumpToMessage`, three answers cheapest first: already in the window
     (`revealMessage`), in the channel's cached tail (`jumpWithinCache`), or a
@@ -967,7 +998,11 @@ DAG and conventions.
     None of the three page routes writes to the message cache, for the reason item
     5 keeps a quote out of it, and what comes back is held in the same
     `App.uncached` — which is what lets a quote *inside* a jump window resolve
-    without a request of its own. So the window is not in the cache, and
+    without a request of its own. That is also why an update to a message on such
+    a page cannot be read anywhere: every handler writes to the cache, so
+    `refreshMessage` finds nothing and hands off to `refetchMounted`, one
+    `ResolveMessages` for that message, single-flighted through `App.refetching`
+    so an edit and the reaction after it are one request rather than two. So the window is not in the cache, and
     `loadMoreHistory` and `mountNewerFromCache` read that off the cache rather than
     off a flag: the top or bottom mounted message not being in it means
     `MessagesBefore`/`MessagesAfter`, no flag needed, and deep scrollback past the
@@ -1008,16 +1043,24 @@ DAG and conventions.
     and decides nothing: which of them costs a request is answered here, because
     the answer is held here. `App.searchFound` is the messages the last request
     returned, kept while the island is up, and `ui.SearchQuery.SameRequest` is what
-    tells a chip from the two things the route is actually asked with — so
-    toggling a filter re-runs `drawSearchResults` over what is already in hand and
-    changing the order asks again. The filters *have to differ* for that fast path,
-    which is what keeps a second Enter on an unchanged query a real request rather
-    than a redraw. `App.searchAnswered` distinguishes "nothing came back" from
-    "nothing has been asked", which an empty slice cannot, and is what makes a chip
-    toggled mid-flight do nothing: the pending answer is drawn through the filters
-    standing when it lands.
-    Every filter is a property of the message the route cannot be asked about
-    (`matchesSearch`), so the count line carries both numbers — see the known gap.
+    tells the narrowing done *here* from the four things the route is actually
+    asked with — the query, the order and the two ends of the span — so toggling a
+    filter or picking a person re-runs `drawSearchResults` over what is already in
+    hand and changing the order or a date asks again. Something *has to differ*
+    for that fast path (`narrowedApart`), which is what keeps a second Enter on an
+    unchanged query a real request rather than a redraw. `App.searchAnswered`
+    distinguishes "nothing came back" from "nothing has been asked", which an
+    empty slice cannot, and is what makes a chip toggled mid-flight do nothing:
+    the pending answer is drawn through the narrowing standing when it lands.
+    Every filter but the span is a property of the message the route cannot be
+    asked about (`matchesSearch`), so the count line carries both numbers — see
+    the known gap. The **author** is one of those, which is the whole reason the
+    picker is honest only about the hundred: `loadSearchAuthors` fills it from the
+    membership `refreshMemberList` last walked, or walks one off the UI thread
+    where the sidebar has not — the same slice, published and never written into.
+    The **span** is the exception and is sent, so `withinSpan` re-checks it
+    locally rather than trusting a field nothing in this repo has verified the
+    backend reads on this route.
     `refillSearch` wraps every change to the island in a `repositionOverlay`,
     unlike the pins panel: replacing cards with "Searching..." is a change of
     height, and a centred card sized from its own minimum re-places for neither.
@@ -1057,6 +1100,15 @@ DAG and conventions.
     channel on screen. Our own messages are not announced: `audio.Send` plays in
     `handleSubmit`, at the keystroke, rather than on the echo, where it would land
     on whatever the user had moved to.
+    `noticeMessage` is the third thing a message can be worth: the message *itself*
+    on the notice layer, the sender's face and the line they wrote, tapping through
+    to it (`jumpToMessageIn`). Only the two kinds addressed to the reader, each on
+    its own switch (`ShowMention` / `ShowDirect`) — anything wider is a card in the
+    corner for every message in every server — and never for the channel on screen,
+    which is showing it. The notice is `Unfiltered`: the tone switches name which
+    *outcomes* are worth reporting, and this is not an outcome of anything the
+    reader did. `noticeHeading` names the sender, plus where they said it anywhere
+    the name alone would not say which conversation it belongs to.
     Three events needed something they did not carry. A **reaction** arrives as
     `MessageUpdated`, indistinguishable from an edit once the cache is written —
     hence `MessageUpdated.ReactedBy`, the one field on it the reader could not work
@@ -1124,11 +1176,14 @@ DAG and conventions.
     from `App.mentions` and the panel both.
     Nothing is **sent**: Revolt clears the array on an ack and on nothing else, and
     acking would mark everything before the message read as well. So the ID goes
-    into `App.dismissedMentions` and `keepDismissed` filters every later `Ready`
-    through it — otherwise re-reading the account's whole read state is exactly
-    what would hand a dismissed mention back. It is cleared on sign-out and not
-    persisted; opening the channel acks it for real, and a restart before that is
-    what forgets the decision. See the known gap.
+    into `App.dismissedMentions`, which `keepDismissed` filters every later `Ready`
+    through — otherwise re-reading the account's whole read state is exactly
+    what would hand a dismissed mention back — and into
+    `config.State.DismissedMentions`, keyed to the account, which
+    `restoreDismissedMentions` merges back at the *next* `Ready`. Merged rather
+    than assigned: a reconnect must not narrow the set to whatever the debounced
+    write had reached. Bounded at `config.MaxDismissedMentions`, oldest first,
+    since opening the channel is what drops one for real. See the known gap.
 34. **A server's settings.** `ui.ServerSettingsPage` is the client's own settings
     shell (item 13) filled with one server: Overview, Channels, Invites, Bans. It
     is the **second** layer in the content stack beside `settings.Layer`, and only
@@ -1526,3 +1581,113 @@ DAG and conventions.
     client recorded one — it says nothing rather than guessing, and the section
     says so under the list instead of leaving the reader to work out which row
     they are sitting at.
+39. **Selecting messages, and deleting them together.** A bulk delete is a *mode*
+    the message column is in, and `messages.go` owns both halves of it: the mode
+    lives on `ui.MessageList` (the set, the anchor, which rows may join it) and
+    what stands over the composer while it is on lives here.
+    **There is one way in and it names a message**: "Select messages" on a row's
+    own context menu, gated by `MessageWidget.canBulkSelect` — the route asks for
+    `ManageMessages` even over the account's own words, and refuses the whole
+    batch over one message past `domain.MaxBulkDeleteAge` (see the client note).
+    A mode entered by a stray click is a mode nobody meant to be in, so it is
+    not the hover actions and not a modifier-click.
+    **The bar stands where the entry does**, inside the composer card beside
+    `ui.ComposerNotice` and for the same reason: nothing is typed in that mode,
+    and the card is where a reader already looks for what the next keystroke will
+    do. Putting it there is also what makes `resizeDock` cover it — the card's
+    height changing is a thing that machinery already knows about. `syncComposer`
+    is the single arbiter: while selecting it hides the entry *and* the notice, so
+    a permission arriving mid-selection cannot put the entry back under the bar,
+    and a permission **lost** mid-selection ends the mode instead of leaving a set
+    nothing can be done with.
+    **Three things end it**, all through `endSelection`: Cancel, Escape
+    (`escapeToPresent` takes it before the jump bar — the composer is not mounted,
+    and a mode with no key out of it is one to be stuck in), and a channel switch,
+    since the window a set was picked out of is about to be replaced.
+    `MessageList.dropRows` additionally empties the *set* on a jump within the
+    channel — the mode is the controller's and stays — a selection the reader
+    cannot see being one they do not know they hold.
+    **Nothing is removed optimistically**, as with a single delete: the rows leave
+    through `BulkMessageDelete` → `removeMessages`, which was already the handler,
+    so a refused request leaves them where they are and says so. The set is
+    re-filtered against the week-long window on the way out — the reader can sit
+    on a selection until a message ages past it — and how many were left behind is
+    a warning rather than a silent drop. `Client.DeleteMessages` chunks by a
+    hundred, so a large selection is several requests and several events.
+40. **A group's own settings.** `ui.GroupSettingsPage` is the settings shell
+    (item 13) filled with one conversation, and the **third** such layer beside
+    `settings` and `serverSettings` — only ever one of the three is up, each
+    opening by closing the other two. Two sections, no lists and nothing fetched:
+    everything on it is a field on the channel or a bit in one value, and both
+    arrive as `ChannelUpdate`, so `refreshGroupPage` rebuilds it from the store
+    the way `refreshServerPage` does.
+    It exists for the two things a group has that no other conversation does — a
+    **picture**, which is an upload into a bucket rather than a field (which is
+    why the create card cannot ask for one), and a **say in what the people in it
+    may do**. So it *replaces* the channel edit card for a group rather than
+    joining it: `channelMenu` offers one or the other, and the age gate moved
+    onto the page so nothing was lost. `groupEdit` is what makes a single field
+    settable — `ChannelEdit` refuses a blank name and the route applies every
+    field it is given, so whichever half is not changing is read back out of the
+    store, the same read-and-resend this account's status line needs (item 23).
+    The permission grid is the **shell's** now (`settingsShell.permissionGroups`,
+    working from `gridAllow`/`gridDeny`), three pages drawing one. A group's scope
+    is the odd one twice over: it is a plain **set** rather than an overwrite, so
+    the rows are switches, and its `can` asks for `ManagePermissions` and nothing
+    else — the group arm of `permissions_set_default.rs` makes no
+    "can't grant what you lack" check, so gating on the bit would refuse what the
+    server accepts. `groupPermissions` drops three bits from the channel mask:
+    ViewChannel and ReadMessageHistory are in the floor Revolt ORs the value with
+    and so cannot be turned off, and MentionRoles names something a group has not
+    got. `groupDetails` rewords the one entry whose explanation says "role".
+    `canManageGroup` is either permission, and `refreshGroupSettings` closes the
+    page when neither is left — the owner can take both off everybody in one edit.
+41. **What keeps the three message panels current, and what does not.** Pins,
+    search and the inbox are *fetched* snapshots — each lists messages further
+    back than the message cache reaches, which is why none of them is drawn from
+    it — so the handlers that keep the column right say nothing to them. Three
+    things can move under one, and they are not equally affordable:
+    - A **deletion** is free: `removeMessages` calls `dropPanelMessages`, for any
+      channel, beside the mention set it already prunes there. This is the one
+      worth fixing first — a card for a message that is gone leads nowhere.
+    - A **pin** is the pins panel asking again (`reloadPins`), which is the whole
+      of what that panel is. It goes through `queueRefresh(refreshPins)` because
+      Revolt sends an event per message; `client.MessageUpdated.Pinning` is what
+      says a pin was what moved, read off the wire because a pinned message is
+      routinely one the cache never held. An unpin made *here* re-asks too — the
+      echo is indistinguishable from somebody else's — which costs one redundant
+      search per settling window and needs no marker that has to be right.
+    - An **edit** is bound to the cache (`refreshPanelMessage`): the gateway names
+      the message and only the cache can say what it now reads. A card inside the
+      channel's cached tail follows an edit; an older one keeps the line it was
+      fetched with. Re-asking per edit would be a request per keystroke somebody
+      else makes. See `docs/known-gaps.md`.
+
+42. **Telling the client it has been superseded.** `updates.go` is one request to
+    GitHub's `/releases/latest` per run, hung off `onReady` rather than off
+    launch: the login screens are drawn before the notice layer exists, and Ready
+    is the first moment there is somewhere to report into. `App.updateAsked` is
+    the once-per-run guard — Ready repeats on every reconnect, the release does
+    not — and `App.updates.Checking` is the claim single-flighting the request, so
+    the Updates section's own **Check** button and the startup check are one call.
+    Three things about it:
+    - **The answer is not session state.** What GitHub publishes has nothing to do
+      with which account is signed in, so `settleUpdate` is reached through a bare
+      `doOnUI` rather than through `backgroundThen`'s epoch guard. Epoch-guarding
+      it would drop the answer *and* leave `Checking` set, killing the button for
+      the rest of the run.
+    - **A failure is drawn, never announced.** Nobody asked for the startup check,
+      so `UpdateState.Err` is held for the section to say and no notice is raised.
+      A repository with nothing published (`update.ErrNoRelease`) is a state
+      rather than a failure and carries no error at all.
+    - **A release is announced once, ever.** `config.Updates.Announced` is
+      persisted before the modal goes up, so a client relaunched twice a day
+      interrupts once per release rather than twice a day. An unstamped build
+      (`update.Comparable`) is never announced to — it is behind every release by
+      definition. The modal is an `ui.Confirm` whose action is
+      `openSettingsAt(ui.SectionUpdates)`: what the reader asked to see is the
+      changelog, and that is where it is drawn.
+
+    Nothing is downloaded and no binary is replaced. `ui.UpdateRelease` carries
+    the one asset `update.Release.AssetFor` picked for this GOOS/GOARCH, and both
+    buttons hand a URL to `openLink`. See `docs/known-gaps.md` for why.

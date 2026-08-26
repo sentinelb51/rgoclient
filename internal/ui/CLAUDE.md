@@ -279,8 +279,8 @@ naming and the test policy.
   widget says has changed. For the same reason nothing on the scroll path may
   call `MinSize` on the list — `BaseWidget.MinSize` is not memoised — so a
   virtualised list's own layout reports its height from a **field**, never from a
-  walk (`memberListLayout.MinSize`, `messageListLayout.MinSize`):
-  `container.Scroll` asks its content for a minimum on every offset write.
+  walk — `slotLayout.MinSize`, which both share: `container.Scroll` asks its
+  content for a minimum on every offset write.
   `Container.Add` is the same trap one child at a time (it refreshes the whole
   container per call), so a list is built into a slice and written to `Objects`
   once. Nothing in this repo fills a container in a loop. One level below all of
@@ -290,7 +290,8 @@ naming and the test policy.
 - **The message column measures in its layout.** Rows are variable-height, so
   `MessageList` places a row by an estimate until its widget has been laid out at
   the column's width, and the only place that width is certain is
-  `messageListLayout.Layout`. It is also the one hook Fyne offers for a row that
+  the message list's `slotLayout.Layout` (the `measure` hook the member
+  sidebar's leaves nil). It is also the one hook Fyne offers for a row that
   grows after mounting — an editor opening, an invite card resolving: the
   driver's `EnsureMinSize` re-runs a parent's layout when a child's minimum moves
   and carries the container's new minimum up to the scroller in the same pass. So
@@ -365,6 +366,35 @@ naming and the test policy.
   layer with the lightbox — and a card *on* that layer draws over the app's
   tooltip, so one that hovers anything mounts a `NewTooltip` of its own in its own
   stack. The emoji picker and the attachment viewer each carry one.
+- **A transient notice is the call island's card, not the modal notice's.** Same
+  surface, same lighter-than-hairline edge (`NoticeCardOutline`), same shadow:
+  they are the only two cards the client floats over what is being read. The tone
+  is a **disc at the leading edge**, centred against the whole row rather than
+  hung from the first line — a mark level with the heading points at the heading.
+  Its plate and ring are `theme.Mix`ed from `NoticeCardBg` towards the tone, so
+  they follow an accent override; the body is hand-wrapped (`newNoticeBody`)
+  because `widget.Label` brings `InnerPadding` on four sides, which on a card this
+  size is a line's worth of air the heading does not have.
+  **A notice about a *person* takes a face in that same slot** (`noticeMark`,
+  `NoticeAvatarSize` — larger than the disc, a glyph being legible at any size and
+  a face not): a message is recognised by who sent it before its heading is read.
+  `noticeMark` hands its width back because the sentence is wrapped by hand and the
+  two marks are not the same size. Such a card **leads somewhere**: `Notice.OnTap`
+  runs after the dismissal — what it opens must not be drawn under the card — and
+  `Cursor` answers with a hand only where there is one, a card that merely
+  dismisses being a message about to leave on its own. The close button still wins
+  the tap, being deeper, so a card can be waved off without going where it leads.
+  The heading is a `NewEllipsisText`: a name and a channel are as long as they are,
+  and a `canvas.Text` draws straight past the card holding it. `Notice.Unfiltered`
+  is how a ping escapes the tone switches, which name which *outcomes* are worth
+  reporting rather than whether somebody wrote to you.
+- **A translucent fill cannot be handed to a canvas object.** The palette writes
+  *straight* alpha into `color.RGBA` (see `theme.toRGBA`) and every painter reads
+  one back **premultiplied**, so a colour whose channels exceed its alpha
+  composites as a different hue entirely — `theme.Fade(NoticeInfo, 0.2)` drew the
+  notice's blue disc olive green. `theme.Mix` against the surface the object
+  stands on is the fix; `dissolve` in `notice.go` is the other one, scaling every
+  channel with the alpha for a fade.
 - **`ModalNotice` is a layer for the same reason, in the middle rather than the
   corner.** It is what a message worth stopping for is drawn as, and the only
   thing the login and second-factor screens can report with — the notice stack
@@ -391,6 +421,46 @@ naming and the test policy.
   it wraps **by hand** (`wrapText`, breaking mid-word where no space will ever
   break a URL in a transport error): `widget.RichText` is what wraps text in Fyne
   and it carries a theme colour *name*, which the notice's fade cannot move.
+- **One card is drawn on the modal layer, and `newDialogCard` is it.** The
+  rectangle, `ConfirmRadius`, the client's one hairline and the shadow are all in
+  that one constructor, so the confirmation, the join card, a prompt, a
+  challenge, a ban and the screens before Ready cannot drift a corner or a shade
+  apart. `dialogHeader` is the heading every one of them wears — `newBoldText` at
+  `ConfirmTitleSize`, not a `widget.Label`, so it is the same type as the rest of
+  the client — and the rule under it is `NewRowDivider`, never
+  `widget.NewSeparator`, which draws in a Fyne colour name nothing here sets. A
+  card's body is `spacedColumn(DialogFieldGap, …)` inside
+  `NewInset(DialogPadding)` at `ChannelDialogWidth`, and each field is
+  `dialogField(label, fieldSurface(entry))`: the name above the field,
+  upper-cased, and the entry on a surface rather than bare. Anything that reaches
+  for `container.NewPadded(container.NewVBox(…))` instead is reading as a
+  different program's dialog, which is what the join and prompt cards used to do.
+  `spacedColumn` is a `NewGapColumn`, so a row a card only sometimes has —
+  the invite preview, the status line — **hides** rather than standing empty:
+  a spacer either side of an empty row is a hole the reader can see, and both
+  start hidden because a card is built before anything has gone wrong.
+- **The screens before Ready are that same card** (`ui/login.go`). Sign-in, the
+  second factor and the one held while a saved token is exchanged each *are* the
+  window — there is no main UI to draw them over yet — so they are the only cards
+  here with **no close button**: there is nothing behind one to go back to.
+  `NewAuthCard` is the surface, `NewAuthField` / `NewAuthCaption` / `NewAuthNote`
+  the rows, and `NewAuthChoice` the client's own dropdown, Fyne's `Select` being
+  unusable for the reason the settings page gave up on it — `AppTheme` zeroes the
+  input border it draws its field with. The pieces are exported and the screens
+  are not: what is asked and in what order is the controller's, holding the
+  account and the ticket, and the shape is this package's. `app.mountLogin` sizes
+  the window from what the card measures, so nothing here names a login width.
+- **A link in somebody else's content is not a hyperlink until it has passed
+  `util.SafeLink`.** `fyne.App.OpenURL` is `rundll32 url.dll,FileProtocolHandler`
+  on Windows and `xdg-open` elsewhere: both launch whatever the scheme is
+  registered to, and Fyne's own comment says validating the input is the caller's
+  job. So `mdBuilder.link` renders a destination outside http/https/mailto as
+  **plain text carrying the label** rather than as a segment somebody can click,
+  and every live tap — a body's link, an embed's title, the viewer's browser
+  button — goes to `MessageActions.OnLinkTapped` so the controller can refuse it
+  out loud and warn about a masked one. `ui.openURL` still checks: it is the last
+  gate, not the only one, and it refuses in silence so a call site added later
+  cannot open a scheme by default.
 - **A box layout stretches every child across the row.** `container.NewHBox`
   hands each object its minimum *width* and the row's full height, so an icon
   button in a strip taller than itself is drawn as a tall rectangle — and two
@@ -406,9 +476,24 @@ naming and the test policy.
   reporting what it did are the same red). A filled button lifts its own colour
   under the pointer (`theme.Lighten`) rather than taking the plain one's hover
   fill, and a disabled one carries no tone at all — it is not offering anything.
-  It is **not focusable**, unlike Fyne's: an entry that submits through one does
-  it from `OnSubmitted`, calling `Tap` rather than the action, since the action
-  bypasses the disabled check and would send an in-flight request twice.
+  It is **focusable**: Tab reaches one and Space or Enter presses it, both going
+  through `Tap` rather than the action — the action bypasses the disabled check
+  and would send an in-flight request twice, which is also why an entry that
+  submits through a button calls `Tap` from `OnSubmitted`. The ring
+  (`ButtonFocusRing`, `ButtonFocusWidth`) *overwrites* whatever edge the button
+  had settled on, a `canvas.Rectangle` having one stroke: `focusRing` is called
+  last in both appearance paths. It is near-white rather than the accent so it
+  reads against a Danger fill as well as against the plain surface. A disabled
+  button still accepts focus — Fyne's manager walks the tree and does not ask —
+  and draws no ring, pressing no more from the keyboard than from the pointer.
+- **A list narrowed by typing uses `newFilterField`.** The settings rail, the
+  friends page and the group picker all mount one, so the mark, the field and the
+  surface under them are built in `widgets.go` rather than three times; Escape
+  empties it rather than reaching the surface as "close", but only while there is
+  something to empty. `matchesFilter` is the comparison all three share. The
+  group picker **hides** its rows rather than rebuilding them — a rebuilt row is
+  a row whose pick is gone — and `noSpacingLayout` charges no gap for a hidden
+  child, which is what makes that work.
 - **Fyne's form widgets do not survive `AppTheme`, and a scoped override only
   buys so much.** `AppTheme.Size` zeroes `SizeNameInputBorder`, from which a
   `widget.Slider`'s track thickness is derived (`trackWidth = inputBorder * 2`),
@@ -459,15 +544,30 @@ naming and the test policy.
   first.** `dialog.NewFileOpen` is a browser of Fyne's own: no pinned or recent
   places, no cloud providers, no shell search, no typed path, and not the dialog
   the reader opens in every other program on the machine. `ui.PickFile` /
-  `ui.PickFolder` are the shell's Common Item Dialog (`IFileOpenDialog`) over the
-  HWND `driver.NativeWindow` hands back — the same route `FlashTaskbar` takes —
-  run on a locked OS thread in a single-threaded apartment, the dialog pumping
-  messages of its own, so it is a window beside the client rather than a layer
-  over it and the client keeps painting behind it. COM has no binding in the
-  standard library: the vtable indices in `filedialog_windows.go` *are* the
-  interface contract, fixed by inheritance order and discoverable nowhere at
-  runtime, and one wrong number calls a different method. Both report false where
-  there is no native picker, which is what sends the caller to Fyne's.
+  `ui.PickFolder` open the desktop's own on all three platforms, each half in its
+  own file, and all three are a **process or thread beside the client** rather
+  than a layer over it — which is what keeps the client painting behind one.
+  - `filedialog_windows.go` — the shell's Common Item Dialog (`IFileOpenDialog`)
+    over the HWND `driver.NativeWindow` hands back, the same route `FlashTaskbar`
+    takes, on a locked OS thread in a single-threaded apartment because the dialog
+    pumps messages of its own. COM has no binding in the standard library: the
+    vtable indices there *are* the interface contract, fixed by inheritance order
+    and discoverable nowhere at runtime, and one wrong number calls a different
+    method.
+  - `filedialog_darwin.go` — AppKit's panel through `osascript`. NSOpenPanel
+    would need cgo on the process's **main** thread, which is the one Fyne paints
+    from. The script is wrapped in `tell application "System Events"` because a
+    panel raised by a background process opens behind whatever is in front of it,
+    and a dismissal is `-128` in the error text rather than an exit code of its
+    own.
+  - `filedialog_linux.go` — `zenity`, `qarma`, `matedialog` or `kdialog`,
+    whichever is on PATH. None is a dependency; the three zenity clones share
+    their flags and kdialog takes its own, which is the only thing the code
+    branches on. All four exit 1 for a dialog that was dismissed, so that is an
+    answer rather than a failure.
+
+  Both calls report false where there is nothing native to open, which is what
+  sends the caller to Fyne's — see the known gap.
 - **A row's wash is an animation, never state.** `MessageWidget.Flash` (a jump)
   and `FlashEdit` (an edit landing) both go through `flashWash`: `fill()` is
   untouched, so the row answers the pointer throughout and the last tick hands
@@ -477,6 +577,25 @@ naming and the test policy.
   The two differ only in colour and in the strength curve: a jump starts at full
   wash and lets go, an edit rises and falls inside its second, nobody having
   asked to be shown that row.
+- **The selection tick is the whole of the target, and that is forced.** A bulk
+  delete needs rows picked, and the row itself cannot take the click: its body is
+  a selectable `widget.Label` behind a `selectionCatcher` that forwards a tap
+  *down*, so innermost wins and a `Tapped` on `MessageWidget` would answer
+  everywhere except over the words. `selectTick` is therefore a widget of its own
+  in a second overlay beside the quick-actions' — same `overlayLayout`, a positive
+  `yOffset` because it is up for as long as the mode is and a row bleeding above
+  its own top would put two ticks in one gutter at a group seam. The two overlays
+  are never populated at once: `updateHover` returns early while selecting, so the
+  mode is what the row offers and the wash still follows the pointer.
+  A row the route would refuse — no `ManageMessages`, or past
+  `domain.MaxBulkDeleteAge` — keeps its box **dimmed and inert** rather than
+  losing it, or a column with a week of history in it reads as half broken; the
+  rule is asked of the *model* as well (`MessageList.selectable`), because a
+  Shift-extend spans rows that are not mounted and only the model can step over
+  one. Shift is `ui.ShiftHeld` read at the click, the same Windows-only answer a
+  confirmation skip is. Both the mode and the set live on `MessageList`, keyed by
+  message ID for the reason `mounted` is, and `build` pushes both into a row as it
+  mounts so one scrolling back in does not return unticked.
 - **A picture cannot be rounded off, so a card puts it inside its padding.**
   `canvas.Image` has no corner radius and Fyne clips nothing, so an image drawn to
   a rounded card's edge squares off the corners it covers — the invite card's
@@ -496,12 +615,18 @@ naming and the test policy.
   of an empty composer — changed nothing to draw, so they want no refresh either.
   `TypedShortcut` is left alone: what it dispatches to does not all refresh.
 - Any custom widget overriding `Dragged` must also have `DragEnd`.
-- **One shell draws both settings pages.** `settings_shell.go` owns the surface —
+- **One shell draws three settings pages now.** `settings_shell.go` owns the surface —
   the layer, the rail, the pane, the group offsets, the flash, the popover — and
   the vocabulary of rows every section is assembled from. `SettingsPage` and
   `ServerSettingsPage` **embed it by value**, so a section reaches `p.group`,
   `p.row`, `p.note` and the rest by promotion and never names it; that embedding
   is also why extracting it changed no call site in `settings_sections.go`.
+  Three rows the pages had a copy of each now live there too: `identityStrip`
+  (the picture and name above the rail), `descriptionRowOf` and `pictureRow` —
+  the last taking its Remove **button** rather than a bool, the account's banner
+  holding on to one that stays disabled until a profile fetch says otherwise.
+  The circle those previews are drawn as is `newInitialIcon` in `widgets.go`,
+  shared with the invite card, the emoji rail and the call island.
   What a page contributes is the sections: `railEntry.section` is a plain `int`
   because the two number theirs separately, and `buildRail` is handed the
   entries, the open one and what to do about a tap. It appends sub-entries only
@@ -544,13 +669,27 @@ naming and the test policy.
   A card of forty rows is read by its **markers**, not its controls:
   `markPermission` paints the same bar `boolRow` uses in the accent for a grant
   and the danger tone for a denial, so a role's shape is legible without reading
-  every dropdown. **One grid serves four scopes** — a server role, the server's
-  default, a role in one channel and a channel's default — and `permissionScope`
+  every dropdown. **One grid serves five scopes** — a server role, the server's
+  default, a role in one channel, a channel's default and a group's — and `permissionScope`
   is the whole of what separates them: three states or two, which bits are drawn
   at all, whether a bit may be moved, and where the change is sent. A category
   whose bits the mask empties is dropped rather than captioned over nothing, and
   the two cards whose wording is about the server say it again for a channel
   (`captionIn` / `detailIn`).
+- **The permission grid belongs to the shell, not to a page.**
+  `settingsShell.permissionGroups` / `permissionRow` / `setPermissionRow` work
+  from `gridAllow` / `gridDeny` on the shell, because three pages draw one grid:
+  a server role and the server's default, a role in one channel and that
+  channel's, and a **group's** own. `permissionScope` is still the whole of what
+  separates them — and a group adds two answers to it. `group` picks the
+  `groupDetails` rewording, for the entries whose line names something a group has
+  not got (one: roles). And a group is the one scope that is a plain **set** with
+  no deny half, so its rows are switches like the server default's — Revolt keeps
+  one value on the channel and ORs it with a view-only floor, which is also why
+  `groupPermissions` drops the two bits that floor already grants.
+  `ui.GroupSettingsPage` is otherwise the smallest page on the shell: two
+  sections, no lists, nothing fetched, so no `cachedList` and no `visit` counter —
+  everything it draws arrives as a channel update.
 - **A list row's own action is an outlined icon, not a filled button.** A page of
   lists with a filled `Edit` on every row is a column of accent slabs shouting
   from a surface that is mostly read — so `editButton` puts the `action-edit`
@@ -627,7 +766,14 @@ naming and the test policy.
   layout reports **no** width of its own — a minimum here would put the page into
   the window's.
   It carries one control of its own: `buildAsk`, the field and button that send a
-  friend request to a typed handle. It is built **once, in the constructor**, and
+  friend request to a typed handle. **One surface**, not a field on a card — the
+  button is seated inside the field's trailing edge by `FriendsAskInset`, which the
+  bar's height is chosen against (`ButtonMinHeight` plus twice it), and the mark
+  leading it starts at a card's own left padding so the bar and the rows share an
+  edge. Its focus edge is `askEntry`'s doing: `WithCaret` makes Fyne's input border
+  transparent — that being what stops every entry drawing a box inside the one it
+  is already in — so the surface's outline lights instead of the entry's.
+  It is built **once, in the constructor**, and
   stands between the header and the scroll rather than in the list — `SetSections`
   replaces that list wholesale and presence alone refills it, so a field inside it
   would lose what somebody was typing. It reports through

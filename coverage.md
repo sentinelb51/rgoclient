@@ -4,7 +4,7 @@
 
 `internal/client/actions.go` is the client's whole action surface — every network call the
 user can cause. revoltgo's `Session` exposes ~110 REST methods plus the socket pair. The
-client calls **77** of them, and registers **39** of the **47** event types revoltgo's
+client calls **79** of them, and registers **39** of the **47** event types revoltgo's
 `eventConstructors` table can decode. Two routes are reached without revoltgo's types at
 all, because revoltgo cannot express them — see *Round the typed API* below.
 
@@ -19,13 +19,15 @@ the cache, and `Nearby` / `After` / an uncached `Before` for a jump window, whic
 `ChannelMessagesParams` no longer has an unused field. `ChannelSearch` counts once and is
 asked two ways, `pinned` and `query`, which Revolt takes as alternatives rather than
 together.
+`ChannelEdit` counts once and is asked three ways — the edit card, a group's name and
+description, and a group's icon, which is an upload first and this field second.
 
 This is a map, kept so targets can be picked from it. Anything moved out of *Not covered*
 is built and working, not merely planned.
 
 ---
 
-## Covered today (77 calls)
+## Covered today (79 calls)
 
 | Area | revoltgo call | Client action |
 |---|---|---|
@@ -53,6 +55,7 @@ is built and working, not merely planned.
 | Messages | `ChannelMessageSend` | `SendMessage` |
 | | `ChannelMessageEdit` | `EditMessage` |
 | | `ChannelMessageDelete` | `DeleteMessage` |
+| | `ChannelMessageDeleteBulk` | `DeleteMessages` |
 | | `ChannelMessagePin` / `ChannelMessageUnpin` | `PinMessage` |
 | | `ChannelMessageReactionCreate` / `…Delete` | `React` |
 | | `ChannelMessageReactionClear` | `ClearReactions` (a moderator's, confirmed) |
@@ -69,6 +72,8 @@ is built and working, not merely planned.
 | | `ChannelDelete` | `CloseChannel` |
 | Conversations | `DirectMessages`, `DirectMessageCreate` | `Conversations`, `OpenConversation` |
 | Groups | `GroupCreate` | `CreateGroup` (a name and up to 49 friends) |
+| | `ChannelEdit` (`Icon`) | `SetGroupIcon` / `RemoveGroupIcon` (the `icons` bucket) |
+| | `GroupPermissionsSetDefault` | `SetGroupPermissions` (a plain value, not an override) |
 | | `GroupMemberAdd` | `AddGroupMembers` (one request each — the route names one) |
 | | `GroupMemberDelete` | `RemoveGroupMember` (the owner's alone) |
 | Users | `User`, `ServerMember` | `ResolveAuthors`, `resolveRecipients` |
@@ -384,13 +389,25 @@ factor was already built; configuring one no longer isn't.
 
 ### Tier 3 — moderation / administration, still not offered
 
-`ChannelMessageDeleteBulk` and `ServersRole` (fetching one role, which Ready already
-carries). The first is the only one with a feature behind it, and what stops it is the
-surface rather than the route: the message column has no selection model at all, so
-picking a run of messages is the whole of the work and the route is the last line of it.
-`GroupPermissionsSetDefault` is the third — the same question asked of a group, which
-Revolt takes as a plain value rather than an override — and there is no settings page for
-a group to put it on.
+`ServersRole` — fetching one role, which Ready already carries — is what is left, and there
+is no feature behind it.
+
+**`GroupPermissionsSetDefault` came out of this tier**, and what it wanted was the same
+thing the bulk delete wanted: somewhere to put it. `ui.GroupSettingsPage` is that place —
+the settings shell filled with one conversation, two sections and nothing fetched — and it
+carries the group **icon** out of Tier 1's neighbourhood on the way, an icon being an
+upload rather than a field and so the one thing the create card could never ask for. The
+route is not `ChannelPermissionsSetDefault` with a different argument: Revolt branches on
+the channel and takes a plain value for a group where a server channel takes `{allow, deny}`,
+and the wrong shape is `InvalidOperation`.
+
+**`ChannelMessageDeleteBulk` came out of this tier**, and what it cost was the surface
+rather than the route, as expected: the message column had no selection model at all, so
+that is what was built — a mode on `ui.MessageList`, a tick per row and a bar standing
+where the composer's entry does. The route was the last line of it. Its three rules are
+Revolt's and are applied here rather than reported: `ManageMessages` even over the
+account's own words, nothing over a week old (the route refuses the whole batch over one),
+and a hundred per request.
 
 What has come out of this tier is what the client could already *do* but not undo, and
 what it could already *read* but not write. Banning was built without a ban list, so
@@ -511,16 +528,22 @@ refresh.
 
 - **A pinned message is marked in the column and collected in a panel.** The mark rides the
   name line, so `continuesGroup` refuses to group a pinned message — grouped, it would have
-  nowhere to draw. The panel is opened from the channel header and is a **snapshot**: it is
-  one search, nothing keeps it current, so a pin made anywhere while it is open — this
-  account's own from another client included — does not appear until it is reopened. A row
+  nowhere to draw. The panel is opened from the channel header and is **one search that is
+  made again when a pin moves**: `MessageUpdated.Pinning` says a pin was what changed, read
+  off the wire because a pinned message is routinely older than anything cached, and the
+  panel re-asks through the refresh queue so a moderator clearing a channel's pins costs one
+  request rather than one each. A deleted message leaves for free. An **edit** it follows
+  only as far as the message cache reaches. A row
   is a flattened one-line summary and leads to the message; a body with no text says what it
   carries instead. It is capped at the hundred newest, Revolt's own ceiling on a search, with
   no way to page past it.
-- **Channel search is that panel with a query**, and inherits all of it: a snapshot, the
-  hundred newest matches with no paging, one-line summaries, and the open channel alone —
+- **Channel search is that panel with a query**, and inherits all of it *but* the re-asking:
+  the hundred newest matches with no paging, one-line summaries, and the open channel alone —
   there is no search across a server, Revolt's route being per channel. It asks on Enter
-  rather than as you type, since each query is a request. Revolt's matching is MongoDB's
+  rather than as you type, since each query is a request. It only ever **shrinks**: a card
+  goes when its message is deleted and follows an edit as far as the cache reaches, and
+  nothing is ever added — a message sent after the search that would have matched it is not
+  there until the question is asked again. Revolt's matching is MongoDB's
   full-text search, so it is words rather than substrings: half a word finds nothing, and
   what counts as a word is the server's business.
 - **A reaction now says who**, on hover, and only as far as the store can name them: a
@@ -537,8 +560,9 @@ refresh.
   is re-asked after an action here and never otherwise. A row names the channel it lands in
   and who made it as far as the store can; a creator who has left the server is not named
   at all rather than shown as an ID.
-- **The status line is set, not seen.** Nothing in the client draws anybody's status text,
-  this account's included, so the settings row is the only place it appears — and it shows
+- **The status line is seen in one place and set in another.** A profile draws it
+  (`ui.profileStatus`), and nothing else does: not the member sidebar, not a message row,
+  not the account's own row anywhere but the settings field that writes it — which shows
   what the store last said rather than what was just typed, the change returning as a
   gateway event that does not rebuild the page. Over `MaxStatusText` is truncated by rune
   rather than refused, the limit being Revolt's.
@@ -607,16 +631,21 @@ refresh.
   home view alone. A *server* relationship — Revolt's own `Relations` array on the account —
   is dropped at the boundary, so what is held is one value per person met rather than the
   whole graph.
-- **A group is made, named and grown, and has no picture.** Creating one takes a name and up
-  to 49 friends — Revolt's own ceiling on that route, and friendship is the whole of what it
-  takes, so the card is picked from the relationships. Everything after is the ordinary
-  channel edit, minus the **icon**, which is an upload into a bucket of its own with no row
-  offering it. Its participants are the one conversation the member sidebar draws, resolved
-  through `ensureAuthor` like any other unseen account, so a group opened for the first time
-  fills in a moment later. Adding has no client-side ceiling at all: the create route
-  documents 49 and the add route documents none, the real limit being a runtime setting of
-  the instance's, so one past it is refused by the server rather than not offered. Removing
-  somebody is the **owner's** alone — not a permission bit, so no grant carries it.
+- **A group is made with a name and configured on a page of its own.** Creating one takes a
+  name and up to 49 friends — Revolt's own ceiling on that route, and friendship is the whole
+  of what it takes, so the card is picked from the relationships. Everything after is
+  `ui.GroupSettingsPage`: the name, the description, the age gate, the **icon** (an upload
+  into the `icons` bucket, which is why the create card could never ask for one) and what
+  everybody in the group may do. That last is Revolt's one *plain value* permission scope —
+  a set ORed over a view-only floor rather than an overwrite — so its grid is switches, and
+  the route branches on the channel: the `{allow, deny}` shape a server channel takes is
+  `InvalidOperation` here. What the page cannot do is **transfer ownership**, so removing
+  somebody stays the owner's alone: not a permission bit, so no grant carries it. Its
+  participants are the one conversation the member sidebar draws, resolved through
+  `ensureAuthor` like any other unseen account, so a group opened for the first time fills in
+  a moment later. Adding has no client-side ceiling at all: the create route documents 49 and
+  the add route documents none, the real limit being a runtime setting of the instance's, so
+  one past it is refused by the server rather than not offered.
 - **The emoji picker lists what `State` holds**, which is the servers the account is in. An
   emoji from anywhere else renders in a message and in a chip and is in nothing to be picked
   from. The cells themselves carry no caption — the line under the grid names one at a time,

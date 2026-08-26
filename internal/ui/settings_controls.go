@@ -13,6 +13,7 @@ package ui
 import (
 	"image/color"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -809,13 +810,12 @@ func (c *optionControl) open() {
 // a hand-edited file naming something the client dropped — shows itself, rather
 // than an empty control that looks broken.
 func optionLabel(options []settingsOption, value string) string {
-	for _, option := range options {
-		if option.Value == value {
-			return option.Label
-		}
+	at := slices.IndexFunc(options, func(option settingsOption) bool { return option.Value == value })
+	if at < 0 {
+		return value
 	}
 
-	return value
+	return options[at].Label
 }
 
 // dropdownList is what an option control opens: the client's own list rather
@@ -903,17 +903,7 @@ func (l *dropdownList) MinSize() fyne.Size {
 // ShowAtPosition drops the list at pos, pulled back inside the canvas where it
 // would otherwise hang off the right or bottom edge.
 func (l *dropdownList) ShowAtPosition(pos fyne.Position) {
-	size := l.MinSize()
-	_, area := l.canvas.InteractiveArea()
-
-	if pos.X+size.Width > area.Width {
-		pos.X = max(area.Width-size.Width, 0)
-	}
-	if pos.Y+size.Height > area.Height {
-		pos.Y = max(area.Height-size.Height, 0)
-	}
-
-	l.popUp.ShowAtPosition(pos)
+	l.popUp.ShowAtPosition(keepInside(pos, l.MinSize(), l.canvas))
 	l.canvas.Focus(l)
 }
 

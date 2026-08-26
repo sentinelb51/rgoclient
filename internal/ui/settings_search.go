@@ -16,9 +16,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/widget"
 
-	"RGOClient/assets"
 	"RGOClient/internal/cache"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui/theme"
@@ -176,45 +174,15 @@ func indexPass(hooks SettingsHooks, advanced bool) []settingsHit {
 
 /* The field */
 
-// buildSearchField is the box at the head of the rail. Its own surface rather
-// than textField's, that one being a control sized to a row's trailing slot.
+// buildSearchField is the box at the head of the rail — the shared filter field
+// (ui/widgets.go), which is a surface of its own rather than textField's, that
+// one being a control sized to a row's trailing slot.
 func (p *SettingsPage) buildSearchField() fyne.CanvasObject {
-	entry := &searchEntry{}
-	entry.ExtendBaseWidget(entry)
-	entry.PlaceHolder = "Search settings"
+	field, entry := newFilterField("Search settings", p.onQuery)
 	entry.Text = p.query
-	entry.OnChanged = p.onQuery
 	p.field = entry
 
-	mark := newScaledIcon(tintedIcon(assets.SearchIcon, theme.Colors.CategoryText),
-		theme.Sizes.SettingsIconSize)
-
-	row := NewFillRow(2,
-		container.NewCenter(mark),
-		HorizontalSpacer(theme.Sizes.ChipDotGap),
-		WithCaret(entry),
-	)
-
-	return NewFixedHeightContainer(theme.Sizes.SettingsInputHeight,
-		container.NewStack(newFieldBackground(),
-			NewInset(row, 0, 0, theme.Sizes.ChipPaddingH, theme.Sizes.ChipPaddingH)))
-}
-
-// searchEntry is the query field. Escape empties it rather than reaching the page
-// as "close", but only while there is something to empty: a search is what the
-// reader wants out of first, and once it is gone the key means what it means
-// everywhere else in the client.
-type searchEntry struct {
-	widget.Entry
-}
-
-func (e *searchEntry) TypedKey(key *fyne.KeyEvent) {
-	if key.Name == fyne.KeyEscape && e.Text != "" {
-		e.SetText("")
-		return
-	}
-
-	e.Entry.TypedKey(key)
+	return field
 }
 
 // onQuery answers a keystroke. Emptying the field puts the open section back

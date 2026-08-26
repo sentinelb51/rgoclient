@@ -9,6 +9,7 @@ package ui
 // declared rather than the day somebody remembers to list it.
 
 import (
+	"cmp"
 	"image/color"
 	"strconv"
 	"strings"
@@ -94,7 +95,7 @@ func (p *SettingsPage) accountSection() []settingsGroup {
 	}
 	if len(cards) > 0 {
 		groups = append(groups, p.group("Saved logins",
-			"Accounts you can sign back into on this computer without typing your password.",
+			"Sign back in on this computer without typing your password.",
 			cards...))
 	}
 
@@ -110,11 +111,11 @@ func (p *SettingsPage) accountSection() []settingsGroup {
 				})
 			}),
 		p.actionRow("Log out everywhere",
-			"Signs out every device this account is signed in on, including this one, and removes its saved login here.",
+			"Signs out every device, including this one, and forgets its saved login here.",
 			"Log out everywhere", ToneDanger, func() {
 				p.hooks.Confirm(Confirm{
 					Title:     "Log out everywhere",
-					Body:      "Every device signed in as this account will be signed out, and this computer's saved login for it removed.",
+					Body:      "Every device signed in as this account is signed out, and its saved login here is removed.",
 					Action:    "Log out everywhere",
 					Tone:      ToneDanger,
 					OnConfirm: p.hooks.LogOutEverywhere,
@@ -174,28 +175,20 @@ func (p *SettingsPage) profileGroup() settingsGroup {
 		return settingsGroup{}
 	}
 
-	group := p.group("Profile", "", p.pictureRow(self), p.bannerRow(), p.bioRow())
+	group := p.group("Profile", "", p.avatarRow(self), p.bannerRow(), p.bioRow())
 	p.hooks.LoadProfile(p.SetProfile)
 
 	return group
 }
 
-// pictureRow is the account's own picture and the two things that can be done to
-// it. Remove is drawn disabled rather than left out, so the row keeps one shape
-// and no button appears under the pointer the moment a picture lands.
-func (p *SettingsPage) pictureRow(self domain.User) fyne.CanvasObject {
+// avatarRow is the account's own picture and the two things that can be done to
+// it.
+func (p *SettingsPage) avatarRow(self domain.User) fyne.CanvasObject {
 	remove := newRowButton("Remove", ToneWarning, p.hooks.RemoveAvatar)
 	enableIf(remove, self.AvatarURL != "")
 
-	control := HBoxNoSpacing(
-		container.NewCenter(p.swatchlessAvatar(self.AvatarURL)),
-		HorizontalSpacer(theme.Sizes.SettingsPreviewGap),
-		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeAvatar)),
-		HorizontalSpacer(theme.Sizes.ChipSpacing),
-		container.NewCenter(remove),
-	)
-
-	return p.row("Picture", "Shown wherever you are named.", control)
+	return p.pictureRow("Picture", "Shown wherever you are named.",
+		p.swatchlessAvatar(self.AvatarURL), remove, p.hooks.ChangeAvatar)
 }
 
 // bannerRow is the picture behind the profile. No preview: a banner is a wide
@@ -205,13 +198,8 @@ func (p *SettingsPage) bannerRow() fyne.CanvasObject {
 	remove.Disable() // until the profile lands and says there is one
 	p.account.removeBanner = remove
 
-	control := HBoxNoSpacing(
-		container.NewCenter(newRowButton("Change", ToneInfo, p.hooks.ChangeBanner)),
-		HorizontalSpacer(theme.Sizes.ChipSpacing),
-		container.NewCenter(remove),
-	)
-
-	return p.row("Banner", "The picture behind your profile.", control)
+	return p.pictureRow("Banner", "The picture behind your profile.",
+		nil, remove, p.hooks.ChangeBanner)
 }
 
 // bioRow is the description under the name on a profile, stacked under its
@@ -222,7 +210,7 @@ func (p *SettingsPage) bioRow() fyne.CanvasObject {
 	entry.PlaceHolder = "Say something about yourself"
 	p.account.bio = entry
 
-	return p.stackedRow("About", "Shown on your profile, saved when you click away. Clear it to remove it.",
+	return p.stackedRow("About", "Shown on your profile. Saved when you click away.",
 		wideField(entry))
 }
 
@@ -288,7 +276,7 @@ func (p *SettingsPage) securitySection() []settingsGroup {
 	state := p.security.value
 
 	sessions := p.groupOf("Your devices",
-		"Every device holding a login for this account. Revoking one signs it out at once.",
+		"Every device signed in to this account. Revoking one signs it out at once.",
 		VBoxNoSpacing(p.spaceRows(p.loginRows())...))
 
 	return []settingsGroup{
@@ -298,7 +286,7 @@ func (p *SettingsPage) securitySection() []settingsGroup {
 				"Change", ToneWarning, p.hooks.ChangePassword),
 		),
 		p.group("Second factor",
-			"A code from an app, asked for on top of your password when you sign in.",
+			"A code from an app, asked for alongside your password.",
 			p.totpRow(state), p.recoveryRow(state),
 		),
 		sessions,
@@ -309,9 +297,11 @@ func (p *SettingsPage) securitySection() []settingsGroup {
 // card, Revolt asking for the password with it, and it is not a field that can be
 // left half-typed on a page that stays open.
 func (p *SettingsPage) emailRow(state SecurityState) fyne.CanvasObject {
+	failed := p.security.err != nil || state.EmailErr != nil
+
 	email := state.Email
 	switch {
-	case p.security.err != nil:
+	case failed:
 		email = "Could not be read"
 	case p.security.pending():
 		email = "…"
@@ -320,7 +310,7 @@ func (p *SettingsPage) emailRow(state SecurityState) fyne.CanvasObject {
 	}
 
 	button := newRowButton("Change", ToneWarning, p.hooks.ChangeEmail)
-	enableIf(button, p.security.err == nil && !p.security.pending())
+	enableIf(button, !failed && !p.security.pending())
 
 	return p.rowWith("Email",
 		newText(email, theme.Colors.TimestampText, theme.Sizes.SettingsLabelSize),
@@ -331,8 +321,8 @@ func (p *SettingsPage) emailRow(state SecurityState) fyne.CanvasObject {
 // is a shared secret and a code proving it was stored, so enabling is a card with
 // two steps in it — see the controller.
 func (p *SettingsPage) totpRow(state SecurityState) fyne.CanvasObject {
-	if p.security.pending() || p.security.err != nil {
-		return p.readOnlyRow("Authenticator app", securityUnknown(p.security.err))
+	if failed := cmp.Or(p.security.err, state.MFAErr); p.security.pending() || failed != nil {
+		return p.readOnlyRow("Authenticator app", securityUnknown(failed))
 	}
 
 	if state.MFA.TOTP {
@@ -341,7 +331,7 @@ func (p *SettingsPage) totpRow(state SecurityState) fyne.CanvasObject {
 	}
 
 	return p.actionRow("Authenticator app",
-		"Off. Your password is the only thing between somebody and this account.",
+		"Off. Your password is all that protects this account.",
 		"Set up", ToneInfo, p.hooks.EnableTOTP)
 }
 
@@ -350,11 +340,11 @@ func (p *SettingsPage) totpRow(state SecurityState) fyne.CanvasObject {
 // every one already written down, hence the second button rather than one that
 // decides for itself.
 func (p *SettingsPage) recoveryRow(state SecurityState) fyne.CanvasObject {
-	if p.security.pending() || p.security.err != nil {
-		return p.readOnlyRow("Recovery codes", securityUnknown(p.security.err))
+	if failed := cmp.Or(p.security.err, state.MFAErr); p.security.pending() || failed != nil {
+		return p.readOnlyRow("Recovery codes", securityUnknown(failed))
 	}
 
-	detail := "None yet. Generate a set and keep them somewhere other than this computer."
+	detail := "None yet. Generate a set and store it off this computer."
 	if state.MFA.Recovery {
 		detail = "Generated. Each one signs you in once if you lose your authenticator."
 	}
@@ -375,7 +365,7 @@ func (p *SettingsPage) loginRows() []fyne.CanvasObject {
 	switch {
 	case p.security.pending():
 		return []fyne.CanvasObject{p.note("Fetching…")}
-	case p.security.err != nil:
+	case p.security.err != nil || p.security.value.LoginsErr != nil:
 		return []fyne.CanvasObject{p.note("Could not read where this account is signed in.")}
 	case len(p.security.value.Logins) == 0:
 		return []fyne.CanvasObject{p.note("Revolt is holding no logins for this account.")}
@@ -392,7 +382,7 @@ func (p *SettingsPage) loginRows() []fyne.CanvasObject {
 	// client, not about any one login.
 	if !state.SelfKnown {
 		rows = append(rows, p.note(
-			"This client can't tell which of these is the one you're using — sign in again and it will."))
+			"This client can't tell which login is its own. Sign in again to mark it."))
 	}
 
 	if len(state.Logins) > 1 {
@@ -559,11 +549,11 @@ func (p *SettingsPage) stylesSection() []settingsGroup {
 	}
 
 	groups = append(groups, p.group("Everything", "",
-		p.actionRow("Reset all styles", "Returns every size and colour to the client's own.",
+		p.actionRow("Reset all styles", "Restores every size and colour to its default.",
 			"Reset", ToneWarning, func() {
 				p.hooks.Confirm(Confirm{
 					Title:  "Reset all styles",
-					Body:   "Every size and colour returns to the client's defaults. Nothing else changes.",
+					Body:   "Every size and colour returns to its default. Nothing else changes.",
 					Action: "Reset",
 					Tone:   ToneWarning,
 					OnConfirm: func() {
@@ -597,7 +587,7 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 	settings := config.Current().Behaviour
 
 	return []settingsGroup{
-		p.group("Members", "What the member sidebar shows and how it is kept up to date.",
+		p.group("Members", "What the member sidebar shows, and how often.",
 			p.toggleRow("Load every member",
 				"Shows the whole server. Off, only people who have posted appear.",
 				settings.FetchAllMembers, func(s *config.Settings, on bool) { s.Behaviour.FetchAllMembers = on }),
@@ -619,13 +609,13 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				"Shows only people the server has given a role.",
 				settings.HideRolelessMembers, func(s *config.Settings, on bool) { s.Behaviour.HideRolelessMembers = on }),
 			p.toggleRow("Show everyone when the list would be empty",
-				"If the two settings above leave nothing to show, the whole server is listed instead.",
+				"Lists the whole server if the two settings above leave nothing to show.",
 				settings.MemberListFallback, func(s *config.Settings, on bool) { s.Behaviour.MemberListFallback = on }),
 			p.adv(p.toggleRow("Update the list as people come and go",
 				"Off, the list only changes when you reopen the server.",
 				settings.LiveMemberPresence, func(s *config.Settings, on bool) { s.Behaviour.LiveMemberPresence = on })),
 			p.adv(p.numberRow("Extra rows drawn",
-				"How far past the visible area to draw. Higher is smoother to scroll and uses more memory.",
+				"How far past the visible area to draw. Higher is smoother and uses more memory.",
 				settings.MemberOverscan, 0, maxMemberOverscan, "",
 				func(s *config.Settings, v int) { s.Behaviour.MemberOverscan = v })),
 			p.note("The sidebar can be hidden from the channel header."),
@@ -638,10 +628,10 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				settings.TypingNames, 0, maxTypingNames, "",
 				func(s *config.Settings, v int) { s.Behaviour.TypingNames = v }),
 			p.toggleRow("Show myself typing",
-				"Adds you to the line while you are composing, as everyone else sees it.",
+				"Adds you to the line while you compose.",
 				settings.TypingShowSelf, func(s *config.Settings, on bool) { s.Behaviour.TypingShowSelf = on }),
 			p.toggleRow("Mark typing in the channel list",
-				"Marks any channel someone is typing in, other than the one you are reading.",
+				"Marks any channel someone is typing in, other than the open one.",
 				settings.TypingInChannels, func(s *config.Settings, on bool) { s.Behaviour.TypingInChannels = on }),
 			p.toggleRow("Show pictures beside who is typing",
 				"Draws each person's avatar before their name.",
@@ -656,11 +646,11 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				settings.GroupWindowSeconds, 0, maxGroupWindow, "s",
 				func(s *config.Settings, v int) { s.Behaviour.GroupWindowSeconds = v })),
 			p.adv(p.numberRow("Messages held on open",
-				"How far back a channel reaches when opened. Only what is on screen is drawn; older messages fill in as you scroll.",
+				"How far back a channel reaches when opened. Older messages fill in as you scroll.",
 				settings.InitialMountCount, 5, maxMountedCap, "",
 				func(s *config.Settings, v int) { s.Behaviour.InitialMountCount = v })),
 			p.adv(p.numberRow("Maximum messages held",
-				"The limit while scrolling back. Only what is on screen is drawn whatever this is.",
+				"The limit while scrolling back.",
 				settings.MountedCap, 20, maxMountedCap, "",
 				func(s *config.Settings, v int) { s.Behaviour.MountedCap = max(v, s.Behaviour.InitialMountCount) })),
 			p.adv(p.numberRow("Messages loaded per scroll",
@@ -668,7 +658,7 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				settings.HistoryPageSize, 5, maxHistoryPage, "",
 				func(s *config.Settings, v int) { s.Behaviour.HistoryPageSize = v })),
 			p.adv(p.numberRow("Extra messages drawn",
-				"How far past the visible area to draw. Higher is smoother to scroll and uses more memory.",
+				"How far past the visible area to draw. Higher is smoother and uses more memory.",
 				settings.MessageOverscan, 0, maxMessageOverscan, "",
 				func(s *config.Settings, v int) { s.Behaviour.MessageOverscan = v })),
 		),
@@ -693,6 +683,9 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 			p.toggleRow("Enter sends the message",
 				"Off, Enter starts a new line and Ctrl+Enter sends.",
 				settings.EnterSends, func(s *config.Settings, on bool) { s.Behaviour.EnterSends = on }),
+			p.toggleRow("Blinking cursor",
+				"Fade the caret in and out while a box has focus. A box already focused takes it on the next keystroke.",
+				settings.CursorBlink, func(s *config.Settings, on bool) { s.Behaviour.CursorBlink = on }),
 		),
 	}
 }
@@ -711,7 +704,7 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 				settings.MaxStacked, 1, maxNoticeStack, "",
 				func(s *config.Settings, v int) { s.Notifications.MaxStacked = v })),
 		),
-		p.group("Centre of the window", "The card the client takes the middle of the window with — a login refused, an outcome you are waiting on.",
+		p.group("Centre of the window", "The card shown in the middle of the window.",
 			p.numberRow("Hold for", "How long that card stays before it goes.",
 				settings.ModalSeconds, 1, maxModalLifetime, "s",
 				func(s *config.Settings, v int) { s.Notifications.ModalSeconds = v }),
@@ -723,6 +716,12 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 				settings.ShowWarning, func(s *config.Settings, on bool) { s.Notifications.ShowWarning = on }),
 			p.toggleRow("Failures", "Something did not work.",
 				settings.ShowDanger, func(s *config.Settings, on bool) { s.Notifications.ShowDanger = on }),
+		),
+		p.group("Show a message", "The sender's face and their first line, tapping through to it.",
+			p.toggleRow("A mention", "Somebody named you, or addressed everyone.",
+				settings.ShowMention, func(s *config.Settings, on bool) { s.Notifications.ShowMention = on }),
+			p.toggleRow("A direct message", "Anything sent to you or to a group you're in.",
+				settings.ShowDirect, func(s *config.Settings, on bool) { s.Notifications.ShowDirect = on }),
 		),
 	}
 
@@ -745,12 +744,12 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 
 	return append(groups,
 		p.group("Sound", "",
-			p.toggleRow("Play sounds", "With this off the client never opens an audio device.",
+			p.toggleRow("Play sounds", "Off, no audio device is opened.",
 				settings.Sounds, func(s *config.Settings, on bool) { s.Notifications.Sounds = on }),
 			p.numberRow("Volume", "", settings.SoundVolume, 0, 100, "%",
 				func(s *config.Settings, v int) { s.Notifications.SoundVolume = v }),
 			p.toggleRow("Play while the window is in focus",
-				"Off makes an incoming message silent until you look away.",
+				"Off, incoming messages are silent until you look away.",
 				settings.SoundsWhenFocused,
 				func(s *config.Settings, on bool) { s.Notifications.SoundsWhenFocused = on }),
 		),
@@ -780,12 +779,12 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 				settings.TypingSounds,
 				func(s *config.Settings, on bool) { s.Notifications.TypingSounds = on }),
 			p.numberRow("Typing volume",
-				"Separate from the volume above: these play far more often than anything else.",
+				"Set apart from the volume above; keystrokes play far more often.",
 				settings.TypingVolume, 0, 100, "%",
 				func(s *config.Settings, v int) { s.Notifications.TypingVolume = v }),
 		),
 		p.soundFileGroup("Sounds",
-			"Point one at a WAV or MP3 file of your own, or keep the built-in.", false),
+			"Use a WAV or MP3 file of your own, or keep the built-in.", false),
 		p.soundFileGroup("Typing sounds", "", true),
 	)
 }
@@ -880,7 +879,7 @@ func (p *SettingsPage) cacheSection() []settingsGroup {
 				"Clear", ToneDanger, func() {
 					p.hooks.Confirm(Confirm{
 						Title:  "Clear the image cache",
-						Body:   "Every cached avatar, attachment and emoji is deleted. They will be downloaded again as they are drawn.",
+						Body:   "Every cached avatar, attachment and emoji is deleted, then downloaded again as it is drawn.",
 						Action: "Clear",
 						Tone:   ToneDanger,
 						OnConfirm: func() {
@@ -1002,22 +1001,22 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 	groups := []settingsGroup{
 		p.group("Drawing", "How the client draws each frame.",
 			p.numberRow("FPS",
-				"The most frames per second the client will try to draw. Higher is smoother to scroll and animate while something moves.",
+				"The most frames per second to draw. Higher is smoother while something moves.",
 				settings.FrameRate, minFrameRate, maxFrameRate, "fps",
 				func(s *config.Settings, v int) { s.Performance.FrameRate = v }),
 			p.toggleRow("V-Sync",
-				"Shows each frame in step with the monitor, so none is ever half-drawn. Off, frames appear as soon as they're ready, which can tear.",
+				"Draws each frame in step with the monitor. Off, frames can tear.",
 				settings.VSync, func(s *config.Settings, on bool) { s.Performance.VSync = on }),
 			p.note("With V-Sync on, FPS is capped to your monitor's refresh rate (Hz)."),
 			p.toggleRow("Partial redraw",
-				"Redraws only the parts of the window that changed, keeping the rest from the previous frame. Turn off only if part of the window ever looks stale.",
+				"Redraws only what changed. Turn off if part of the window ever looks stale.",
 				settings.PartialRepaint, func(s *config.Settings, on bool) { s.Performance.PartialRepaint = on }),
 		),
 	}
 
 	if rows := p.coreRows(settings); len(rows) > 0 {
 		groups = append(groups, p.group("Processor cores",
-			"Which of this machine's cores the client is allowed to run on. Everything it does moves with this, call audio included.",
+			"Which cores the client may run on. Everything moves with this, call audio included.",
 			rows...))
 	}
 
@@ -1054,7 +1053,7 @@ func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject
 				{Label: "CCD1", Value: config.CoresCCD1},
 			}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
 
-			p.note("CCD1 is the default: games and heavier apps usually land on CCD0, which carries the stacked cache or the better-binned cores. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+			p.note("CCD1 is the default: games and heavier apps usually land on CCD0. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
 		}
 	}
 
@@ -1068,7 +1067,7 @@ func (p *SettingsPage) coreRows(settings config.Performance) []fyne.CanvasObject
 			{Label: "Performance cores", Value: config.CoresPerformance},
 		}, func(s *config.Settings, v string) { s.Performance.Cores = v }),
 
-		p.note("Efficiency cores is the default: the client is idle most of the time, and they cost less power. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
+		p.note("Efficiency cores are the default: the client is idle most of the time and they cost less power. Fewer cores can mean stutter while scrolling, or a dropout in a call."),
 	}
 }
 
@@ -1137,7 +1136,7 @@ func (p *SettingsPage) advancedSection() []settingsGroup {
 
 	if len(sizeRows) == 0 && len(colorRows) == 0 {
 		return []settingsGroup{p.group("", "",
-			p.note("No size or colour is named that. Empty the search box for the whole list."))}
+			p.note("No size or colour is named that. Clear the search box for the whole list."))}
 	}
 
 	return []settingsGroup{
@@ -1296,7 +1295,7 @@ var styleGroups = []styleGroup{
 	},
 	{
 		caption: "Buttons",
-		detail:  "Every button the client draws, from a card's action to a settings row.",
+		detail:  "Every button, from a card's action to a settings row.",
 		fields: []styleField{
 			{"ButtonRadius", "Corner radius"},
 			{"ButtonTextSize", "Label text"},
@@ -1309,7 +1308,7 @@ var styleGroups = []styleGroup{
 	},
 	{
 		caption: "Cards and edges",
-		detail:  "Every border the client draws is the same hairline.",
+		detail:  "Every border is the same hairline.",
 		fields: []styleField{
 			{"OutlineWidth", "Hairline"},
 			{"CardShadowBlur", "Composer shadow"},
@@ -1329,7 +1328,7 @@ var styleGroups = []styleGroup{
 	},
 	{
 		caption: "Scroll indicator",
-		detail:  "The bar beside the conversation while it moves. A width of zero removes it.",
+		detail:  "The scrollbar beside the conversation. A width of zero removes it.",
 		fields: []styleField{
 			{"ScrollIndicatorWidth", "Width"},
 			{"ScrollIndicatorInset", "Distance from the edge"},

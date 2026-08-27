@@ -176,6 +176,37 @@ func (c *MessageCache) Replace(channelID string, updated *domain.Message) bool {
 	return true
 }
 
+// Update applies change to a copy of the cached message and stores it, reporting
+// whether anything moved — a change reporting false, and a message the cache
+// does not hold, are both nothing rather than a write.
+//
+// The search, the copy, the change and the store are one held lock. Find then
+// Replace is the same work across two, and between them a gateway echo and a
+// background worker each read the same message, each apply their own change to
+// their own copy, and the second store silently discards the first — a reaction
+// or a pin that answered and then was not there.
+func (c *MessageCache) Update(channelID, messageID string, change func(*domain.Message) bool) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	messages := c.byChannel[channelID]
+	i, ok := slices.BinarySearchFunc(messages, messageID, CompareMessageID)
+	if !ok {
+		return false
+	}
+
+	updated := *messages[i]
+	if !change(&updated) {
+		return false
+	}
+
+	revised := slices.Clone(messages)
+	revised[i] = &updated
+	c.byChannel[channelID] = revised
+
+	return true
+}
+
 // IsDepleted reports whether a channel's full history has been loaded.
 func (c *MessageCache) IsDepleted(channelID string) bool {
 	c.mu.RLock()

@@ -184,7 +184,8 @@ var searchSortChips = []struct {
 // receives the whole query whenever any part of it moves — the field submitted, a
 // filter toggled, a person picked, an order chosen — and the controller decides
 // which of those has to reach the network. onClose dismisses the layer.
-func NewSearchDialog(deps Deps, channel, selfID string, onChange func(SearchQuery), onClose func()) *SearchDialog {
+func NewSearchDialog(deps Deps, channel, selfID string, onChange func(SearchQuery),
+	onMore, onClose func()) *SearchDialog {
 	d := &SearchDialog{
 		onChange: onChange,
 		query:    SearchQuery{Sort: domain.SortRelevance},
@@ -208,6 +209,7 @@ func NewSearchDialog(deps Deps, channel, selfID string, onChange func(SearchQuer
 		Where:    "in " + channel,
 		Controls: []fyne.CanvasObject{d.buildField(), d.buildFilters(deps)},
 		Trailing: d.buildSorts(),
+		OnMore:   onMore,
 		OnClose:  onClose,
 	})
 
@@ -532,9 +534,9 @@ func (d *SearchDialog) focus(target fyne.Focusable) {
 /* Filling it */
 
 // SetResults replaces the cards. found is how many came back before the filters
-// were applied, which the line reports alongside: the route caps an answer at
-// 100 and pages only by being asked for a narrower span, so a reader narrowing
-// one has to be able to see that they are narrowing that hundred. Call on the UI
+// were applied, which the line reports alongside: the route caps one answer at
+// 100, so a reader narrowing what is held has to be able to see how much they
+// are narrowing. Both numbers grow as further pages are asked for. Call on the UI
 // thread.
 func (d *SearchDialog) SetResults(results []MessageCard, found int) {
 	cards := make([]fyne.CanvasObject, 0, len(results))

@@ -88,6 +88,10 @@ func (a *App) stashToken(result client.Login, err error) (client.Login, error) {
 // unread marks, collapsed categories and fetch guards. The client clears its own
 // half, the message cache, when the session is replaced. Call on the UI thread.
 func (a *App) resetSessionState() {
+	// The rows a deletion was being held over belong to a column about to be
+	// replaced, and the wake over them would fire into the next session.
+	a.dropRemoval()
+
 	a.epoch++         // anything still in flight for the old session is now stale
 	a.notices.Clear() // a failure from the last account has nothing to say to this one
 

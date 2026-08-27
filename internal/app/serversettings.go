@@ -147,7 +147,7 @@ func (a *App) serverSettingsHooks() ui.ServerSettingsHooks {
 		RemoveBanner: a.removeServerBanner,
 
 		Channels:      a.serverSettingsChannels,
-		CreateChannel: a.promptCreateChannel,
+		CreateChannel: func() { a.promptCreateChannel(a.serverSettingsID) },
 		EditChannel:   a.editChannel,
 		MoveChannel:   a.moveChannel,
 
@@ -155,7 +155,7 @@ func (a *App) serverSettingsHooks() ui.ServerSettingsHooks {
 		SetChannelRolePermissions:    a.setChannelRolePermissions,
 		SetChannelDefaultPermissions: a.setChannelDefaultPermissions,
 
-		CreateCategory: a.promptCreateCategory,
+		CreateCategory: func() { a.promptCreateCategory(a.serverSettingsID) },
 		RenameCategory: a.promptRenameCategory,
 		MoveCategory:   a.moveCategory,
 		DeleteCategory: a.deleteCategory,
@@ -573,11 +573,11 @@ func (a *App) moveCategory(categoryID string, up bool) {
 	a.publishCategories(serverID, buckets, "Could not move that category.")
 }
 
-// promptCreateCategory raises the card that names a new category. Call on the UI
-// thread.
-func (a *App) promptCreateCategory() {
-	serverID := a.serverSettingsID
-	if !a.canOnServerSettings(domain.PermissionManageChannel) {
+// promptCreateCategory raises the card that names a new category. The server is
+// passed rather than read off the page: the channel sidebar's own empty space
+// offers this too, and no settings page is open behind it. Call on the UI thread.
+func (a *App) promptCreateCategory(serverID string) {
+	if !a.store.ServerPermissions(serverID).Has(domain.PermissionManageChannel) {
 		return
 	}
 
@@ -719,10 +719,10 @@ func (a *App) nearestVisible(channels []string, index, step int) int {
 
 // promptCreateChannel raises the card that names a new channel. The same card the
 // sidebar's edit uses, asked from empty and with the one row an edit cannot
-// offer — see ui.NewChannelCreateDialog. Call on the UI thread.
-func (a *App) promptCreateChannel() {
-	serverID := a.serverSettingsID
-	if !a.canOnServerSettings(domain.PermissionManageChannel) {
+// offer — see ui.NewChannelCreateDialog. The server is passed for the reason
+// promptCreateCategory's is. Call on the UI thread.
+func (a *App) promptCreateChannel(serverID string) {
+	if !a.store.ServerPermissions(serverID).Has(domain.PermissionManageChannel) {
 		return
 	}
 

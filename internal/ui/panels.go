@@ -98,6 +98,10 @@ type islandParts struct {
 	Controls []fyne.CanvasObject
 	Trailing fyne.CanvasObject
 
+	// OnMore asks for the page after what is drawn. Nil where the surface cannot
+	// page at all, which is what leaves the slot out rather than hiding it.
+	OnMore func()
+
 	OnClose func()
 }
 
@@ -113,6 +117,12 @@ type messageIsland struct {
 	empty    fyne.CanvasObject // the line and its mark, standing where the cards are not
 	list     *fyne.Container
 
+	// more is the way to the next page and moreSlot is that button with the gap
+	// above it, hidden together: a well with nothing further to ask for must not pay
+	// for the gap either. Both nil where the surface does not page.
+	more     *Button
+	moreSlot fyne.CanvasObject
+
 	// countAlone is a surface with nothing to put opposite the count, whose line is
 	// hidden until there is a number to put in it.
 	countAlone bool
@@ -124,6 +134,9 @@ func newMessageIsland(deps Deps, parts islandParts) (*messageIsland, fyne.Canvas
 	pad := theme.Sizes.IslandPadding
 
 	d := &messageIsland{deps: deps, list: VBoxNoSpacing()}
+	if parts.OnMore != nil {
+		d.buildMore(parts.OnMore)
+	}
 
 	blocks := []fyne.CanvasObject{d.buildHeader(parts), VerticalSpacer(gap)}
 	for _, control := range parts.Controls {
@@ -240,6 +253,19 @@ func (d *messageIsland) buildWell(res fyne.Resource) fyne.CanvasObject {
 // Not a setting: it is a proportion of a size that already is one.
 const emptyWellShare = 0.25
 
+// buildMore is the way to the next page: a full-width button at the end of the
+// well, which is where a reader who has run out of cards already is. Inside the
+// scroll rather than under it — a footer outside would stand there whether or not
+// there is anything more, and the well is capped in height.
+func (d *messageIsland) buildMore(onMore func()) {
+	d.more = NewButton("", onMore)
+
+	slot := VBoxNoSpacing(VerticalSpacer(theme.Sizes.IslandCardSpacing), d.more)
+	slot.Hide()
+
+	d.moreSlot = slot
+}
+
 /* Filling it */
 
 // setCards replaces the well's contents, one gap between each. Call on the UI
@@ -258,10 +284,40 @@ func (d *messageIsland) setCards(cards []fyne.CanvasObject) {
 }
 
 // setBlocks replaces the well's contents with a column already spaced, for a
-// surface whose runs are not all one gap apart. Call on the UI thread.
+// surface whose runs are not all one gap apart. The way to the next page rides
+// under whatever is put here, so no filler has to remember to keep it. Call on
+// the UI thread.
 func (d *messageIsland) setBlocks(blocks []fyne.CanvasObject) {
+	if d.moreSlot != nil {
+		blocks = append(blocks, d.moreSlot)
+	}
+
 	d.list.Objects = blocks
 	d.list.Refresh()
+}
+
+// SetMore says what the way to the next page reads, or takes it away: an empty
+// label is nothing further to ask for. busy draws it as the request it already
+// is, a second tap on a page in flight being a second request for the same page.
+// Call on the UI thread.
+func (d *messageIsland) SetMore(label string, busy bool) {
+	if d.moreSlot == nil {
+		return
+	}
+	if label == "" {
+		showIf(d.moreSlot, false)
+
+		return
+	}
+
+	d.more.SetText(label)
+	if busy {
+		d.more.Disable()
+	} else {
+		d.more.Enable()
+	}
+
+	showIf(d.moreSlot, true)
 }
 
 // reset empties the well and leaves one line standing in it. Call on the UI
@@ -270,6 +326,7 @@ func (d *messageIsland) reset(reason string) {
 	d.setCards(nil)
 	d.setCount("")
 	d.say(reason)
+	d.SetMore("", false)
 }
 
 // say fills the well's own line, or hides it where the cards speak for
@@ -547,12 +604,14 @@ type PinsDialog struct {
 }
 
 // NewPinsDialog builds the panel for a channel, showing that it is loading.
-// channel names it in the heading; onClose dismisses the layer.
-func NewPinsDialog(deps Deps, channel string, onClose func()) *PinsDialog {
+// channel names it in the heading; onMore asks for the page after what is drawn;
+// onClose dismisses the layer.
+func NewPinsDialog(deps Deps, channel string, onMore, onClose func()) *PinsDialog {
 	island, content := newMessageIsland(deps, islandParts{
 		Mark:    assets.SystemPinnedIcon,
 		Title:   "Pinned",
 		Where:   "in " + channel,
+		OnMore:  onMore,
 		OnClose: onClose,
 	})
 	island.reset("Loading what is pinned here...")
@@ -564,6 +623,10 @@ func NewPinsDialog(deps Deps, channel string, onClose func()) *PinsDialog {
 func (d *PinsDialog) SetEntries(entries []MessageCard) {
 	d.island.fill(entries, "pinned message", "Nothing is pinned here yet.")
 }
+
+// SetMore is the island's own, forwarded: a panel holds the shell rather than
+// being one. Call on the UI thread.
+func (d *PinsDialog) SetMore(label string, busy bool) { d.island.SetMore(label, busy) }
 
 // Fail replaces the list with a reason it is not there. Call on the UI thread.
 func (d *PinsDialog) Fail(reason string) { d.island.reset(reason) }
@@ -588,13 +651,14 @@ type MentionsDialog struct {
 	island *messageIsland
 }
 
-// NewMentionsDialog builds the panel, showing that it is loading. onClose
-// dismisses the layer.
-func NewMentionsDialog(deps Deps, onClose func()) *MentionsDialog {
+// NewMentionsDialog builds the panel, showing that it is loading. onMore asks
+// for the page after what is drawn; onClose dismisses the layer.
+func NewMentionsDialog(deps Deps, onMore, onClose func()) *MentionsDialog {
 	island, content := newMessageIsland(deps, islandParts{
 		Mark:    assets.MentionIcon,
 		Title:   "Mentions",
 		Where:   "everywhere you are",
+		OnMore:  onMore,
 		OnClose: onClose,
 	})
 	island.reset("Looking for what named you...")
@@ -651,6 +715,10 @@ func newMentionGroup(deps Deps, group MentionGroup) fyne.CanvasObject {
 
 	return VBoxNoSpacing(column...)
 }
+
+// SetMore is the island's own, forwarded, as the pins panel's is. Call on the UI
+// thread.
+func (d *MentionsDialog) SetMore(label string, busy bool) { d.island.SetMore(label, busy) }
 
 // Fail replaces the list with a reason it is not there. Call on the UI thread.
 func (d *MentionsDialog) Fail(reason string) { d.island.reset(reason) }

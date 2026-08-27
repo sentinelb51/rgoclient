@@ -136,6 +136,11 @@ type MessageWidget struct {
 	// message, and every path that re-evaluates one rebuilds the widget.
 	mentioned bool
 
+	// deleted is a message that has gone and whose row is still standing. Pushed in
+	// by MessageList, which holds the set for the controller — a row scrolling back
+	// in is built already marked, the same way a picked one is.
+	deleted bool
+
 	editing   bool
 	emptyBody bool // says nothing, so the slot stays hidden outside an edit
 
@@ -860,6 +865,22 @@ func (t *selectTick) repaint() {
 	reportHover(t.onHover, t.hovered)
 }
 
+/* The delete mark */
+
+// SetDeleted marks the row as one whose message has been deleted and which is
+// standing for a moment longer. Unlike the jump and edit washes this is a
+// *state*: it stands until the row goes, so it goes through fill() and the row
+// still lifts under the pointer. Nothing here takes it off — the row is removed
+// with the mark still on it.
+func (w *MessageWidget) SetDeleted(on bool) {
+	if on == w.deleted {
+		return
+	}
+
+	w.deleted = on
+	w.setHighlighted(w.overMessage || w.overChild)
+}
+
 // setHighlighted paints (or clears) the row's hover background.
 func (w *MessageWidget) setHighlighted(on bool) {
 	w.stopFlash() // the pointer arriving is the reader having found the row
@@ -925,7 +946,10 @@ func (w *MessageWidget) stopFlash() {
 // restBackdrop is what a row at rest is seen against: its own wash where it has
 // one, else the message area behind it — a row's rest fill being transparent.
 func (w *MessageWidget) restBackdrop() color.Color {
-	if w.mentioned {
+	switch {
+	case w.deleted:
+		return theme.Colors.MessageDeletedBackground
+	case w.mentioned:
 		return theme.Colors.MessageMentionBackground
 	}
 
@@ -950,6 +974,13 @@ func mixColor(from, to color.Color, at float32) color.Color {
 // addressed — so hovering lifts the colour rather than replacing it.
 func (w *MessageWidget) fill(hovered bool) color.Color {
 	switch {
+	// A row on its way out outranks everything else it could be: the message has
+	// gone, which is the only thing left worth saying about it.
+	case w.deleted && hovered:
+		return theme.Colors.MessageDeletedHoverBackground
+	case w.deleted:
+		return theme.Colors.MessageDeletedBackground
+
 	// A picked row outranks a mention wash: the mention is a fact about the
 	// message and the tick is a state the reader put it in, and only one of the two
 	// is about to be acted on.

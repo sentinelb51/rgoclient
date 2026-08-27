@@ -3,15 +3,19 @@ package app
 // Channel search: the island in ui/search.go, and the two halves of what it
 // asks for.
 //
-// Nothing here is incremental. Revolt's search is a request per query, so the
+// A question is asked whole. Revolt's search is a request per query, so the
 // field reports on submit rather than per keystroke, and searchQuery holds the
 // one in flight: an answer to an older query is dropped, not drawn under a newer.
+// The *answer* is incremental — it caps at a hundred and searchFound accumulates
+// the pages after that.
 //
 // Beyond the query, the order and the limit, the route takes only a window of
 // message IDs — no author, no attachment, no reaction — so the span is sent and
 // everything else is held here and applied on the way to the island. That is
-// what makes a chip free: toggling one redraws a hundred cards the client
-// already has, where moving an end of the span has to ask again.
+// what makes a chip free: toggling one redraws the cards the client already has,
+// where moving an end of the span has to ask again. That same window is what a
+// page walks along, which is why the two cannot both have their way with it and
+// the client takes the tighter (pageFrom).
 
 import (
 	"log"
@@ -23,10 +27,10 @@ import (
 	"RGOClient/internal/util"
 )
 
-// searchLimit is how many results are asked for. Revolt caps a search at 100, so
-// this is the whole answer or the hundred the chosen order puts first — and the
-// only way past that ceiling is a narrower span, the window being the one thing
-// the route can be asked to move.
+// searchLimit is how many results one request asks for. Revolt caps a search at
+// 100, so a full page is the ceiling rather than the end of the answer — the way
+// past it is another request beginning where this one stopped, which is what
+// loadMoreSearch is.
 const searchLimit = 100
 
 /* Opening it */
@@ -40,7 +44,8 @@ func (a *App) showChannelSearch() {
 		return
 	}
 
-	dialog := ui.NewSearchDialog(a.deps(), a.channelName(), a.store.SelfID(), a.onSearchChanged, a.closeOverlay)
+	dialog := ui.NewSearchDialog(a.deps(), a.channelName(), a.store.SelfID(), a.onSearchChanged,
+		a.loadMoreSearch, a.closeOverlay)
 	dialog.OnResize = a.repositionOverlay
 
 	a.showOverlay(dialog.Content)
@@ -48,6 +53,8 @@ func (a *App) showChannelSearch() {
 	a.searchChannelID = channelID
 	a.searchQuery = ui.SearchQuery{}
 	a.searchFound, a.searchAnswered = nil, false
+	a.searchMore, a.searchPaging = false, false
+	a.searchSeq++ // an answer owed to the last opening is not this one's
 
 	a.loadSearchAuthors(channelID)
 	a.window.Canvas().Focus(dialog.Entry)
@@ -102,6 +109,7 @@ func (a *App) closeSearch() {
 	a.searchChannelID = ""
 	a.searchQuery = ui.SearchQuery{}
 	a.searchFound, a.searchAnswered = nil, false
+	a.searchMore, a.searchPaging = false, false
 }
 
 /* Asking */
@@ -138,6 +146,7 @@ func (a *App) onSearchChanged(query ui.SearchQuery) {
 
 	a.searchQuery = query
 	a.searchFound, a.searchAnswered = nil, false
+	a.searchMore, a.searchPaging = false, false
 
 	if query.Text == "" {
 		a.refillSearch(a.search.Prompt)
@@ -163,18 +172,21 @@ func (a *App) searchMessages(query ui.SearchQuery) {
 	channelID, serverID := a.searchChannelID, a.channelServerID(a.searchChannelID)
 	epoch := a.epoch
 
+	a.searchSeq++
+	seq := a.searchSeq
+
 	a.refillSearch(a.search.Searching)
 
 	go func() {
 		messages, err := a.client.SearchMessages(channelID, query.Text, query.Sort, searchLimit,
-			query.After, query.Before)
+			query.After, query.Before, "")
 		if err == nil {
 			a.client.ResolveAuthors(a.unknownAuthors(serverID, messages))
 		}
 
 		a.doOnUI(func() {
 			if a.stale(epoch) || a.search == nil || a.searchChannelID != channelID ||
-				!a.searchQuery.SameRequest(query) {
+				a.searchSeq != seq {
 				return
 			}
 			if err != nil {
@@ -184,16 +196,115 @@ func (a *App) searchMessages(query ui.SearchQuery) {
 			}
 
 			a.searchFound, a.searchAnswered = messages, true
+			a.searchMore = pageWasFull(len(messages), searchLimit) && pageable(query.Sort)
 			a.refillSearch(a.drawSearchResults)
 		}, false)
 	}()
+}
+
+// loadMoreSearch asks for the page after what is held and appends it. The query
+// is the one already recorded rather than one passed in: the button is on the
+// island, and what the island is showing is the answer to that query — a chip
+// toggled since narrowed it here without asking anything.
+//
+// Guarded on a page not already being out, since the button is disabled rather
+// than removed while one is. Call on the UI thread.
+func (a *App) loadMoreSearch() {
+	if a.search == nil || a.searchPaging || !a.searchMore || len(a.searchFound) == 0 {
+		return
+	}
+	query := a.searchQuery
+	channelID, serverID := a.searchChannelID, a.channelServerID(a.searchChannelID)
+	cursor := a.searchFound[len(a.searchFound)-1].ID
+	epoch, seq := a.epoch, a.searchSeq
+
+	a.searchPaging = true
+	a.refillSearch(a.drawSearchResults)
+
+	go func() {
+		messages, err := a.client.SearchMessages(channelID, query.Text, query.Sort, searchLimit,
+			query.After, query.Before, cursor)
+		if err == nil {
+			a.client.ResolveAuthors(a.unknownAuthors(serverID, messages))
+		}
+
+		a.doOnUI(func() {
+			if a.stale(epoch) || a.search == nil || a.searchChannelID != channelID ||
+				a.searchSeq != seq {
+				return
+			}
+			a.searchPaging = false
+
+			if err != nil {
+				// The answer already on screen is still the answer, so this is a notice
+				// rather than the island's own failure line — replacing a hundred cards with
+				// a sentence would cost the reader what they had.
+				log.Printf("search %s (next page): %v", channelID, err)
+				a.notify(ui.ToneWarning, "Couldn't load more results.")
+				a.refillSearch(a.drawSearchResults)
+
+				return
+			}
+
+			added := appendUnseen(&a.searchFound, messages)
+			a.searchMore = added > 0 && pageWasFull(len(messages), searchLimit)
+			a.refillSearch(a.drawSearchResults)
+		}, false)
+	}()
+}
+
+// pageable reports whether an order can be paged through at all. Only the two
+// chronological ones can: a relevance ranking is re-computed over whatever window
+// the route is given, so the page after it is not a thing that exists.
+func pageable(sort domain.MessageSort) bool {
+	return sort == domain.SortNewest || sort == domain.SortOldest
+}
+
+// pageWasFull reports whether a page came back at its ceiling, which is the only
+// thing that says there may be another — the route counts nothing for the caller,
+// so a short page is the end and a full one is a maybe.
+func pageWasFull(got, limit int) bool { return got >= limit }
+
+// appendUnseen adds what a page brought that is not already held and reports how
+// many that was. Each page comes back in the order it is held in and begins past
+// the last of it, so appending keeps the whole answer ordered.
+//
+// The repeat check is not belt and braces: nothing in this repo has verified that
+// /search honours before/after the way the history route does (see
+// internal/client/CLAUDE.md), so a build that ignores them answers with the same
+// page forever. Dropping the repeats is what stops it being drawn twice, and a
+// page that is *entirely* repeats is what tells the caller the paging is not
+// working and to stop offering it.
+func appendUnseen(held *[]*domain.Message, page []*domain.Message) int {
+	seen := make(map[string]bool, len(*held))
+	for _, message := range *held {
+		seen[message.ID] = true
+	}
+
+	var added int
+	for _, message := range page {
+		if seen[message.ID] {
+			continue
+		}
+		seen[message.ID] = true
+
+		*held = append(*held, message)
+		added++
+	}
+
+	return added
 }
 
 /* What comes back */
 
 // drawSearchResults narrows the held answer and hands it over as cards. The
 // island is told how many came back as well as how many survived, so the line
-// above the well can say what the chips took away. Call on the UI thread.
+// above the well can say what the chips took away.
+//
+// It is also the one writer of the way to the next page: every path that can move
+// whether there is one — a fresh query, a page landing, a page failing — ends
+// here, so the button cannot be left saying something the state has stopped
+// agreeing with. Call on the UI thread.
 func (a *App) drawSearchResults() {
 	query := a.searchQuery
 
@@ -207,7 +318,30 @@ func (a *App) drawSearchResults() {
 	}
 
 	a.search.SetResults(results, len(a.searchFound))
+	a.search.SetMore(searchMoreLabel(query.Sort, a.searchMore, a.searchPaging), a.searchPaging)
 }
+
+// searchMoreLabel is what the way to the next page reads, "" where there is
+// none. The word names the direction the page walks rather than saying "more":
+// asking an oldest-first answer for more walks forward in time, which "older"
+// would have the reader believe it does not.
+func searchMoreLabel(sort domain.MessageSort, more, busy bool) string {
+	switch {
+	case !more:
+		return ""
+	case busy:
+		return moreBusyLabel
+	case sort == domain.SortOldest:
+		return "Newer results"
+	}
+
+	return "Older results"
+}
+
+// moreBusyLabel is what every one of the three panels' next-page buttons says
+// while its request is out — the same wait said the same way, whichever surface
+// is waiting.
+const moreBusyLabel = "Loading..."
 
 // matchesSearch reports whether a message survives what is narrowing the answer.
 // Every one of these is a property of the message the route cannot be asked

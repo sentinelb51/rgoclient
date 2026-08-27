@@ -37,8 +37,10 @@ func (stubActions) OnJumpToMessage(_, _ string)                {}
 func (stubActions) OnAttachFile(func(string))                  {}
 
 // OnPickEmoji never opens anything: the picker is a pop-up on a canvas, which a
-// widget test has no business raising.
+// widget test has no business raising. OnPickGIF is the same picker's neighbour,
+// and would additionally put a request out.
 func (stubActions) OnPickEmoji(fyne.CanvasObject, []string, func(EmojiChoice)) {}
+func (stubActions) OnPickGIF(fyne.CanvasObject, func(string))                  {}
 
 // ResolveInvite never answers, which leaves an invite card in the state it
 // mounts in — the state every test that isn't about one wants it to stay in.

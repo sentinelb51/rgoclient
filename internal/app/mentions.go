@@ -245,12 +245,13 @@ func (a *App) syncMentionMarks() {
 // are messages the client holds only the IDs of, so every one of them is a
 // request.
 func (a *App) showMentions() {
-	dialog := ui.NewMentionsDialog(a.deps(), a.closeOverlay)
+	dialog := ui.NewMentionsDialog(a.deps(), a.loadMoreMentions, a.closeOverlay)
 
 	a.showOverlay(dialog.Content)
 	a.inbox = dialog // after showOverlay, which clears whatever was there
 	a.inboxSeq++
 	a.mentioned = nil
+	a.inboxMore, a.inboxPaging = false, false
 
 	a.loadMentions()
 }
@@ -260,19 +261,21 @@ func (a *App) showMentions() {
 func (a *App) closeMentions() {
 	a.inbox = nil
 	a.mentioned = nil
+	a.inboxMore, a.inboxPaging = false, false
 }
 
 // loadMentions resolves the newest mentions and fills the panel. inboxSeq drops
 // an answer that a later opening has already overtaken, the request being long
 // enough that a panel closed and reopened would otherwise fill twice.
 func (a *App) loadMentions() {
-	targets, channels := a.mentionTargets()
+	targets, channels, more := a.mentionTargets("", inboxLimit)
 	if len(targets) == 0 {
 		a.inbox.SetGroups(nil)
 		a.repositionOverlay()
 
 		return
 	}
+	a.inboxMore = more
 
 	seq := a.inboxSeq
 	epoch := a.epoch
@@ -331,10 +334,17 @@ func (a *App) forgetGone(gone []client.MessageRef) {
 	}
 }
 
-// mentionTargets is the newest mentions across every channel, and the server each
-// channel belongs to. Bounded by inboxLimit: the set is unbounded — it is
-// whatever has gone unread — and each one costs a request. Call on the UI thread.
-func (a *App) mentionTargets() ([]client.MessageRef, map[string]string) {
+// mentionTargets is a page of the newest mentions across every channel, the
+// server each channel belongs to, and whether the set holds more past the page.
+// Bounded because the set is unbounded — it is whatever has gone unread — and
+// each one costs a request.
+//
+// cursor is the oldest mention already listed, and the page begins strictly
+// older than it. Paging by **ID** rather than by an offset into the sorted set:
+// the set moves under the panel — forgetGone drops what the server denied, an
+// arriving mention is filed at the other end — and an index into a list that has
+// shifted is a page with a hole or a repeat in it. Call on the UI thread.
+func (a *App) mentionTargets(cursor string, limit int) ([]client.MessageRef, map[string]string, bool) {
 	var (
 		refs     []client.MessageRef
 		channels = make(map[string]string, len(a.mentions))
@@ -343,6 +353,10 @@ func (a *App) mentionTargets() ([]client.MessageRef, map[string]string) {
 	for channelID, messageIDs := range a.mentions {
 		channels[channelID] = a.channelServerID(channelID)
 		for _, messageID := range messageIDs {
+			if cursor != "" && messageID >= cursor {
+				continue
+			}
+
 			refs = append(refs, client.MessageRef{ChannelID: channelID, MessageID: messageID})
 		}
 	}
@@ -352,11 +366,13 @@ func (a *App) mentionTargets() ([]client.MessageRef, map[string]string) {
 	slices.SortFunc(refs, func(a, b client.MessageRef) int {
 		return strings.Compare(b.MessageID, a.MessageID)
 	})
-	if len(refs) > inboxLimit {
-		refs = refs[:inboxLimit]
+
+	more := len(refs) > limit
+	if more {
+		refs = refs[:limit]
 	}
 
-	return refs, channels
+	return refs, channels, more
 }
 
 // showMentioned fills the open panel from what was resolved, newest first and
@@ -393,9 +409,92 @@ func (a *App) showMentioned() {
 	}
 	a.inbox.SetGroups(groups)
 
+	// After SetGroups, which resets the panel outright when nothing resolved — and
+	// would take the way to the next page with it.
+	a.inbox.SetMore(inboxMoreLabel(a.inboxMore, a.inboxPaging), a.inboxPaging)
+
 	// The card is centred and sized from its own minimum, which a row gained or lost
 	// changes; neither re-runs on its own.
 	a.repositionOverlay()
+}
+
+// inboxMoreLabel is what the way to the next page reads, "" where there is none.
+// The inbox is newest-first and only walks backwards, as the pins panel does.
+func inboxMoreLabel(more, busy bool) string {
+	switch {
+	case !more:
+		return ""
+	case busy:
+		return moreBusyLabel
+	}
+
+	return "Older mentions"
+}
+
+// loadMoreMentions resolves the next page of the set and appends it. Unlike the
+// other two panels this pages a list the client already holds — the mentions are
+// IDs here and the request is what turns them into messages — so the page is
+// taken off the set rather than asked for from a route, and only the new refs
+// are resolved: the ones already drawn cost nothing to keep.
+//
+// Call on the UI thread.
+func (a *App) loadMoreMentions() {
+	if a.inbox == nil || a.inboxPaging || !a.inboxMore || len(a.mentioned) == 0 {
+		return
+	}
+
+	// mentioned is sorted newest first by showMentioned, so the last of it is the
+	// oldest already listed and the page begins under it.
+	cursor := a.mentioned[len(a.mentioned)-1].ID
+
+	targets, channels, more := a.mentionTargets(cursor, inboxLimit)
+	if len(targets) == 0 {
+		a.inboxMore = false
+		a.showMentioned()
+
+		return
+	}
+
+	seq := a.inboxSeq
+	epoch := a.epoch
+
+	a.inboxPaging = true
+	a.showMentioned()
+
+	go func() {
+		messages, gone := a.client.ResolveMessages(targets)
+
+		a.client.ResolveAuthors(a.unresolvedAuthors(messages, func(channelID string) string {
+			return channels[channelID]
+		}))
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+			a.forgetGone(gone)
+
+			if a.inbox == nil || a.inboxSeq != seq {
+				return
+			}
+			a.inboxPaging = false
+
+			// Nothing came back and nothing was denied either, so the request failed
+			// rather than the page being empty. The cards already up are still the answer,
+			// hence a notice instead of the panel's own failure line.
+			if len(messages) == 0 && len(gone) == 0 {
+				log.Print("mentions: nothing resolved for the next page")
+				a.notify(ui.ToneWarning, "Couldn't load more mentions.")
+				a.showMentioned()
+
+				return
+			}
+
+			a.mentioned = append(a.mentioned, messages...)
+			a.inboxMore = more
+			a.showMentioned()
+		}, false)
+	}()
 }
 
 // mentionCard is one message as the inbox draws it. The mention edge is dropped:

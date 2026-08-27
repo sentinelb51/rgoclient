@@ -412,7 +412,7 @@ func (b *mdBuilder) text(s string, em emphasis, base widget.RichTextStyle, sp *s
 		return
 	}
 	if em.strike || em.underline || sp != nil {
-		b.decorated(s, em, base, sp)
+		b.decorated(s, em, base, sp, nil)
 		return
 	}
 
@@ -460,8 +460,9 @@ const codePad = "\u00a0"
 
 // decorated splits a run into per-word segments separated by ordinary
 // break-point spaces, each bridging its trailing space so the decoration joins
-// the next word's.
-func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
+// the next word's. onTap is what a word covered by a spoiler does once the span
+// is revealed — a link or a mention under the cover — and nil for plain text.
+func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, sp *spoilerState, onTap func(anchor fyne.CanvasObject)) {
 	ts := em.over(base)
 
 	toks := splitTokens(s)
@@ -488,6 +489,7 @@ func (b *mdBuilder) decorated(s string, em emphasis, base widget.RichTextStyle, 
 			strike:    em.strike,
 			underline: em.underline,
 			state:     sp,
+			onTap:     onTap,
 			onMenu:    b.onMenu,
 			bridge:    i+1 < len(toks) && toks[i+1].space,
 			solo:      words == 1,
@@ -607,26 +609,42 @@ func (b *mdBuilder) inlines(nodes []markdown.Inline, em emphasis, base widget.Ri
 		case *markdown.Spoiler:
 			b.inlines(n.Children, em, base, &spoilerState{})
 		case *markdown.Code:
-			b.code(n.Text, em, base)
+			if sp != nil {
+				// The chip cannot wear the cover, so the span is covered text — in the
+				// body's own face, not monospace: the mono face is taller at the same
+				// size, and RichText baseline-aligns a row of differing heights by
+				// dropping it half a line (the emojiSide trap).
+				b.decorated(n.Text, em, base, sp, nil)
+			} else {
+				b.code(n.Text, em, base)
+			}
 		case *markdown.Link:
-			b.link(n, base)
+			if sp != nil {
+				b.coveredLink(n, em, base, sp)
+			} else {
+				b.link(n, base)
+			}
 		case *markdown.UserMention:
 			userID := n.UserID
-			b.mention("@"+mentionName(b.deps.Store.UserName(userID)), em, base, func(anchor fyne.CanvasObject) {
+			b.reference(sp, "@"+mentionName(b.deps.Store.UserName(userID)), em, base, func(anchor fyne.CanvasObject) {
 				b.deps.Actions.OnUserTapped(userID, anchor)
 			})
 		case *markdown.ChannelMention:
 			channelID := n.ChannelID
-			b.mention("#"+mentionName(b.deps.Store.ChannelName(channelID)), em, base, func(fyne.CanvasObject) {
+			b.reference(sp, "#"+mentionName(b.deps.Store.ChannelName(channelID)), em, base, func(fyne.CanvasObject) {
 				b.deps.Actions.OnChannelTapped(channelID)
 			})
 		case *markdown.Emoji:
-			b.emoji(n.EmojiID, base)
+			if sp != nil {
+				b.coveredEmoji(n.EmojiID, em, base, sp)
+			} else {
+				b.emoji(n.EmojiID, base)
+			}
 		case *markdown.Timestamp:
 			// Drawn as a mention and for the same reason: a fact the client resolved
 			// rather than something the author typed, so it stands apart from the
 			// sentence. It opens nothing — an instant leads nowhere — hence the nil tap.
-			b.mention(util.MessageTimestamp(n.Time, n.Style), em, base, nil)
+			b.reference(sp, util.MessageTimestamp(n.Time, n.Style), em, base, nil)
 		}
 	}
 }
@@ -652,6 +670,53 @@ func (b *mdBuilder) link(n *markdown.Link, base widget.RichTextStyle) {
 		URL:      parsed,
 		OnTapped: func() { b.deps.Actions.OnLinkTapped(raw, label) },
 	})
+}
+
+// coveredLink is a link inside a spoiler. A HyperlinkSegment has no cover to
+// wear, so the label is decorated text in the hyperlink colour, opening the
+// destination only once the span is revealed. A destination the client will not
+// open renders its children covered, as link renders them plain.
+func (b *mdBuilder) coveredLink(n *markdown.Link, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
+	if _, ok := util.SafeLink(n.URL); !ok {
+		b.inlines(n.Children, em, base, sp)
+		return
+	}
+
+	raw, label := n.URL, markdown.PlainText(n.Children)
+	style := base
+	style.ColorName = fynetheme.ColorNameHyperlink
+	next := em
+	next.underline = true
+	b.decorated(label, next, style, sp, func(fyne.CanvasObject) { b.deps.Actions.OnLinkTapped(raw, label) })
+}
+
+// reference renders an "@Name", "#channel" or resolved timestamp: a mention
+// segment in the open, and inside a spoiler the same accent word as covered
+// decorated text — a mention segment has no cover to wear, and a name standing
+// uncovered says what the span hides. The tap fires once the span is revealed.
+func (b *mdBuilder) reference(sp *spoilerState, text string, em emphasis, base widget.RichTextStyle, onTap func(anchor fyne.CanvasObject)) {
+	if sp == nil {
+		b.mention(text, em, base, onTap)
+		return
+	}
+
+	style := base
+	style.ColorName = theme.ColorNameMention
+	next := em
+	next.bold = true
+	b.decorated(text, next, style, sp, onTap)
+}
+
+// coveredEmoji is a custom emoji inside a spoiler, drawn as its shortcode: a
+// picture has no cover to wear. One from a server the account is not in has no
+// name to reveal, so the generic shortcode stands in.
+func (b *mdBuilder) coveredEmoji(emojiID string, em emphasis, base widget.RichTextStyle, sp *spoilerState) {
+	name := b.deps.Store.EmojiName(emojiID)
+	if name == "" {
+		name = "emoji"
+	}
+
+	b.decorated(":"+name+":", em, base, sp, nil)
 }
 
 // mention renders an already-marked "@Name" or "#channel" as bold accent text
@@ -933,6 +998,16 @@ type spoilerState struct {
 
 func (s *spoilerState) add(c *canvas.Rectangle) {
 	s.covers = append(s.covers, c)
+
+	// solo is decided per decorated() call and a span can span several — text
+	// beside a covered link — so the rounding is undone where the span converges:
+	// a second cover means nothing here was ever alone.
+	if len(s.covers) > 1 {
+		for _, cover := range s.covers {
+			cover.CornerRadius = 0
+		}
+	}
+
 	if s.revealed {
 		c.Hide()
 	}
@@ -960,9 +1035,10 @@ type decoratedSegment struct {
 	strike    bool
 	underline bool
 	state     *spoilerState
-	onMenu    func(*fyne.PointEvent) // the owning message's menu — see mentionText
-	bridge    bool                   // extend the decoration over the following space
-	solo      bool                   // the only word of its span (round the spoiler cover)
+	onTap     func(anchor fyne.CanvasObject) // what a revealed word does — see decoratedText.Tapped
+	onMenu    func(*fyne.PointEvent)         // the owning message's menu — see mentionText
+	bridge    bool                           // extend the decoration over the following space
+	solo      bool                           // the only word of its span (round the spoiler cover)
 }
 
 var _ widget.RichTextSegment = (*decoratedSegment)(nil)
@@ -990,6 +1066,7 @@ type decoratedText struct {
 	sizeName   fyne.ThemeSizeName
 	bridge     bool
 	state      *spoilerState
+	onTap      func(anchor fyne.CanvasObject)
 	onMenu     func(*fyne.PointEvent)
 	textObj    *canvas.Text
 	strikeLine *canvas.Line
@@ -1008,6 +1085,7 @@ func newDecoratedText(seg *decoratedSegment) *decoratedText {
 	w := &decoratedText{
 		textObj: canvas.NewText(seg.text, color.Transparent),
 		state:   seg.state,
+		onTap:   seg.onTap,
 		onMenu:  seg.onMenu,
 	}
 	if seg.strike {
@@ -1063,8 +1141,15 @@ func (w *decoratedText) MinSize() fyne.Size {
 	return w.textObj.MinSize()
 }
 
+// Tapped reveals a hidden span first; only once revealed does a word act as
+// what it covers — a link or a mention — and a plain one hides the span again.
 func (w *decoratedText) Tapped(*fyne.PointEvent) {
-	if w.state != nil {
+	switch {
+	case w.state != nil && !w.state.revealed:
+		w.state.toggle()
+	case w.onTap != nil:
+		w.onTap(w)
+	case w.state != nil:
 		w.state.toggle()
 	}
 }

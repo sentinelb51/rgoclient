@@ -115,7 +115,17 @@ func (a *App) bindKeys() {
 // the member list, whose shape is decided when it is built rather than per row —
 // so the Members group would do nothing visible until somebody joined.
 func (a *App) updateSettings(mutate func(*config.Settings)) {
+	board := config.Current().Notifications.TypingProfile
+
 	config.Update(mutate)
+
+	// The board is the one sound setting that is not read where it is played: a
+	// keystroke is synthesised once and installed, so changing it means building
+	// all four again. Compared rather than done every time — this runs on every
+	// change to anything, and two dozen renders is not a thing to do on a slider.
+	if picked := config.Current().Notifications.TypingProfile; picked != board {
+		a.applyTypingProfile(picked)
+	}
 
 	settings := config.Current().Cache
 	a.images.SetLimits(imageLimits(settings))
@@ -143,7 +153,7 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 	a.applyVoiceSettings()
 	a.syncChannelList()
 
-	applyPacing()
+	a.applyPacing()
 	applyAffinity()
 }
 
@@ -152,13 +162,29 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 // them — and all four are read where they are used rather than at startup, so
 // none needs a restart. The caret is the one that does not apply at once: an
 // entry already focused keeps the caret it has until its next refresh.
-func applyPacing() {
+func (a *App) applyPacing() {
 	settings := config.Current()
 
-	fyne.SetFrameRate(settings.Performance.FrameRate)
+	a.applyFrameRate()
 	fyne.SetVSync(settings.Performance.VSync)
 	fyne.SetPartialRepaint(settings.Performance.PartialRepaint)
 	fyne.SetCursorBlink(settings.Behaviour.CursorBlink)
+}
+
+// applyFrameRate hands the toolkit the ceiling for whichever side of the focus
+// the window is on. Also called from the foreground hooks in startAlerts, off
+// the UI thread — safe because a.focused, config.Current and the setter are all
+// atomics — and the driver resets its frame deadline whenever the rate moves,
+// so regaining focus draws at the full rate immediately.
+func (a *App) applyFrameRate() {
+	performance := config.Current().Performance
+
+	rate := performance.FrameRate
+	if !a.focused.Load() && performance.BackgroundFrameRate < rate {
+		rate = performance.BackgroundFrameRate
+	}
+
+	fyne.SetFrameRate(rate)
 }
 
 // applyAffinity restricts the process to the cores the setting names.
@@ -357,6 +383,7 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		OutputDevices:     a.outputDevices,
 		StartInputMonitor: a.startInputMonitor,
 		StopInputMonitor:  a.forgetInputMonitor,
+		SetInputEcho:      a.setInputEcho,
 		GateRatio:         audio.GateRatio,
 
 		Sessions:         settingsSessions,
@@ -386,10 +413,11 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		RevokeLogin:    a.revokeLogin,
 		RevokeOthers:   a.revokeOthers,
 
-		Sounds:      settingsSounds,
-		ChooseSound: a.chooseSound,
-		ResetSound:  a.resetSound,
-		PlaySound:   a.previewSound,
+		Sounds:         settingsSounds,
+		ChooseSound:    a.chooseSound,
+		ResetSound:     a.resetSound,
+		PlaySound:      a.previewSound,
+		TypingProfiles: settingsTypingProfiles,
 
 		CacheDir:       func() string { return a.assetDir },
 		ChooseCacheDir: a.chooseCacheDir,

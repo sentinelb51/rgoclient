@@ -20,9 +20,9 @@ import (
 )
 
 const (
-	// pinsLimit is how many pins are asked for. Revolt caps a search at 100 and
-	// there is no paging through them, so this is the whole list or the newest
-	// hundred of it.
+	// pinsLimit is how many pins one request asks for. Revolt caps a search at 100,
+	// so a full page is the ceiling rather than the end of the list — the rest is
+	// asked for through loadMorePins.
 	pinsLimit = 100
 
 	// previewRunes is how much of a message an island card summarises: enough to
@@ -42,14 +42,15 @@ func (a *App) showPinnedMessages() {
 		return
 	}
 
-	dialog := ui.NewPinsDialog(a.deps(), a.channelName(), a.closeOverlay)
+	dialog := ui.NewPinsDialog(a.deps(), a.channelName(), a.loadMorePins, a.closeOverlay)
 
 	a.showOverlay(dialog.Content)
 	a.pins = dialog // after showOverlay, which clears whatever was there
 	a.pinsChannelID = channelID
 	a.pinned = nil
 
-	a.loadPinned(channelID)
+	a.loadPinned(channelID) // which resets the paging state
+
 }
 
 // searchableChannel is the open channel, or false when there is none or the
@@ -77,6 +78,7 @@ func (a *App) closePins() {
 	a.pins = nil
 	a.pinsChannelID = ""
 	a.pinned = nil
+	a.pinsMore, a.pinsPaging = false, false
 }
 
 // loadPinned fetches the list and fills the panel. The search carries its own
@@ -84,18 +86,26 @@ func (a *App) closePins() {
 // the same worker rather than through ensureAuthor's queue: a webhook or somebody
 // departed would otherwise be a raw ID the panel mounts and fills in a moment
 // later.
+//
+// It bumps pinsSeq, which is what abandons a page already in flight: this is the
+// list from the start, and a page of the one it replaces would append to it. Call
+// on the UI thread.
 func (a *App) loadPinned(channelID string) {
 	serverID := a.channelServerID(channelID)
 	epoch := a.epoch
 
+	a.pinsSeq++
+	a.pinsMore, a.pinsPaging = false, false
+	seq := a.pinsSeq
+
 	go func() {
-		messages, err := a.client.PinnedMessages(channelID, pinsLimit)
+		messages, err := a.client.PinnedMessages(channelID, pinsLimit, "")
 		if err == nil {
 			a.client.ResolveAuthors(a.unknownAuthors(serverID, messages))
 		}
 
 		a.doOnUI(func() {
-			if a.stale(epoch) || a.pins == nil || a.pinsChannelID != channelID {
+			if a.stale(epoch) || a.pins == nil || a.pinsChannelID != channelID || a.pinsSeq != seq {
 				return
 			}
 			if err != nil {
@@ -105,6 +115,52 @@ func (a *App) loadPinned(channelID string) {
 			}
 
 			a.pinned = messages
+			a.pinsMore = pageWasFull(len(messages), pinsLimit)
+			a.showPinned()
+		}, false)
+	}()
+}
+
+// loadMorePins asks for the pins older than the last one held and appends them.
+// The panel is newest-first and only ever walks backwards, a pin being a search
+// with no query — so the cursor is the oldest card on screen. Call on the UI
+// thread.
+func (a *App) loadMorePins() {
+	if a.pins == nil || a.pinsPaging || !a.pinsMore || len(a.pinned) == 0 {
+		return
+	}
+	channelID := a.pinsChannelID
+	serverID := a.channelServerID(channelID)
+	cursor := a.pinned[len(a.pinned)-1].ID
+	epoch, seq := a.epoch, a.pinsSeq
+
+	a.pinsPaging = true
+	a.showPinned()
+
+	go func() {
+		messages, err := a.client.PinnedMessages(channelID, pinsLimit, cursor)
+		if err == nil {
+			a.client.ResolveAuthors(a.unknownAuthors(serverID, messages))
+		}
+
+		a.doOnUI(func() {
+			if a.stale(epoch) || a.pins == nil || a.pinsChannelID != channelID || a.pinsSeq != seq {
+				return
+			}
+			a.pinsPaging = false
+
+			if err != nil {
+				// What is on screen is still the list; a failure to extend it is a notice
+				// rather than the panel's own failure line, which would take the list away.
+				log.Printf("pinned messages %s (next page): %v", channelID, err)
+				a.notify(ui.ToneWarning, "Couldn't load more pins.")
+				a.showPinned()
+
+				return
+			}
+
+			added := appendUnseen(&a.pinned, messages)
+			a.pinsMore = added > 0 && pageWasFull(len(messages), pinsLimit)
 			a.showPinned()
 		}, false)
 	}()
@@ -162,10 +218,24 @@ func (a *App) showPinned() {
 		entries = append(entries, a.pinCard(message, manage))
 	}
 	a.pins.SetEntries(entries)
+	a.pins.SetMore(pinsMoreLabel(a.pinsMore, a.pinsPaging), a.pinsPaging)
 
 	// The card is centred and sized from its own minimum, which a row gained or lost
 	// changes; neither re-runs on its own.
 	a.repositionOverlay()
+}
+
+// pinsMoreLabel is what the way to the next page reads, "" where there is none.
+// The panel only walks backwards, so the word can say so.
+func pinsMoreLabel(more, busy bool) string {
+	switch {
+	case !more:
+		return ""
+	case busy:
+		return moreBusyLabel
+	}
+
+	return "Older pins"
 }
 
 // pinCard builds one card: the shared summary, plus the way to take the pin off
@@ -390,6 +460,11 @@ func (a *App) refreshPanelMessage(channelID, messageID string) {
 // The cost is one redundant search per settling window, and the alternative is a
 // marker for "our own action" that has to be right every time — where being
 // wrong leaves the panel stale, which is the thing this exists to fix.
+//
+// It re-asks from the *first* page, dropping whatever was paged in: a pin has
+// moved, so which pin is the hundredth has moved with it, and a page fetched past
+// the old boundary belongs to a list that no longer exists. loadPinned bumping
+// pinsSeq is what makes one still in flight land on nothing.
 // Call on the UI thread.
 func (a *App) reloadPins() {
 	if a.pins == nil || a.pinsChannelID == "" {

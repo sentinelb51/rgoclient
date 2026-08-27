@@ -161,6 +161,9 @@ func newTestSettingsPage() *SettingsPage {
 		ChooseSound: func(string, func()) {},
 		ResetSound:  func(string) {},
 		PlaySound:   func(string) {},
+		TypingProfiles: func() []TypingProfile {
+			return []TypingProfile{{Value: "clicky", Label: "Clicky"}}
+		},
 
 		CacheDir:       func() string { return "" },
 		ChooseCacheDir: func(func(string)) {},

@@ -141,6 +141,7 @@ func buildSettingsIndex(hooks SettingsHooks) []settingsHit {
 	hooks.OutputDevices = nil
 	hooks.StartInputMonitor = nil
 	hooks.StopInputMonitor = nil
+	hooks.SetInputEcho = nil
 
 	basic := indexPass(hooks, false)
 

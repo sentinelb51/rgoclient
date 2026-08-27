@@ -112,6 +112,13 @@ type Store interface {
 	Permissions(channelID string) Permission
 	ServerPermissions(serverID string) Permission
 
+	// ServerChannelPermissions is Permissions for every channel of one server at
+	// once, keyed by channel ID, for a surface drawing all of them. A channel the
+	// account cannot see is absent rather than zero. Asking per channel re-ranks
+	// the member's roles — an allocation and a sort — once per channel for a
+	// ranking they all share.
+	ServerChannelPermissions(serverID string) map[string]Permission
+
 	// MemberServerPermissions is the same question about somebody else, which is
 	// what a moderation action asks: Revolt refuses a timeout against anybody
 	// holding the permission to hand one out.

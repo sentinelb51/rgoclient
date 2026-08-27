@@ -2,6 +2,8 @@ package cache
 
 import (
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 
 	"RGOClient/internal/domain"
@@ -169,5 +171,40 @@ func TestEvictionUnderManyChannels(t *testing.T) {
 	}
 	if kept != 3 {
 		t.Fatalf("kept %d channels, want 3", kept)
+	}
+}
+
+// TestUpdateKeepsEveryConcurrentChange is the one thing Update exists for. A
+// gateway echo and a background worker write the same message at the same
+// moment; find-then-replace lets both read it, both apply their own change to
+// their own copy, and the second store discard the first — silently, since a
+// reaction that answered and then was not there looks like nothing at all.
+//
+// Every writer adds a reaction of its own, so a lost update is a missing one.
+func TestUpdateKeepsEveryConcurrentChange(t *testing.T) {
+	const writers = 64
+
+	c := NewMessageCache(100, 10)
+	c.Set("ch", page("m1"))
+
+	var wg sync.WaitGroup
+	for i := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+
+			emoji := fmt.Sprintf("e%02d", i)
+			c.Update("ch", "m1", func(message *domain.Message) bool {
+				message.Reactions = append(slices.Clone(message.Reactions),
+					domain.Reaction{Emoji: emoji})
+
+				return true
+			})
+		}()
+	}
+	wg.Wait()
+
+	if got := len(c.Find("ch", "m1").Reactions); got != writers {
+		t.Fatalf("kept %d of %d concurrent changes", got, writers)
 	}
 }

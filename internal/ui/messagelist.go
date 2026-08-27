@@ -173,6 +173,12 @@ type MessageList struct {
 	selected  map[string]bool
 	anchor    string
 
+	// deleted is the messages that have gone and whose rows are still standing,
+	// which the controller holds the batch for. Keyed by message ID like the
+	// selection, and emptied by Remove taking those rows out — see
+	// App.holdRemoval.
+	deleted map[string]bool
+
 	// width is the column width the measured heights are good for. A different one
 	// re-wraps every body, so it sends every row back to an estimate.
 	width float32
@@ -262,6 +268,30 @@ func (l *MessageList) Mounted(messageID string) *MessageWidget {
 func (l *MessageList) EachMounted(fn func(*MessageWidget)) {
 	for _, w := range l.mounted {
 		fn(w)
+	}
+}
+
+/* Deleted rows still standing */
+
+// SetDeleted marks a message as gone while its row stands, or takes the mark off.
+// The row need not be mounted: the set is what a row is built from on the way
+// back in, which is what keeps the mark on a row the reader has scrolled past.
+func (l *MessageList) SetDeleted(messageID string, on bool) {
+	if on == l.deleted[messageID] {
+		return
+	}
+
+	if on {
+		if l.deleted == nil {
+			l.deleted = make(map[string]bool)
+		}
+		l.deleted[messageID] = true
+	} else {
+		delete(l.deleted, messageID)
+	}
+
+	if w, ok := l.mounted[messageID]; ok {
+		w.SetDeleted(on)
 	}
 }
 
@@ -514,6 +544,12 @@ func (l *MessageList) TrimBottom(n int) {
 // went regains its header — and reports how many went. Rows removed above the
 // viewport move the offset up by their height, so what is on screen stays put.
 func (l *MessageList) Remove(doomed map[string]bool) int {
+	// Whatever this call finds in the window, these messages have gone: a mark left
+	// behind would wash a row that can only be a different message.
+	for id := range doomed {
+		delete(l.deleted, id)
+	}
+
 	kept := l.rows[:0]
 	var seams []int
 	var shift float32
@@ -888,6 +924,9 @@ func (l *MessageList) build(row *windowRow) *MessageWidget {
 	w := NewMessageWidget(l.deps, row.message, row.dayLabel, row.grouped, row.followed)
 	if l.selecting {
 		w.SetSelecting(true, l.selected[row.message.ID])
+	}
+	if l.deleted[row.message.ID] {
+		w.SetDeleted(true)
 	}
 
 	return w

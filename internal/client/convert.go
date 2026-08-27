@@ -69,11 +69,12 @@ func toFile(file *revoltgo.File) *domain.File {
 	}
 
 	out := &domain.File{
-		ID:   file.ID,
-		Name: file.Filename,
-		URL:  file.URL(""),
-		Kind: domain.FileKindOf(file.Filename),
-		Size: file.Size,
+		ID:          file.ID,
+		Name:        file.Filename,
+		URL:         file.URL(""),
+		Kind:        domain.FileKindOf(file.Filename),
+		Size:        file.Size,
+		ContentType: file.ContentType,
 	}
 
 	if file.Metadata == nil {

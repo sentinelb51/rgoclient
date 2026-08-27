@@ -662,6 +662,23 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				settings.MessageOverscan, 0, maxMessageOverscan, "",
 				func(s *config.Settings, v int) { s.Behaviour.MessageOverscan = v })),
 		),
+		p.group("Deleted messages", "A deleted message is marked in red and left on screen for a moment, so the conversation does not jump out from under you.",
+			p.numberRow("Keep deleted messages on screen",
+				"How long the marked message stays before it goes. Zero takes it away at once.",
+				settings.DeletedHoldMS, 0, maxDeletedHold, "ms",
+				func(s *config.Settings, v int) { s.Behaviour.DeletedHoldMS = v }),
+			p.adv(p.numberRow("Added per message waiting",
+				"How much longer they stay for each one already marked. More at once means one redraw rather than one each.",
+				settings.DeletedHoldStepMS, 0, maxDeletedStep, "ms",
+				func(s *config.Settings, v int) { s.Behaviour.DeletedHoldStepMS = v })),
+			p.adv(p.numberRow("Longest stay",
+				"Nothing stays longer than this, however many are marked behind it.",
+				settings.DeletedHoldCapMS, 0, maxDeletedHold, "ms",
+				func(s *config.Settings, v int) {
+					s.Behaviour.DeletedHoldCapMS = max(v, s.Behaviour.DeletedHoldMS)
+				})),
+			p.note("The message itself is deleted immediately, for everyone."),
+		),
 		p.group("Timing", "",
 			p.adv(p.numberRow("Author lookup delay",
 				"How long to wait for more unknown authors before looking them up together.",
@@ -782,11 +799,47 @@ func (p *SettingsPage) notificationsSection() []settingsGroup {
 				"Set apart from the volume above; keystrokes play far more often.",
 				settings.TypingVolume, 0, 100, "%",
 				func(s *config.Settings, v int) { s.Notifications.TypingVolume = v }),
+			p.typingProfileRow(settings.TypingProfile),
 		),
 		p.soundFileGroup("Sounds",
 			"Use a WAV or MP3 file of your own, or keep the built-in.", false),
 		p.soundFileGroup("Typing sounds", "", true),
 	)
+}
+
+// typingProfileRow picks the board the built-in keystrokes are synthesised from.
+// A row of its own rather than four more entries in the file group below: those
+// point a key at a file, and this changes what all four are made of.
+func (p *SettingsPage) typingProfileRow(current string) fyne.CanvasObject {
+	profiles := p.hooks.TypingProfiles()
+
+	options := make([]settingsOption, len(profiles))
+	for i, profile := range profiles {
+		options[i] = settingsOption{profile.Label, profile.Value}
+	}
+
+	return p.optionRow("Keyboard",
+		"The switch every keystroke is built from. A sound pointed at a file of your own is not affected.",
+		typingProfileValue(current, profiles), options,
+		func(s *config.Settings, value string) { s.Notifications.TypingProfile = value })
+}
+
+// typingProfileValue resolves what the settings hold against what is on offer.
+// The stored name is a string in a file anybody may edit, and the first board is
+// the default — so an empty or unknown one shows as that rather than as a blank
+// field naming nothing.
+func typingProfileValue(current string, profiles []TypingProfile) string {
+	for _, profile := range profiles {
+		if profile.Value == current {
+			return current
+		}
+	}
+
+	if len(profiles) == 0 {
+		return current
+	}
+
+	return profiles[0].Value
 }
 
 // soundFileGroup lists the sounds of one kind and what can be done about each.
@@ -1004,6 +1057,10 @@ func (p *SettingsPage) performanceSection() []settingsGroup {
 				"The most frames per second to draw. Higher is smoother while something moves.",
 				settings.FrameRate, minFrameRate, maxFrameRate, "fps",
 				func(s *config.Settings, v int) { s.Performance.FrameRate = v }),
+			p.numberRow("Background FPS",
+				"The ceiling while another window has focus. Low is safe: input and the return to focus are never slowed, and at 1 animations barely draw at all.",
+				settings.BackgroundFrameRate, minBackgroundFrameRate, maxFrameRate, "fps",
+				func(s *config.Settings, v int) { s.Performance.BackgroundFrameRate = v }),
 			p.toggleRow("V-Sync",
 				"Draws each frame in step with the monitor. Off, frames can tear.",
 				settings.VSync, func(s *config.Settings, on bool) { s.Performance.VSync = on }),
@@ -1483,15 +1540,24 @@ const (
 	maxDelayMS     = 2000
 	maxScrollSpeed = 12
 
+	// A deleted row stands for seconds where the other delays are gathering windows
+	// of a fraction of one, so maxDelayMS is far too low a ceiling for it. The step
+	// is a fraction of that stay rather than another one, hence the lower ceiling.
+	maxDeletedHold = 30000
+	maxDeletedStep = 5000
+
 	maxRefreshDelay    = 5000
 	maxMemberOverscan  = 50
 	maxMessageOverscan = 50
 
 	// The frame rate is floored well above zero: the slider reaches every value
 	// between these two, and the ones near the bottom are indistinguishable from a
-	// client that has stopped responding.
-	minFrameRate = 15
-	maxFrameRate = 600
+	// client that has stopped responding. The background rate has no such floor —
+	// it paces only a window nothing is watching, input is noticed whatever the
+	// rate, and regaining focus restores the full rate at once.
+	minFrameRate           = 15
+	maxFrameRate           = 600
+	minBackgroundFrameRate = 1
 
 	// maxTypingNames is a limit on the sentence, not on the feature: past a few
 	// names the line is wider than it is worth and "and 4 others" says the same

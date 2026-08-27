@@ -122,11 +122,12 @@ func (a *App) buildMessageArea() fyne.CanvasObject {
 		dockBg.Refresh()
 	}
 
-	// The two buttons ride the entry's last line rather than the middle of it — see
+	// The buttons ride the entry's last line rather than the middle of it — see
 	// ui.NewComposerButtonSlot, which is what decides where in the row they land.
 	a.composerEntry = ui.NewFillRow(0,
 		ui.WithCaret(a.input),
 		ui.NewComposerButtonSlot(a.input.EmojiButton),
+		ui.NewComposerButtonSlot(a.input.GIFButton),
 		ui.NewComposerButtonSlot(a.input.AttachButton),
 	)
 
@@ -254,11 +255,11 @@ const (
 	composerNoSending   = "You can't send messages in this channel"
 )
 
-// syncComposer matches the composer to what the account may do in the open
-// channel. Called from every path that changes which channel that is, and from
-// the gateway event that can change the answer without the channel moving — so
-// it reads the open channel rather than being told, and there is one answer
-// however it was reached.
+// syncComposer matches the composer to the open channel: which one it is, and
+// what the account may do there. Called from every path that changes which
+// channel that is, and from the gateway event that can change the answer without
+// the channel moving — so it reads the open channel rather than being told, and
+// there is one answer however it was reached.
 func (a *App) syncComposer() {
 	if a.input == nil {
 		return
@@ -267,6 +268,7 @@ func (a *App) syncComposer() {
 	channel, known := a.store.Channel(a.currentChannelID)
 	permissions := a.store.Permissions(a.currentChannelID)
 	a.input.SetPermissions(permissions)
+	a.input.SetChannel(a.currentChannelID)
 
 	reason := ""
 	switch {
@@ -382,11 +384,7 @@ func (a *App) confirmDeleteSelected() {
 // trusted from when it was built — the route refuses the *whole* batch over one
 // message past it, and a selection is something a reader can sit on.
 func (a *App) deleteSelected(channelID string, ids []string) {
-	fresh := slices.DeleteFunc(slices.Clone(ids), func(id string) bool {
-		when, err := util.Timestamp(id)
-
-		return err != nil || time.Since(when) >= domain.MaxBulkDeleteAge
-	})
+	fresh := slices.DeleteFunc(slices.Clone(ids), staleForBulk)
 
 	a.endSelection()
 	if stale := len(ids) - len(fresh); stale > 0 {
@@ -401,6 +399,158 @@ func (a *App) deleteSelected(channelID string, ids []string) {
 		func() error { return a.client.DeleteMessages(channelID, fresh) },
 		a.notifyFailure("bulk delete in "+channelID, "Could not delete those messages."),
 	)
+}
+
+/* Deleted rows still standing */
+
+// removeHold is the deletions the column has been told about and has not yet
+// acted on: their rows are washed and stand a moment longer, then go together.
+// channelID is what they belong to and queued when the first of them arrived,
+// the hold being measured from there — see config.Behaviour.DeletedHold.
+type removeHold struct {
+	channelID string
+	ids       []string
+	queued    time.Time
+	timer     *time.Timer
+}
+
+// holdRemoval washes the deleted rows and leaves them standing, reporting
+// whether it has taken the batch on. Two things come of that: the column moves
+// once for a burst of deletions rather than once each — a sweep arrives as an
+// event per message, and every one of them re-derives seams and re-lays the
+// column out — and a message somebody is halfway through reading does not
+// vanish out from under them.
+//
+// It holds the *drawing* and nothing else. The deletion has already happened,
+// here and everywhere else: nothing about a delete request waits on this, the
+// cache dropped the message before this was called, and the mention set, the
+// three panels and any open editor were answered by the caller.
+// Call on the UI thread.
+func (a *App) holdRemoval(channelID string, messageIDs []string) bool {
+	if a.messages == nil || config.Current().Behaviour.DeletedHold(1) <= 0 {
+		return false
+	}
+
+	hold := a.removing
+	if hold != nil && hold.channelID != channelID {
+		// The window that hold belongs to has been replaced, so its rows went with it
+		// and there is nothing left to take out.
+		a.dropRemoval()
+		hold = nil
+	}
+	if hold == nil {
+		hold = &removeHold{channelID: channelID, queued: time.Now()}
+	}
+
+	for _, id := range messageIDs {
+		if slices.Contains(hold.ids, id) {
+			continue
+		}
+
+		hold.ids = append(hold.ids, id)
+		a.messages.SetDeleted(id, true)
+	}
+	a.removing = hold
+
+	// From the first row of the batch rather than from this one, so the cap bounds
+	// how long any row stands: a channel being deleted from steadily would
+	// otherwise push the whole set out in front of itself indefinitely.
+	wait := time.Until(hold.queued.Add(config.Current().Behaviour.DeletedHold(len(hold.ids))))
+	if wait <= 0 {
+		a.flushRemoval()
+
+		return true
+	}
+
+	a.armRemoval(hold, wait)
+
+	return true
+}
+
+// armRemoval replaces the hold's wake. A timer that has already fired cannot be
+// recalled, so the wake checks it is still the one the hold carries — see
+// armTypingTimer, which is the same trap.
+func (a *App) armRemoval(hold *removeHold, wait time.Duration) {
+	if hold.timer != nil {
+		hold.timer.Stop()
+	}
+	epoch := a.epoch
+
+	var timer *time.Timer
+	timer = time.AfterFunc(wait, func() {
+		a.doOnUI(func() {
+			if a.stale(epoch) || a.removing == nil || a.removing.timer != timer {
+				return
+			}
+
+			a.flushRemoval()
+		}, false)
+	})
+	hold.timer = timer
+}
+
+// flushRemoval takes every held row out in one pass. A hold whose channel is no
+// longer the open one has no rows left to take — the window went with the switch
+// — so it only gives the marks back. Call on the UI thread.
+func (a *App) flushRemoval() {
+	hold := a.removing
+	if hold == nil {
+		return
+	}
+	if hold.timer != nil {
+		hold.timer.Stop()
+	}
+	a.removing = nil
+
+	if a.messages == nil {
+		return
+	}
+	if hold.channelID != a.currentChannelID {
+		a.unmark(hold.ids)
+
+		return
+	}
+
+	doomed := make(map[string]bool, len(hold.ids))
+	for _, id := range hold.ids {
+		doomed[id] = true
+	}
+	a.messages.Remove(doomed) // which is also what takes the marks off
+}
+
+// dropRemoval forgets a hold, its wake and its marks without taking the rows
+// out: what is left to draw is somebody else's answer, not this one's.
+// Call on the UI thread.
+func (a *App) dropRemoval() {
+	hold := a.removing
+	if hold == nil {
+		return
+	}
+
+	if hold.timer != nil {
+		hold.timer.Stop()
+	}
+	a.removing = nil
+	a.unmark(hold.ids)
+}
+
+func (a *App) unmark(messageIDs []string) {
+	if a.messages == nil {
+		return
+	}
+
+	for _, id := range messageIDs {
+		a.messages.SetDeleted(id, false)
+	}
+}
+
+// staleForBulk reports whether a message is past the week the bulk delete route
+// allows — or carries an ID it cannot read, which that route refuses the same
+// way.
+func staleForBulk(messageID string) bool {
+	when, err := util.Timestamp(messageID)
+
+	return err != nil || time.Since(when) >= domain.MaxBulkDeleteAge
 }
 
 // OnAttachFile asks for a file to hang on the next message. No filter: what a
@@ -437,7 +587,7 @@ func (a *App) handleSubmit(text string) {
 	}
 
 	attachments := slices.Clone(a.input.Attachments)
-	replies := toReplies(a.input.Replies)
+	replies := toReplies(a.input.RepliesHere())
 
 	a.input.SetText("")
 	a.input.ClearAttachments()
@@ -551,7 +701,8 @@ func (a *App) refreshSlowmode() {
 }
 
 // toReplies drops the composer's own bookkeeping — which channel each quoted
-// message lives in, needed only to draw its preview — leaving what is sent.
+// message lives in, which draws its preview and decides whether it is going out
+// at all (ui.MessageInput.RepliesHere) — leaving what is sent.
 func toReplies(pending []ui.Reply) []domain.Reply {
 	replies := make([]domain.Reply, len(pending))
 	for i, reply := range pending {
@@ -1137,10 +1288,18 @@ func (a *App) removeMessages(channelID string, messageIDs []string) {
 		doomed[id] = true
 	}
 
+	// The editor goes now whatever the rows do: it edits a message that no longer
+	// exists, and a row held on screen is not a message that can still be saved.
 	if a.editing != nil && doomed[a.editing.Message().ID] {
-		a.editing = nil // the editor goes with its row
+		a.cancelActiveEdit()
 	}
-	a.messages.Remove(doomed)
+
+	// The rows themselves are washed and left standing for a moment, so a burst of
+	// deletions moves the column once — holdRemoval takes them out when the hold
+	// lapses, and answers false where the reader has turned it off.
+	if !a.holdRemoval(channelID, messageIDs) {
+		a.messages.Remove(doomed)
+	}
 }
 
 // refreshMessage rebuilds an updated message's widget in place from its cache

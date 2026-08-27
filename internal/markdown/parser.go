@@ -54,7 +54,22 @@ type flatten struct {
 // and nothing there is a Link node to find.
 func Links(doc *Document) []string {
 	var found []string
-	eachInline(doc.Blocks, func(nodes []Inline) { collectInlineLinks(&found, nodes) })
+	eachInline(doc.Blocks, func(nodes []Inline) {
+		walkInlines(nodes, func(n Inline) bool {
+			switch v := n.(type) {
+			case *Link:
+				// The label is not walked: renderers flatten it to plain text, so a
+				// URL written inside one is not a link the body offers.
+				found = append(found, v.URL)
+				return false
+			case *Spoiler:
+				// Not reported: a card unfurled from a spoiler would say what it hides.
+				return false
+			}
+
+			return true
+		})
+	})
 
 	return found
 }
@@ -68,43 +83,48 @@ func Links(doc *Document) []string {
 func HasRelativeTimestamp(doc *Document) bool {
 	var found bool
 	eachInline(doc.Blocks, func(nodes []Inline) {
-		found = found || hasRelativeIn(nodes)
+		walkInlines(nodes, func(n Inline) bool {
+			switch v := n.(type) {
+			case *Timestamp:
+				if v.Style == "R" {
+					found = true
+				}
+			case *Link:
+				// A label is flattened to plain text, so an instant inside one is
+				// drawn once and never goes out of date.
+				return false
+			}
+
+			return !found
+		})
 	})
 
 	return found
 }
 
-func hasRelativeIn(nodes []Inline) bool {
+// walkInlines visits every inline node in reading order, descending into a
+// span's children only when visit answers true for the span itself.
+func walkInlines(nodes []Inline, visit func(Inline) bool) {
 	for _, n := range nodes {
+		if !visit(n) {
+			continue
+		}
+
 		switch v := n.(type) {
-		case *Timestamp:
-			if v.Style == "R" {
-				return true
-			}
 		case *Strong:
-			if hasRelativeIn(v.Children) {
-				return true
-			}
+			walkInlines(v.Children, visit)
 		case *Emphasis:
-			if hasRelativeIn(v.Children) {
-				return true
-			}
+			walkInlines(v.Children, visit)
 		case *Underline:
-			if hasRelativeIn(v.Children) {
-				return true
-			}
+			walkInlines(v.Children, visit)
 		case *Strike:
-			if hasRelativeIn(v.Children) {
-				return true
-			}
+			walkInlines(v.Children, visit)
 		case *Spoiler:
-			if hasRelativeIn(v.Children) {
-				return true
-			}
+			walkInlines(v.Children, visit)
+		case *Link:
+			walkInlines(v.Children, visit)
 		}
 	}
-
-	return false
 }
 
 // eachInline visits every run of inline content in blocks, in reading order,
@@ -124,25 +144,6 @@ func eachInline(blocks []Block, visit func([]Inline)) {
 			for _, item := range v.Items {
 				visit(item.Children)
 			}
-		}
-	}
-}
-
-func collectInlineLinks(found *[]string, nodes []Inline) {
-	for _, n := range nodes {
-		switch v := n.(type) {
-		case *Link:
-			*found = append(*found, v.URL)
-		case *Strong:
-			collectInlineLinks(found, v.Children)
-		case *Emphasis:
-			collectInlineLinks(found, v.Children)
-		case *Underline:
-			collectInlineLinks(found, v.Children)
-		case *Strike:
-			collectInlineLinks(found, v.Children)
-		case *Spoiler:
-			// Not reported: a card unfurled from a spoiler would say what it hides.
 		}
 	}
 }
@@ -1093,11 +1094,22 @@ func matchEmphasis(s, delim string, boundary bool, depth int) (Inline, int) {
 
 // wrap matches a delimiter-bounded span (e.g. **bold**), recursively parsing its
 // contents. An unterminated or empty span does not match.
+//
+// A close run longer than a ** or __ delimiter closes at the run's far end —
+// Discord's (?!\*) lookahead — which is what makes ***x*** emphasis inside
+// strong rather than a stray asterisk. ~~ and || keep the near close, as
+// Discord's own rules do.
 func wrap(s, delim string, depth int, build func([]Inline) Inline) (Inline, int) {
 	rest := s[len(delim):]
 	end := findClose(rest, delim)
 	if end <= 0 {
 		return nil, 0
+	}
+
+	if delim == "**" || delim == "__" {
+		for end+len(delim) < len(rest) && rest[end+len(delim)] == delim[0] {
+			end++
+		}
 	}
 
 	return build(scanInline(rest[:end], depth+1)), len(delim)*2 + end

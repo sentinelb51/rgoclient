@@ -26,15 +26,16 @@ func TestIndexPassOpensNoDevice(t *testing.T) {
 
 		// Everything the walk reaches has to answer; the point of the test is the
 		// three below it, which must never be reached at all.
-		Sessions:   func() []SettingsSession { return nil },
-		Sounds:     func() []SettingsSound { return nil },
-		CacheDir:   func() string { return "" },
-		ConfigPath: func() string { return "" },
+		Sessions:       func() []SettingsSession { return nil },
+		Sounds:         func() []SettingsSound { return nil },
+		TypingProfiles: func() []TypingProfile { return nil },
+		CacheDir:       func() string { return "" },
+		ConfigPath:     func() string { return "" },
 
 		InputDevices:  func() []AudioDevice { enumerated++; return nil },
 		OutputDevices: func() []AudioDevice { enumerated++; return nil },
 
-		StartInputMonitor: func(func(float32)) { opened++ },
+		StartInputMonitor: func(func(InputMeter)) { opened++ },
 		StopInputMonitor:  func() {},
 	}
 
@@ -80,15 +81,16 @@ func TestIndexPassDoesNotFetchSecurity(t *testing.T) {
 		LoadSecurity: func(func(SecurityState, error)) { asked++ },
 
 		// Everything else the walk reaches has to answer.
-		LoadProfile:   func(func(domain.UserProfile)) {},
-		CacheStats:    func(func(cache.ImageStats)) {},
-		Sessions:      func() []SettingsSession { return nil },
-		Sounds:        func() []SettingsSound { return nil },
-		CacheDir:      func() string { return "" },
-		ConfigPath:    func() string { return "" },
-		InputDevices:  func() []AudioDevice { return nil },
-		OutputDevices: func() []AudioDevice { return nil },
-		GateRatio:     func(int) float32 { return 0 },
+		LoadProfile:    func(func(domain.UserProfile)) {},
+		CacheStats:     func(func(cache.ImageStats)) {},
+		Sessions:       func() []SettingsSession { return nil },
+		Sounds:         func() []SettingsSound { return nil },
+		TypingProfiles: func() []TypingProfile { return nil },
+		CacheDir:       func() string { return "" },
+		ConfigPath:     func() string { return "" },
+		InputDevices:   func() []AudioDevice { return nil },
+		OutputDevices:  func() []AudioDevice { return nil },
+		GateRatio:      func(int) float32 { return 0 },
 	}
 
 	index := indexPass(hooks, true)

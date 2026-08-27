@@ -212,20 +212,12 @@ func (c *Client) PinMessage(channelID, messageID string, pinned bool) error {
 // applied to, reporting whether anything moved — a change reporting false, and
 // an echo of something already recorded, are both dropped rather than announced.
 //
-// A copy rather than a write in place: cached messages are read without the
-// cache lock, so everything reachable from one stays immutable.
+// The cache does the whole of it under one lock. Reading the message here and
+// storing it back would let a gateway echo and a background worker apply their
+// changes to two copies of the same message, the second store dropping the
+// first — a reaction that answered and then was not there.
 func (c *Client) reviseMessage(channelID, messageID string, change func(*domain.Message) bool) bool {
-	current := c.messages.Find(channelID, messageID)
-	if current == nil {
-		return false
-	}
-
-	updated := *current
-	if !change(&updated) {
-		return false
-	}
-
-	return c.messages.Replace(channelID, &updated)
+	return c.messages.Update(channelID, messageID, change)
 }
 
 // markPinned writes a message's pin state into the cache.
@@ -572,12 +564,17 @@ func oldestFirst(a, b *domain.Message) int { return strings.Compare(a.ID, b.ID) 
 // flag on the message and Revolt publishes no collection of them, so the search
 // route asked with pinned and no query is the only enumeration there is.
 //
-// Nothing is written to the message cache, for the reason messagePage gives.
-func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message, error) {
-	return c.search(channelID, domain.SortNewest, revoltgo.ChannelSearchParams{
+// cursor is the oldest pin already held, past which the next page begins; empty
+// for the first. Nothing is written to the message cache, for the reason
+// messagePage gives.
+func (c *Client) PinnedMessages(channelID string, limit int, cursor string) ([]*domain.Message, error) {
+	params := revoltgo.ChannelSearchParams{
 		Limit:  limit,
 		Pinned: true,
-	})
+	}
+	pageFrom(&params, domain.SortNewest, cursor)
+
+	return c.search(channelID, domain.SortNewest, params)
 }
 
 // SearchMessages is the same route asked the other way it can be — Revolt
@@ -592,21 +589,56 @@ func (c *Client) PinnedMessages(channelID string, limit int) ([]*domain.Message,
 //
 // after and before bound the answer in time, either of them zero for an end left
 // open. They are the *only* narrowing this route takes beyond the query — there
-// is no author, attachment or reaction filter on the wire — and they are also
-// the only way past the hundred it caps at, a narrower window being what a
-// hundred-and-first result has to be asked for through.
-func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort, limit int, after, before time.Time) ([]*domain.Message, error) {
+// is no author, attachment or reaction filter on the wire.
+//
+// cursor is the result already held that the next page begins past, empty for
+// the first page. It rides on those same two fields, which is why it cannot be
+// combined with a span by the caller: which end it moves is the order's, and the
+// reader's own bound has to survive it.
+func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort, limit int,
+	after, before time.Time, cursor string) ([]*domain.Message, error) {
+
 	query = trimTo(query, maxSearchQuery)
 	if query == "" {
 		return nil, nil
 	}
-
-	return c.search(channelID, sort, revoltgo.ChannelSearchParams{
+	params := revoltgo.ChannelSearchParams{
 		Limit:  limit,
 		After:  boundaryID(after),
 		Before: boundaryID(before),
 		Query:  query,
-	})
+	}
+	pageFrom(&params, sort, cursor)
+
+	return c.search(channelID, sort, params)
+}
+
+// pageFrom tightens a request onto the page after cursor, which is the result
+// the caller already holds furthest along the order it asked for. Which end
+// moves is that order's: a newest-first answer walks backwards through before,
+// an oldest-first one forwards through after.
+//
+// Relevance walks in no direction at all — the route re-ranks whatever window it
+// is given, so a narrower one is not the next page of a wider one — and is left
+// alone here rather than paged wrongly. Callers offer no page past it.
+//
+// The reader's own bound is kept wherever it is the tighter of the two: a span
+// is what may not be left, and a cursor only ever moves inside one.
+func pageFrom(params *revoltgo.ChannelSearchParams, sort domain.MessageSort, cursor string) {
+	if cursor == "" {
+		return
+	}
+
+	switch sort {
+	case domain.SortNewest:
+		if params.Before == "" || cursor < params.Before {
+			params.Before = cursor
+		}
+	case domain.SortOldest:
+		if params.After == "" || cursor > params.After {
+			params.After = cursor
+		}
+	}
 }
 
 // boundaryID is the message ID standing for an instant, the route bounding a

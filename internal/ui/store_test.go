@@ -170,6 +170,8 @@ func (s *fakeStore) MemberServerPermissions(string, string) domain.Permission {
 	return s.memberPermissions
 }
 
+func (s *fakeStore) ServerChannelPermissions(string) map[string]domain.Permission { return nil }
+
 func (s *fakeStore) ChannelOverrides(channelID string) (domain.ChannelOverrides, bool) {
 	overrides, ok := s.channelOverrides[channelID]
 

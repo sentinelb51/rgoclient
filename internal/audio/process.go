@@ -85,9 +85,24 @@ func (h *highPass) Process(frame []float32) bool {
 // It answers true rather than the model's own voice estimate: the gate is the
 // one deciding stage, and its threshold is a setting the reader has tuned
 // against a meter. Two voice detectors with two opinions is a mode nobody can
-// reason about.
+// reason about. The estimate is not discarded, though — vad carries it, and the
+// gate may *veto* opening on it (never open by it), which keeps one decider.
 type noiseSuppressor struct {
 	enabled bool
+
+	// floor is what the strength dial arrives as: a floor under the model's band
+	// gains, 0 full suppression, 1 passthrough. applied is what the denoiser was
+	// last told, so the C call is made on change rather than per frame.
+	floor, applied float32
+
+	// vad is the model's own estimate that the last frame held speech, 0-1, the
+	// max of the frame's two subframes so a word starting mid-frame counts.
+	// **Negative** while disabled: no model, no opinion, and neither the gate's
+	// veto nor the settings meter may read a stale number as an answer.
+	//
+	// Atomic for the reason preamp.level is: Process runs on the capture's own
+	// goroutine and the settings page reads it from the UI thread.
+	vad atomic.Uint32 // float32 bits
 
 	// dn is created on the first enabled frame rather than at open: its state is
 	// ~19 KB of C memory, and most captures with the setting off never need it.
@@ -100,22 +115,64 @@ type noiseSuppressor struct {
 	dn *rnnoise.Denoiser
 }
 
+// newNoiseSuppressor starts with no estimate at all, which is what it has until
+// a frame has been through the model: the zero value would read as "certainly
+// not speech" rather than as nothing having been measured.
+func newNoiseSuppressor() *noiseSuppressor {
+	n := &noiseSuppressor{}
+	n.vad.Store(floatBits(-1))
+
+	return n
+}
+
 func (n *noiseSuppressor) SetEnabled(enabled bool) { n.enabled = enabled }
+
+// VAD is the model's estimate that the last frame held speech, 0-1, and
+// negative where the model is not running — which is no opinion rather than a
+// refusal, and nothing to draw rather than a bar left at its last answer.
+func (n *noiseSuppressor) VAD() float32 { return bitsFloat(n.vad.Load()) }
+
+// SetFloor is the strength dial, as the linear gain floor SuppressionFloor
+// maps to. Applied by Read like every other stage setting.
+func (n *noiseSuppressor) SetFloor(floor float32) { n.floor = floor }
 
 func (n *noiseSuppressor) Process(frame []float32) bool {
 	if !n.enabled {
+		n.vad.Store(floatBits(-1))
 		return true
 	}
 	if n.dn == nil {
 		n.dn = rnnoise.New()
 	}
-
-	// The model's frame is 10 ms against the chain's 20, so a frame is two calls.
-	for at := 0; at+rnnoise.FrameSize <= len(frame); at += rnnoise.FrameSize {
-		n.dn.Process(frame[at : at+rnnoise.FrameSize])
+	if n.applied != n.floor {
+		n.dn.SetGainFloor(n.floor)
+		n.applied = n.floor
 	}
 
+	// The model's frame is 10 ms against the chain's 20, so a frame is two calls.
+	vad := float32(0)
+	for at := 0; at+rnnoise.FrameSize <= len(frame); at += rnnoise.FrameSize {
+		vad = max(vad, n.dn.Process(frame[at:at+rnnoise.FrameSize]))
+	}
+	n.vad.Store(floatBits(vad))
+
 	return true
+}
+
+// SuppressionFloor is the gain floor a suppression strength in decibels asks
+// for — the most the denoiser may take out of any band. full is the top of the
+// caller's range and means uncapped, the stock behaviour; the range's own end
+// is passed in rather than named here, the way GainFromDB takes its off, so
+// the settings stay the one place that decides where it is. 0 is passthrough.
+func SuppressionFloor(db, full int) float32 {
+	if db >= full {
+		return 0
+	}
+	if db <= 0 {
+		return 1
+	}
+
+	return float32(decibelsToLinear(float64(-db)))
 }
 
 /* Preamp */
@@ -169,11 +226,14 @@ func (p *preamp) Process(frame []float32) bool {
 
 /* The gate */
 
-// Gate thresholds, in dBFS. The sensitivity setting picks a point between them:
-// 0 opens on almost anything, 100 takes a raised voice. They bound a slider
-// rather than describing a room, so a reader whose microphone is quiet turns it
-// down rather than the gate learning it — an adaptive floor that guesses wrong
-// is a gate nobody can reason about.
+// How far the gate's threshold may be asked to go, in dBFS. The setting is that
+// number rather than a scale onto it, so nothing here maps anything — these
+// exist only to clamp a figure that arrives from outside.
+//
+// config.VoiceGateQuietestDB / VoiceGateLoudestDB are the same two numbers where
+// the slider's range is decided. Not read from there: this package is a leaf and
+// builds in a test with no settings file anywhere, the same split maxGain and
+// VoiceGainMaxDB already have.
 const (
 	gateQuietest = -70.0
 	gateLoudest  = -20.0
@@ -201,6 +261,14 @@ type noiseGate struct {
 	close     float32 // and to close at, always the lower of the two
 	remaining int     // hangover frames left
 
+	// vadFloor is the second condition on opening, 0-1, 0 off: the suppressor's
+	// model must be at least this sure the frame holds speech. A veto and never
+	// a vote — loudness still has to open the gate, so the RMS threshold stays
+	// the one decider and this only stops a loud non-voice (a keyboard, a door)
+	// from opening it. vad is the suppressor the estimate is read from.
+	vadFloor float32
+	vad      *noiseSuppressor
+
 	// bypass passes every frame through untouched and answers true. Push-to-talk
 	// sets it: the key decides what is sent, and a gate deciding as well would
 	// swallow the quiet start of a held-key sentence.
@@ -211,17 +279,18 @@ type noiseGate struct {
 	level float32
 }
 
-func newNoiseGate(sensitivity int) *noiseGate {
+func newNoiseGate(thresholdDB int) *noiseGate {
 	g := &noiseGate{}
-	g.SetSensitivity(sensitivity)
+	g.SetThreshold(thresholdDB)
 
 	return g
 }
 
-// SetSensitivity moves the threshold. 0-100, clamped, read from the settings
-// whenever they change rather than per frame.
-func (g *noiseGate) SetSensitivity(sensitivity int) {
-	openDB := GateThresholdDB(sensitivity)
+// SetThreshold moves the point the gate opens at, in dBFS, clamped to what this
+// package will act on. Read from the settings whenever they change rather than
+// per frame.
+func (g *noiseGate) SetThreshold(db int) {
+	openDB := min(max(float64(db), gateQuietest), gateLoudest)
 
 	g.open = float32(decibelsToLinear(openDB))
 	g.close = float32(decibelsToLinear(openDB - hysteresis))
@@ -229,39 +298,42 @@ func (g *noiseGate) SetSensitivity(sensitivity int) {
 
 /* The meter's scale */
 
-// meterCeiling is the top of the meter, in dBFS. Its floor is the gate's own
-// quietest threshold, so the whole of what the sensitivity slider can ask for is
-// somewhere on the bar, with the headroom above the loudest setting still shown.
+// meterCeiling is the top of the meter, in dBFS. Its floor is the quietest
+// threshold the gate will take, so the whole of what the sensitivity setting can
+// ask for is somewhere on the bar, with the headroom above the loudest still
+// shown.
 const meterCeiling = 0.0
-
-// GateThresholdDB is where the gate opens for a sensitivity of 0-100, in dBFS.
-// Exported because the settings page draws this threshold on the level meter,
-// and a second copy of the mapping up there would be free to drift from this one.
-func GateThresholdDB(sensitivity int) float64 {
-	fraction := float64(min(max(sensitivity, 0), 100)) / 100
-
-	return gateQuietest + (gateLoudest-gateQuietest)*fraction
-}
 
 // MeterRatio places a linear RMS level on the meter, 0-1.
 //
 // Decibels rather than the level itself: speech sits around -26 dBFS, which is
-// 0.05 linear, and the gate's default threshold is 0.0024. A linear bar draws
-// both of those on the floor, which is the whole reason the sensitivity setting
-// could not be tuned by looking at one.
+// 0.05 linear, and the gate's default threshold is 0.0025. A linear bar draws
+// both of those on the floor, which is the whole reason a threshold could not be
+// tuned by looking at one.
 func MeterRatio(level float32) float32 {
 	if level <= 0 {
 		return 0
 	}
 
-	return meterPosition(20 * math.Log10(float64(level)))
+	return meterPosition(LevelDecibels(level))
 }
 
-// GateRatio places the gate's threshold on that same scale, so the marker and
-// the fill cannot disagree about what the setting means.
-func GateRatio(sensitivity int) float32 {
-	return meterPosition(GateThresholdDB(sensitivity))
+// LevelDecibels is that same level as the figure a meter says in words, dBFS.
+//
+// Floored at the bottom of the bar rather than answering the true value or
+// -Inf: below that the bar is empty, and a number still counting down beside an
+// empty bar is two readings of one measurement disagreeing.
+func LevelDecibels(level float32) float64 {
+	if level <= 0 {
+		return gateQuietest
+	}
+
+	return max(20*math.Log10(float64(level)), gateQuietest)
 }
+
+// GateRatio places a threshold in dBFS on that same scale, so the marker and the
+// fill cannot disagree about what the number means.
+func GateRatio(db int) float32 { return meterPosition(float64(db)) }
 
 func meterPosition(db float64) float32 {
 	ratio := (db - gateQuietest) / (meterCeiling - gateQuietest)
@@ -272,6 +344,13 @@ func meterPosition(db float64) float32 {
 // SetBypass turns the gate into a pass-through. Read applies it, like the
 // sensitivity, so the mode cannot change in the middle of a frame.
 func (g *noiseGate) SetBypass(bypass bool) { g.bypass = bypass }
+
+// SetVADThreshold moves the veto, 0-100, 0 off. Read applies it, and passes 0
+// while the suppressor is off — the model only runs while suppressing, and a
+// veto read off a number nothing is computing would gate on a stale answer.
+func (g *noiseGate) SetVADThreshold(percent int) {
+	g.vadFloor = float32(min(max(percent, 0), 100)) / 100
+}
 
 func (g *noiseGate) Process(frame []float32) bool {
 	if g.bypass {
@@ -284,12 +363,26 @@ func (g *noiseGate) Process(frame []float32) bool {
 
 	level := rms(frame)
 
+	// The suppressor ran earlier in this same chain walk, so its estimate is
+	// about this very frame. A vetoed frame counts as non-speech below: it may
+	// not refresh or hold the hangover, so a loud noise the model rejects closes
+	// the gate through the ordinary countdown rather than freezing it open. A
+	// negative estimate is the model not running, which is no opinion.
+	estimate := float32(-1)
+	if g.vad != nil {
+		estimate = g.vad.VAD()
+	}
+
+	vadOK := g.vadFloor <= 0 || estimate < 0 || estimate >= g.vadFloor
+
 	switch {
-	case level >= g.open:
+	case vadOK && level >= g.open:
 		g.remaining = hangoverFrames
-	case level < g.close && g.remaining > 0:
+	case vadOK && level >= g.close:
+		// Inside the hysteresis band: hold whatever hangover is left.
+	case g.remaining > 0:
 		g.remaining--
-	case level < g.close:
+	default:
 		g.remaining = 0
 	}
 

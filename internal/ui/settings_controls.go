@@ -586,12 +586,20 @@ func (b *numberBox) unfocus() {
 	}
 }
 
+// valueText is the number and its unit. A percent sign is set tight against the
+// figure and a unit word is not — the typographic convention, and what the
+// meters' own readouts say beside these rows.
 func (b *numberBox) valueText() string {
-	if b.unit == "" {
-		return strconv.Itoa(int(b.value))
+	number := strconv.Itoa(int(b.value))
+
+	switch b.unit {
+	case "":
+		return number
+	case "%":
+		return number + b.unit
 	}
 
-	return strconv.Itoa(int(b.value)) + " " + b.unit
+	return number + " " + b.unit
 }
 
 // numberEntry is the field a numberBox becomes, for two things widget.Entry
@@ -1124,18 +1132,18 @@ func usageTint(ratio float32) color.Color {
 
 /* The input level meter */
 
-// newLevelBar is the microphone meter: a fill for what the microphone is hearing
-// and a marker for where the gate opens, on one scale so the two can be compared
-// by eye. That comparison is the whole point — the sensitivity setting is a
-// threshold in decibels, and a number between 0 and 100 says nothing about
-// whether your own voice clears it.
+// newLevelBar is the bar itself: a fill for what is being measured and a marker
+// for the threshold it is being compared against, on one scale so the two can be
+// compared by eye. That comparison is the whole point of either voice meter — a
+// threshold says nothing on its own about whether your voice clears it.
 //
 // The fill turns as it crosses the marker, which is the answer to the only
-// question being asked of this control: am I being heard right now.
+// question being asked: am I over the line right now.
 //
 // It hands back a setter for each, because they move for different reasons and
 // at very different rates — the level on every sample the controller reports,
-// the threshold only when the slider is dragged.
+// the threshold only when the slider is dragged. newMeterBar is what the page
+// actually mounts; this is the half of it with no words.
 func newLevelBar() (bar *fyne.Container, setLevel, setThreshold func(ratio float32)) {
 	height := theme.Sizes.SettingsLevelHeight
 
@@ -1174,6 +1182,60 @@ func newLevelBar() (bar *fyne.Container, setLevel, setThreshold func(ratio float
 	}
 
 	return bar, setLevel, setThreshold
+}
+
+// meterNoFigure is what a readout says where there is nothing to measure. Only
+// the speech bar reaches it — the model runs solely while noise suppression
+// does, and a percentage there would be a number for something nothing is
+// computing.
+const meterNoFigure = "—"
+
+// newMeterBar is a diagnostic bar and the figure it is saying in words: the
+// level bar above, plus a readout at the row's trailing end.
+//
+// The number is not decoration, and both voice meters now carry one. The bar
+// answers "over the line right now", which is what aiming a threshold needs;
+// the readout answers "by how much", which a strip a few pixels wide cannot
+// say and which is the whole of what somebody watching a fan or a keyboard
+// through one wants to know. The caller formats it, the wording being the row's
+// rather than this control's.
+func newMeterBar() (block *fyne.Container, set func(ratio float32, figure string), setThreshold func(ratio float32)) {
+	bar, setLevel, setMark := newLevelBar()
+
+	readout := newText(meterNoFigure, theme.Colors.TextPrimary, theme.Sizes.SettingsDetailSize)
+
+	// The bar takes the fill slot and the readout sits at the row's trailing end,
+	// so a figure growing a digit narrows the bar rather than moving it.
+	block = NewFillRow(0, bar, HorizontalSpacer(theme.Sizes.ChipSpacing), vcenter(readout))
+
+	set = func(ratio float32, figure string) {
+		setLevel(ratio)
+
+		// Guarded because this arrives at the sampling rate and most samples round
+		// to the figure the last one did: a canvas.Text Refresh dirties the whole
+		// window, and each distinct string is a glyph texture of its own.
+		if readout.Text != figure {
+			readout.Text = figure
+			readout.Refresh()
+			Relayout(block)
+		}
+	}
+
+	return block, set, setMark
+}
+
+// meterDecibels and meterPercent are how the two bars say their figure. Both
+// take what InputMeter reported and neither converts anything: the scales are
+// the audio package's, and a second copy of either up here would be free to
+// drift from the one the gate decides by.
+func meterDecibels(db int) string { return strconv.Itoa(db) + " dB" }
+
+func meterPercent(ratio float32) string {
+	if ratio < 0 {
+		return meterNoFigure
+	}
+
+	return strconv.Itoa(int(clamp(ratio, 0, 1)*100+0.5)) + "%"
 }
 
 // levelBarLayout stretches the track across the slot, the fill across the level,

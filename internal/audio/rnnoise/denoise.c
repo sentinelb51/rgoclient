@@ -94,6 +94,12 @@ struct DenoiseState {
   int last_period;
   float mem_hp_x[2];
   float lastg[NB_BANDS];
+  /* rgoclient: floor under every band gain, 0 (full suppression, the stock
+     behaviour — rnnoise_init memsets it) to 1 (passthrough). Flooring the gains
+     in the model's own spectral domain is what a "suppression strength" dial
+     can be without a delay-compensated dry mix: the synthesis path is
+     untouched, so no comb filtering. */
+  float gain_floor;
   RNNState rnn;
 };
 
@@ -278,6 +284,13 @@ DenoiseState *rnnoise_create(RNNModel *model) {
   st = malloc(rnnoise_get_size());
   rnnoise_init(st, model);
   return st;
+}
+
+/* rgoclient: not in xiph's API. See the gain_floor field. */
+void rnnoise_set_gain_floor(DenoiseState *st, float gain_floor) {
+  if (gain_floor < 0) gain_floor = 0;
+  if (gain_floor > 1) gain_floor = 1;
+  st->gain_floor = gain_floor;
 }
 
 void rnnoise_destroy(DenoiseState *st) {
@@ -478,6 +491,10 @@ float rnnoise_process_frame(DenoiseState *st, float *out, const float *in) {
     for (i=0;i<NB_BANDS;i++) {
       float alpha = .6f;
       g[i] = MAX16(g[i], alpha*st->lastg[i]);
+      /* rgoclient: cap how far a band may be pushed down. Applied after the
+         decay so lastg carries the floored value and the release stays
+         consistent, and after pitch_filter so the enhancement is unaffected. */
+      g[i] = MAX16(g[i], st->gain_floor);
       st->lastg[i] = g[i];
     }
     interp_band_gain(gf, g);

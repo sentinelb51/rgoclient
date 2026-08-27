@@ -105,13 +105,7 @@ func (a *App) joinCall(channelID string) {
 				a.sounds.Sink().SetGain(id, float64(audio.GainFromDB(db, config.VoiceGainOffDB)))
 			}
 
-			capture, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
-				Sensitivity:      settings.Sensitivity,
-				Gain:             audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB),
-				SoftClip:         settings.SoftClip,
-				HighPass:         settings.HighPass,
-				NoiseSuppression: settings.NoiseSuppression,
-			})
+			capture, err := audio.OpenInput(settings.InputDevice, inputConfig(settings))
 
 			devices <- openedInput{capture: capture, err: err}
 		}()
@@ -157,6 +151,23 @@ func (a *App) joinCall(channelID string) {
 	})
 }
 
+// inputConfig is the capture chain as the settings describe it, converted at
+// the seam: config speaks decibels and percentages, audio linear gains. One
+// builder because two sites open a microphone — the join and the settings
+// meter — and a dial only one of them carried would behave differently in a
+// call than under the bar tuning it.
+func inputConfig(settings config.Voice) audio.InputConfig {
+	return audio.InputConfig{
+		GateThresholdDB:  settings.SensitivityDB,
+		Gain:             audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB),
+		SoftClip:         settings.SoftClip,
+		HighPass:         settings.HighPass,
+		NoiseSuppression: settings.NoiseSuppression,
+		SuppressionFloor: audio.SuppressionFloor(settings.NoiseSuppressionDB, config.VoiceSuppressionMaxDB),
+		VADThreshold:     settings.VADThreshold,
+	}
+}
+
 // openedInput carries the microphone back from the goroutine that opened it
 // beside the credentials request. Both halves have to be waited for, so a
 // failure travels with the device rather than being reported from in there.
@@ -193,6 +204,7 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 	a.capture = capture
 	a.muted, a.deafened = call.Muted(), call.Deafened()
 	a.syncCall()
+	a.refreshSelfVoiceMarks()
 	a.armPushToTalk()
 
 	// A meter that wants to exist is moved onto this capture: an owned one would
@@ -230,9 +242,13 @@ func (a *App) dropCall() {
 	}
 
 	a.speaking = nil
+	a.callMuted = nil
 	a.muted, a.deafened = false, false
 
+	// Every mark the media session was the source of goes with it: what is left is
+	// the moderation, which the store still answers for.
 	a.refreshSpeakingAll()
+	a.refreshVoiceMarksAll()
 }
 
 // hangUp leaves whatever call is running and closes the microphone. Safe to call
@@ -275,9 +291,27 @@ func (a *App) canJoinCall(channelID string) bool {
 // than an arm on dispatch, for two reasons: client.Event's marker is unexported,
 // so a voice event cannot be one; and that channel blocks rather than drops, so
 // speaking updates would stall the gateway reader behind them.
+//
+// Batched onto one hop per burst, as pumpEvents is and for the same reason —
+// every hop wakes the driver's loop — which matters most here: an active speaker
+// diff arrives several times a second and a room of eight talking over each other
+// is the highest event rate the client sees.
+//
+// Unlike pumpEvents this does **not** wait. Call.emit drops rather than blocks,
+// so a pump held against the UI thread would turn a busy frame into lost
+// speaking transitions; and without the wait the batch cannot be reused, hence a
+// slice per burst — still one allocation where there was a closure per event.
 func (a *App) pumpCall(call *voice.Call) {
-	for event := range call.Events() {
-		a.doOnUI(func() { a.onCallEvent(call, event) }, false)
+	events := call.Events()
+
+	for first := range events {
+		batch := gather(make([]voice.Event, 0, maxEventBatch), first, events, maxEventBatch)
+
+		a.doOnUI(func() {
+			for _, event := range batch {
+				a.onCallEvent(call, event)
+			}
+		}, false)
 	}
 }
 
@@ -293,11 +327,15 @@ func (a *App) onCallEvent(call *voice.Call, event voice.Event) {
 	switch e := event.(type) {
 	case voice.SpeakingChanged:
 		a.onSpeakingChanged(e)
+	case voice.MuteChanged:
+		a.onMuteChanged(e)
 	case voice.ParticipantChanged:
 		// The gateway announces the voice state and the sidebar is rebuilt from
-		// that; this half only stops a departed participant being left ringing.
+		// that; this half only stops a departed participant being left ringing or
+		// wearing a mark from the last time they were here.
 		if !e.Joined {
 			a.onSpeakingChanged(voice.SpeakingChanged{UserID: e.UserID})
+			a.onMuteChanged(voice.MuteChanged{UserID: e.UserID})
 		}
 	case voice.ConnectionChanged:
 		a.onCallConnection(e)
@@ -325,11 +363,41 @@ func (a *App) onSpeakingChanged(e voice.SpeakingChanged) {
 		delete(a.speaking, e.UserID)
 	}
 
+	// Recorded either way, so turning the ring back on draws the truth rather
+	// than whoever happens to start talking next. Only the drawing is the
+	// setting's, and it is read here rather than at the row: a repaint that does
+	// not happen is the whole of what the setting buys.
+	if !config.Current().Voice.SpeakingRing {
+		return
+	}
+
 	for row := range a.voiceRows() {
 		if row.UserID() == e.UserID {
 			row.SetSpeaking(e.Speaking)
 		}
 	}
+}
+
+// onMuteChanged marks one participant as holding their own microphone, or lets
+// go. Touches that user's rows only, for the reason onSpeakingChanged does —
+// though this one moves far less often, a mute being a decision rather than a
+// syllable.
+func (a *App) onMuteChanged(e voice.MuteChanged) {
+	if a.callMuted == nil {
+		a.callMuted = make(map[string]bool)
+	}
+
+	if a.callMuted[e.UserID] == e.Muted {
+		return
+	}
+
+	if e.Muted {
+		a.callMuted[e.UserID] = true
+	} else {
+		delete(a.callMuted, e.UserID)
+	}
+
+	a.refreshVoiceMarks(e.UserID)
 }
 
 // onCallConnection moves the island's dot, and the word beside it where the
@@ -682,6 +750,7 @@ func (a *App) toggleMute() {
 	a.call.SetMuted(!a.call.Muted())
 	a.muted = a.call.Muted()
 	a.syncCallIsland()
+	a.refreshSelfVoiceMarks()
 }
 
 func (a *App) toggleDeafen() {
@@ -692,6 +761,7 @@ func (a *App) toggleDeafen() {
 	a.call.SetDeafened(!a.call.Deafened())
 	a.muted, a.deafened = a.call.Muted(), a.call.Deafened()
 	a.syncCallIsland()
+	a.refreshSelfVoiceMarks()
 }
 
 /* Rows */
@@ -720,8 +790,117 @@ func (a *App) voiceRows() iter.Seq[*ui.VoiceParticipantRow] {
 // talking when the old ones were dropped.
 func (a *App) refreshSpeakingAll() {
 	for row := range a.voiceRows() {
-		row.SetSpeaking(a.speaking[row.UserID()])
+		row.SetSpeaking(a.showSpeaking(row.UserID()))
 	}
+}
+
+// showSpeaking is whether a row may wear the ring. The record is kept whatever
+// the setting says, so this is only ever about the painting — which is why
+// onSpeakingChanged asks it by not walking the rows at all.
+func (a *App) showSpeaking(userID string) bool {
+	return config.Current().Voice.SpeakingRing && a.speaking[userID]
+}
+
+// voiceMarks is everything a participant's row says about their voice, gathered
+// from the three places that know: the membership carries a moderator's hold,
+// the media session carries their own microphone, and config carries whether
+// this machine has turned them down to nothing.
+//
+// participant is what the sidebar was built from, and is where the server-wide
+// hold comes from — the store resolves it with the rest of the membership.
+func (a *App) voiceMarks(participant domain.VoiceParticipant) ui.VoiceMarks {
+	marks := ui.VoiceMarks{
+		ServerMuted:    participant.ServerMuted,
+		ServerDeafened: participant.ServerDeafened,
+		SelfMuted:      a.callMuted[participant.UserID],
+		Silenced:       config.Current().Voice.UserGainsDB[participant.UserID] == config.VoiceGainOffDB,
+	}
+
+	// This account's own two are the call's, not the room's: SetMuted is what was
+	// just decided here, and a deafen is not reported to anybody at all — see
+	// docs/known-gaps.md. Silenced is never drawn on our own row, a volume for
+	// somebody nobody hears meaning nothing.
+	if participant.UserID == a.store.SelfID() {
+		marks.SelfMuted = a.muted
+		marks.SelfDeafened = a.deafened
+		marks.Silenced = false
+	}
+
+	return marks
+}
+
+// refreshVoiceMarks re-marks the rows drawing one user, for a change that does
+// not rebuild the sidebar: their own mute inside the call, this account's
+// switches, or their volume being moved here. The participant is re-read from
+// the store, a hold being the membership's rather than the row's.
+func (a *App) refreshVoiceMarks(userID string) {
+	if userID == "" {
+		return
+	}
+
+	for row := range a.voiceRows() {
+		if row.UserID() != userID {
+			continue
+		}
+
+		row.SetMarks(a.voiceMarks(a.voiceParticipantOf(row.ChannelID(), userID)))
+	}
+}
+
+// voiceParticipantOf finds one participant in a channel's call. A miss answers
+// with the ID alone, which draws no hold: somebody who has just left is somebody
+// with nothing held against them.
+func (a *App) voiceParticipantOf(channelID, userID string) domain.VoiceParticipant {
+	for _, participant := range a.store.VoiceParticipants(channelID) {
+		if participant.UserID == userID {
+			return participant
+		}
+	}
+
+	return domain.VoiceParticipant{UserID: userID}
+}
+
+// refreshVoiceMarksAll re-marks every mounted row, for a change that moved all
+// of them at once: a call ending, which retires everything the media session was
+// the only source of.
+//
+// One snapshot per channel rather than one per row: voiceParticipantOf resolves
+// and sorts a whole call to answer about one person, and the rows here are
+// exactly the people in it — so asking per row is that walk once for every
+// participant. A channel absent from the snapshot answers as voiceParticipantOf
+// does, with the ID alone.
+func (a *App) refreshVoiceMarksAll() {
+	calls := make(map[string]map[string]domain.VoiceParticipant)
+
+	for row := range a.voiceRows() {
+		channelID, userID := row.ChannelID(), row.UserID()
+
+		people, ok := calls[channelID]
+		if !ok {
+			participants := a.store.VoiceParticipants(channelID)
+
+			people = make(map[string]domain.VoiceParticipant, len(participants))
+			for _, participant := range participants {
+				people[participant.UserID] = participant
+			}
+			calls[channelID] = people
+		}
+
+		participant, ok := people[userID]
+		if !ok {
+			participant = domain.VoiceParticipant{UserID: userID}
+		}
+
+		row.SetMarks(a.voiceMarks(participant))
+	}
+}
+
+// refreshSelfVoiceMarks re-marks this account's own row wherever it is drawn,
+// which is what a mute or a deafen changes besides the island. A no-op with
+// nothing on screen, which is the usual case: the row exists only while the
+// server holding that call is the open one.
+func (a *App) refreshSelfVoiceMarks() {
+	a.refreshVoiceMarks(a.store.SelfID())
 }
 
 /* The participant menu */
@@ -733,11 +912,17 @@ func (a *App) refreshSpeakingAll() {
 // Not on the profile card — every action there closes the card first, so a slider
 // would be dragged out from under the pointer — and not on the member sidebar's
 // own menu, which is the whole membership, most of whom are not in the call.
-func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID string,
-	participant domain.VoiceParticipant) []*fyne.MenuItem {
+func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID,
+	userID string) []*fyne.MenuItem {
 
-	userID := participant.UserID
-	items := []*fyne.MenuItem{a.userVolumeItem(anchor, participant)}
+	var items []*fyne.MenuItem
+
+	// Not on our own row: this account is not one of the voices this client
+	// mixes, so a volume for it would be a slider that moves nothing. Every other
+	// item here is already refused for the same person by memberVoiceItems.
+	if userID != a.store.SelfID() {
+		items = append(items, a.userVolumeItem(anchor, channelID, userID))
+	}
 
 	channel, ok := a.store.Channel(channelID)
 	if !ok || channel.ServerID == "" {
@@ -745,7 +930,9 @@ func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID string,
 	}
 
 	if moderation := a.memberVoiceItems(channel.ServerID, userID); len(moderation) > 0 {
-		items = append(items, fyne.NewMenuItemSeparator())
+		if len(items) > 0 {
+			items = append(items, fyne.NewMenuItemSeparator())
+		}
 		items = append(items, moderation...)
 	}
 
@@ -759,11 +946,9 @@ func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID string,
 // fyne.MenuItem, so a menu on its own can offer only the levels somebody thought
 // of. Fyne dismisses the menu before running the action, so nothing is left over
 // the card.
-func (a *App) userVolumeItem(anchor fyne.CanvasObject,
-	participant domain.VoiceParticipant) *fyne.MenuItem {
-
+func (a *App) userVolumeItem(anchor fyne.CanvasObject, channelID, userID string) *fyne.MenuItem {
 	return fyne.NewMenuItemWithIcon("Volume", fynetheme.VolumeUpIcon(),
-		func() { a.showUserVolume(anchor, participant) })
+		func() { a.showUserVolume(anchor, channelID, userID) })
 }
 
 // showUserVolume hangs the volume card beside the row it was opened from. Whole
@@ -775,8 +960,7 @@ func (a *App) userVolumeItem(anchor fyne.CanvasObject,
 // The level is written back as it moves: the sink holds it for as long as the
 // client runs, and config for longer. A voice too quiet is usually the room and
 // not the person, but the room is the same one tomorrow.
-func (a *App) showUserVolume(anchor fyne.CanvasObject, participant domain.VoiceParticipant) {
-	userID := participant.UserID
+func (a *App) showUserVolume(anchor fyne.CanvasObject, channelID, userID string) {
 	current := audio.DecibelsFromGain(a.sounds.Sink().Gain(userID), config.VoiceGainOffDB)
 
 	// Unity in the middle: the range is -40 to +20, so the level everybody else is
@@ -784,7 +968,7 @@ func (a *App) showUserVolume(anchor fyne.CanvasObject, participant domain.VoiceP
 	unity := 0.0
 
 	card := ui.NewSliderCard(ui.SliderCard{
-		Title:   participant.Name,
+		Title:   a.voiceParticipantOf(channelID, userID).Name,
 		Icon:    assets.HeadphonesIcon,
 		Low:     config.VoiceGainOffDB,
 		High:    config.VoiceGainMaxDB,
@@ -797,6 +981,10 @@ func (a *App) showUserVolume(anchor fyne.CanvasObject, participant domain.VoiceP
 
 			a.sounds.Sink().SetGain(userID, float64(audio.GainFromDB(level, config.VoiceGainOffDB)))
 			config.SetUserGain(userID, level)
+
+			// The bottom of the range is silence, which the row says so with a mark:
+			// a person nobody can hear and nothing saying why is a bug report.
+			a.refreshVoiceMarks(userID)
 		},
 	})
 
@@ -911,7 +1099,7 @@ const meterInterval = 60 * time.Millisecond
 //
 // A monitor already running is stopped first, so a second section change cannot
 // leave one behind.
-func (a *App) startInputMonitor(report func(level float32)) {
+func (a *App) startInputMonitor(report func(m ui.InputMeter)) {
 	a.stopInputMonitor()
 
 	capture, owned := a.capture, false
@@ -928,13 +1116,7 @@ func (a *App) startInputMonitor(report func(level float32)) {
 	if capture == nil {
 		settings := config.Current().Voice
 
-		opened, err := audio.OpenInput(settings.InputDevice, audio.InputConfig{
-			Sensitivity:      settings.Sensitivity,
-			Gain:             audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB),
-			SoftClip:         settings.SoftClip,
-			HighPass:         settings.HighPass,
-			NoiseSuppression: settings.NoiseSuppression,
-		})
+		opened, err := audio.OpenInput(settings.InputDevice, inputConfig(settings))
 		if err != nil {
 			log.Printf("open microphone for the level meter: %v", err)
 			return
@@ -961,6 +1143,10 @@ func (a *App) startInputMonitor(report func(level float32)) {
 		}()
 	}
 
+	// The echo rides whichever capture the bar is now reading, so a call starting
+	// or ending carries the microphone test over with the meter.
+	a.applyInputEcho()
+
 	epoch := a.epoch
 
 	go func() {
@@ -974,13 +1160,22 @@ func (a *App) startInputMonitor(report func(level float32)) {
 			case <-ticker.C:
 			}
 
+			// Both bars come off the one sample, so the loudness and the model's
+			// estimate a reader compares are about the same run of frames — and the
+			// bar and its figure off the one level, for the same reason.
 			level := capture.Level()
+
+			meter := ui.InputMeter{
+				Level:   audio.MeterRatio(level),
+				LevelDB: int(math.Round(audio.LevelDecibels(level))),
+				Speech:  capture.VAD(),
+			}
 
 			a.doOnUI(func() {
 				// The page may have closed, or the session been replaced, between the
 				// sample and the hop back.
 				if a.monitorDone == done && !a.stale(epoch) {
-					report(audio.MeterRatio(level))
+					report(meter)
 				}
 			}, false)
 		}
@@ -1008,6 +1203,14 @@ func (a *App) stopInputMonitor() {
 		a.monitorDone = nil
 	}
 
+	// The echo comes off first, before the capture it is set on goes away — and
+	// the lane with it, so a test carried across a call's start does not play out
+	// the tail of the stream it was reading.
+	if a.monitor != nil {
+		a.monitor.SetEcho(nil)
+	}
+	a.sounds.Sink().StopEcho()
+
 	// Only a stream this opened is closed. The other case is the call's own
 	// microphone, which the call is still using.
 	if a.monitor != nil && a.monitorOwned {
@@ -1020,9 +1223,58 @@ func (a *App) stopInputMonitor() {
 // forgetInputMonitor is stopInputMonitor plus the bar itself, for the page
 // closing rather than the meter moving. restartInputMonitor is what keeps the
 // report between the two, so the page's own exits have to drop it.
+//
+// The microphone test goes with it: it is a mode somebody turned on to listen to,
+// not a setting, and one left running behind a closed page is this account
+// talking to itself for the rest of the session.
 func (a *App) forgetInputMonitor() {
+	a.monitorEcho = false
 	a.stopInputMonitor()
 	a.monitorReport = nil
+}
+
+/* The microphone test */
+
+// setInputEcho turns the microphone test on or off — this account's own voice
+// played back through the speakers with the whole capture chain applied, which is
+// the one thing the level bar cannot answer: a bar says a microphone is heard,
+// not what it sounds like once the filters have had it. Call on the UI thread.
+func (a *App) setInputEcho(on bool) {
+	a.monitorEcho = on
+	a.applyInputEcho()
+}
+
+// applyInputEcho points whichever microphone the meter holds at the speakers, or
+// takes the echo off it. Every path that moves the meter between the call's
+// capture and its own ends here, the echo being a property of the reader's
+// intention rather than of the stream.
+func (a *App) applyInputEcho() {
+	sink := a.sounds.Sink()
+
+	if !a.monitorEcho || a.monitor == nil {
+		sink.StopEcho()
+
+		if a.monitor != nil {
+			a.monitor.SetEcho(nil)
+		}
+
+		return
+	}
+
+	// The lane exists before anything writes to it: a write for a user with no
+	// lane is dropped, which is what stops a departed participant being
+	// resurrected and would here simply be silence.
+	sink.StartEcho()
+	a.monitor.SetEcho(sink)
+
+	// The speakers open on the first sound *played*, so a client that has rung
+	// none holds no device and the lane would be filled and never rendered — the
+	// same silence a call joined before anything rang used to be. It waits for the
+	// engine goroutine, hence the worker.
+	a.background(func() error {
+		a.sounds.StartOutput()
+		return nil
+	}, nil)
 }
 
 /* Push-to-talk */
@@ -1111,24 +1363,19 @@ func (a *App) applyVoiceSettings() {
 	a.sounds.SetSoftClip(settings.SoftClip)
 
 	if a.capture != nil {
-		a.capture.SetSensitivity(settings.Sensitivity)
-		a.capture.SetGain(audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB))
-		a.capture.SetSoftClip(settings.SoftClip)
-		a.capture.SetHighPass(settings.HighPass)
-		a.capture.SetNoiseSuppression(settings.NoiseSuppression)
-		a.capture.SetDevice(settings.InputDevice)
+		applyCaptureSettings(a.capture, settings)
 	}
 
 	// A meter on a stream of its own follows the picker too, so the bar shows the
 	// device that was just chosen rather than the one before it.
 	if a.monitor != nil && a.monitorOwned {
-		a.monitor.SetSensitivity(settings.Sensitivity)
-		a.monitor.SetGain(audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB))
-		a.monitor.SetSoftClip(settings.SoftClip)
-		a.monitor.SetHighPass(settings.HighPass)
-		a.monitor.SetNoiseSuppression(settings.NoiseSuppression)
-		a.monitor.SetDevice(settings.InputDevice)
+		applyCaptureSettings(a.monitor, settings)
 	}
+
+	// The ring is drawn by the sidebar rather than by the call, so nothing else
+	// would notice the switch: turned off mid-call it would leave whoever was
+	// talking at that moment ringing for as long as the column stood.
+	a.refreshSpeakingAll()
 
 	// The mode and the key are the poll's, and re-arming is how both are picked up:
 	// it is idempotent and stops whatever was running first.
@@ -1136,6 +1383,21 @@ func (a *App) applyVoiceSettings() {
 		a.call.SetDeepPLC(settings.DeepPLC)
 		a.armPushToTalk()
 	}
+}
+
+// applyCaptureSettings pushes every chain setting onto one open capture, the
+// call's and the meter's alike — inputConfig's mid-call twin, and one function
+// for the same reason: a dial applied to one stream and not the other would
+// read differently in a call than under the bar tuning it.
+func applyCaptureSettings(c *audio.Capture, settings config.Voice) {
+	c.SetGateThreshold(settings.SensitivityDB)
+	c.SetGain(audio.GainFromDB(settings.InputGainDB, config.VoiceGainOffDB))
+	c.SetSoftClip(settings.SoftClip)
+	c.SetHighPass(settings.HighPass)
+	c.SetNoiseSuppression(settings.NoiseSuppression)
+	c.SetSuppressionFloor(audio.SuppressionFloor(settings.NoiseSuppressionDB, config.VoiceSuppressionMaxDB))
+	c.SetVADThreshold(settings.VADThreshold)
+	c.SetDevice(settings.InputDevice)
 }
 
 /* Following a move */

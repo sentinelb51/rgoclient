@@ -125,6 +125,19 @@ type ParticipantChanged struct {
 	Joined bool
 }
 
+// MuteChanged is a participant holding their own microphone, which reaches this
+// end as the room marking their track muted. The gateway carries nothing for
+// it: Revolt's is_publishing says a microphone track *exists*, and a mute leaves
+// it published, so this is the only thing that knows.
+//
+// It is emitted for remote participants only. This end's own is what SetMuted
+// was just told, and a report of it coming back through the room would be the
+// same fact arriving late.
+type MuteChanged struct {
+	UserID string
+	Muted  bool
+}
+
 // ConnectionChanged is the call's own health, for the dock's state line.
 type ConnectionChanged struct {
 	State ConnectionState
@@ -138,6 +151,7 @@ type CallEnded struct {
 
 func (SpeakingChanged) isVoiceEvent()    {}
 func (ParticipantChanged) isVoiceEvent() {}
+func (MuteChanged) isVoiceEvent()        {}
 func (ConnectionChanged) isVoiceEvent()  {}
 func (CallEnded) isVoiceEvent()          {}
 
@@ -223,6 +237,7 @@ type Call struct {
 
 	mu       sync.Mutex
 	speaking map[string]bool  // last reported, so only transitions are emitted
+	held     map[string]bool  // ditto, for a participant's own microphone hold
 	lanes    map[string]*lane // who has an open lane, so a leave closes exactly one
 
 	// lanesGen is bumped inside the same critical section as every write to
@@ -275,6 +290,7 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 		sink:     sink,
 		events:   make(chan Event, eventDepth),
 		speaking: make(map[string]bool),
+		held:     make(map[string]bool),
 		lanes:    make(map[string]*lane),
 		done:     make(chan struct{}),
 	}
@@ -574,4 +590,31 @@ func (c *Call) setSpeaking(userID string, speaking bool) {
 	c.mu.Unlock()
 
 	c.emit(SpeakingChanged{UserID: userID, Speaking: speaking})
+}
+
+// setHeld records a participant's own microphone hold, reporting transitions
+// only. lksdk fires the mute callback off a whole participant update, so the
+// same state can arrive more than once for one change.
+func (c *Call) setHeld(userID string, muted bool) {
+	if userID == "" || userID == c.selfID {
+		return // this end's own mute is what SetMuted was told, not news from the room
+	}
+
+	c.mu.Lock()
+	if c.held[userID] == muted {
+		c.mu.Unlock()
+		return
+	}
+	c.held[userID] = muted
+	c.mu.Unlock()
+
+	c.emit(MuteChanged{UserID: userID, Muted: muted})
+}
+
+// forgetHeld drops what a departed participant was last reported as, so somebody
+// who left muted and came back is not drawn from the old answer.
+func (c *Call) forgetHeld(userID string) {
+	c.mu.Lock()
+	delete(c.held, userID)
+	c.mu.Unlock()
 }

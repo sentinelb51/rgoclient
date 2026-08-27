@@ -200,9 +200,18 @@ type App struct {
 	// snapshot rather than anything cached, kept only while the panel is up.
 	// pinsChannelID is which channel was asked about, so an answer arriving after
 	// the reader moved on is dropped.
+	//
+	// pinsMore is whether the last page filled its limit, so there may be another;
+	// pinsPaging is one out, a second tap on a page in flight being a second
+	// request for the same page. pinsSeq counts the times the list has been asked
+	// for from the start, so a page still in flight when a pin moves lands on
+	// nothing — it belongs to the list that has just been replaced.
 	pins          *ui.PinsDialog
 	pinsChannelID string
 	pinned        []*domain.Message
+	pinsSeq       uint64
+	pinsMore      bool
+	pinsPaging    bool
 
 	/* The mention inbox, see mentions.go */
 
@@ -211,9 +220,14 @@ type App struct {
 	// is a request, and the panel holds no snapshot of its own between them.
 	// mentioned is what those requests answered with, kept while the panel is up so
 	// that dismissing one card redraws the rest without asking again.
-	inbox     *ui.MentionsDialog
-	inboxSeq  uint64
-	mentioned []*domain.Message
+	//
+	// inboxMore and inboxPaging are the pins panel's two, for a set held here rather
+	// than a route's own ceiling.
+	inbox       *ui.MentionsDialog
+	inboxSeq    uint64
+	mentioned   []*domain.Message
+	inboxMore   bool
+	inboxPaging bool
 
 	/* Channel search, see search.go */
 
@@ -222,15 +236,24 @@ type App struct {
 	// drawn under a newer. searchChannelID is what pins' own is, for the same
 	// reason.
 	//
-	// searchFound is that answer, held while the island is up so a filter chip
-	// narrows what is already here rather than asking again; searchAnswered tells
-	// "nothing came back" from "nothing has been asked yet", which an empty slice
-	// cannot.
+	// searchFound is that answer — every page of it — held while the island is up so
+	// a filter chip narrows what is already here rather than asking again;
+	// searchAnswered tells "nothing came back" from "nothing has been asked yet",
+	// which an empty slice cannot.
+	//
+	// searchMore is whether another page is worth offering and searchPaging whether
+	// one is already out. Both die with the request they belong to, a new query
+	// being a fresh answer to page through — and searchSeq is what kills a page
+	// still in flight when that happens, the same query asked twice being
+	// indistinguishable to SameRequest.
 	search          *ui.SearchDialog
 	searchChannelID string
 	searchQuery     ui.SearchQuery
 	searchFound     []*domain.Message
+	searchSeq       uint64
 	searchAnswered  bool
+	searchMore      bool
+	searchPaging    bool
 
 	/* Lazy author resolution, see members.go */
 
@@ -298,6 +321,13 @@ type App struct {
 	slowmodeUntil map[string]time.Time // channelID -> when this account may send there again
 	slowmodeTimer *time.Timer          // re-armed a second at a time while one is running
 
+	/* Deleted rows still standing, see messages.go */
+
+	// removing is the deletions the column has been told about and is holding the
+	// rows for, with the wake that takes them out together. One batch rather than
+	// one per channel: only the open channel has rows to hold.
+	removing *removeHold
+
 	/* Typing indicators, see typing.go */
 
 	// typing is who is composing where and when to stop saying so. Every channel
@@ -360,16 +390,29 @@ type App struct {
 	speaking        map[string]bool
 	muted, deafened bool
 
-	// monitor is what the settings page's level meter reads. It is the call's own
-	// capture where there is a call — one device, one stream, which is the only
-	// thing an exclusive-mode backend will grant — and a capture of its own
+	// callMuted is who in the running call is holding their own microphone, which
+	// only somebody in the same call can see — the gateway carries nothing for it.
+	// Kept here for the same reason speaking is: a rebuilt row knows nothing of
+	// what the media session reported before it existed.
+	callMuted map[string]bool
+
+	// monitor is what the settings page's diagnostic bars read. It is the call's
+	// own capture where there is a call — one device, one stream, which is the
+	// only thing an exclusive-mode backend will grant — and a capture of its own
 	// otherwise; monitorOwned is which. Closing monitorDone ends the sampler, and
-	// monitorReport is the bar it feeds, kept so the meter can be moved between
-	// the two when a call starts or ends. All four are zero when nothing is open.
+	// monitorReport is the pair of bars it feeds, kept so the meter can be moved
+	// between the two when a call starts or ends. All four are zero when nothing
+	// is open.
 	monitor       *audio.Capture
 	monitorOwned  bool
 	monitorDone   chan struct{}
-	monitorReport func(level float32)
+	monitorReport func(m ui.InputMeter)
+
+	// monitorEcho is whether the microphone test is on: the same microphone played
+	// back through the speakers. It rides the capture rather than being one, so it
+	// is kept here beside monitorReport and re-applied whenever the meter moves
+	// between the call's stream and its own.
+	monitorEcho bool
 
 	// pushDone stops the push-to-talk key poll. Non-nil only while a call is up in
 	// that mode.
@@ -509,7 +552,7 @@ func New(fyneApp fyne.App, info Info) *App {
 // Run shows the login window, starts the event pump, and enters the Fyne event
 // loop.
 func (a *App) Run() {
-	applyPacing()
+	a.applyPacing()
 	applyAffinity()
 
 	go a.pumpEvents()
@@ -775,6 +818,8 @@ func deletePrompt(message *domain.Message) string {
 
 // deleteMessage deletes without waiting: the message leaves the view through the
 // MessageDeleted event, so a refused delete leaves it where it is and says so.
+// The row is held marked for a moment on the way out — see holdRemoval — which
+// is the column's business and changes nothing about when the request goes.
 func (a *App) deleteMessage(message *domain.Message) {
 	a.background(
 		func() error { return a.client.DeleteMessage(message.ChannelID, message.ID) },

@@ -60,11 +60,11 @@ type Capture struct {
 	// flat. Read once per frame, outside the loop it decides.
 	soft atomic.Bool
 
-	// gate is Read's own, like the rest of the chain. A sensitivity change arrives
+	// gate is Read's own, like the rest of the chain. A threshold change arrives
 	// as a number here and is applied by Read, so nothing outside touches a filter
 	// that a Read may be inside of.
-	gate        *noiseGate
-	sensitivity atomic.Int64
+	gate      *noiseGate
+	threshold atomic.Int64 // dBFS
 
 	// hp and ns are the other two filtering stages, always in the chain and
 	// bypassed rather than absent, so either setting can move mid-call the way
@@ -73,6 +73,18 @@ type Capture struct {
 	ns       *noiseSuppressor
 	highpass atomic.Bool
 	suppress atomic.Bool
+
+	// suppFloor is the suppression strength as the gain floor it maps to
+	// (float32 bits), and vadThreshold the gate's speech veto, 0-100. Both land
+	// here and are applied by Read, like the sensitivity.
+	suppFloor    atomic.Uint32
+	vadThreshold atomic.Int64
+
+	// frameTimer paces the silent-device fallback in Read. One reused timer
+	// rather than a time.After per wait: Read waits once or twice every frame,
+	// and a fresh timer each pass was the last per-frame allocation on the
+	// capture path.
+	frameTimer *time.Timer
 
 	// pre is the gain, and holds the level the meter reads. It carries its own
 	// atomics rather than being set through Read, having nothing a frame boundary
@@ -89,6 +101,15 @@ type Capture struct {
 	// signal switched to and from zero in one sample clicks.
 	ramp float32
 
+	// echo is where Read additionally writes the frame it has just answered with,
+	// for the settings page's microphone test. Nil is off, which is what every
+	// frame of an ordinary call costs: one atomic load.
+	//
+	// It is filled from inside Read rather than by a reader of its own because
+	// Read has exactly one caller — during a call that is the publisher — so a
+	// test tapping the microphone any other way could not run mid-call at all.
+	echo atomic.Pointer[Sink]
+
 	closeOnce sync.Once
 	closed    chan struct{}
 }
@@ -98,8 +119,10 @@ type Capture struct {
 // opened as — except Gain, whose zero is silence rather than unity and which
 // therefore has to be set.
 type InputConfig struct {
-	// Sensitivity is the gate's threshold, 0-100.
-	Sensitivity int
+	// GateThresholdDB is where the gate opens, in dBFS. The zero value is out of
+	// the range this package acts on and is clamped to the loudest end, so it is
+	// the second field after Gain that has to be set rather than left.
+	GateThresholdDB int
 
 	// Gain scales the signal in front of the gate, 0 to maxGain: it is what the
 	// gate then measures, so it is also what decides whether a quiet microphone
@@ -121,6 +144,17 @@ type InputConfig struct {
 	// hiss, fans, keyboard — where the gate can only silence the frames between
 	// words.
 	NoiseSuppression bool
+
+	// SuppressionFloor caps how deep that suppression cuts, as the linear gain
+	// floor audio.SuppressionFloor maps a strength in decibels to. The zero
+	// value is full suppression, which is what the stage always did.
+	SuppressionFloor float32
+
+	// VADThreshold is the gate's speech veto, 0-100: the suppressor's model must
+	// be at least this sure a frame holds speech before loudness may open the
+	// gate. 0 — the zero value — leaves the gate to loudness alone, and the veto
+	// only runs while NoiseSuppression does, that being what computes it.
+	VADThreshold int
 
 	// PushToTalk hands the decision to SetTransmitting instead of the gate.
 	PushToTalk bool
@@ -158,22 +192,28 @@ func OpenInput(id string, cfg InputConfig) (*Capture, error) {
 		revive: make(chan struct{}, 1),
 		wake:   make(chan struct{}, 1),
 		scrap:  make([]float32, FrameSamples),
-		gate:   newNoiseGate(cfg.Sensitivity),
+		gate:   newNoiseGate(cfg.GateThresholdDB),
 		hp:     newHighPass(90),
-		ns:     &noiseSuppressor{},
+		ns:     newNoiseSuppressor(),
 		pre:    newPreamp(cfg.Gain),
 		closed: make(chan struct{}),
 	}
-	c.sensitivity.Store(int64(cfg.Sensitivity))
+	c.threshold.Store(int64(cfg.GateThresholdDB))
 	c.push.Store(cfg.PushToTalk)
 	c.highpass.Store(cfg.HighPass)
 	c.suppress.Store(cfg.NoiseSuppression)
+	c.suppFloor.Store(floatBits(cfg.SuppressionFloor))
+	c.vadThreshold.Store(int64(cfg.VADThreshold))
 	c.soft.Store(cfg.SoftClip)
 
 	// The gain is inside the chain and in front of the gate: the gate's threshold
 	// is then compared against the signal that is actually sent, and RNNoise ahead
 	// of it still sees the level the microphone delivered.
 	c.chain = []Processor{c.hp, c.ns, c.pre, c.gate}
+
+	// The gate's speech veto reads the suppressor's estimate, which the chain
+	// order above has already computed by the time the gate runs.
+	c.gate.vad = c.ns
 
 	if err := c.startDevice(id); err != nil {
 		return nil, err
@@ -434,11 +474,19 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 			break
 		}
 
+		// Reset flushes a stale expiry since Go 1.23, so no drain dance — and the
+		// timer is Read's own, Read having exactly one caller at a time.
+		if c.frameTimer == nil {
+			c.frameTimer = time.NewTimer(frameTimeout)
+		} else {
+			c.frameTimer.Reset(frameTimeout)
+		}
+
 		select {
 		case <-c.wake:
 		case <-c.closed:
 			return 0, ErrCaptureClosed
-		case <-time.After(frameTimeout):
+		case <-c.frameTimer.C:
 			// The device has gone quiet without saying so. Answering with silence
 			// keeps the caller's cadence rather than stalling its encoder.
 			clear(pcm[:FrameSamples])
@@ -449,11 +497,20 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 	}
 
 	push := c.push.Load()
+	suppress := c.suppress.Load()
 
 	c.hp.SetBypass(!c.highpass.Load())
-	c.ns.SetEnabled(c.suppress.Load())
-	c.gate.SetSensitivity(int(c.sensitivity.Load()))
+	c.ns.SetEnabled(suppress)
+	c.ns.SetFloor(bitsFloat(c.suppFloor.Load()))
+	c.gate.SetThreshold(int(c.threshold.Load()))
 	c.gate.SetBypass(push)
+
+	// The veto is armed only while the suppressor computes the estimate it reads.
+	vad := 0
+	if suppress {
+		vad = int(c.vadThreshold.Load())
+	}
+	c.gate.SetVADThreshold(vad)
 
 	frame := c.scrap
 	c.pcm.PopAll(frame)
@@ -477,16 +534,35 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 		for i, sample := range frame {
 			pcm[i] = floatToSample(softClip(sample))
 		}
-
-		return FrameSamples, nil
+	} else {
+		for i, sample := range frame {
+			pcm[i] = floatToSample(sample)
+		}
 	}
 
-	for i, sample := range frame {
-		pcm[i] = floatToSample(sample)
-	}
+	c.echoFrame(pcm[:FrameSamples])
 
 	return FrameSamples, nil
 }
+
+// echoFrame hands the finished frame to the microphone test. The lane is fed at
+// the microphone's own rate and drained at the speakers', so a long test on two
+// devices whose clocks differ drifts — which the lane's own backlog cap answers,
+// exactly as it does for a participant whose clock is somebody else's.
+func (c *Capture) echoFrame(pcm []int16) {
+	if sink := c.echo.Load(); sink != nil {
+		sink.Write(echoLane, pcm)
+	}
+}
+
+// SetEcho plays what Read answers with back through the speakers — the settings
+// page's microphone test — or stops it with a nil sink. The frame handed over is
+// the one the call would send, so the whole chain is in it: the filters, the
+// gate, the gain and the soft clipping.
+//
+// Sink.StartEcho has to have opened the lane, and Sink.StopEcho is what drops
+// what is left in it.
+func (c *Capture) SetEcho(sink *Sink) { c.echo.Store(sink) }
 
 // applyPush is the push-to-talk gate: the key decides, and the frame is faded
 // rather than switched so releasing it does not click.
@@ -532,6 +608,12 @@ func (c *Capture) Voiced() bool { return c.voiced.Load() }
 // and cheap enough to poll.
 func (c *Capture) Level() float32 { return c.pre.Level() }
 
+// VAD is the noise suppressor's own estimate that the last frame held speech,
+// 0-1, for the settings meter drawing it beside the gate's veto — and negative
+// where there is no estimate to give, the model running only while suppression
+// does. Safe from any goroutine and cheap enough to poll.
+func (c *Capture) VAD() float32 { return c.ns.VAD() }
+
 // SetGain scales the captured signal, 0 to maxGain. Applied by the preamp on the
 // next frame it processes, mid-call included.
 func (c *Capture) SetGain(gain float32) { c.pre.SetGain(gain) }
@@ -540,10 +622,10 @@ func (c *Capture) SetGain(gain float32) { c.pre.SetGain(gain) }
 // flat. Applied by Read, like the sensitivity.
 func (c *Capture) SetSoftClip(on bool) { c.soft.Store(on) }
 
-// SetSensitivity moves the gate's threshold, 0-100. It records the number and
-// leaves the filter alone: Read applies it, so a settings change cannot land in
-// the middle of a frame being gated.
-func (c *Capture) SetSensitivity(sensitivity int) { c.sensitivity.Store(int64(sensitivity)) }
+// SetGateThreshold moves where the gate opens, in dBFS. It records the number
+// and leaves the filter alone: Read applies it, so a settings change cannot land
+// in the middle of a frame being gated.
+func (c *Capture) SetGateThreshold(db int) { c.threshold.Store(int64(db)) }
 
 // SetHighPass turns the rumble filter on or off, mid-call included. Applied by
 // Read, like the sensitivity.
@@ -552,6 +634,14 @@ func (c *Capture) SetHighPass(on bool) { c.highpass.Store(on) }
 // SetNoiseSuppression turns RNNoise on or off, mid-call included. Applied by
 // Read, like the sensitivity.
 func (c *Capture) SetNoiseSuppression(on bool) { c.suppress.Store(on) }
+
+// SetSuppressionFloor caps how deep the suppression cuts — the linear floor
+// SuppressionFloor maps a strength in decibels to. Applied by Read.
+func (c *Capture) SetSuppressionFloor(floor float32) { c.suppFloor.Store(floatBits(floor)) }
+
+// SetVADThreshold moves the gate's speech veto, 0-100, 0 off. Applied by Read,
+// and only while noise suppression runs — the model is what computes the answer.
+func (c *Capture) SetVADThreshold(percent int) { c.vadThreshold.Store(int64(percent)) }
 
 // Close stops the microphone. Safe from any goroutine, safe to call twice, and
 // safe while a Read is waiting — that Read answers ErrCaptureClosed.

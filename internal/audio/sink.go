@@ -49,6 +49,24 @@ func (s *Sink) Write(userID string, pcm []int16) {
 // Open can create is a lane no late write can resurrect.
 func (s *Sink) Open(userID string) { s.lane(userID) }
 
+// echoLane is what the microphone test's own lane is filed under. Not a ULID, so
+// it can never be somebody's, and unexported so the identifier never leaves this
+// package — StartEcho and StopEcho are the whole of what a caller needs.
+const echoLane = "\x00echo"
+
+// StartEcho opens the lane the microphone test plays back through: this account's
+// own voice, mixed by the same path a participant's is. That is the point of it
+// being a lane at all — what is heard is what a call would send, the call volume
+// and the soft clipping included, rather than a second rendering that could
+// disagree with the first.
+//
+// Capture.SetEcho is what fills it. Safe from any goroutine.
+func (s *Sink) StartEcho() { s.Open(echoLane) }
+
+// StopEcho closes it, dropping whatever it had buffered. Safe with nothing
+// running, and safe to call twice.
+func (s *Sink) StopEcho() { s.Remove(echoLane) }
+
 // Wake fires when the speakers have rendered a period with a lane open. It is
 // the whole clock of the playout path: whoever writes a lane waits on this and
 // tops every lane back up to what Want reports, so audio is decoded at the rate
@@ -142,14 +160,21 @@ func (s *Sink) Remove(userID string) {
 
 // Reset closes every lane. This is hanging up: the call is over and nothing
 // buffered for it should still be heard.
+//
+// The microphone test's lane is not a call's and survives one, or a test running
+// while a call ended would go silent with its switch still on.
 func (s *Sink) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	for _, index := range s.byOne {
+	for id, index := range s.byOne {
+		if id == echoLane {
+			continue
+		}
+
 		s.release(index)
+		delete(s.byOne, id)
 	}
-	clear(s.byOne)
 }
 
 // release retires one lane. active goes false first, so the callback has stopped

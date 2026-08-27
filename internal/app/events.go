@@ -130,68 +130,124 @@ func (a *App) flushRefresh() {
 	}
 }
 
+// maxEventBatch bounds one trip to the UI thread. The stream is 64 deep and a
+// drain that kept taking whatever a busy gateway produced meanwhile would hand
+// the UI thread an unbounded run of handlers in one go — the cap is what keeps a
+// batch a burst rather than a backlog.
+const maxEventBatch = 64
+
 // pumpEvents drains the client's event stream for the life of the process. It is
 // started once, before the first login, so no event can arrive before there is
 // somebody to read it — the stream is buffered but not unbounded.
+//
+// It hops onto the UI thread once per *burst*, not once per event: whatever the
+// gateway has already produced is taken in one go and dispatched in arrival
+// order inside a single hop. Each hop costs a queue entry and a wake of the
+// driver's loop — which on Windows is a cgo PostMessage and a whole loop pass —
+// and Revolt sends bursts as a matter of course: a rank reorder is an event per
+// role, presence on a large server is continuous. The handlers behind them
+// already coalesce their *work* through queueRefresh; this coalesces the trip.
+//
+// The hop waits, which is what lets the batch buffer be reused: the UI thread is
+// finished with it before the next drain starts. It is also the backpressure —
+// the pump gathering while the UI thread works is what makes the next batch
+// bigger rather than the queue longer.
 func (a *App) pumpEvents() {
-	for event := range a.client.Events() {
-		a.dispatch(event)
+	events := a.client.Events()
+	batch := make([]client.Event, 0, maxEventBatch)
+
+	for first := range events {
+		batch = gather(batch[:0], first, events, maxEventBatch)
+
+		a.doOnUI(func() {
+			for _, event := range batch {
+				a.dispatch(event)
+			}
+		}, true)
 	}
 }
 
-// dispatch hands one event to its handler on the UI thread. The type switch is
-// exhaustive by construction: client.Event's marker method is unexported, so the
-// set cannot grow without this file failing to compile against it.
+// gather is first plus whatever the channel is already holding, in arrival
+// order, up to max. It **never blocks**: what has not been produced yet belongs
+// to the next batch, not to this one — waiting for it would trade the hop this
+// saves for latency on the events already in hand.
+//
+// Shared by both pumps (see App.pumpCall), which is the whole reason it is a
+// function rather than a loop written twice. A closed channel ends the gather
+// and keeps what was collected: the caller's range over the same channel is what
+// then sees the close, so nothing is dropped on the way out.
+func gather[T any](batch []T, first T, queue <-chan T, max int) []T {
+	batch = append(batch, first)
+
+	for len(batch) < max {
+		select {
+		case next, ok := <-queue:
+			if !ok {
+				return batch
+			}
+			batch = append(batch, next)
+		default:
+			return batch
+		}
+	}
+
+	return batch
+}
+
+// dispatch hands one event to its handler. Called on the UI thread, from the
+// batch pumpEvents hands over. The type switch is exhaustive by construction:
+// client.Event's marker method is unexported, so the set cannot grow without
+// this file failing to compile against it.
 func (a *App) dispatch(event client.Event) {
 	switch e := event.(type) {
 	case client.Ready:
-		a.doOnUI(func() { a.onReady(e) }, true)
+		a.onReady(e)
 	case client.Disconnected:
-		a.doOnUI(func() { a.onDisconnected(e) }, true)
+		a.onDisconnected(e)
 	case client.SessionsChanged:
-		a.doOnUI(a.onSessionsChanged, false)
+		a.onSessionsChanged()
 	case client.MessageCreated:
-		a.doOnUI(func() { a.onMessageCreated(e) }, false)
+		a.onMessageCreated(e)
 	case client.MessageUpdated:
-		a.doOnUI(func() { a.onMessageUpdated(e) }, false)
+		a.onMessageUpdated(e)
 	case client.MessageDeleted:
-		a.doOnUI(func() { a.removeMessages(e.ChannelID, e.MessageIDs) }, false)
+		a.removeMessages(e.ChannelID, e.MessageIDs)
 	case client.ServerJoined:
-		a.doOnUI(func() { a.onServerJoined(e) }, false)
+		a.onServerJoined(e)
 	case client.ServerLeft:
-		a.doOnUI(func() { a.onServerLeft(e) }, false)
+		a.onServerLeft(e)
 	case client.ServerUpdated:
-		a.doOnUI(func() { a.onServerUpdated(e) }, false)
+		a.onServerUpdated(e)
 	case client.RolesChanged:
-		a.doOnUI(func() { a.onRolesChanged(e) }, false)
+		a.onRolesChanged(e)
 	case client.EmojisChanged:
-		a.doOnUI(a.onEmojisChanged, false)
+		a.onEmojisChanged()
 	case client.ChannelCreated:
-		a.doOnUI(func() { a.onChannelCreated(e) }, false)
+		a.onChannelCreated(e)
 	case client.ChannelUpdated:
-		a.doOnUI(func() { a.onChannelUpdated(e) }, false)
+		a.onChannelUpdated(e)
 	case client.ChannelClosed:
-		a.doOnUI(func() { a.onChannelClosed(e) }, false)
+		a.onChannelClosed(e)
 	case client.ChannelRead:
-		a.doOnUI(func() { a.onChannelRead(e) }, false)
+		a.onChannelRead(e)
 	case client.MembersChanged:
-		a.doOnUI(func() { a.onMembersChanged(e) }, false)
+		a.onMembersChanged(e)
 	case client.MemberUpdated:
-		a.doOnUI(func() { a.onMemberUpdated(e) }, false)
+		a.onMemberUpdated(e)
 	case client.RecipientsChanged:
-		a.doOnUI(func() { a.onRecipientsChanged(e) }, false)
+		a.onRecipientsChanged(e)
 	case client.UserRemoved:
-		a.doOnUI(func() { a.onUserRemoved(e) }, false)
+		a.onUserRemoved(e)
 	case client.UserUpdated:
-		a.doOnUI(func() { a.onUserUpdated(e) }, false)
+		a.onUserUpdated(e)
 	case client.RelationshipChanged:
-		a.doOnUI(func() { a.onRelationshipChanged(e) }, false)
+		a.onRelationshipChanged(e)
 	case client.PresenceChanged:
-		a.doOnUI(func() { a.onPresenceChanged(e) }, false)
+		a.onPresenceChanged(e)
 	case client.TypingChanged:
-		a.doOnUI(func() { a.onTypingChanged(e) }, false)
+		a.onTypingChanged(e)
 	case client.VoiceChanged:
-		a.doOnUI(func() { a.onVoiceChanged(e) }, false)
+		a.onVoiceChanged(e)
 	}
 }
 
@@ -815,6 +871,15 @@ func (a *App) onMemberUpdated(event client.MemberUpdated) {
 			targets |= refreshChannels
 			a.syncComposer()
 		}
+
+		// A membership is also where a server-wide voice hold lives, and that is
+		// drawn on their row under the voice channel — so a mute somebody else was
+		// given moves the channel column too. Only for a member actually in a call:
+		// this event is every nickname and role change in the open server.
+		if _, inCall := a.voiceChannelOf(event.ServerID, event.UserID); inCall {
+			targets |= refreshChannels
+		}
+
 		a.queueRefresh(targets)
 	}
 

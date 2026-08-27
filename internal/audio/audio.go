@@ -78,6 +78,49 @@ var groups = func() map[string]uint16 {
 	return out
 }()
 
+// The boards the built-in keystrokes can be synthesised from. Like a sound key,
+// one of these is a string in the settings file, so renaming one silently moves
+// whoever chose it back to the default.
+const (
+	ProfileClicky     = "clicky"
+	ProfileTactile    = "tactile"
+	ProfileThocky     = "thocky"
+	ProfileTypewriter = "typewriter"
+
+	// DefaultTypingProfile is what an empty or unrecognised setting resolves to.
+	DefaultTypingProfile = ProfileClicky
+)
+
+// TypingProfile is one board on offer: what the setting stores and what to call
+// it. The caller decides how to list them — this package does not know there is
+// a settings page.
+type TypingProfile struct {
+	Value string
+	Label string
+}
+
+// TypingProfiles is every board, in the order they are worth offering: the two
+// that are ordinary keyboards first, then the two that are a choice.
+func TypingProfiles() []TypingProfile {
+	return []TypingProfile{
+		{ProfileClicky, "Clicky"},
+		{ProfileTactile, "Tactile"},
+		{ProfileThocky, "Thocky"},
+		{ProfileTypewriter, "Typewriter"},
+	}
+}
+
+// ResolveTypingProfile answers with a board that exists. The setting is a string
+// in a file anybody may edit, and a name nothing recognises must not leave the
+// composer silent.
+func ResolveTypingProfile(name string) string {
+	if _, ok := profiles[name]; ok {
+		return name
+	}
+
+	return DefaultTypingProfile
+}
+
 // IsTyping reports whether a key is one the composer fires per keystroke. Those
 // are the ones that have to overlap, that repeat often enough for an identical
 // render to read as a machine gun, and that are worth their own volume.
@@ -139,6 +182,11 @@ type Engine struct {
 	// it was built for, so the stop that closeDevice itself causes is told from
 	// the one the backend causes and does not queue a reopen.
 	generation atomic.Uint64
+
+	// profile is the board a built-in keystroke is synthesised from. An atomic
+	// because Set synthesises on the *caller's* goroutine — deliberately, a board
+	// being two dozen renders — so the engine goroutine is not the one reading it.
+	profile atomic.Pointer[string]
 
 	/* The engine goroutine's own, touched nowhere else */
 
@@ -213,10 +261,11 @@ func (e *Engine) StartOutput() { e.send(request{kind: requestOpen}, true) }
 // queued — so call it from a worker rather than the UI thread.
 //
 // An empty path is the built-in, which is synthesised rather than read, so it
-// cannot fail and needs no file to exist.
+// cannot fail and needs no file to exist. For a keystroke that is whatever board
+// SetTypingProfile last named.
 func (e *Engine) Set(key, path string) error {
 	if path == "" {
-		e.send(request{kind: requestInstall, key: key, sound: builtin(key)}, true)
+		e.send(request{kind: requestInstall, key: key, sound: builtin(key, e.typingProfile())}, true)
 		return nil
 	}
 
@@ -228,6 +277,24 @@ func (e *Engine) Set(key, path string) error {
 	e.send(request{kind: requestInstall, key: key, sound: sound}, true)
 
 	return nil
+}
+
+// SetTypingProfile names the board later built-in keystrokes are synthesised
+// from. It installs nothing on its own — the four typing keys have to be Set
+// again, off the UI thread, and only those still on a built-in: a file the reader
+// chose outranks a board they picked.
+func (e *Engine) SetTypingProfile(name string) {
+	name = ResolveTypingProfile(name)
+	e.profile.Store(&name)
+}
+
+// typingProfile is the board in force, the default until one is named.
+func (e *Engine) typingProfile() string {
+	if name := e.profile.Load(); name != nil {
+		return *name
+	}
+
+	return DefaultTypingProfile
 }
 
 // Play sounds a key at volume — 0 to 1, already carrying whatever the settings

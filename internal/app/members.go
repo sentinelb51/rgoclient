@@ -1051,19 +1051,30 @@ func (a *App) removeTimeout(serverID, userID string) {
 
 // memberVoiceItems is what the member menu offers about somebody's voice: the
 // two server-wide holds and the two ways out of a channel. Each is gated on its
-// own permission **and** on the member actually being in a call — an item that
-// can never do anything is worse than no item, which is the rule
+// own permission, and an item that can never do anything is left out — the rule
 // canTimeoutMember follows.
 //
-// Muting and deafening are caution rather than danger: each is undone by doing
-// the opposite.
+// The two holds **toggle**, because this menu is the only place either is lifted
+// from: an item that could only ever mute somebody already muted is a hold with
+// no way out. Which is also why they are offered to a member who is not in a
+// call but is already held — a hold is the membership's and outlives the call it
+// was given in, so gating on the call alone would strand one until they came
+// back. Both are caution rather than danger: each is undone by doing the
+// opposite.
+//
+// Moving and disconnecting stay gated on the call, having nothing to act on
+// without one.
 func (a *App) memberVoiceItems(serverID, userID string) []*fyne.MenuItem {
 	if serverID == "" || userID == "" || userID == a.store.SelfID() {
 		return nil
 	}
 
+	// A member the store cannot resolve is one nothing is held against, which is
+	// the right default for a menu.
+	member, _ := a.store.Member(serverID, userID)
 	channelID, inCall := a.voiceChannelOf(serverID, userID)
-	if !inCall {
+
+	if !inCall && !member.ServerMuted && !member.ServerDeafened {
 		return nil
 	}
 
@@ -1071,19 +1082,21 @@ func (a *App) memberVoiceItems(serverID, userID string) []*fyne.MenuItem {
 
 	var items []*fyne.MenuItem
 
-	if permissions.Has(domain.PermissionMuteMembers) {
-		items = append(items, fyne.NewMenuItemWithIcon("Server mute",
+	if permissions.Has(domain.PermissionMuteMembers) && (inCall || member.ServerMuted) {
+		items = append(items, fyne.NewMenuItemWithIcon(
+			holdLabel("Server mute", "Remove server mute", member.ServerMuted),
 			ui.CautionMark(assets.MicOffIcon),
-			func() { a.setMemberVoiceMuted(serverID, userID, true) }))
+			func() { a.setMemberVoiceMuted(serverID, userID, !member.ServerMuted) }))
 	}
 
-	if permissions.Has(domain.PermissionDeafenMembers) {
-		items = append(items, fyne.NewMenuItemWithIcon("Server deafen",
+	if permissions.Has(domain.PermissionDeafenMembers) && (inCall || member.ServerDeafened) {
+		items = append(items, fyne.NewMenuItemWithIcon(
+			holdLabel("Server deafen", "Remove server deafen", member.ServerDeafened),
 			ui.CautionMark(assets.HeadphonesOffIcon),
-			func() { a.setMemberVoiceDeafened(serverID, userID, true) }))
+			func() { a.setMemberVoiceDeafened(serverID, userID, !member.ServerDeafened) }))
 	}
 
-	if permissions.Has(domain.PermissionMoveMembers) {
+	if inCall && permissions.Has(domain.PermissionMoveMembers) {
 		if move := a.memberMoveItems(serverID, userID, channelID); move != nil {
 			items = append(items, move)
 		}
@@ -1094,6 +1107,15 @@ func (a *App) memberVoiceItems(serverID, userID string) []*fyne.MenuItem {
 	}
 
 	return items
+}
+
+// holdLabel names a toggle by what it would do, not by what it is about.
+func holdLabel(set, lift string, held bool) string {
+	if held {
+		return lift
+	}
+
+	return set
 }
 
 // voiceChannelOf finds the call a member is in, so the menu can be built around
@@ -1159,20 +1181,28 @@ func (a *App) memberMoveItems(serverID, userID, currentID string) *fyne.MenuItem
 func (a *App) setMemberVoiceMuted(serverID, userID string, muted bool) {
 	name := a.memberName(serverID, userID)
 
+	failure, success := "Could not mute %s.", "%s can no longer speak."
+	if !muted {
+		failure, success = "Could not unmute %s.", "%s may speak again."
+	}
+
 	a.reportAction(
 		func() error { return a.client.SetMemberVoiceMuted(serverID, userID, muted) },
-		"mute member "+userID+" in server "+serverID,
-		"Could not mute %s.", "%s can no longer speak.", name,
+		"mute member "+userID+" in server "+serverID, failure, success, name,
 	)
 }
 
 func (a *App) setMemberVoiceDeafened(serverID, userID string, deafened bool) {
 	name := a.memberName(serverID, userID)
 
+	failure, success := "Could not deafen %s.", "%s can no longer hear the call."
+	if !deafened {
+		failure, success = "Could not undeafen %s.", "%s may hear the call again."
+	}
+
 	a.reportAction(
 		func() error { return a.client.SetMemberVoiceDeafened(serverID, userID, deafened) },
-		"deafen member "+userID+" in server "+serverID,
-		"Could not deafen %s.", "%s can no longer hear the call.", name,
+		"deafen member "+userID+" in server "+serverID, failure, success, name,
 	)
 }
 

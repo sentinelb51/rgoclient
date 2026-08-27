@@ -94,6 +94,13 @@ RNNOISE_EXPORT void rnnoise_destroy(DenoiseState *st);
 RNNOISE_EXPORT float rnnoise_process_frame(DenoiseState *st, float *out, const float *in);
 
 /**
+ * rgoclient addition, not in xiph's API: floor every band gain at gain_floor
+ * (0 = full suppression, the default; 1 = passthrough), which caps how many dB
+ * the denoiser may take out. Takes effect on the next frame.
+ */
+RNNOISE_EXPORT void rnnoise_set_gain_floor(DenoiseState *st, float gain_floor);
+
+/**
  * Load a model from a file
  *
  * It must be deallocated with rnnoise_model_free()

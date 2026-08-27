@@ -1,9 +1,11 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -138,6 +140,65 @@ func TestSaveRoundTrip(t *testing.T) {
 	}
 	if got := settings.Styles.Sizes["MessageAvatarSize"]; got != 24 {
 		t.Errorf("MessageAvatarSize = %v, want 24", got)
+	}
+}
+
+// TestGateThresholdMigrates covers the one change on the gate that nothing would
+// report: a file written while sensitivity was an arbitrary 0-100 has to come
+// back as the decibels that number always meant. Read as decibels instead, a
+// saved 35 clamps to -20 and the microphone never opens — no error, no crash,
+// nothing on screen saying so.
+func TestGateThresholdMigrates(t *testing.T) {
+	for _, c := range []struct {
+		legacy, want int
+	}{
+		{0, VoiceGateQuietestDB},
+		{35, -53}, // the old default, halfway-rounded away from zero
+		{100, VoiceGateLoudestDB},
+	} {
+		path := withHome(t)
+
+		file := []byte(`{"voice":{"sensitivity":` + strconv.Itoa(c.legacy) + `}}`)
+		if err := os.WriteFile(path, file, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := Load(); err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+
+		if got := Current().Voice.SensitivityDB; got != c.want {
+			t.Errorf("sensitivity %d became %d dB, want %d", c.legacy, got, c.want)
+		}
+
+		// And the old key does not survive, or every later load would convert the
+		// new value again from a number nothing is writing any more.
+		if err := Save(); err != nil {
+			t.Fatalf("Save: %v", err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(data, []byte(`"sensitivity"`)) {
+			t.Error("the pre-decibel key was written back")
+		}
+	}
+}
+
+// TestGateThresholdKept is the other half: a file already in decibels is read as
+// it stands, so the migration above cannot fire twice on one setting.
+func TestGateThresholdKept(t *testing.T) {
+	path := withHome(t)
+
+	if err := os.WriteFile(path, []byte(`{"voice":{"sensitivity_db":-44}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := Current().Voice.SensitivityDB; got != -44 {
+		t.Errorf("SensitivityDB = %d, want -44", got)
 	}
 }
 

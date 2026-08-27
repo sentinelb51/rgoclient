@@ -380,6 +380,11 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, roles roleTa
 	out.HasRoles = len(member.Roles) > 0
 	out.Color, out.HoistRoleID = memberRoleInfo(roles, member.Roles)
 
+	// Unset is allowed rather than held: Revolt's default for both is *true*, and
+	// a nil pointer is a membership nobody has ever moderated.
+	out.ServerMuted = member.CanPublish != nil && !*member.CanPublish
+	out.ServerDeafened = member.CanReceive != nil && !*member.CanReceive
+
 	return out
 }
 
@@ -424,6 +429,11 @@ func (s *store) VoiceParticipants(channelID string) []domain.VoiceParticipant {
 			participant.AvatarURL = resolved.AvatarURL
 			participant.Color = resolved.Color
 			participant.Bot = resolved.Bot
+
+			// A hold is the membership's, so it is known here and nowhere else: a
+			// call in a group conversation has no membership and cannot carry one.
+			participant.ServerMuted = resolved.ServerMuted
+			participant.ServerDeafened = resolved.ServerDeafened
 		} else if user := state.User(voice.ID); user != nil {
 			participant.Name = displayName(user)
 			participant.AvatarURL = user.AvatarURL(avatarSize)
@@ -985,6 +995,67 @@ func (s *store) Permissions(channelID string) domain.Permission {
 	return channelPermissions(server, state.Member(server.ID, self.ID), channel, self.ID)
 }
 
+// ServerChannelPermissions resolves what the account may do in every channel of
+// one server, keyed by channel ID. A channel it cannot see is absent rather than
+// zero, which is the same answer Permissions gives for one.
+//
+// Asking Permissions per channel instead re-reads the account, the server and
+// the membership out of State and re-ranks the member's roles — an allocation
+// and a sort — once per channel, for a ranking that is the same for all of them.
+// So the column rebuild takes this and the per-channel cost is two overwrite
+// lookups. Nothing is cached: this is one pass over State, made where a whole
+// server's worth of the answer is wanted at once.
+func (s *store) ServerChannelPermissions(serverID string) map[string]domain.Permission {
+	state := s.state()
+	if state == nil || serverID == "" {
+		return nil
+	}
+
+	self, server := state.Self(), state.Server(serverID)
+	if self == nil || server == nil {
+		return nil
+	}
+
+	permits := make(map[string]domain.Permission, len(server.Channels))
+
+	// The owner may do everything in all of them, so neither the ranking nor the
+	// overwrites are worth reading.
+	if server.Owner == self.ID {
+		for _, channelID := range server.Channels {
+			permits[channelID] = permissionGrantAll
+		}
+
+		return permits
+	}
+
+	member := state.Member(serverID, self.ID)
+	roles := rankRoles(server, member)
+
+	for _, channelID := range server.Channels {
+		channel := state.Channel(channelID)
+		if channel == nil {
+			continue
+		}
+
+		// A voice channel is a TextChannel carrying a voice object, so this covers
+		// both and anything else in the list is not a server channel at all —
+		// answered the long way rather than with the arithmetic for a kind it is not
+		// about, so a key here always agrees with Permissions.
+		held := domain.Permission(0)
+		if channel.ChannelType == revoltgo.ChannelTypeText {
+			held = channelPermissionsWith(server, member, roles, channel)
+		} else {
+			held = s.Permissions(channelID)
+		}
+
+		if held != 0 {
+			permits[channelID] = held
+		}
+	}
+
+	return permits
+}
+
 // conversationPermissions resolves what the account may do in a channel of its
 // own: saved notes, a direct message, a group. other is how the account stands
 // with the DM's opposite number — nobody else's relationship comes into it.
@@ -1064,7 +1135,22 @@ func channelPermissions(server *revoltgo.Server, member *revoltgo.ServerMember, 
 
 	// One ranking of the member's roles serves both passes: the server's grant, and
 	// this channel's overwrites keyed by the same roles in the same order.
-	roles := rankRoles(server, member)
+	return channelPermissionsWith(server, member, rankRoles(server, member), channel)
+}
+
+// channelPermissionsWith is the arithmetic alone, for a caller that has already
+// ranked the member's roles and is asking about several channels — the ranking
+// allocates and sorts, and is the same for every channel of one server, where
+// what differs is two overwrite lookups of bit arithmetic. The owner check is
+// the caller's, that answer being the same for every channel too.
+//
+// Order is load-bearing and is Revolt's: the server's default, then the
+// channel's default overwrite, then the member's roles least senior first, then
+// this channel's overwrites for those same roles, then the timeout clamp last so
+// no overwrite can hand back what a timeout took.
+func channelPermissionsWith(server *revoltgo.Server, member *revoltgo.ServerMember,
+	roles []rankedRole, channel *revoltgo.Channel) domain.Permission {
+
 	permissions := domain.Permission(server.DefaultPermissions)
 
 	if channel.DefaultPermissions != nil {

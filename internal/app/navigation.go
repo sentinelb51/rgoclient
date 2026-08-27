@@ -228,9 +228,18 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 
 	a.refreshChannelList()
 
+	// Under the scroll rather than in it: the rows keep every click that lands on
+	// one, and what is left over — the strip below the last row — is what a server's
+	// structure is added to from here.
+	backdrop := ui.NewChannelBackdrop()
+	backdrop.Menu = a.channelSpaceMenu
+
+	// Outside the side padding as well as under the scroll: a gutter that ignored
+	// the click would be a dead strip down both edges of the column.
 	pad := theme.Sizes.ChannelSidebarPadding
-	scroll := container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
-		container.NewVScroll(a.channelList))
+	scroll := container.NewStack(backdrop,
+		container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad),
+			container.NewVScroll(a.channelList)))
 
 	// The name takes what the buttons leave, so a long one shortens rather than
 	// pushing them out of the column. The row charges nothing for the hidden one,
@@ -291,7 +300,7 @@ func (a *App) refreshChannelList() {
 		// nothing at all.
 		group := []fyne.CanvasObject{a.friendsRow}
 		saved := a.savedNotesID()
-		if w := a.newChannelRow(saved, animate, held); w != nil {
+		if w := a.newChannelRow(saved, animate, held, nil); w != nil {
 			group = append(group, w)
 		}
 		a.setChannelGroup(group)
@@ -300,7 +309,7 @@ func (a *App) refreshChannelList() {
 			if channelID == saved {
 				continue
 			}
-			if w := a.newChannelRow(channelID, animate, held); w != nil {
+			if w := a.newChannelRow(channelID, animate, held, nil); w != nil {
 				rows = append(rows, w)
 			}
 		}
@@ -328,6 +337,10 @@ func (a *App) refreshChannelList() {
 		}
 	}
 
+	// The whole server's answer, taken once: every row below asks the same
+	// question, and asking it per channel re-ranks this account's roles per row.
+	permits := a.store.ServerChannelPermissions(server.ID)
+
 	var candidates []ui.MentionCandidate
 
 	// Uncategorized channels come first.
@@ -335,7 +348,7 @@ func (a *App) refreshChannelList() {
 		if categorized[channelID] {
 			continue
 		}
-		if w := a.newChannelRow(channelID, animate, held); w != nil {
+		if w := a.newChannelRow(channelID, animate, held, permits); w != nil {
 			candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 			rows = append(rows, w)
 			rows = append(rows, a.callRows(w.Channel)...)
@@ -351,7 +364,7 @@ func (a *App) refreshChannelList() {
 
 		var under []fyne.CanvasObject
 		for _, channelID := range category.Channels {
-			if w := a.newChannelRow(channelID, animate, held); w != nil {
+			if w := a.newChannelRow(channelID, animate, held, permits); w != nil {
 				candidates = append(candidates, ui.NewChannelCandidate(w.Channel))
 				under = append(under, w)
 				under = append(under, a.callRows(w.Channel)...)
@@ -383,10 +396,14 @@ func (a *App) refreshChannelList() {
 // need not be.
 //
 // animate is passed rather than read, as applyChannelState's is and for the same
-// reason: one rebuild reads the setting once for every row it makes.
-func (a *App) newChannelRow(channelID string, animate bool, held map[string]*ui.ChannelWidget) *ui.ChannelWidget {
+// reason: one rebuild reads the setting once for every row it makes. permits is
+// the same idea for the view check: the open server's whole answer, taken once,
+// nil on the home view where every row is a conversation and the check is free.
+func (a *App) newChannelRow(channelID string, animate bool, held map[string]*ui.ChannelWidget,
+	permits map[string]domain.Permission) *ui.ChannelWidget {
+
 	channel, ok := a.store.Channel(channelID)
-	if !ok || !a.canViewChannel(channel) {
+	if !ok || !a.viewable(channel, permits) {
 		return nil
 	}
 
@@ -427,17 +444,21 @@ func (a *App) callRows(channel domain.Channel) []fyne.CanvasObject {
 
 	rows := make([]fyne.CanvasObject, 0, len(participants))
 	for _, participant := range participants {
-		row := ui.NewVoiceParticipantRow(deps, participant)
+		row := ui.NewVoiceParticipantRow(deps, channel.ID, participant)
 
 		// Built when the click arrives rather than captured: what the menu may offer
 		// depends on permissions a role change can move under a standing sidebar.
+		// The *user* is captured and the rest is re-read, so a menu built here can
+		// only ever act on the person whose row was clicked.
 		row.Menu = func() []*fyne.MenuItem {
-			return a.voiceParticipantMenu(row, channel.ID, participant)
+			return a.voiceParticipantMenu(row, channel.ID, participant.UserID)
 		}
 
-		// A rebuilt row is a new object and knows nothing of who was talking when
-		// the old one was dropped.
-		row.SetSpeaking(a.speaking[participant.UserID])
+		// A rebuilt row is a new object and knows nothing of who was talking, who
+		// was holding their microphone or who was turned down when the old one was
+		// dropped.
+		row.SetSpeaking(a.showSpeaking(participant.UserID))
+		row.SetMarks(a.voiceMarks(participant))
 
 		rows = append(rows, row)
 	}
@@ -506,6 +527,30 @@ func (a *App) serverMenu(serverID string) []*fyne.MenuItem {
 	}
 
 	return leadWithMarkRead(items, a.serverUnread(serverID), func() { a.markServerRead(serverID) })
+}
+
+// channelSpaceMenu builds the items the empty part of the channel sidebar offers
+// on right-click: what is added to a *server*, rather than to any one row. The
+// home view has nothing of the kind — a conversation is not made this way — so it
+// answers with none, which ui.ShowContextMenu takes as no menu at all.
+//
+// Both are the server-wide permission Revolt itself checks: a category is the
+// arrangement rather than one channel, and a channel is made in the server.
+func (a *App) channelSpaceMenu() []*fyne.MenuItem {
+	serverID := a.currentServerID
+	if a.homeSelected || serverID == "" {
+		return nil
+	}
+	if !a.store.ServerPermissions(serverID).Has(domain.PermissionManageChannel) {
+		return nil
+	}
+
+	return []*fyne.MenuItem{
+		fyne.NewMenuItemWithIcon("New channel", assets.ActionAddIcon,
+			func() { a.promptCreateChannel(serverID) }),
+		fyne.NewMenuItemWithIcon("New category", fynetheme.FolderNewIcon(),
+			func() { a.promptCreateCategory(serverID) }),
+	}
 }
 
 // leadWithMarkRead puts "Mark as read" at the head of a menu, where the one thing
@@ -754,7 +799,23 @@ func (a *App) firstVisibleChannel(server domain.Server) (string, bool) {
 // Only a server decides it — a conversation is in the user's own list because
 // they are in it, and a closed DM leaves by its Active flag, not a permission.
 func (a *App) canViewChannel(channel domain.Channel) bool {
-	return channel.ServerID == "" || a.store.Permissions(channel.ID).Has(domain.PermissionViewChannel)
+	return a.viewable(channel, nil)
+}
+
+// viewable is canViewChannel answered against a set the caller already holds.
+// permits is one server's whole answer (Store.ServerChannelPermissions) and is
+// nil everywhere but the column rebuild, which asks about every channel at once
+// and would otherwise re-rank the account's roles once per row.
+func (a *App) viewable(channel domain.Channel, permits map[string]domain.Permission) bool {
+	if channel.ServerID == "" {
+		return true
+	}
+
+	if permits != nil {
+		return permits[channel.ID].Has(domain.PermissionViewChannel)
+	}
+
+	return a.store.Permissions(channel.ID).Has(domain.PermissionViewChannel)
 }
 
 // enterServer switches both sidebars to a server without choosing a channel.

@@ -88,21 +88,33 @@ type SettingsHooks struct {
 	// Empty is an instance offering no choice, and the row is left off.
 	VoiceNodes func() []VoiceNode
 
-	// StartInputMonitor opens the microphone and reports its level until
-	// StopInputMonitor. The controller samples — a level arrives off the audio
-	// thread and each repaint is the whole window — so this is called at a rate a
-	// meter can be drawn at rather than at the device's.
+	// StartInputMonitor opens the microphone and reports what it is hearing until
+	// StopInputMonitor. The controller samples — a frame arrives off the audio
+	// thread a hundred times a second and each repaint is the whole window — so
+	// this is called at a rate a meter can be drawn at rather than at the
+	// device's.
+	//
+	// One stream feeds both diagnostic bars, hence one report rather than one
+	// hook each: a second monitor would be a second open of the same device.
 	//
 	// Opening a device is why it must never run during the index pass, and why
 	// stopping it belongs to both showSection and Close.
-	StartInputMonitor func(report func(level float32))
+	StartInputMonitor func(report func(m InputMeter))
 	StopInputMonitor  func()
 
-	// GateRatio is where a sensitivity setting falls on the meter's scale, 0-1.
-	// The meter draws a level and a threshold on one bar and the two have to agree
-	// about decibels; the mapping belongs to the audio package, which ui does not
-	// import, so it crosses as a plain ratio like the level itself.
-	GateRatio func(sensitivity int) float32
+	// SetInputEcho plays that same microphone back through the speakers, the whole
+	// capture chain applied — the microphone test. It rides the stream
+	// StartInputMonitor opened, so it is stubbed out for the index pass with the
+	// rest of them, and StopInputMonitor is what takes it down: the switch is a
+	// mode somebody turned on to listen to, and is never restored on the way back.
+	SetInputEcho func(on bool)
+
+	// GateRatio is where a threshold in dBFS falls on the meter's scale, 0-1. The
+	// meter draws a level and a threshold on one bar and the two have to agree
+	// about where the bar's floor and ceiling are; that scale belongs to the audio
+	// package, which ui does not import, so it crosses as a plain ratio like the
+	// level itself.
+	GateRatio func(db int) float32
 
 	/* Account */
 
@@ -195,6 +207,11 @@ type SettingsHooks struct {
 
 	// PlaySound sounds one whatever its own switch says, for the row's button.
 	PlaySound func(key string)
+
+	// TypingProfiles is the boards the keystrokes can be built from, in the order
+	// to offer them. A plain read of a compiled-in list, so the index pass may call
+	// it; picking one plays the result, the same way choosing a file does.
+	TypingProfiles func() []TypingProfile
 
 	/* Cache */
 

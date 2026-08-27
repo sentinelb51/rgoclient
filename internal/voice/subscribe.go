@@ -30,6 +30,7 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 
 		OnParticipantDisconnected: func(p *lksdk.RemoteParticipant) {
 			c.closeLane(p.Identity(), nil)
+			c.forgetHeld(p.Identity())
 			c.emit(ParticipantChanged{UserID: p.Identity(), Joined: false})
 		},
 
@@ -40,6 +41,27 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 		},
 
 		ParticipantCallback: lksdk.ParticipantCallback{
+			// A track arrives with its mute already set, so this is where somebody
+			// who was holding their microphone before we joined is first seen —
+			// the transition callbacks below only ever report a *change*.
+			OnTrackPublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				if pub.Kind() == lksdk.TrackKindAudio {
+					c.setHeld(rp.Identity(), pub.IsMuted())
+				}
+			},
+
+			OnTrackMuted: func(pub lksdk.TrackPublication, p lksdk.Participant) {
+				if pub.Kind() == lksdk.TrackKindAudio {
+					c.setHeld(p.Identity(), true)
+				}
+			},
+
+			OnTrackUnmuted: func(pub lksdk.TrackPublication, p lksdk.Participant) {
+				if pub.Kind() == lksdk.TrackKindAudio {
+					c.setHeld(p.Identity(), false)
+				}
+			},
+
 			OnTrackSubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
 				// Audio only: lksdk subscribes to whatever is published, and a
 				// camera or screen share fed to an Opus decoder would replace the

@@ -145,9 +145,12 @@ func soundOf(key string) (soundEntry, bool) {
 func (a *App) startAlerts() {
 	a.focused.Store(true) // the window is about to be shown; a first ping must not be swallowed
 
+	// The frame rate follows the focus (config.Performance.BackgroundFrameRate),
+	// so the hooks re-apply it. Fyne keeps one callback per hook: anything else
+	// that needs to follow focus joins these closures rather than registering.
 	lifecycle := a.fyne.Lifecycle()
-	lifecycle.SetOnEnteredForeground(func() { a.focused.Store(true) })
-	lifecycle.SetOnExitedForeground(func() { a.focused.Store(false) })
+	lifecycle.SetOnEnteredForeground(func() { a.focused.Store(true); a.applyFrameRate() })
+	lifecycle.SetOnExitedForeground(func() { a.focused.Store(false); a.applyFrameRate() })
 
 	// The mixer's own atomic starts false, and applyVoiceSettings only runs when
 	// something is changed: without this a client that never joins a call and
@@ -155,7 +158,44 @@ func (a *App) startAlerts() {
 	// says. Everything else the mixer holds is set by a join.
 	a.sounds.SetSoftClip(config.Current().Voice.SoftClip)
 
+	// Before loadSounds, not after: the board decides what a built-in keystroke is
+	// synthesised as, so naming it second would install four clicks from the
+	// default and replace them a moment later.
+	a.sounds.SetTypingProfile(config.Current().Notifications.TypingProfile)
+
 	go a.loadSounds()
+}
+
+// applyTypingProfile rebuilds the keystrokes from another board and plays one.
+// Only the four typing sounds, and only those still on a built-in — a file the
+// reader pointed a key at outranks a board they picked, and loadSounds' own
+// fallback covers the file that has since gone away.
+//
+// Off the UI thread: a board is two dozen renders, which is not something to do
+// between two frames.
+func (a *App) applyTypingProfile(name string) {
+	a.sounds.SetTypingProfile(name)
+
+	files := config.Current().Notifications.SoundFiles
+	epoch := a.epoch
+
+	go func() {
+		for _, key := range audio.Keys {
+			if !audio.IsTyping(key) || files[key] != "" {
+				continue
+			}
+
+			if err := a.sounds.Set(key, ""); err != nil {
+				log.Printf("load built-in sound %s: %v", key, err)
+			}
+		}
+
+		a.doOnUI(func() {
+			if !a.stale(epoch) {
+				a.previewSound(audio.KeyPress)
+			}
+		}, false)
+	}()
 }
 
 // loadSounds installs every sound, each from its own file where one is set.
@@ -284,6 +324,20 @@ func (a *App) noteKeystroke(kind ui.Keystroke) {
 // is pointed at is read here rather than held: the page is rebuilt after every
 // change to one, and a copy kept beside the settings is a second thing to keep
 // true.
+// settingsTypingProfiles is the boards on offer, converted at the seam the way a
+// device list is. `ui` does not import `audio`, and what a board is made of is
+// no business of the row that names it.
+func settingsTypingProfiles() []ui.TypingProfile {
+	boards := audio.TypingProfiles()
+
+	profiles := make([]ui.TypingProfile, len(boards))
+	for i, board := range boards {
+		profiles[i] = ui.TypingProfile{Value: board.Value, Label: board.Label}
+	}
+
+	return profiles
+}
+
 func settingsSounds() []ui.SettingsSound {
 	files := config.Current().Notifications.SoundFiles
 

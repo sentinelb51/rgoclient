@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -187,6 +188,22 @@ type Behaviour struct {
 	HistoryPageSize    int `json:"history_page_size"`
 	MessageOverscan    int `json:"message_overscan"`
 
+	// A deleted message's row is marked and left standing for a moment before the
+	// column takes it out, so the conversation does not jump out from under
+	// somebody mid-sentence and a burst of deletions costs one pass rather than
+	// one each. Nothing about the *deletion* waits on this — it has already
+	// happened, here and everywhere else.
+	//
+	// DeletedHoldStepMS widens the hold per row already standing and
+	// DeletedHoldCapMS is the ceiling on that. The hold is measured from the
+	// **first** row of a batch, so the cap bounds how long any one of them stands
+	// rather than a steady trickle pushing the whole set out indefinitely.
+	//
+	// At a DeletedHoldMS of zero a row goes the moment its deletion arrives.
+	DeletedHoldMS     int `json:"deleted_hold_ms"`
+	DeletedHoldStepMS int `json:"deleted_hold_step_ms"`
+	DeletedHoldCapMS  int `json:"deleted_hold_cap_ms"`
+
 	/* Timing */
 
 	AuthorFetchDelayMS int `json:"author_fetch_delay_ms"`
@@ -273,6 +290,13 @@ type Notifications struct {
 	TypingSounds bool `json:"typing_sounds"`
 	TypingVolume int  `json:"typing_volume"`
 
+	// TypingProfile is which board the built-in keystrokes are synthesised from,
+	// named by one of `internal/audio`'s profile keys. Not validated here — config
+	// is a leaf and does not import audio — so the name is resolved where it is
+	// used, and one nothing recognises falls back rather than going silent. A file
+	// under SoundFiles still outranks it: a sound somebody chose is not a board.
+	TypingProfile string `json:"typing_profile"`
+
 	// SoundFiles holds only the sounds pointed at a file of their own, keyed by the
 	// sound's name — the same reason Styles stores overrides rather than the whole
 	// table. An absent key is the built-in, which is synthesised rather than read,
@@ -316,6 +340,13 @@ type Performance struct {
 	// costs is paid while something is moving.
 	FrameRate int `json:"frame_rate"`
 
+	// BackgroundFrameRate stands in for FrameRate while another window has the
+	// focus. It may sit far below FrameRate's own floor: input is noticed whatever
+	// the rate and regaining focus restores FrameRate at once, so all a low value
+	// paces is drawing nobody is watching — at 1, an animation is frozen in all
+	// but name.
+	BackgroundFrameRate int `json:"background_frame_rate"`
+
 	// VSync waits for the display's next refresh before presenting. On, the rate
 	// above cannot exceed the monitor's and the wait blocks the whole driver loop,
 	// input and queued work included. Off, a frame is shown as soon as it is drawn
@@ -356,7 +387,7 @@ type Updates struct {
 // the way out, and what state it joins in.
 //
 // Every field here is read at its use site rather than captured. A device name
-// is read once when the device is opened; the gate reads Sensitivity from
+// is read once when the device is opened; the gate reads SensitivityDB from
 // config.Current per frame, which is an atomic snapshot rather than a lock.
 type Voice struct {
 	/* Devices */
@@ -370,13 +401,21 @@ type Voice struct {
 
 	Mode string `json:"mode"` // VoiceModeActivity or VoiceModePush
 
-	// Sensitivity is where the gate opens, 0-100: 0 passes almost anything, 100
-	// takes a raised voice.
-	Sensitivity int `json:"sensitivity"`
+	// SensitivityDB is where the gate opens, in dBFS: VoiceGateQuietestDB passes
+	// almost anything, VoiceGateLoudestDB takes a raised voice. The same unit the
+	// meter beside it is drawn in, so the number and the bar say one thing.
+	SensitivityDB int `json:"sensitivity_db"`
+
+	// Sensitivity is what that used to be stored as — an arbitrary 0-100 onto the
+	// very range above — and is kept for one purpose: reading a file written
+	// before it moved to decibels. sanitise converts it and clears it, and
+	// omitempty is what stops a nil one being written back, so the key leaves the
+	// file the first time the client saves. Nothing else may read it.
+	Sensitivity *int `json:"sensitivity,omitempty"`
 
 	// HighPass runs the ~90 Hz filter in front of the rest of the chain: what is
 	// below speech, cut before it can hold the gate open. The gate runs either
-	// way — it is what Sensitivity means.
+	// way — it is what SensitivityDB means.
 	HighPass bool `json:"high_pass"`
 
 	// NoiseSuppression runs RNNoise between that filter and the gate, which is
@@ -384,6 +423,19 @@ type Voice struct {
 	// hiss, fans, keyboard — where the gate can only silence the gaps between
 	// words.
 	NoiseSuppression bool `json:"noise_suppression"`
+
+	// NoiseSuppressionDB is how much of it, 0 to VoiceSuppressionMaxDB: the most
+	// the suppressor may take out of the signal. The top of the range is the
+	// model uncapped; lower keeps some of the room, for a voice full suppression
+	// hollows out.
+	NoiseSuppressionDB int `json:"noise_suppression_db"`
+
+	// VADThreshold is a second condition on the gate, 0-100: the suppressor's
+	// own speech detector must be at least this sure before loudness may open
+	// the microphone, which is what keeps a keyboard or a door that clears the
+	// sensitivity from opening it. 0 leaves the gate to loudness alone, and it
+	// only runs while NoiseSuppression does — the model is what answers.
+	VADThreshold int `json:"vad_threshold"`
 
 	// InputGainDB amplifies the microphone, VoiceGainOffDB to VoiceGainMaxDB. It
 	// runs in front of the gate rather than after it, so raising it on a quiet
@@ -405,6 +457,14 @@ type Voice struct {
 	// drops it — so the map is only ever as long as the list of people actually
 	// moved, and somebody set back to normal leaves no record behind.
 	UserGainsDB map[string]int `json:"user_gains_db"`
+
+	// SpeakingRing draws a ring round whoever is talking, on their row under the
+	// voice channel in the sidebar. It is the one thing here worth being able to
+	// turn off: Fyne's dirty flag is one bool for the whole canvas, so every
+	// transition is a repaint of the entire window, and a busy call is one per
+	// person per sentence. Off, the rows are still there and still say who is in
+	// the call — only the ring stops moving.
+	SpeakingRing bool `json:"speaking_ring"`
 
 	// DeepPLC reconstructs a lost packet with libopus's neural model instead of
 	// extrapolating the last pitch period. It costs nothing on a clean stream —
@@ -444,6 +504,24 @@ type Voice struct {
 const (
 	VoiceGainOffDB = -40
 	VoiceGainMaxDB = 20
+)
+
+// VoiceSuppressionMaxDB is the top of the noise suppression strength range and
+// means uncapped — RNNoise measures −33 to −36 dB on the noises it is for, so
+// a cap at the ceiling never binds and the top of the dial is the stock model.
+const VoiceSuppressionMaxDB = 40
+
+// Where the gate's threshold may be set, in dBFS. They bound a slider rather
+// than describe a room — a reader whose microphone is quiet turns the input
+// volume up rather than the gate learning the floor, an adaptive one that
+// guesses wrong being a gate nobody can reason about.
+//
+// `audio` clamps to the same two numbers and does not read them from here: it
+// is a leaf that has to build in a test with no settings file anywhere, which
+// is the same split `maxGain` and VoiceGainMaxDB already have.
+const (
+	VoiceGateQuietestDB = -70
+	VoiceGateLoudestDB  = -20
 )
 
 /* Enumerated values */
@@ -521,6 +599,15 @@ func Default() Settings {
 			MountedCap:         250,
 			HistoryPageSize:    50,
 			MessageOverscan:    8,
+
+			// Long enough to look up at a row that has just gone red and read it,
+			// short enough that a marked message is not mistaken for one still there.
+			// The step keeps a run of half a dozen inside the cap, and the cap is what
+			// no row stands longer than.
+			DeletedHoldMS:     5000,
+			DeletedHoldStepMS: 500,
+			DeletedHoldCapMS:  8000,
+
 			AuthorFetchDelayMS: 50,
 			AckDelayMS:         1000,
 			RefreshDelayMS:     250,
@@ -556,6 +643,10 @@ func Default() Settings {
 			PlayConnection:    true,
 
 			TypingVolume: 45,
+
+			// Empty rather than a name spelled twice: audio resolves it, and the default
+			// board is its to choose.
+			TypingProfile: "",
 		},
 		Voice: Voice{
 			// Voice activity rather than push-to-talk: it is what a client with no
@@ -563,14 +654,20 @@ func Default() Settings {
 			// slider is for. Both gains at unity — 0 dB — and joining neither muted
 			// nor deafened: a reader who wants either can say so, and a client that
 			// joins silent with no obvious reason reads as broken.
-			Mode:        VoiceModeActivity,
-			Sensitivity: 35,
-			HighPass:    true,
+			// The threshold is where the old arbitrary 0-100 default of 35 always
+			// landed on this scale, to the nearest whole decibel: ordinary speech
+			// clears it comfortably and a fan in the same room does not.
+			Mode:          VoiceModeActivity,
+			SensitivityDB: -52,
+			HighPass:      true,
 
 			// On: what it costs is ~0.5 % of one core while capturing, and the
 			// microphone that does not want it — a studio interface in a treated
-			// room — is the rare one.
-			NoiseSuppression: true,
+			// room — is the rare one. Full strength and no speech veto is the
+			// stage exactly as it behaved before either dial existed.
+			NoiseSuppression:   true,
+			NoiseSuppressionDB: VoiceSuppressionMaxDB,
+			VADThreshold:       0,
 
 			InputGainDB:  0,
 			OutputGainDB: 0,
@@ -580,9 +677,14 @@ func Default() Settings {
 			// than a broken one.
 			SoftClip: true,
 
-			// On: a clean stream decodes at exactly the same price either way, so
-			// the only machine that pays is one already losing packets, which is the
-			// machine that wants it.
+			// On: a call is a handful of people, so the repaints are a handful a
+			// sentence, and knowing who is talking is most of what the rows are for.
+			SpeakingRing: true,
+
+			// On: a clean stream costs about a quarter more per frame (the model is
+			// fed either way) and concealment ~13× — 1 % of realtime per concealed
+			// stream — which a machine already losing packets is glad to pay. See
+			// docs/voice-chat-todo.md §5.
 			DeepPLC: true,
 		},
 		Cache: Cache{
@@ -595,9 +697,10 @@ func Default() Settings {
 			CachedChannels:     5,
 		},
 		Performance: Performance{
-			FrameRate:      120,
-			VSync:          true,
-			PartialRepaint: true,
+			FrameRate:           120,
+			BackgroundFrameRate: 10,
+			VSync:               true,
+			PartialRepaint:      true,
 		},
 		Updates: Updates{
 			// On: one request per run, and a client nobody updates is one running
@@ -613,6 +716,20 @@ func Default() Settings {
 // still group under it.
 func (b Behaviour) GroupWindow() time.Duration {
 	return time.Duration(b.GroupWindowSeconds) * time.Second
+}
+
+// DeletedHold is how long a batch of deleted rows stands before the column takes
+// it out, standing being how many rows are in it. It widens with each addition
+// rather than restarting, so it is measured from the first of them and the cap
+// bounds how long any one row stands; zero says to take them out at once.
+func (b Behaviour) DeletedHold(standing int) time.Duration {
+	if b.DeletedHoldMS <= 0 || standing <= 0 {
+		return 0
+	}
+
+	ms := b.DeletedHoldMS + b.DeletedHoldStepMS*(standing-1)
+
+	return time.Duration(min(ms, max(b.DeletedHoldCapMS, b.DeletedHoldMS))) * time.Millisecond
 }
 
 // AuthorFetchDelay is how long author resolution waits for more authors before
@@ -772,6 +889,9 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.HistoryPageSize, 1)
 	floor(&s.Behaviour.MountedCap, s.Behaviour.InitialMountCount)
 	floor(&s.Behaviour.MessageOverscan, 0)
+	floor(&s.Behaviour.DeletedHoldMS, 0)
+	floor(&s.Behaviour.DeletedHoldStepMS, 0)
+	floor(&s.Behaviour.DeletedHoldCapMS, s.Behaviour.DeletedHoldMS)
 	floor(&s.Behaviour.AuthorFetchDelayMS, 0)
 	floor(&s.Behaviour.AckDelayMS, 0)
 	floor(&s.Behaviour.RefreshDelayMS, 0)
@@ -787,10 +907,22 @@ func (s *Settings) sanitise() {
 	s.Notifications.SoundVolume = clamp(s.Notifications.SoundVolume, 0, 100)
 	s.Notifications.TypingVolume = clamp(s.Notifications.TypingVolume, 0, 100)
 
+	// The gate's threshold moved from an arbitrary 0-100 to the decibels it
+	// always mapped onto, so a file written before that carries the old key and
+	// none of the new one. Converting it here is the whole migration: read once,
+	// cleared, and never written back — a reader who had tuned the gate keeps
+	// what they tuned rather than silently getting the default.
+	if s.Voice.Sensitivity != nil {
+		s.Voice.SensitivityDB = gateDBFromLegacy(*s.Voice.Sensitivity)
+		s.Voice.Sensitivity = nil
+	}
+
 	// A gain the file may name anything at. The ceiling is the one the mixer
 	// enforces anyway; clamping here is what keeps the slider and the file
 	// agreeing about where the range ends.
-	s.Voice.Sensitivity = clamp(s.Voice.Sensitivity, 0, 100)
+	s.Voice.SensitivityDB = clamp(s.Voice.SensitivityDB, VoiceGateQuietestDB, VoiceGateLoudestDB)
+	s.Voice.NoiseSuppressionDB = clamp(s.Voice.NoiseSuppressionDB, 0, VoiceSuppressionMaxDB)
+	s.Voice.VADThreshold = clamp(s.Voice.VADThreshold, 0, 100)
 	s.Voice.InputGainDB = clamp(s.Voice.InputGainDB, VoiceGainOffDB, VoiceGainMaxDB)
 	s.Voice.OutputGainDB = clamp(s.Voice.OutputGainDB, VoiceGainOffDB, VoiceGainMaxDB)
 
@@ -812,8 +944,10 @@ func (s *Settings) sanitise() {
 	floor(&s.Cache.CachedChannels, 1)
 
 	// A frame rate of zero is a client that never wakes: the toolkit clamps it to
-	// 1, which is indistinguishable from one that has hung.
+	// 1, which is indistinguishable from one that has hung. The background rate
+	// has no such floor — it only ever paces a window nothing is watching.
 	s.Performance.FrameRate = clamp(s.Performance.FrameRate, 15, 1000)
+	s.Performance.BackgroundFrameRate = clamp(s.Performance.BackgroundFrameRate, 1, 1000)
 
 	if s.Interface.FontSize < 1 {
 		s.Interface.FontSize = Default().Interface.FontSize
@@ -823,6 +957,16 @@ func (s *Settings) sanitise() {
 // clamp holds a value inside a range, for the settings whose floor is not zero.
 func clamp(value, lowest, highest int) int {
 	return min(max(value, lowest), highest)
+}
+
+// gateDBFromLegacy is the mapping the 0-100 sensitivity always had, kept for the
+// one job of reading a file written before the setting moved to decibels. It is
+// deliberately not exported and has no other caller: the arbitrary scale is
+// gone, and this is the last thing that knows what a number on it meant.
+func gateDBFromLegacy(sensitivity int) int {
+	fraction := float64(clamp(sensitivity, 0, 100)) / 100
+
+	return int(math.Round(VoiceGateQuietestDB + (VoiceGateLoudestDB-VoiceGateQuietestDB)*fraction))
 }
 
 // Save writes the current settings immediately, cancelling any pending delayed

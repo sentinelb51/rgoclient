@@ -52,6 +52,18 @@ type opusTuning interface {
 	SetDTX(bool) error
 }
 
+// opusEncodeIn is the send-side half of what opusDecodeIn is: a caller's
+// packet buffer, so the loop encodes fifty times a second without allocating.
+// Upstream layeh.com/gopus does not have it; sentinelb51/gopus does, and the
+// assertion lights it up without this package knowing which is linked.
+//
+// Reusing the buffer across frames is safe because lksdk's WriteSample
+// packetises and writes inside the call (localtrack.go, Packetize then
+// WriteRTP), and pion's send-side interceptors copy what they retain.
+type opusEncodeIn interface {
+	EncodeIn(pcm []int16, frameSize int, data []byte) (int, error)
+}
+
 // publisher owns the microphone, the encoder and the track they feed. One
 // goroutine drives all three, paced by the microphone rather than by a timer:
 // the device is the clock, and a ticker beside it would drift against it.
@@ -62,6 +74,12 @@ type publisher struct {
 	source  PCMSource
 	encoder *gopus.Encoder
 	tuning  opusTuning
+
+	// into is the caller-buffer encode where the binding offers one, and packet
+	// the buffer it fills — the loop's own, consumed by WriteSample in the same
+	// breath. nil falls back to Encode's per-frame allocation.
+	into   opusEncodeIn
+	packet []byte
 
 	// selfID is who to report this end's speaking as, and speaking is what was
 	// last reported — the gate has hangover of its own, so this is already
@@ -169,6 +187,9 @@ func newPublisher(mic *microphone, pub *lksdk.LocalTrackPublication, src PCMSour
 		tuning:  mic.tuning,
 		done:    make(chan struct{}),
 	}
+	if into, ok := any(mic.encoder).(opusEncodeIn); ok {
+		p.into, p.packet = into, make([]byte, maxPacket)
+	}
 
 	p.selfID = opts.SelfID
 
@@ -228,7 +249,7 @@ func (p *publisher) run(call *Call) {
 		// half a second late, where the gate has already decided.
 		p.reportSpeaking(call, p.source.Voiced())
 
-		encoded, err := p.encoder.Encode(pcm, frameSize, maxPacket)
+		encoded, err := p.encodeFrame(pcm)
 		if err != nil {
 			log.Printf("voice: encode: %v", err)
 			continue
@@ -247,6 +268,23 @@ func (p *publisher) run(call *Call) {
 			log.Printf("voice: publish frame: %v", err)
 		}
 	}
+}
+
+// encodeFrame turns one frame into a packet, into the loop's own buffer where
+// the binding offers that. The answer aliases p.packet and is good only until
+// the next frame — WriteSample consumes it in the same breath, which is the
+// whole of why that is enough.
+func (p *publisher) encodeFrame(pcm []int16) ([]byte, error) {
+	if p.into == nil {
+		return p.encoder.Encode(pcm, frameSize, maxPacket)
+	}
+
+	n, err := p.into.EncodeIn(pcm, frameSize, p.packet)
+	if err != nil {
+		return nil, err
+	}
+
+	return p.packet[:n], nil
 }
 
 // reportSpeaking passes this end's own gate decision to the call, on a change

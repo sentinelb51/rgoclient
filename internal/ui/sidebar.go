@@ -464,6 +464,11 @@ type VoiceParticipantRow struct {
 	deps   Deps
 	userID string
 
+	// channelID is the call the row is drawn under. Held so the controller can
+	// re-read this participant out of the store without capturing anything per
+	// rebuild, the way userID is.
+	channelID string
+
 	// Menu is what a right-click offers: per-person volume and, where the
 	// permissions allow it, the voice moderation. Read at the moment of the click
 	// rather than captured, the way ChannelWidget and ServerWidget read theirs.
@@ -473,6 +478,61 @@ type VoiceParticipantRow struct {
 	ring       *canvas.Circle
 	speaking   bool
 	content    fyne.CanvasObject
+
+	// row is the Border the marks hang at the trailing end of, held because
+	// hiding one of them is what re-measures the name column beside it.
+	row *fyne.Container
+
+	// The three marks that come and go while the row stands: the two holds on a
+	// participant's voice and the one this machine put on them. Built hidden and
+	// shown rather than added, so a mute is a layout of one strip instead of a
+	// rebuilt row.
+	muteMark, deafenMark, silenceMark voiceHold
+	marks                             VoiceMarks
+}
+
+// voiceHold is one of those marks: the glyph, and the gap after it. The two are
+// hidden together — an HBox skips what is invisible when it measures, but a
+// spacer beside a hidden mark is not itself hidden, and three of those would be
+// dead width at the end of every row that holds nothing.
+type voiceHold struct {
+	icon *canvas.Image
+	slot *fyne.Container
+}
+
+// set draws the mark in the colour naming who set it, or takes it away. The
+// resource is re-tinted rather than the image recoloured: these marks are
+// outlines and carry their colour in the source, which is what tintedIcon
+// rewrites.
+func (h voiceHold) set(res fyne.Resource, fill color.Color, on bool) {
+	if !on {
+		h.slot.Hide()
+		return
+	}
+
+	h.icon.Resource = tintedIcon(res, fill)
+	h.icon.Refresh()
+	h.slot.Show()
+}
+
+// VoiceMarks is what a row says about somebody's voice beyond who they are. The
+// glyph names *what* is held and the colour names who held it: a moderator's
+// hold cannot be undone by the person wearing it, their own can, and the last of
+// the three was set here and is true on this machine only.
+//
+// SelfDeafened is knowable for this account alone — Revolt carries nothing for
+// somebody else's, and the media session only reports a microphone. See
+// docs/known-gaps.md.
+type VoiceMarks struct {
+	ServerMuted    bool
+	ServerDeafened bool
+
+	SelfMuted    bool
+	SelfDeafened bool
+
+	// Silenced is their volume turned off in this client, which is neither a
+	// server's doing nor theirs.
+	Silenced bool
 }
 
 var (
@@ -480,13 +540,16 @@ var (
 	_ desktop.Hoverable = (*VoiceParticipantRow)(nil)
 )
 
-// NewVoiceParticipantRow draws one participant. The name is already resolved —
-// the store hands back the nickname and role colour the member sidebar would
-// draw them with.
-func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *VoiceParticipantRow {
+// NewVoiceParticipantRow draws one participant of the call in channelID. The
+// name is already resolved — the store hands back the nickname and role colour
+// the member sidebar would draw them with.
+func NewVoiceParticipantRow(deps Deps, channelID string,
+	participant domain.VoiceParticipant) *VoiceParticipantRow {
+
 	w := &VoiceParticipantRow{
 		deps:       deps,
 		userID:     participant.UserID,
+		channelID:  channelID,
 		background: canvas.NewRectangle(color.Transparent),
 
 		// The ring exists from construction and only its fill moves. Adding a
@@ -510,8 +573,9 @@ func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *Voi
 
 	// The name takes the leftover width in a Border's centre, as it does on a
 	// member row: an HBox would hand the ellipsis box, which reports zero, zero.
-	w.content = container.NewStack(w.background, container.NewBorder(nil, nil, leading,
-		voiceMarks(participant), NewEllipsisText(name)))
+	w.row = container.NewBorder(nil, nil, leading,
+		voiceMarks(w, participant), NewEllipsisText(name))
+	w.content = container.NewStack(w.background, w.row)
 
 	// Tapping opens the profile, as it does in the member sidebar. Joining a call
 	// is deliberately not on this row: it is how you look somebody up, and a tap
@@ -530,8 +594,10 @@ func NewVoiceParticipantRow(deps Deps, participant domain.VoiceParticipant) *Voi
 }
 
 // UserID is who the row is drawing, so the controller can find the one to mark
-// without capturing anything per rebuild.
-func (w *VoiceParticipantRow) UserID() string { return w.userID }
+// without capturing anything per rebuild. ChannelID is the call they are in,
+// which is what the controller re-reads them out of the store by.
+func (w *VoiceParticipantRow) UserID() string    { return w.userID }
+func (w *VoiceParticipantRow) ChannelID() string { return w.channelID }
 
 // SetSpeaking rings the avatar, or takes the ring away. A no-op on an unchanged
 // value: this is called for every participant on every speaking change, and
@@ -550,6 +616,44 @@ func (w *VoiceParticipantRow) SetSpeaking(speaking bool) {
 	w.ring.Refresh()
 }
 
+// SetMarks draws what is held against this participant's voice. A no-op on an
+// unchanged value for the same reason SetSpeaking is one — the controller marks
+// every row when any of them moves — and this one earns it twice over: a mark
+// coming or going changes the strip's width, so it is a layout rather than a
+// repaint.
+func (w *VoiceParticipantRow) SetMarks(marks VoiceMarks) {
+	if w.marks == marks {
+		return
+	}
+	w.marks = marks
+
+	// A moderator's hold outranks the person's own switch: they are held either
+	// way, and the one they cannot undo is the one worth saying.
+	w.muteMark.set(assets.MicOffIcon, holdColor(marks.ServerMuted),
+		marks.ServerMuted || marks.SelfMuted)
+	w.deafenMark.set(assets.HeadphonesOffIcon, holdColor(marks.ServerDeafened),
+		marks.ServerDeafened || marks.SelfDeafened)
+
+	// The third wears the row's own mark colour: it is about this machine rather
+	// than about them, so neither of the two above would be telling the truth.
+	w.silenceMark.set(assets.SpeakerOffIcon, theme.Colors.VoiceParticipantMark, marks.Silenced)
+
+	// The strip is the Border's trailing object, so its width is what the name
+	// column is measured against: refreshing the marks alone leaves the ellipsis
+	// box laid out for the strip as it was.
+	Relayout(w.row)
+}
+
+// holdColor is the whole of what separates a hold somebody may lift from one
+// they may not.
+func holdColor(server bool) color.Color {
+	if server {
+		return theme.Colors.VoiceHoldServer
+	}
+
+	return theme.Colors.VoiceHoldSelf
+}
+
 func (w *VoiceParticipantRow) CreateRenderer() fyne.WidgetRenderer {
 	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.VoiceRowHeight))
 
@@ -566,10 +670,16 @@ func (w *VoiceParticipantRow) MouseOut() {
 	w.background.Refresh()
 }
 
-// voiceMarks is what a participant is sharing, at the trailing end of their row.
-// A bot mark rides with them: the same account is marked as one wherever it is
-// drawn, and a call is one more place a bot turns up.
-func voiceMarks(participant domain.VoiceParticipant) fyne.CanvasObject {
+// voiceMarks is the strip at the trailing end of a participant's row: what they
+// are sharing, then what is held against their voice. A bot mark rides at its
+// head — the same account is marked as one wherever it is drawn, and a call is
+// one more place a bot turns up.
+//
+// What is being shared cannot change under a standing row (the gateway announces
+// it and the sidebar is rebuilt), so those are added only where they apply. The
+// three holds *can*, so all three are built and hidden: showing one is a layout,
+// where adding one would be a rebuilt row.
+func voiceMarks(w *VoiceParticipantRow, participant domain.VoiceParticipant) *fyne.Container {
 	marks := HBoxNoSpacing()
 
 	if participant.Bot {
@@ -584,13 +694,39 @@ func voiceMarks(participant domain.VoiceParticipant) fyne.CanvasObject {
 		marks.Add(container.NewCenter(voiceMark(assets.CameraIcon)))
 		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
 	}
+
+	// Outermost, so the pair a moderator or the person themselves set stands at
+	// the row's end where a glance goes, and the silence this client set stands
+	// last of all.
+	w.muteMark = newVoiceHold(assets.MicOffIcon)
+	w.deafenMark = newVoiceHold(assets.HeadphonesOffIcon)
+	w.silenceMark = newVoiceHold(assets.SpeakerOffIcon)
+
+	marks.Add(w.muteMark.slot)
+	marks.Add(w.deafenMark.slot)
+	marks.Add(w.silenceMark.slot)
 	marks.Add(HorizontalSpacer(theme.Sizes.ChannelLeftPadding))
 
 	return marks
 }
 
+// newVoiceHold builds one of the three, hidden, in the colour it would wear if
+// it were about nothing in particular — SetMarks re-tints it before it is shown.
+func newVoiceHold(res fyne.Resource) voiceHold {
+	icon := voiceMark(res)
+
+	hold := voiceHold{
+		icon: icon,
+		slot: HBoxNoSpacing(container.NewCenter(icon),
+			HorizontalSpacer(theme.Sizes.VoiceMarkGap)),
+	}
+	hold.slot.Hide()
+
+	return hold
+}
+
 // voiceMark is one of those marks, tinted the way the sidebar's other glyphs are.
-func voiceMark(res fyne.Resource) fyne.CanvasObject {
+func voiceMark(res fyne.Resource) *canvas.Image {
 	side := theme.Sizes.VoiceMarkSize
 
 	return newScaledIcon(tintedIcon(res, theme.Colors.VoiceParticipantMark), side)
@@ -735,6 +871,43 @@ func (r *categoryRenderer) MinSize() fyne.Size           { return r.widget.MinSi
 func (r *categoryRenderer) Refresh()                     { r.inner.Refresh() }
 func (r *categoryRenderer) Objects() []fyne.CanvasObject { return []fyne.CanvasObject{r.inner} }
 func (r *categoryRenderer) Destroy()                     {}
+
+/* Channel sidebar backdrop */
+
+// ChannelBackdrop is the column behind the channel rows, and the only thing in
+// this package that exists to answer a click on *nothing*. It is mounted under
+// the scroll rather than inside it, so the rows keep every event that lands on
+// one and what is left over — the strip below the last row — reaches this.
+//
+// Deliberately not built on tapBase: that supplies a primary Tapped and promises
+// a pointer cursor unconditionally, and an empty column is neither a target nor
+// something to be told is one. Only the right-click stops here.
+type ChannelBackdrop struct {
+	widget.BaseWidget
+
+	// Menu is read when the click arrives, as ServerWidget's and ChannelWidget's
+	// are: what a server offers moves under a standing sidebar.
+	Menu func() []*fyne.MenuItem
+}
+
+var _ fyne.SecondaryTappable = (*ChannelBackdrop)(nil)
+
+// NewChannelBackdrop creates the backdrop. It draws nothing and reports no
+// minimum, so the column it stacks under is sized by the scroll alone.
+func NewChannelBackdrop() *ChannelBackdrop {
+	w := &ChannelBackdrop{}
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *ChannelBackdrop) TappedSecondary(event *fyne.PointEvent) {
+	showMenuHook(w, w.Menu, event)
+}
+
+func (w *ChannelBackdrop) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(canvas.NewRectangle(color.Transparent))
+}
 
 /* Drawn glyphs */
 

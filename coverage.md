@@ -535,11 +535,14 @@ refresh.
   request rather than one each. A deleted message leaves for free. An **edit** it follows
   only as far as the message cache reaches. A row
   is a flattened one-line summary and leads to the message; a body with no text says what it
-  carries instead. It is capped at the hundred newest, Revolt's own ceiling on a search, with
-  no way to page past it.
+  carries instead. One request answers with the hundred newest, Revolt's own ceiling on a
+  search, and **Older pins** asks for the hundred past the oldest held — so the ceiling is
+  per request. A pin moving re-asks from the first page and drops what was paged in.
 - **Channel search is that panel with a query**, and inherits all of it *but* the re-asking:
-  the hundred newest matches with no paging, one-line summaries, and the open channel alone —
-  there is no search across a server, Revolt's route being per channel. It asks on Enter
+  the same hundred-per-request with the same way past it, one-line summaries, and the open
+  channel alone — there is no search across a server, Revolt's route being per channel.
+  **Best** is the one order with no next page: the route re-ranks whatever window it is
+  given, so a narrower one is not the page after a wider one. It asks on Enter
   rather than as you type, since each query is a request. It only ever **shrinks**: a card
   goes when its message is deleted and follows an edit as far as the cache reaches, and
   nothing is ever added — a message sent after the search that would have matched it is not

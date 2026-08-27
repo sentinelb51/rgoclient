@@ -70,8 +70,8 @@ All seven are cross-package: the agent that found them did not own the other fil
 
 | Item | What |
 |---|---|
-| B2-8 | One line: `internal/app/events.go:497` should call `a.syncCallIsland()`, not `a.syncChannelKind()`. A channel's kind cannot change, so the glyph rebuild and `Relayout` are wasted on every channel update |
-| C1-2 | `reviseMessage` is a non-atomic find-then-replace, so a gateway reaction and a background worker race and one silently wins. Needs `MessageCache.Update(channelID, messageID, change func(*domain.Message) bool) bool` doing search+copy+apply+store under one held lock — only `internal/cache` can hold the mutex across both halves |
+| ~~B2-8~~ | **Done differently.** `syncChannelKind` now ends in `syncCallIsland` (`messages.go:704`), so the one call site covers both and the comment above it says why |
+| ~~C1-2~~ | **Done.** `MessageCache.Update` holds the lock across search+copy+apply+store; `Client.reviseMessage` is the one-line delegate its six call sites still go through |
 | C3-12 | The AST memo. Down from four parses per body to one (two with an invite) without it, but `PreviewText` and `resolveReply` still parse per call — they are about *other* messages than the row being built, so no per-row cache reaches them. Needs a `DocCache` beside `TextCache`, through `ui.Deps`, bounded from `config.Settings` |
 | C3-13 | `Store.Permissions` re-ranks the same member for every channel in a sidebar rebuild. The store must stay pure, so the memo belongs in `app/navigation.go`'s rebuild scope |
 | B2-13 | `fetchTextPreview`'s liveness guard on the miss path: needs a generation on `MessageWidget` bumped by a release called from `MessageList.mount` and the drop sites |

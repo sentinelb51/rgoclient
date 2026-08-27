@@ -24,12 +24,22 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   track to Stoat's LiveKit node and mixes everybody else — but there is no
   camera, no screen share and no way to *watch* either, so a participant sharing
   one is drawn with the mark and nothing behind it. Nothing records a call.
-  What a participant's own end is doing is still drawn only as far as it is a
-  plain fact — `is_publishing` / `is_receiving` are a media session's bookkeeping
-  rather than muted and deafened, so neither is shown. A *remote* speaking ring
-  comes from the voice server's active-speaker report; this account's own comes
-  off the capture gate instead, that report being about other people and landing
-  about half a second late.
+  A *remote* speaking ring comes from the voice server's active-speaker report;
+  this account's own comes off the capture gate instead, that report being about
+  other people and landing about half a second late.
+
+- **Nobody else's deafen is knowable.** A voice row draws four holds — a
+  moderator's mute and deafen, from the membership's `can_publish` /
+  `can_receive`, and a person's own mute and deafen — but the last of those only
+  for this account. Stoat carries nothing for somebody else's: `is_receiving` is
+  set `true` when a voice state is created and never written again (only
+  `is_publishing`, `camera` and `screensharing` are, from
+  `sync_user_voice_permissions`), and LiveKit tells the room which tracks a
+  participant *publishes*, never which they subscribe to. A remote self-*mute*
+  is read off the room instead — `OnTrackMuted` / `OnTrackUnmuted` on their
+  microphone track — which is also why it is known only while this client is in
+  the same call, and why `is_publishing` is still not drawn: it says a
+  microphone track exists, and a mute leaves it published.
 
 - **The voice node is measured unless it is named.** `join_call` requires a node
   by name; with nothing chosen, `nearestVoiceNode` dials every node the instance
@@ -188,17 +198,20 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   event per message). A deleted message leaves the panel for free. What it cannot
   follow is an **edit** of a message older than the channel's cached tail: the
   gateway names the message and only the cache can say what it now reads, so an
-  old pin keeps the line it was fetched with until the panel is reopened. It is
-  capped at the hundred newest pins, Revolt's own ceiling on a search, and the
-  panel sends no window to page past it, and a row is a flattened one-line summary
-  — a body with no text says what it carries instead of quoting nothing.
+  old pin keeps the line it was fetched with until the panel is reopened. One
+  request answers with the hundred newest pins, Revolt's own ceiling on a search,
+  and **Older pins** asks for the next hundred past the oldest held — so the
+  ceiling is per request rather than on the panel. A pin moving anywhere re-asks
+  from the first page and drops what was paged in: which pin is the hundredth has
+  moved with it. A row is a flattened one-line summary — a body with no text says
+  what it carries instead of quoting nothing.
 - **Channel search and the mention inbox are snapshots that only shrink.** Both
   drop a card whose message was deleted, and both follow an edit exactly as far as
   the message cache reaches — see above. Neither *gains* anything: a message sent
   after the search that would have matched it is not added, and the inbox lists
   what it fetched when it opened. Re-asking is reopening.
-- **Channel search inherits that hundred-result ceiling and adds three limits of
-  its own.** It searches the **open channel** only: Revolt's route is per channel,
+- **Channel search pages the same way and adds three limits of its own.** It
+  searches the **open channel** only: Revolt's route is per channel,
   so there is no search across a server, let alone across the account. The
   matching is MongoDB's full-text search rather than a substring scan — words, not
   fragments, with what counts as a word decided by the server — so half a word
@@ -219,13 +232,19 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   three orders **are** sent (`Relevance`, `Latest`, `Oldest`), so changing one is
   a fresh request, as is moving a date, while toggling a chip or picking a person
   is free.
-- **A search is not paged, though the route could be.** `before`/`after` are the
-  only lever past the hundred-result ceiling and the client spends them on the
-  date filter alone — there is no "older results" button, so a query matching more
-  than a hundred is narrowed by hand, by naming a span, or not at all. The dates
-  are read as **local** calendar days and sent as zero-entropy ULIDs at each
-  edge, so the span is exact to the millisecond of local midnight and a message
-  minted in that same millisecond at the `after` edge is kept.
+- **A search pages, and only in the two orders that have a direction.**
+  `before`/`after` carry both the date span and the page cursor, so
+  `client.pageFrom` sends whichever of the two is tighter — the reader's window is
+  what may not be left, and a page only ever moves inside one. **Best** (Revolt's
+  `Relevance`) offers no next page at all: the route re-ranks whatever window it
+  is given, so a narrower one is not the page after a wider one, and there is
+  nothing honest to put on the button. Whether `/search` honours the fields the
+  history route does is **not verified against the backend**, so a repeated page
+  is dropped rather than drawn twice and a page that is entirely repeats stops the
+  paging — which is what a build ignoring them would look like from here.
+  The dates are read as **local** calendar days and sent as zero-entropy ULIDs at
+  each edge, so the span is exact to the millisecond of local midnight and a
+  message minted in that same millisecond at the `after` edge is kept.
 - **The mention inbox lists what Revolt has kept, which is not everything that
   ever named you.** The set is the `mentions` array on each unread marker, so it
   holds only what is still *unread*: acknowledging a channel prunes it, and there
@@ -235,7 +254,9 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   count. A mention whose message was since deleted stays counted — Revolt prunes
   the array on an ack and on nothing else — and shows as one row fewer than the
   badge says. The panel resolves the newest `inboxLimit` of them, each being a
-  request, and there is no paging past that; the sidebar still counts the rest.
+  request, and **Older mentions** resolves the next `inboxLimit` under the oldest
+  already listed — paged by ID rather than by an offset, the set moving under the
+  panel as a card is dismissed or a mention arrives.
   Nothing is muted, either: Revolt's per-channel notification settings are user
   settings this client does not read, so a muted channel counts like any other.
   **Dismissing one is the client's own record.** Revolt has no route dropping a
@@ -292,7 +313,8 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   reachable, a body carrying no tooltip.
 - **Embeds** render site line, title, description, colour and one picture. A bare
   **video** embed is dropped at the boundary (revoltgo carries only the URL, and
-  there is no player); a bare **image** embed has the same missing dimensions, so it
+  there is no player — `docs/video-player.md` is the plan for one); a bare
+  **image** embed has the same missing dimensions, so it
   draws against the placeholder until the picture lands.
 - **An invite card does not refresh.** A server joined from another client keeps
   offering Join until the channel is reopened, the card being filled once when it
@@ -651,3 +673,20 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   linux/arm64 — is told there is no build for it rather than offered another
   one's. The check itself is unauthenticated, which GitHub allows sixty times an
   hour per address; this client spends one per run.
+- **A GIF moves only under the pointer, and only where the client can reach the
+  file.** `ui.gifAnimator` plays an uploaded GIF attachment, a `.gif` image
+  embed and a picker tile on hover — fetched, decoded and freed per hover, at
+  rest always the first-frame still. What still never moves: the embed Revolt
+  unfurls from a gifbox page, which carries an MP4 and a poster and no `.gif`
+  URL (that is the video player's problem — see `docs/video-player.md`); a GIF
+  served with no `image/gif` content type and no `.gif` in its name or URL,
+  `gifCandidate` having nothing to go on; an animated **custom emoji** or
+  avatar; and the attachment viewer, whose picture is a plain mount. A GIF
+  cached before the animator existed re-fetches its bytes on first hover — the
+  disk cache held only the PNG still.
+- **The GIF picker asks for one page.** `next` is carried by the route and
+  dropped: there is no scroll-to-load in the grid, so a search is its first fifty
+  results. The trending list and the categories are one request each per opening,
+  held for as long as the picker is up and re-asked the next time it opens —
+  nothing announces either, and the service's bucket is ten requests in ten
+  seconds.

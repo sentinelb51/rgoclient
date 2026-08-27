@@ -144,6 +144,14 @@ naming and the test policy.
   it grows the strip, nothing else. `NewComposerButtonSlot` bottom-anchors the
   emoji button against the growing entry and lifts it by the entry's own
   `InnerPadding`, so it centres on the last *line* rather than on the entry's box.
+- **A queued reply belongs to a channel, and the composer does not.** So both are
+  pushed in: `SetPermissions` and `SetChannel`, from `App.syncComposer`. A card
+  whose message is not in the open channel is drawn **stale** (sunken fill, no
+  role colour, a frozen mention toggle) and left out of `RepliesHere`, which is
+  what the send is built from — it is kept rather than dropped, because returning
+  to that channel makes it live again. Queueing a reply from a *different*
+  channel replaces the whole set: nothing sendable answers messages in two
+  channels, and the clear happens before `maxReplies` is read.
 - **What hangs above the card** — the slowmode chip and the typing line — is one
   row under one set of rules: a pill of its own (`newDockBadgeSurface`) sized by
   what it holds rather than by the row, accepting no pointer event so the
@@ -175,7 +183,15 @@ naming and the test policy.
   radius needs a fork patch. It stays a native `TextSegment` — a widget segment
   is atomic and RichText never breaks a row before one — and a body carrying one
   is off the flattened, selectable Label path.
-- **Mixed text sizes on one line** align by being siblings in an HBox — a
+- **A spoiler covers everything inside it.** A construct with a segment of its
+  own — a link, a mention, inline code, a custom emoji, a timestamp — has no
+  cover to wear, so inside a spoiler each is rendered as covered `decoratedText`
+  instead: a link as its label in the hyperlink colour, a mention as its accent
+  word (`ColorNameMention`), an emoji as its shortcode, code in the body's own
+  face — the mono face is taller at the same size and RichText's baseline drop
+  (the `emojiSide` trap) would overlap the rows. `decoratedSegment.onTap` is
+  what a word does once revealed: the first tap reveals the span, the second
+  opens what the word covers.
   `canvas.Text` centres its glyphs in whatever height it is given. Don't wrap one
   in a spacer to nudge it.
 - **Message row rhythm.** The avatar is centred on the block a *single-line*
@@ -269,6 +285,15 @@ naming and the test policy.
   that wants hover declares it itself. `ui.decoratedText` is the one hold-out and
   stays one — its `Cursor` is conditional (a struck word is not a spoiler and must
   not read as clickable), which `tapBase`'s fixed pointer would flatten.
+- **A click on nothing is caught from underneath.** `ChannelBackdrop` is stacked
+  *under* the channel sidebar's scroll, not inside it: `FindObjectAtPositionMatching`
+  walks in painting order and keeps the **last** match, so a row over the pointer
+  wins and only the strip below the last row falls through. It is the one widget
+  here **not** built on `tapBase` — that promises a pointer cursor unconditionally
+  and a primary `Tapped` besides, and an empty column is neither a target nor
+  something to tell a reader is one. `container.Scroll` is not itself tappable, so
+  nothing in between swallows the event; `CategoryWidget` is (through `tapBase`,
+  with no menu), so a right-click on a category header still stops there.
 - **Repainting the message column.** `Container.Refresh` refreshes every child
   and `RichText.Refresh` re-wraps its text, so refreshing the column re-flows
   every mounted body — and `Scroll.Refresh` does exactly that to its content.
@@ -577,6 +602,13 @@ naming and the test policy.
   The two differ only in colour and in the strength curve: a jump starts at full
   wash and lets go, an edit rises and falls inside its second, nobody having
   asked to be shown that row.
+  **A deleted row's wash is the exception, and is a state on purpose**
+  (`SetDeleted`, `MessageDeletedBackground`): the message has gone and the row is
+  standing a few seconds longer so the column does not jump, so the wash has to
+  hold until the row goes — which means going through `fill()` like the mention
+  and selection washes, lifting under the pointer and outranking both.
+  `MessageList` holds the set, so a row scrolled past and back is built already
+  washed, and `Remove` is what clears it — see `internal/app/CLAUDE.md` item 43.
 - **The selection tick is the whole of the target, and that is forced.** A bulk
   delete needs rows picked, and the row itself cannot take the click: its body is
   a selectable `widget.Label` behind a `selectionCatcher` that forwards a tap
@@ -857,13 +889,48 @@ naming and the test policy.
   `p.preview` already uses.
   The meter is a row *inside* the Microphone group, directly under Sensitivity,
   because it is not a reading — it is the other half of that control, and a
-  threshold in decibels set by a number from 0 to 100 cannot be aimed without it.
+  threshold cannot be aimed without seeing what your own voice measures.
   The level and the threshold arrive as **ratios on one scale** (what
   `StartInputMonitor` reports, and `SettingsHooks.GateRatio`): the scale is
   decibels and belongs to `internal/audio`, which `ui` does not import, so a
   second copy of the mapping here would be free to drift from the gate's own. A
   linear bar is what that replaced — speech sits at 0.05 of full scale and the
-  default threshold at 0.0024, so both drew on the floor.
+  default threshold at 0.0025, so both drew on the floor.
+  **Sensitivity is set in dBFS**, the unit the bar under it is drawn in and the
+  unit every other level on the page already used. It was an arbitrary 0-100 onto
+  that very range; `InputMeter.LevelDB` is the figure the bar now says beside
+  itself, so the row and the meter are read in one unit. `ui` still converts
+  nothing — the ratio *and* the figure both arrive computed.
+  **`echoRow` sits directly under it** and is the other half again: the bar says
+  the microphone is heard, and only playing it back says what it sounds like once
+  the chain has had it. A plain `boolRow`, never a setting — it is a mode
+  somebody turns on to listen to, and one restored at the next launch would howl
+  at whoever left it there — so it is always built at off and the controller's
+  own two exits clear it, which is what keeps that honest.
+  **`speechMeterRow` is the second bar and belongs to a different control**, so
+  the two are a **group of their own** — *Voice activity detection*, the veto and
+  the bar that makes it aimable, with what they both depend on said once in the
+  caption instead of on each row. Noise suppression is split out the same way,
+  and neither split costs a search term: `recordGroup` files a caption as a hit
+  of its own, which is what frees the rows inside from repeating it (the toggle
+  is "Remove background noise", the dial "Strength", the veto "Threshold").
+  The **order of the groups is load-bearing**: the bar rides the stream
+  `levelMeterRow` opened (one report, `ui.InputMeter`, both bars) and is built
+  after it or not at all, so Microphone stands ahead of both — which is also why
+  its two setters are filled onto `voiceLevelMeter` rather than held by the row.
+  `newMeterBar` is `newLevelBar` plus the figure
+  itself at the row's trailing end, and **both** voice meters are one: the bar
+  answers "over the line right now", which is what aiming a threshold needs, and
+  the number answers "by how much", which a strip a few pixels wide cannot. The
+  caller formats it (`meterDecibels`, `meterPercent`) — the wording is the row's.
+  A negative `Speech` is the model not running — drawn as an empty bar and a
+  dash, never as zero.
+  Two other units follow from that. The veto's own row is **`%`**, which is what
+  it always was and was drawn without; `numberBox.valueText` sets a percent sign
+  tight against the figure and a unit word apart from it. And **Smooth loud
+  peaks** left Playback for a group of its own: `softClip` is both directions,
+  so under Playback the row had to apologise for its group in its own
+  description.
 - **The speaking ring needs headroom or it clips.** `VoiceParticipantRow`'s ring
   is built like the presence ring — the circle exists from construction at
   `color.Transparent` and only its `FillColor` moves, nothing being added to a
@@ -874,6 +941,21 @@ naming and the test policy.
   `SetSpeaking` no-ops on an unchanged value, the contract `MemberRow.SetMember`
   and `ChannelWidget.SetState` already keep — see `internal/app/CLAUDE.md` item 36
   for why anything else is a full window repaint per syllable.
+- **The three holds on a voice row are shown, never added.** `VoiceMarks` is the
+  whole of what a row says about somebody's voice, and the glyph names *what* is
+  held while the colour names *who* held it: `VoiceHoldServer` for a moderator's,
+  which the person cannot lift, `VoiceHoldSelf` for their own switch, and the
+  row's plain `VoiceParticipantMark` for the speaker struck through, which is
+  about this machine rather than about them. What a participant is *sharing*
+  cannot change under a standing row — the gateway announces it and the column is
+  rebuilt — so those marks are added only where they apply; a hold can, so all
+  three are built hidden by `newVoiceHold`. Each is the glyph **and the gap after
+  it** in one container, hidden together: an HBox skips an invisible child when it
+  measures, but a spacer beside a hidden mark is not itself hidden, and three of
+  those are dead width at the end of every row that holds nothing. `SetMarks`
+  ends in `Relayout` of the row's Border rather than a `Refresh` of the strip —
+  the strip is the trailing slot, so its width is what the name's ellipsis box was
+  measured against.
 - **`ui.CallIsland` is a fourth kind of surface**, and not any of the three it
   looks like. Not a `messageIsland` (the modal layer's surface for the three
   message lists), not a composer dock badge (everything in that stack is about the
@@ -954,3 +1036,35 @@ naming and the test policy.
   `OutlinedIconButton` bakes its mark, its tint and its `disabled()` state at
   construction, so a slot with a rebuilt button is the only way to change any of
   the three.
+- **A wrapping grid reports one row until it has been laid out.**
+  `layout.GridWrap`'s `MinSize` multiplies the cell by a `rowCount` computed
+  during `Layout`, so a fresh grid measures one cell tall whatever is in it. The
+  emoji picker survives it by only ever *shrinking* — it opens with the whole set
+  and re-`Resize`s the pop-up per query. `gifColumns` has the same shape of
+  problem for the same reason (it stores the width its last `Layout` was given, so
+  `MinSize` has one to answer with), and the GIF picker's grid additionally starts
+  empty and fills from a request — so its viewport is a fixed height
+  (`GIFPickerMaxHeight`) rather than a `cappedHeightLayout`: a card measured off
+  that grid would open at nothing and grow with every page. A pop-up takes its
+  size once, as it is shown.
+- **A picture-filled card wears its edge on top.** `gifTile` is the attachment's
+  arrangement at tile size: the picture reaches the tile's edge, so the hairline
+  is a rectangle stacked *over* it (`rim`) and hover lifts that as well as the
+  fill under the picture's 3 px frame — a fill alone is three pixels of colour
+  nobody reads as hover. The frame is what keeps the corners rounded, `canvas.Image`
+  having no radius and Fyne clipping nothing.
+- **`ChipBg` is the emoji picker's island colour.** So the client's chip drawn on
+  that island is an invisible pill — which is what `gifChip` is for: the same
+  shape, filled with the tile's colour instead. Anything else mounting a chip on
+  `NoticeBg` has the same problem.
+- **A GIF plays through the hover its frame already has.** `ui.gifAnimator`
+  (gifanim.go) is a driver, not a widget: a Hoverable of its own inside a
+  `HoverableStack` or a `gifTile` would steal their hover (innermost wins), so
+  `SetPlaying` rides the stack's `onHover` and the tile's `setHovered`. Playback
+  is one reusable RGBA buffer composed per tick (disposal, then the frame's
+  patch) and a `Refresh` of the mounted `canvas.Image`; the frames are decoded
+  per hover and freed on `MouseOut`, so rest costs nothing and every hover
+  starts at frame zero. Per-frame delays mean a rescheduled `time.AfterFunc`
+  through `DoOnUI`, not a `fyne.Animation` — gen-guarded, the fired-timer trap —
+  and each tick asks `CanvasForObject` before painting, because a dropped row
+  hears nothing and the tick is the only thing placed to stop itself.

@@ -423,6 +423,18 @@ hardware; the code paths were.
 
 ### Done since this file was written
 
+- **The last per-frame allocations on the media path are gone.** The publish
+  loop encoded into a fresh 1275 B buffer per frame; the fork gained
+  `Encoder.EncodeIn` (mirroring `DecodeIn` — `Encode` delegates, so the two
+  cannot drift) and `publisher.encodeFrame` reuses one buffer behind an
+  `opusEncodeIn` assertion. Safe because lksdk's `WriteSample` packetises and
+  writes inside the call. And `Capture.Read` built a `time.After` timer per
+  wait — 50-100 a second — where a reused `Timer.Reset` costs nothing (since
+  Go 1.23 Reset flushes a stale expiry, so no drain dance). Byte-identical
+  output verified offline against `Encode` before the harness was deleted.
+- **Noise suppression grew two dials** — strength and a speech veto; see the
+  entry in section 4 for the shape and the measurements.
+
 - **Reconnect after a hard disconnect.** A `CallEnded` carrying an error now
   rejoins rather than reporting: `App.scheduleRejoin` doubles the wait per
   attempt to a 30 s ceiling, gives up after five, and keeps the island on screen
@@ -442,6 +454,14 @@ hardware; the code paths were.
   `a.capture` where there is one, so a device held in exclusive mode is not asked
   to grant a second open. `monitorOwned` is which, and `restartInputMonitor`
   moves the bar between the two as a call starts and ends.
+- **"Hear myself" is that capture written into a sink lane.** `Capture.SetEcho`
+  is filled from inside `Read` — `Read` has exactly one caller, so no second
+  reader is possible and none is needed: the test works on the call's stream and
+  on the meter's own alike. Being a *lane* is what makes it honest, the mix, the
+  call volume and the soft clipping all being the ones a call is heard through.
+  `Sink.Reset` exempts it — a call ending must not silence a test — and
+  `forgetInputMonitor` is what turns it off, it being a mode rather than a
+  setting. No echo cancellation, hence the headphones line under the switch.
 - **Everything was 6 dB from silence.** Both directions clamped at `maxGain = 2`,
   and the receive side could only ever *cut*: call volume topped out at 100 %,
   so the only boost anywhere was the per-person menu's 200 %. Now a gain is
@@ -497,6 +517,23 @@ been listened to.
   a microphone produces. Cost ~63 µs per 10 ms frame on that Xeon, so well under
   1 % of a core while capturing.
   **Not verified by ear** — the numbers say it works; nobody has listened to it.
+  It has **two dials** now, both live mid-call like every other chain setting:
+  - *Strength* (`config.Voice.NoiseSuppressionDB`, 0–40, default 40 =
+    uncapped): a floor under the model's band gains, patched into the vendored
+    `denoise.c` (`rnnoise_set_gain_floor`, every change `rgoclient`-marked for
+    the next re-vendor). Spectral flooring rather than a dry/wet mix because
+    RNNoise carries 10 ms of algorithmic latency — an undelayed dry path would
+    comb-filter, and a delayed one is a buffer the floor makes unnecessary.
+    Measured: floor at 20 dB caps a −58 dB synthetic at −20.1 dB; floor 1
+    passes through at −0.1 dB.
+  - *Speech veto* (`config.Voice.VADThreshold`, 0–100, default 0 = off): the
+    model's per-frame speech probability — computed all along, discarded until
+    now — as a second condition on the gate *opening*. A veto and never a vote,
+    so the RMS gate stays the one decider (the rule the old comment defended);
+    it exists for the loud non-voice the RMS threshold cannot reject — keyboard,
+    doors. Vetoed frames count down the hangover rather than freezing it, so
+    sustained rejected noise closes the gate. Armed only while suppression runs,
+    the model being what answers.
 - **Push-to-talk is Windows-only** (`ui.KeyHeld` → `GetAsyncKeyState`). X11 needs
   `XQueryKeymap` on a display connection the client does not own; macOS needs an
   Accessibility grant. `PushToTalkSupported` is false there and the mode is left
@@ -724,9 +761,10 @@ Run the client, join `voice-test`, and watch the settings meter move.
   `replace` would have been wrong here anyway — it applies to the main module
   alone, so it stops working the moment `internal/voice` lifts out as a module
   of its own.
-  The FEC/DTX commit, the libopus 1.5.2 bump, the Deep PLC vendoring and
-  `Decoder.DecodeIn` are all merged there; the pin carries DecodeIn, so the
-  receive path decodes allocation-free through the `opusDecodeIn` assertion. The `opus_shared` build path — link the system libopus instead —
+  The FEC/DTX commit, the libopus 1.5.2 bump, the Deep PLC vendoring,
+  `Decoder.DecodeIn` and `Encoder.EncodeIn` are all merged there; the pin
+  carries both, so the receive path decodes and the publish loop encodes
+  allocation-free through the `opusDecodeIn` / `opusEncodeIn` assertions. The `opus_shared` build path — link the system libopus instead —
   has never been compiled on this machine, pkg-config not being installed; the
   `Decoder.SetComplexity` shim was added to both files but only the vendored one
   is proven.

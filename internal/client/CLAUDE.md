@@ -99,6 +99,16 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   back — nothing here mirrors the participants. A move arrives as one event
   naming both ends, never a leave/join pair, and `EventUserMoveVoiceChannel` is
   the same move sent only to the account that was moved.
+- **A voice state says nothing about mute or deafen.** `UserVoiceState` carries
+  `is_publishing` / `is_receiving`, and neither means what the names suggest:
+  `voice/mod.rs` sets `is_publishing` from LiveKit's track-published webhook —
+  a self-mute leaves the track published — and writes `is_receiving` exactly
+  once, `true`, when the state is created. So a **hold** is read off the
+  *membership* instead (`ServerMember.CanPublish` / `CanReceive`, nil meaning
+  allowed), which `toMember` converts and `VoiceParticipants` copies onto each
+  participant. It follows that a hold is known for anybody whose membership is
+  cached, in a call or not, and that a call in a **group** conversation can carry
+  none — there is no membership there to file one on.
 - **`State.ChannelPermissions`/`ServerPermissions`/`UserPermissions` agree with
   the backend now** — rewritten against `calculate_*_permissions` in
   `core/permissions/src/impl.rs` — and `client/store.go` still does the whole
@@ -219,6 +229,15 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   `delta` honours them on `/search` as it does on `/messages` is **not verified
   against the backend** — `app.withinSpan` re-checks the window locally for that
   reason.
+  **Those two fields carry the paging as well**, which is why `pageFrom` and not
+  the caller decides them: a cursor and a date span both want the same field, so
+  the tighter of the two is sent and the reader's window is never widened by a
+  page. Which end moves is the *order's* — a `Latest` answer walks back through
+  `before`, an `Oldest` one forward through `after` — and `Relevance` moves
+  neither: the route re-ranks whatever window it is given, so narrowing one is not
+  the page after it. On the unverified honouring above, `app.appendUnseen` drops a
+  page that repeats what is held and a wholly repeated page stops the paging,
+  which is what a build ignoring the fields would look like from here.
 - `Session.ServerCreate` and `Session.InviteJoin` decode their own responses now
   (`ServerCreateResponse`, `InviteJoin` — server plus default channels either
   way), but `Client.CreateServer` and `Client.JoinInvite` still ignore them and
@@ -471,3 +490,14 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   The request goes through a throwaway `revoltgo.New("")`: the route is
   unauthenticated, and the session that serves the account is built from the
   token afterwards by `Open`.
+
+- **The GIF service is not the API, and revoltgo had to learn the host.**
+  `gifs.go` calls `Session.GIFSearch` / `GIFTrending` / `GIFCategories`, which are
+  the fork's own (added for this client): `HTTPClient.ResolveURL` allows the API
+  base and the CDN and rejects everything else, so an absolute `api.gifbox.me`
+  URL was refused until `parsedGifboxBase` joined that list. It is an allowlist of
+  hosts *the session token is sent to* — the service authenticates with it rather
+  than with a key of its own, which is the whole reason nothing here ships one.
+  Rate-limit buckets key on the path alone (scheme and host are dropped), so
+  `/search`, `/trending` and `/categories` would share a bucket with API routes of
+  those names; none exists today.

@@ -79,7 +79,11 @@ only.
   hoisted role it is filed under. Safe off-thread is not cheap — `Members`
   resolves all of that per member and sorts, so it belongs on a worker.
 - **`Client.Events()`** — one buffered channel. `app.pumpEvents` is its single
-  reader; `dispatch` hops onto the UI thread once per event. `client.Event`'s
+  reader; it hops onto the UI thread once per **burst**, taking whatever is
+  already queued and running `dispatch` over it in arrival order, so a rank
+  reorder or a presence storm costs one trip rather than one per event. The hop
+  waits, which is the backpressure: emission blocks at the buffer rather than the
+  pump running ahead. `client.Event`'s
   marker method is unexported, so the switch is exhaustive. **Not gateway
   order**: revoltgo dispatches frames on a goroutine each, so two events about
   the same object can arrive inverted if both land inside one state mutation.
@@ -111,6 +115,10 @@ change in `markdown/` does not pay for the Fyne footguns:
 - `docs/voice-chat-todo.md` — the voice work queue: what is missing, what is
   compromised, and what was measured and left alone. Read it before touching
   `internal/voice`, `internal/audio` or the call half of `internal/app`.
+- `docs/video-player.md` — the video playback design, none of it built: the
+  shippable order, and why the decoder is a sandboxed ffmpeg subprocess rather
+  than a library. Read it before building anything about video, including the
+  sent half of GIFs (a gifbox GIF unfurls as an MP4).
 - `docs/performance.md` — what a frame costs, which levers are reachable and
   which need a fork of Fyne. Read it before optimising anything.
 
@@ -156,7 +164,9 @@ internal/
   domain/                domain.go (value types; Embed is one shape for every kind,
                          so renderers branch on what is filled in) + store.go
   client/                client.go, auth.go, security.go, convert.go, store.go,
-                         events.go, actions.go
+                         events.go, actions.go, gifs.go (the GIF service, which is
+                         not the API: a service beside it, holding the provider's
+                         key and taking this session's token in its place)
   cache/                 cache.go (LRU + TextCache), message.go, image.go
   audio/                 both directions of the machine's sound, on miniaudio (malgo).
                          audio.go (the engine and the one playback device),
@@ -184,7 +194,13 @@ internal/
                          so it coexists with gopus's libopus), device.go
                          (enumeration and the process's one miniaudio context),
                          decode.go (WAV + MP3 -> the device's format),
-                         synth.go (the built-in sounds, rendered rather than shipped)
+                         synth.go (the built-in sounds, rendered rather than shipped —
+                         a keystroke being a list of impacts through resonators
+                         rather than one noise burst, the switch and the bottom-out
+                         under it, which is where clicky rather than mushy comes
+                         from. The four boards a reader can pick between are one
+                         table of those, and the four keys are that board struck
+                         elsewhere rather than four more tables)
   cpu/                   which logical processors the client is allowed to run on.
                          cpu.go (Topology, Detect, Pin — Pin also moves GOMAXPROCS,
                          the runtime having counted its processors before any of
@@ -199,11 +215,11 @@ internal/
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          groups.go, pins.go, search.go, mentions.go, emoji.go,
-                         notify.go, alerts.go, security.go, settings.go,
+                         gifs.go, notify.go, alerts.go, security.go, settings.go,
                          serversettings.go, updates.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
-                         embed.go, invite.go, search.go,
+                         gifs.go, embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, group.go, panels.go, notice.go,
                          login.go (the card the screens before Ready are drawn on,
@@ -262,7 +278,10 @@ package's own `CLAUDE.md`; this is the map:
   a rebuild is what most of those handlers do.
 - `app/messages.go` — the message area end to end: composer dock, submit,
   slowmode, the window and what mounting a row asks for (`onMessageMounted`),
-  load/render, jumps and paging. Also **selecting** messages for a bulk delete,
+  load/render, jumps and paging. Also the **removal hold**: a deleted message's
+  row is washed red and left standing for a few seconds, so a burst of deletions
+  moves the column once rather than once each. Also **selecting** messages for a
+  bulk delete,
   which is filed here rather than beside the other destructive confirmations
   because what it is is a state of the composer: the bar stands where the entry
   does, and `syncComposer` is the one thing deciding which of the three is up.
@@ -388,6 +407,17 @@ package's own `CLAUDE.md`; this is the map:
   the other half — which emoji are on offer and in what order, a walk of every
   server the account is in that no widget knows. That one walk also feeds the
   composer's `:` autocomplete, so the pop-up and the typed list cannot disagree.
+- `ui/gifs.go` — the composer's other pop-up, on the emoji picker's island. It is
+  the shape a surface that **fetches** takes: nothing is in hand, so the field
+  settles before it asks (`gifQueryDelay`), an answer is held for as long as the
+  picker is open and a query in flight is not asked twice. Its grid is `gifColumns`,
+  two columns each as tall as what lands in them — a cell of one size letterboxes
+  every portrait GIF and bands every wide one — and its viewport is a fixed height
+  rather than a ceiling, a column's height not being known until an answer lands
+  and a pop-up taking its size once. `app/gifs.go` is the other half:
+  the requests, and which **rendition** a tile is drawn from, which is policy the
+  way a keystroke's sound is — the service names its formats and what can be put
+  on screen is a question about Fyne.
 - `ui/invite.go` — the invite card *and* `inviteCodesIn`, the scan that decides
   a message has one. `NewInviteCardFor` is the same card built from an invite
   already in hand — the join dialog's preview, which draws the banner and no
@@ -402,7 +432,13 @@ package's own `CLAUDE.md`; this is the map:
   inbox. `messageIsland` is three surfaces deep (island, well, card) with a
   header, a count line and an empty state that holds a floor open, so a panel
   reporting one sentence is still an island rather than a strip. `islandParts` is
-  what a surface adds — blocks under the header, something opposite the count.
+  what a surface adds — blocks under the header, something opposite the count, and
+  `OnMore`, the way to the next page. That last is a button *inside* the well
+  under the last card, which is where a reader who has run out already is; it is
+  appended by `setBlocks`, so no filler has to remember to keep it, and its slot
+  carries the gap above it so a well with nothing further to ask for pays for
+  neither. `SetMore` is what says whether it stands and what it reads — the
+  controller supplies the word, the direction of a page being the surface's.
   `MessageCard` is what a card is drawn from and `newMessageCard` draws it: a
   heading, a line, and a badge strip naming what the message carries, left off
   entirely where it carries nothing. A card's line is flattened by
@@ -456,10 +492,15 @@ package's own `CLAUDE.md`; this is the map:
 - `ui/theme/overrides.go` — `Apply`, reflection over the two tables against a
   defaults snapshot taken at init.
 - `cache/message.go` — entries *and* published slices are immutable, so a
-  UI-thread reader holding an older slice is safe. Find/Remove/Replace
-  binary-search by ULID.
+  UI-thread reader holding an older slice is safe. Find/Remove/Replace/Update
+  binary-search by ULID. `Update` is the one that *changes* a message — search,
+  copy, apply and store under one held lock, because Find-then-Replace lets two
+  writers copy the same message and the second store drop the first.
 - `cache/image.go` — memory bounded in *bytes*, plus disk; `Get` stamps mtime so
-  `trimDiskCache` evicts by recency. One `ImageCache` is one *folder* under the
+  `trimDiskCache` evicts by recency. An animated GIF's encoded bytes are kept on
+  disk as `id+".gif"` beside the `.png` still (`GIF`), fetched on first hover
+  rather than with the still — a GIF nobody hovers costs nothing, and both files
+  are entries under the one budget. One `ImageCache` is one *folder* under the
   configured root (`ImagesFolder`, `EmojisFolder`) with its own budget and LRU,
   or an afternoon of scrolling attachments evicts the handful of emoji every
   message is drawn with. The settings name **one** budget, so `app.emojiShare`
@@ -562,7 +603,7 @@ Fyne is **patched**, and the patched copy is a repository of its own —
 `replace` in `go.mod` and fetched like any other module. Nothing is vendored and
 there is no checkout step: a fresh clone builds. The fork keeps the module path
 `fyne.io/fyne/v2`, which is why the `replace` needs nothing beside it. Its
-`PATCHES.md` lists the eleven, and `./update-fyne.sh vX.Y.Z` there carries them
+`PATCHES.md` lists the twelve, and `./update-fyne.sh vX.Y.Z` there carries them
 onto a new Fyne by rebasing onto a pristine upstream branch. A bare `go get -u`
 floats what that frozen Fyne compiles against, so everything else updates
 through `scripts/update-deps.sh`.

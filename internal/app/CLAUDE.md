@@ -318,7 +318,11 @@ DAG and conventions.
     reaches past the client on both counts: `applyPacing` hands the frame rate,
     vsync, partial repaint and whether the caret blinks to the patched Fyne
     (`rgoclient-fyne`), which picks each up where it uses it — the caret at the
-    next refresh of an entry, the rest on the next tick — and `applyAffinity`
+    next refresh of an entry, the rest on the next tick. The frame rate is the
+    focus-dependent one: `applyFrameRate` hands over `BackgroundFrameRate`
+    instead while the window is unfocused, re-applied by the foreground hooks in
+    `startAlerts` — off the UI thread, which is safe because everything it
+    touches is an atomic. `applyAffinity`
     hands the process itself to a set of cores through `internal/cpu`. `Run`
     calls both once at startup. The core setting is the one on the page that
     moves things nothing here draws — the gateway, the image loaders,
@@ -529,7 +533,10 @@ DAG and conventions.
     reason behind a mark — a disabled `widget.Entry` draws its border in
     `ColorNameDisabled`, which no scoped theme can flatten without taking the
     placeholder with it, so the box read as a stray outline inside the card's own.
-    Typed text is kept. `UploadFiles` is checked in `AddAttachment`, where a drop
+    Typed text is kept, and so are the queued replies — `syncComposer` pushes the
+    channel itself as well (`MessageInput.SetChannel`), which is what greys the
+    cards belonging to another one and keeps them out of the send
+    (`RepliesHere`); see `internal/ui/CLAUDE.md`. `UploadFiles` is checked in `AddAttachment`, where a drop
     and a paste both land, and reported through `OnRefused` — nothing else would
     happen, and nothing happening reads as a bug. A drop checks once for the whole
     batch, not per file.
@@ -537,6 +544,14 @@ DAG and conventions.
     reads and the questions are asked per channel switch, per hover and once a
     second at worst — while holding a `*revoltgo.ServerMember` would be both a data
     race (the gateway writes `Roles` in place) and a cache to invalidate.
+    **The one place that asks in bulk asks once**: `refreshChannelList` wants the
+    same question about every channel of a server, and the only per-channel part
+    of the answer is two overwrite lookups — the account, the server, the
+    membership and the ranking of its roles are shared, and the ranking allocates
+    and sorts. So it takes `Store.ServerChannelPermissions(serverID)` and hands it
+    to `newChannelRow`, which reads `ViewChannel` out of it (`App.viewable`, nil
+    meaning ask the store, which is every other caller). Still not a cache: one
+    walk, held no longer than the rebuild.
     `onMemberUpdated` is the one event that can change the answer under a standing
     selection: for **our own** member it rebuilds the channel list and re-syncs the
     composer, a role gained or lost being what makes a channel appear.
@@ -730,7 +745,12 @@ DAG and conventions.
     later.
     The panel is a **snapshot** — `App.pinned` for as long as it is up — so a pin
     made anywhere while it is open does not reflect. `App.pinsChannelID` is what
-    drops an answer that lands after the reader has moved on. A card leads to its
+    drops an answer that lands after the reader has moved on, and `App.pinsSeq`
+    what drops one belonging to a list since replaced: `loadPinned` bumps it, so a
+    page still in flight when `reloadPins` re-asks from the top lands on nothing
+    rather than appending to the new list. Revolt's hundred is per request —
+    `loadMorePins` asks for the hundred past the oldest held — and a pin moving
+    throws the paged-in pages away, which pin is the hundredth having moved too. A card leads to its
     message through `OnJumpToMessage` and closes the panel on the way, a jump
     moving the column underneath it; unpinning goes through `App.setPinned` — the
     shared half of `OnPin`, with a hook, since the message a pin is taken off here
@@ -742,6 +762,15 @@ DAG and conventions.
     ID and nothing else, revoltgo's own default handlers having already put `State`
     right by the time ours run. So a handler's whole job is to decide which surface
     is now wrong and let the rebuild re-read the store.
+    **Two coalescings sit on top of each other here and answer different
+    questions.** `pumpEvents` batches the *trip*: whatever the gateway has
+    already produced goes onto the UI thread in one hop, in arrival order, since
+    every hop wakes the driver's loop. The refresh queue below batches the
+    *work*, which is what the events in that batch ask for. Neither subsumes the
+    other — a burst spread over three settling windows still costs three
+    rebuilds, and a burst inside one window still arrives as however many trips
+    the pump made.
+
     Those rebuilds are **queued**, not made: `App.queueRefresh` sets bits in
     `App.dirty` (`refreshServers` | `refreshChannels` | `refreshMembers` |
     `refreshEmojis` | `refreshPresence` | `refreshFriends`) and arms one timer; `flushRefresh` runs
@@ -1061,6 +1090,15 @@ DAG and conventions.
     The **span** is the exception and is sent, so `withinSpan` re-checks it
     locally rather than trusting a field nothing in this repo has verified the
     backend reads on this route.
+    The hundred is per *request*, not per island: `loadMoreSearch` asks again
+    beginning past the last result held and `appendUnseen` grows `searchFound`, so
+    both numbers on the count line climb. `drawSearchResults` is the **single
+    writer** of the button — every path that can move whether there is a next page
+    ends there, so it cannot be left saying something the state has stopped
+    agreeing with. `App.searchSeq` is what kills a page still in flight when the
+    query is re-asked: `SameRequest` cannot tell the same query asked twice apart,
+    and a page of the answer just thrown away would append to the new one.
+    Relevance offers no next page at all — see the client note on `pageFrom`.
     `refillSearch` wraps every change to the island in a `repositionOverlay`,
     unlike the pins panel: replacing cards with "Searching..." is a change of
     height, and a centred card sized from its own minimum re-places for neither.
@@ -1119,12 +1157,21 @@ DAG and conventions.
     composer rather than sounded there — `ui` does not import `audio`.
     `App.focused` is the one field on `App` that is not UI-thread confined: Fyne's
     foreground hooks fire from the driver's own goroutine, hence `atomic.Bool`.
+    Those hooks also re-apply the frame rate (`applyFrameRate`), and Fyne keeps
+    one callback per hook — anything else following focus joins those closures.
     The engine is built in `New`, not `startAlerts` — a nil one is a panic on the
     first notice — and holds no audio device until something is actually played, so
     a client with sounds off never takes one. Loading is a worker (`loadSounds`): a
     custom file is decoded there, and the built-ins are *synthesised*, which is not
     free either. A file that cannot be read falls back to its built-in and says so,
     a client that quietly stops pinging being one the user believes is broken.
+    The typing **board** is the one sound setting not read where it is played: a
+    keystroke is synthesised once and installed, so `updateSettings` compares it
+    across the change and `applyTypingProfile` builds all four again on a worker.
+    Only the four, and only those still on a built-in — a file somebody pointed a
+    key at outranks a board they picked. `SetTypingProfile` is named *before*
+    `loadSounds` in `startAlerts`, or the first four clicks are the default board's
+    and are replaced a moment later.
 33. **Mentions as a set.** `App.mentions` is channel → message IDs, oldest first,
     and `mentions.go` is both what maintains it and the inbox that reads it back.
     It is filled wholesale from Ready (`client.Ready.MentionIDs`, off the account's
@@ -1162,7 +1209,14 @@ DAG and conventions.
     under the circle instead of on the rail's edge.
     The **inbox** is the third, and the only one that costs anything: the client
     holds IDs, so every row is a `Client.ResolveMessages` fetch — bounded by
-    `inboxLimit`, newest first. `App.inboxSeq` drops a fill for a panel already
+    `inboxLimit`, newest first, with `loadMoreMentions` resolving the next
+    `inboxLimit` on demand. It is the one panel paging a set held *here* rather
+    than a route's own ceiling, and it pages by **ID** rather than by an offset
+    into `mentionTargets`' sorted list: that list moves under the panel — a card
+    dismissed drops one, an arriving mention adds one at the other end — and an
+    index into a shifted list is a page with a hole or a repeat in it. Only the new
+    refs are resolved; what is already drawn costs nothing to keep.
+    `App.inboxSeq` drops a fill for a panel already
     closed and reopened; `App.mentioned` is what came back, kept while the panel
     is up exactly as `App.pinned` is, so dismissing one card redraws the rest
     without asking again.
@@ -1226,6 +1280,14 @@ DAG and conventions.
     nothing in this client draws a server banner. Neither writes back what it sent — the edit returns as a
     `ServerUpdate` and the store answers for it, exactly as this account's own
     display name does, so a rename the server refused is never left on screen.
+    **The two things that add to a server are reachable from the sidebar too**:
+    `channelSpaceMenu` is what the empty part of the channel column offers on a
+    right-click, and it raises the same `promptCreateChannel` /
+    `promptCreateCategory`. Both therefore take a server rather than reading
+    `serverSettingsID` — no page is open behind that menu — and check
+    `ManageChannel` on it themselves. The home view answers with no items at all,
+    a conversation not being made this way, which `ui.ShowContextMenu` reads as no
+    menu.
     Creating a channel is `ui.NewChannelCreateDialog`, the edit card asked from
     empty with one row it cannot have — the kind, which Revolt takes only at
     creation. On success the page comes *down* and the new channel is selected: the
@@ -1388,15 +1450,25 @@ DAG and conventions.
     else's event in that window would read the store's empty answer as a
     disconnect and tear down a call that just connected.
     **Settings apply to a call already running.** `applyVoiceSettings` pushes
-    sensitivity, input gain, soft clipping, the rumble filter, noise suppression,
-    call volume and the output device onto whatever is open, and re-arms the
-    push-to-talk poll; without it each is read once at join and a slider dragged
-    mid-call does nothing, which reads as a broken setting rather than a deferred
-    one.
+    sensitivity, input gain, soft clipping, the rumble filter, noise suppression
+    (its strength and speech-veto dials included), call volume and the output
+    device onto whatever is open, and re-arms the push-to-talk poll; without it
+    each is read once at join and a slider dragged mid-call does nothing, which
+    reads as a broken setting rather than a deferred one. `inputConfig` and
+    `applyCaptureSettings` are the one builder and one pusher both microphone
+    openers share — a dial only the join carried would behave differently in a
+    call than under the meter tuning it.
     **Both gains are decibels** (`config.VoiceGainOffDB`..`VoiceGainMaxDB`,
     −40 = off, +20 = ×10), converted at the seam by `audio.GainFromDB` — `audio`
     speaks linear gain, being where the arithmetic is, and `config` owns where
-    the range ends, being the leaf everything reads. The per-person volume is the
+    the range ends, being the leaf everything reads. **So is the gate's
+    threshold**: `config.Voice.SensitivityDB`, `VoiceGateQuietestDB`..
+    `VoiceGateLoudestDB`, handed straight to `Capture.SetGateThreshold` with no
+    mapping left anywhere. It was an arbitrary 0-100 onto that same range, and a
+    file written before the change carries the old key — `config.sanitise`
+    converts it once and clears it, which is the whole migration (there is no
+    version field, and reading a saved `35` as decibels would clamp the gate to
+    −20 and silence the microphone with nothing saying so). The per-person volume is the
     same range in the same unit, on a `ui.SliderCard` hung beside the participant
     row (`showUserVolume` → `showPopover`) and seeded by `audio.DecibelsFromGain`
     off `Sink.Gain`: a slider is not a `fyne.MenuItem`, so the menu item opens a
@@ -1447,7 +1519,7 @@ DAG and conventions.
     **A second pump, not `dispatch`.** `client.Event`'s marker is unexported so a
     voice event cannot be one, and that channel *blocks rather than drops*, so
     speaking updates would stall the gateway reader behind them. `pumpCall` is
-    modelled on `pumpEvents`, one `doOnUI` hop per event, ending when
+    modelled on `pumpEvents`, one `doOnUI` hop per **burst**, ending when
     `Call.Close()` closes the channel. `onCallEvent` drops anything from a call
     that is no longer `a.call` — the same check `armTypingTimer` makes.
     `leaveCall` is in `resetSessionState` beside `resetTyping`: the token was
@@ -1462,7 +1534,36 @@ DAG and conventions.
     (`voiceRows`, beside `channelRows`; `VoiceParticipantRow.SetSpeaking` no-ops on
     an unchanged value and moves one circle's fill). `callRows` re-applies
     `a.speaking` as it builds, a rebuilt row being a new object that knows nothing
-    of who was talking.
+    of who was talking. The third mitigation is the reader's:
+    `config.Voice.SpeakingRing` off keeps the *record* — `App.speaking` is still
+    written, so turning it back on draws the truth rather than whoever talks next
+    — and skips only the painting, which is the whole of what it costs.
+    **What is held against a voice comes from three places, and only one of them
+    is an event.** `App.voiceMarks` gathers them into a `ui.VoiceMarks` per row:
+    the two server-wide holds off `domain.VoiceParticipant` (the *membership*'s
+    `can_publish` / `can_receive`, so they are known whether or not this client is
+    in the call, and a rebuild of the column is what draws them); a participant's
+    own mute off `voice.MuteChanged`, which is the room reporting their microphone
+    track muted and is therefore known only while we are in the same call; and
+    their volume being at `VoiceGainOffDB` **here**, which is neither their doing
+    nor the server's. This account's own two are read from `a.muted` / `a.deafened`
+    instead — `SetMuted` is what was just decided, not news to wait for — and
+    nobody else's deafen is knowable at all (see `docs/known-gaps.md`).
+    `refreshVoiceMarks` re-reads the participant out of the store rather than
+    trusting the row: a hold is the membership's. Which is also why
+    `onMemberUpdated` queues `refreshChannels` for a member *in a call*, not for
+    this account alone — a mute given to somebody else moves their row and nothing
+    else announces it.
+    **The moderation items toggle.** `memberVoiceItems` reads
+    `Member.ServerMuted` / `ServerDeafened` and offers the opposite, because this
+    menu is the only place either hold is lifted from; an item that could only
+    ever mute somebody already muted is a hold with no way out. For the same
+    reason the pair is offered to a member who is **not in a call but is already
+    held** — a hold is the membership's and outlives the call it was given in —
+    where Move and Disconnect stay gated on the call. Every item there
+    is refused for this account (`userID == SelfID`), and `voiceParticipantMenu`
+    now makes the same refusal for the per-person **volume** — this account is not
+    one of the voices this client mixes, so its slider moved nothing.
     **The island** (`ui.CallIsland`) floats on its own layer at the top of the
     window and nowhere else: a call outlives leaving the channel, the server *and*
     the view, and the window's layer is the one slot present in all of them. It
@@ -1492,9 +1593,28 @@ DAG and conventions.
     `SettingsPage.showSection` **and** `Close` **and** `resetSessionState` — the
     page has no unmount hook, signing out does not close it, and either hole holds
     the microphone open for the rest of the run. The index pass
-    (`buildSettingsIndex`) stubs all four voice hooks to nil for the same reason
+    (`buildSettingsIndex`) stubs all five voice hooks to nil for the same reason
     `LoadProfile` and `CacheStats` are stubbed: it builds every section twice on
     the first keystroke in the search box, and `StartInputMonitor` opens a device.
+    **"Hear myself" is that same capture played back**, and it is written from
+    inside `Capture.Read` (`SetEcho`) rather than by a reader of its own — `Read`
+    has exactly one caller, so a test tapping the microphone any other way could
+    not run mid-call at all. It lands in a `Sink` lane, so what is heard is what
+    a call would send, `Sink.Reset` exempting it because a call ending must not
+    silence a test. `App.monitorEcho` is the reader's intention and
+    `applyInputEcho` re-applies it wherever the meter moves between the call's
+    stream and its own; `forgetInputMonitor` clears it, the switch being a mode
+    somebody turned on to listen to rather than a setting.
+    **One stream feeds two bars.** The sampler reports a `ui.InputMeter` — the
+    loudness as a ratio *and* as the dBFS figure the bar says beside itself
+    (`audio.LevelDecibels`, floored at the bar's own bottom so the two readings
+    cannot disagree), plus the noise suppressor's speech estimate, all off the
+    same sample so what a reader compares is the same frames — because a
+    second monitor would be a second open of the one device, which is what the
+    borrowing above exists to avoid. The estimate is `Capture.VAD`, and it is
+    **negative** where the model is not running: it runs only while suppression
+    does, and a bar left at its last answer would report a microphone nothing is
+    listening to.
 37. **A group conversation.** Everything a group *is* was here before one could
     be made: it is a channel, so its sidebar row, header, messages and edit card
     are every channel's, and leaving one is `confirmCloseChannel`. What
@@ -1613,7 +1733,9 @@ DAG and conventions.
     re-filtered against the week-long window on the way out — the reader can sit
     on a selection until a message ages past it — and how many were left behind is
     a warning rather than a silent drop. `Client.DeleteMessages` chunks by a
-    hundred, so a large selection is several requests and several events.
+    hundred, so a large selection is several requests and several events — and
+    the rows those events name are held like any other deletion (item 43), so a
+    selection of ninety leaves the column in one move.
 40. **A group's own settings.** `ui.GroupSettingsPage` is the settings shell
     (item 13) filled with one conversation, and the **third** such layer beside
     `settings` and `serverSettings` — only ever one of the three is up, each
@@ -1691,3 +1813,64 @@ DAG and conventions.
     Nothing is downloaded and no binary is replaced. `ui.UpdateRelease` carries
     the one asset `update.Release.AssetFor` picked for this GOOS/GOARCH, and both
     buttons hand a URL to `openLink`. See `docs/known-gaps.md` for why.
+
+43. **A deleted row is washed red and left standing.** `removeMessages` no longer
+    takes the rows out where it stands: `holdRemoval` washes them
+    (`MessageList.SetDeleted`) and files them in `App.removing`, a `removeHold`
+    with one wake, and the whole batch leaves the column together when it lapses.
+    **Nothing about the deletion waits on this** — it has already happened here
+    and everywhere else. The request went when it was confirmed
+    (`App.deleteMessage`, unchanged), the cache dropped the message before this
+    ran, and the mention set, the three panels and any open editor are answered
+    *before* the hold, an editor over a message that no longer exists being one
+    nothing can save.
+    Two things come of it. A burst of deletions moves the column **once** — a
+    sweep arrives as an event per message and each of them re-derives seams and
+    re-lays out — and a message somebody is halfway through reading goes red
+    rather than vanishing out from under them.
+    - **The hold widens rather than restarting**, and is measured from the *first*
+      row of the batch: `config.Behaviour.DeletedHold(standing)` is
+      `DeletedHoldMS + DeletedHoldStepMS × (standing-1)`, capped at
+      `DeletedHoldCapMS` — 5 s, +0.5 s, 8 s. The cap is therefore a bound on how
+      long any one row stands, where a hold restarted per deletion could be pushed
+      out indefinitely by a steady trickle. At zero `holdRemoval` answers false
+      and the caller removes as it always did.
+    - **A hold belongs to a channel**, and only the open one has rows: a deletion
+      elsewhere returns before it (`removeMessages`' own guard), and a hold whose
+      channel has since been left is dropped rather than acted on — the window
+      went with the switch, so there is nothing to take out. `flushRemoval` checks
+      that at the wake as well as `holdRemoval` at the arrival.
+    - **A wake that has fired cannot be recalled**, so `armRemoval` checks it is
+      still the timer the hold carries — the trap `armTypingTimer` names — and it
+      is epoch-guarded like any other. `resetSessionState` calls `dropRemoval`:
+      the column is about to be replaced whatever the wake would have done.
+    - `MessageList.Remove` is what clears the marks, so the one path that takes a
+      row out is the one that forgets it. `dropRemoval` gives them back by hand,
+      being the case where the rows are *not* removed.
+
+    The marks live on the list rather than on the widgets (`SetDeleted`, keyed by
+    message ID) so a row scrolled past and back is built already washed — the
+    arrangement the selection already has.
+
+44. **Picking a GIF.** `gifs.go` is the controller half of the composer's second
+    pop-up. Nothing about it is held here: the lists come from a service *beside*
+    Revolt (`api.gifbox.me`, which holds the provider's key and authenticates
+    with this session's token), no event announces any of it, and its bucket is
+    ten requests in ten seconds — so the picker holds each answer for as long as
+    it is open, single-flights a query already in flight and lets the field settle
+    before asking. `App` only fetches: `fetchGIFs` runs one list on a worker and
+    answers on the UI thread through the picker's own callback, epoch-guarded like
+    any other. **A failure is drawn, not announced** — nobody asked out loud, and
+    the line above the grid is where the reader is already looking.
+    **Which rendition a tile draws is policy and lives here**, the way a
+    keystroke's sound does: `gifPreviewOrder` prefers the small stills, and a
+    rendition this client cannot decode is stepped over (`gifVideoMarkers`, matched
+    on the name and the URL both) — the service prefers WebM and MP4 and there is
+    no player. A format set this client has never heard of falls back to the
+    smallest that is not a video, walked in sorted order so the answer is the same
+    twice: an unknown set drawing nothing would be an empty grid.
+    **What is picked is a link**, not an upload: `MessageInput.pickGIF` inserts
+    the page URL at the caret exactly as the emoji picker inserts a token, so
+    the send rules — the permission, slowmode, the queued replies — are the
+    composer's own and unchanged, and a draft already typed is not lost. Revolt
+    unfurls that page into the embed (item 6).

@@ -24,7 +24,15 @@ one. There is no separate draw thread; `window.RunWithContext` (`window.go`) is
 
 The deadline comes from `fyne.FrameRate()` and is re-read each frame, which is
 what `config.Performance.FrameRate` (default 120) sets through
-`app.applyPacing`. Upstream it is the literal `time.Second / 60`.
+`app.applyPacing`. Upstream it is the literal `time.Second / 60`. While another
+window has the focus, `config.Performance.BackgroundFrameRate` (default 10,
+floor 1) stands in for it — `app.applyFrameRate`, re-applied by the same
+foreground hooks that gate notification sounds (`app.startAlerts`). Input is
+still noticed at once (the loop waits on the OS queue, not the frame clock),
+and the loop resets its deadline whenever the rate moves, so regaining focus
+draws immediately. What the low rate actually paces is the little that draws
+unwatched: the typing-indicator sweep — the client's one repeat-forever
+animation — and repaints from gateway events.
 
 **The rate is a ceiling, not a rate.** `drawSingleFrame` draws a window only if
 `decideRepaint(visible, frame.ready(), canvas.CheckDirtyAndClear)`, so the drawn
@@ -163,6 +171,28 @@ were drawn and discarded). Everywhere else it is `noGate{}`, always ready.
   **406 → 313 MB**, with `HeapIdle` fully released. The live set (~200 MB with
   that server fetched) is the whole-membership design itself, which is
   deliberate — see `internal/app/CLAUDE.md` item 3.
+- **One trip to the UI thread per burst, not per event.** `app.pumpEvents` takes
+  whatever the gateway has already produced (`maxEventBatch`, 64 — the stream's
+  own depth) and dispatches it in arrival order inside a single `doOnUI`. Every
+  hop costs a queue entry and a wake of the driver's loop, and Revolt's traffic
+  is bursts by construction: a rank reorder is an event per role, presence on a
+  large server is continuous. The handlers behind them already coalesced their
+  *work* through `queueRefresh`; this is the trip itself. The hop **waits**,
+  which is what lets one buffer be reused and is also the backpressure — the pump
+  gathering while the UI thread works is what makes the next batch bigger rather
+  than the queue longer. `app.pumpCall` is the same shape for a call's events and
+  deliberately does *not* wait: `voice.Call.emit` drops rather than blocks, so a
+  pump held against a busy frame would lose speaking transitions.
+- **A sidebar rebuild ranks the account's roles once, not once per channel.**
+  `Store.Permissions(channelID)` re-reads the account, the server and the
+  membership out of `State` and re-ranks the member's roles — an allocation and a
+  sort — for an answer whose only per-channel part is two overwrite lookups. So
+  `refreshChannelList` takes `Store.ServerChannelPermissions(serverID)`, one pass
+  for the whole server, and `newChannelRow` reads the view bit out of it. Nothing
+  is cached: it is one walk, made where a server's worth of the answer is wanted
+  at once. Same shape in `App.refreshVoiceMarksAll`, which asked
+  `Store.VoiceParticipants` — a resolve and a sort of the whole call — once per
+  row of that call.
 - **Nothing is resolved twice on a walk.** `Store.Relationships` carries the
   relationship it filtered on into the resolution rather than asking again. With
   the friends dialog down, `awaitingAnswer` does not call it at all:
@@ -205,7 +235,7 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-ten patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+twelve patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The
@@ -224,6 +254,24 @@ during a scroll here), and the expired-texture sweep that ranged every cached
 texture every frame for entries that expire at minute granularity (now once a
 second). Measured with patch 9 on a message-column scroll: draw phase
 **~1.74 → ~1.43 µs of CPU per drawn object**.
+
+The **twelfth** is the fifth's own bill, come due: a loop parked in the OS event
+queue is not woken by a channel send, so patch 5 made every `DoOnUI` post an
+empty event — a cgo `PostMessage` that also ends the wait, so *n* funcs queued
+before the loop reached any of them cost *n* syscalls and *n* whole loop passes
+to run work one pass would have drained. It is one post per *drain* now, claimed
+by a compare-and-swap. Measured on a 200,000-func flood against an idle loop,
+**1.39 s wall / 1.79 s CPU → 99 ms / 190 ms** (8.9 µs → 0.94 µs of CPU per
+queued func); on 3,000 bursts of 32 a millisecond apart, CPU **1.31 s → 0.20 s**.
+Both are synthetic: the client at rest and through a login queues nowhere near
+enough to show it — measured against this account, idle CPU over 90 s and startup
+CPU over 25 s are both inside their own run-to-run spread. It raises a ceiling
+rather than lowering a bill, which is why the *client's* own coalescing (the
+event pump, below) is what actually pays here.
+
+Where the claim is released is the whole patch and is worth reading `PATCHES.md`
+for before touching it: released a few lines too early, 3% of enqueues stalled
+for the full 100 ms `idleWait`, and nothing else says so.
 
 The sixth and seventh are **work skipped**, both found by profiling the message
 column and both in exported code rather than under `internal/`:
@@ -278,6 +326,12 @@ order of size:
   "upgrade OpenGL" that would pay next (instancing needs 3.3+). A painter
   rewrite; at ~400 µs of draw per scroll frame it is not where the frame goes,
   so it stays unbuilt.
+- **Parsing markdown is not a lever.** `markdown.Parse` measured (2026-08, same
+  machine): ~390 ns for a typical one-line message, ~37 µs for a 6.6 KB
+  many-block body, 0.44 ms worst case for 2000 bytes of pathological `[[[[…` —
+  noise against the widget build each parse feeds. A parsed-AST cache per
+  message was considered and rejected: it buys back microseconds per remount
+  and costs held ASTs plus invalidation on every edit.
 
 ## Still needs more than a patch
 

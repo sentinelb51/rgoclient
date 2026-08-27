@@ -29,6 +29,9 @@ var Colors = struct {
 
 	MessageEditBackground color.Color
 
+	MessageDeletedBackground      color.Color
+	MessageDeletedHoverBackground color.Color
+
 	MessageSelectedBackground      color.Color
 	MessageSelectedHoverBackground color.Color
 	MessageSelectTickEdge          color.Color
@@ -101,6 +104,8 @@ var Colors = struct {
 	SwiftActionDanger     color.Color
 	ReplyLine             color.Color
 	ReplyMentionActive    color.Color
+	ReplyStaleBg          color.Color
+	ReplyStaleText        color.Color
 	MentionText           color.Color
 	MentionHandleText     color.Color
 	LinkText              color.Color
@@ -165,6 +170,14 @@ var Colors = struct {
 	// over the row's hover fill as well as over its rest state, so it has to read
 	// against both.
 	VoiceSpeaking color.Color
+
+	// The two colours a mute or a deafen mark is drawn in, which is the whole of
+	// what separates them: the glyph says *what* is held and the colour says who
+	// held it. Server is a moderator's, and is the only one of the pair the person
+	// cannot undo; Self is their own switch. A third case — their volume turned off
+	// on this machine — wears VoiceParticipantMark, being about neither.
+	VoiceHoldServer color.Color
+	VoiceHoldSelf   color.Color
 
 	/* The call island */
 
@@ -296,6 +309,14 @@ var Colors = struct {
 	// and fainter than the jump wash: it announces a change the reader did not ask
 	// for, where a jump answers one they did.
 	MessageEditBackground: color.RGBA{R: 34, G: 52, B: 66, A: 255}, // #223442
+
+	// A message that has been deleted and whose row is still standing — held for a
+	// few seconds so the column does not jump out from under the reader. The edit
+	// wash's opposite number and the one wash here that is a *state* rather than an
+	// animation: it stands until the row goes, so it is a rest colour that lifts
+	// under the pointer like the two below it.
+	MessageDeletedBackground:      color.RGBA{R: 58, G: 32, B: 38, A: 255}, // #3A2026
+	MessageDeletedHoverBackground: color.RGBA{R: 74, G: 42, B: 49, A: 255}, // #4A2A31
 
 	// A row picked for a bulk delete. It is a *rest* colour like the mention wash
 	// and moves with the pointer the same way — but it is the accent rather than
@@ -459,6 +480,8 @@ var Colors = struct {
 
 	ReplyLine:          color.RGBA{R: 90, G: 98, B: 116, A: 255},   // #5A6274, reads over the hover fill too
 	ReplyMentionActive: color.RGBA{R: 91, G: 124, B: 250, A: 70},   // accent tint
+	ReplyStaleBg:       color.RGBA{R: 29, G: 33, B: 44, A: 255},    // #1D212C, sinks below the composer card rather than resting on it
+	ReplyStaleText:     color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280
 	MentionText:        color.RGBA{R: 147, G: 169, B: 255, A: 255}, // #93A9FF, accent lifted for body text
 	MentionHandleText:  color.RGBA{R: 107, G: 114, B: 128, A: 255}, // #6B7280, the picker's @handle
 
@@ -571,6 +594,9 @@ var Colors = struct {
 	// Bright enough to carry against the hover fill, which is the harder of the
 	// two backgrounds it is drawn over.
 	VoiceSpeaking: color.RGBA{R: 61, G: 214, B: 140, A: 255}, // #3DD68C
+
+	VoiceHoldServer: color.RGBA{R: 217, G: 92, B: 92, A: 255},  // #D95C5C, a moderator's
+	VoiceHoldSelf:   color.RGBA{R: 217, G: 164, B: 65, A: 255}, // #D9A441, their own
 
 	// The server rail's own black, which is the darkest surface the client draws:
 	// the card floats over whatever is being read, and a fill lighter than the page
@@ -862,6 +888,11 @@ var Sizes = struct {
 	EmojiPickerRailWidth          float32
 	EmojiPickerRailIconSize       float32
 	EmojiPickerRailRowHeight      float32
+	GIFPickerWidth                float32
+	GIFPickerMaxHeight            float32
+	GIFPickerTitleSize            float32
+	GIFPickerTilePad              float32
+	GIFPickerChipHeight           float32
 	SystemMessageTextSize         float32
 	SystemMessageIconSize         float32
 	SystemMessagePadding          float32
@@ -1455,6 +1486,19 @@ var Sizes = struct {
 	EmojiPickerRailWidth:     46,
 	EmojiPickerRailIconSize:  26,
 	EmojiPickerRailRowHeight: 36,
+
+	// The island is the emoji picker's own width; its columns are as tall as what
+	// lands in them, so the ceiling is the whole of what says how much of a page is
+	// on screen at once.
+	GIFPickerWidth:     372,
+	GIFPickerMaxHeight: 300,
+	GIFPickerTitleSize: 11,
+
+	// The frame a tile's picture sits inside. A canvas.Image has no corner radius
+	// and Fyne clips nothing, so a picture drawn to the well's edge squares off the
+	// corners it covers — the ring is what keeps the tile rounded.
+	GIFPickerTilePad:    3,
+	GIFPickerChipHeight: 26,
 	// A system line is one line whatever it says, so its margin is its own rather
 	// than the gap that separates two people speaking: a run of joins is a block,
 	// not a page. The mark is sized against that line, not against the avatar
@@ -1950,6 +1994,10 @@ const (
 	ColorNameCodeComment fyne.ThemeColorName = "rgoCodeComment"
 	ColorNameCodeNumber  fyne.ThemeColorName = "rgoCodeNumber"
 	ColorNameCodeCall    fyne.ThemeColorName = "rgoCodeCall"
+
+	// The mention accent, for the covered word a spoiler draws where a mention
+	// segment cannot wear the cover.
+	ColorNameMention fyne.ThemeColorName = "rgoMention"
 )
 
 // Color maps Fyne's semantic colour names onto the palette.
@@ -1967,6 +2015,8 @@ func (t *AppTheme) Color(name fyne.ThemeColorName, variant fyne.ThemeVariant) co
 		return Colors.CodeNumber
 	case ColorNameCodeCall:
 		return Colors.CodeCall
+	case ColorNameMention:
+		return Colors.MentionText
 	case theme.ColorNameScrollBar:
 		return color.Transparent
 	case theme.ColorNamePrimary:

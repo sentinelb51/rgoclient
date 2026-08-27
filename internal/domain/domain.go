@@ -140,6 +140,12 @@ type File struct {
 	Width  int
 	Height int
 
+	// ContentType is the raw MIME type the server recorded at upload, empty
+	// where none was. Kind is the classification to branch on; this is for the
+	// finer questions a kind cannot answer — an image being "image/gif" is what
+	// offers it a player.
+	ContentType string
+
 	// Foreign marks a URL served by somebody other than the instance's own CDN —
 	// an embed's picture, fetched from whatever host the unfurl named. It is not
 	// about trust in the picture but in the *name*: a CDN URL's file ID is what
@@ -402,6 +408,40 @@ type Embed struct {
 	Color color.Color // the accent stripe; nil for the default
 }
 
+/* GIFs */
+
+// GIF is one result from the GIF service. What a message carries is PageURL —
+// the page is sent and Revolt unfurls it into an embed — where Formats are
+// renditions of the picture itself, for choosing one by. They are keyed by the
+// service's own names because nothing here defines them, and a service that
+// grows a rendition should not need a field.
+type GIF struct {
+	ID      string
+	PageURL string
+
+	Formats map[string]GIFFormat
+}
+
+// GIFFormat is one rendition. A zero dimension is one the service left out.
+type GIFFormat struct {
+	URL    string
+	Width  int
+	Height int
+}
+
+// GIFCategory is a browsable heading, and is searched for by its own Title.
+type GIFCategory struct {
+	Title    string
+	ImageURL string
+}
+
+// GIFPage is a page of results. Next is what the page after it is asked for
+// with, and is empty on the last.
+type GIFPage struct {
+	Results []GIF
+	Next    string
+}
+
 /* Permissions */
 
 // Permission is a set of the things an account may do somewhere. The bit
@@ -566,13 +606,14 @@ type Channel struct {
 // VoiceParticipant is somebody connected to a voice channel's call, resolved the
 // way the sidebar draws them under that channel's row: the per-server nickname,
 // avatar and role colour a Member carries, plus what their end of the call is
-// sharing.
+// sharing and what has been held against it.
 //
-// The two flags are the only voice state that is a plain fact about a
-// participant. Revolt also reports whether one is publishing and receiving,
-// which is a media session's own bookkeeping rather than "muted" and "deafened",
-// so neither is carried here — a mark that says the wrong thing is worse than no
-// mark at all.
+// Revolt's `is_publishing` / `is_receiving` are deliberately *not* here. They
+// are the media session's own bookkeeping — a microphone track existing at all,
+// which a self-mute does not take away — so neither means "muted" or
+// "deafened", and a mark that says the wrong thing is worse than no mark.
+// ServerMuted and ServerDeafened come from the membership instead, which is
+// where Revolt actually files a moderator's hold.
 type VoiceParticipant struct {
 	UserID string
 
@@ -585,6 +626,11 @@ type VoiceParticipant struct {
 	Bot           bool
 	Camera        bool
 	Screensharing bool
+
+	// Held server-wide by a moderator, and true wherever the membership is known
+	// — unlike a self-mute, which only somebody in the same call can see.
+	ServerMuted    bool
+	ServerDeafened bool
 }
 
 // CallCredentials is what the join_call route answers with: the voice node to
@@ -825,6 +871,15 @@ type Member struct {
 	// to us — HoistRoleID is empty for a member whose only role is not hoisted.
 	HasRoles bool
 	Bot      bool
+
+	// ServerMuted and ServerDeafened are a moderator's hold on this member's
+	// voice, server-wide: Revolt spells them can_publish and can_receive, and
+	// stores them on the membership rather than on the call, so they are known
+	// whether or not the member is in one. What the menu offers is read from
+	// these — an item that can only ever mute somebody already muted is an item
+	// with no way back.
+	ServerMuted    bool
+	ServerDeafened bool
 }
 
 // Role is a server role as a profile card shows one: its name, in its own

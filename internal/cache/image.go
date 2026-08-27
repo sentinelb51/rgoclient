@@ -218,8 +218,11 @@ type diskFile struct {
 
 // isEntry reports whether the file is a cached image rather than something else
 // the directory holds — a temp left behind by a failed encode, say. Only entries
-// count towards the stats and the disk budget.
-func (f diskFile) isEntry() bool { return strings.HasSuffix(f.name, ".png") }
+// count towards the stats and the disk budget. A ".gif" is an original kept for
+// animation beside the ".png" still of its first frame.
+func (f diskFile) isEntry() bool {
+	return strings.HasSuffix(f.name, ".png") || strings.HasSuffix(f.name, ".gif")
+}
 
 // diskFiles lists the cache directory, skipping subdirectories and anything
 // unreadable. It is the one walk Stats, Clear and trimDiskCache share, and it
@@ -437,6 +440,116 @@ func (c *ImageCache) LoadIntoContainer(id, url string, size fyne.Size, target *f
 		}
 		target.Refresh()
 	})
+}
+
+/* Animated GIF originals */
+
+// gifMaxBytes bounds the encoded GIF kept for animation. Tighter than
+// decodeMaxBytes: a still decodes one frame where the player decodes every
+// frame, and a file of minimal frames buys an allocation per frame, so the byte
+// ceiling is what bounds that.
+const gifMaxBytes = 8 << 20
+
+// GIF returns the encoded bytes of an animated GIF by id, from disk or the
+// network, or nil for anything that is not a GIF worth handing a player. The
+// bytes are kept on disk as id+".gif" — beside the ".png" still Get answers
+// with — so the next hover reads rather than refetches, and the trim evicts
+// them by mtime like any entry. Fetched only on demand, never by the still's
+// own load: a GIF nobody hovers costs nothing.
+//
+// It touches disk and the network; call off the UI thread.
+func (c *ImageCache) GIF(id, url string) []byte {
+	if id == "" || url == "" {
+		return nil
+	}
+
+	path := filepath.Join(c.dir, id+".gif")
+	if raw, err := os.ReadFile(path); err == nil {
+		if validGIF(raw) {
+			// Best-effort recency stamp, so an animation somebody keeps returning to
+			// is not the first thing a trim takes.
+			now := time.Now()
+			_ = os.Chtimes(path, now, now)
+
+			return raw
+		}
+		_ = os.Remove(path)
+	}
+
+	c.mu.RLock()
+	generation := c.generation
+	c.mu.RUnlock()
+
+	resp, err := c.client.Get(url)
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	// One past the ceiling, so a file sitting exactly on it is told apart from
+	// one that was cut short.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, gifMaxBytes+1))
+	if err != nil || len(raw) > gifMaxBytes || !validGIF(raw) {
+		return nil
+	}
+
+	c.mu.RLock()
+	current := c.generation == generation
+	c.mu.RUnlock()
+	if current {
+		c.writeGIF(id, raw)
+	}
+
+	return raw
+}
+
+// validGIF is the magic and the canvas check: the bytes announce themselves as
+// GIF and name a canvas small enough to decode. The frame-count and playback
+// caps are the player's — this only keeps a mislabelled or hostile file out of
+// the directory.
+func validGIF(raw []byte) bool {
+	if !bytes.HasPrefix(raw, []byte("GIF87a")) && !bytes.HasPrefix(raw, []byte("GIF89a")) {
+		return false
+	}
+
+	config, format, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || format != "gif" {
+		return false
+	}
+
+	return config.Width > 0 && config.Height > 0 &&
+		int64(config.Width)*int64(config.Height) <= decodeMaxPixels
+}
+
+// writeGIF persists the encoded bytes via a temp file renamed into place, the
+// arrangement writeToDisk has and for the same reason. Written from the
+// fetching goroutine rather than the flush loop: the rename is atomic and
+// removeStaleTemps spares temps younger than a flush cycle, so the trim cannot
+// catch a half-written one.
+func (c *ImageCache) writeGIF(id string, raw []byte) {
+	path := filepath.Join(c.dir, id+".gif")
+
+	tmp, err := os.CreateTemp(c.dir, id+"-*.tmp")
+	if err != nil {
+		return
+	}
+
+	_, err = tmp.Write(raw)
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err == nil {
+		err = os.Rename(tmp.Name(), path)
+	}
+
+	if err != nil {
+		log.Printf("image cache: write %s: %v", id, err)
+		_ = os.Remove(tmp.Name())
+	}
 }
 
 /* Internals */

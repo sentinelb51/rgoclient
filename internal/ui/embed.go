@@ -186,7 +186,16 @@ func buildEmbedImage(deps Deps, file *domain.File, width float32, onMenu func(*f
 
 	picture := imageFrame(deps.Images, file, bounds, reserve, theme.Colors.ServerDefaultBg, nil)
 
-	stack := NewHoverableStack(picture, func() { deps.Actions.OnAttachmentTapped(file) }, nil)
+	// The stack's hover doubles as the GIF's play control, the arrangement
+	// buildAttachment has and for the same reason.
+	var onHover func(bool)
+	if gifCandidate(file) {
+		if anim := newGIFAnimator(deps.Images, fileCacheID(file), file.URL, picture); anim != nil {
+			onHover = anim.SetPlaying
+		}
+	}
+
+	stack := NewHoverableStack(picture, func() { deps.Actions.OnAttachmentTapped(file) }, onHover)
 	stack.onSecondaryTap = onMenu
 
 	return stack

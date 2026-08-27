@@ -55,9 +55,10 @@ func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.Point
 	bar := attachmentBar(attachment.Name, attachment.Size, nil)
 
 	var content *fyne.Container
+	var anim *gifAnimator
 	switch {
 	case isImage:
-		content = buildImageAttachment(deps.Images, attachment, bar)
+		content, anim = buildImageAttachment(deps.Images, attachment, bar)
 	case isText:
 		content = buildTextAttachment(deps.Texts, attachment, bar)
 	default:
@@ -70,14 +71,21 @@ func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.Point
 	}
 
 	// The stack frames the card, drawing the outline *over* the content — square,
-	// like the picture it edges.
-	stack := NewHoverableStack(content, onTap, nil)
+	// like the picture it edges. Its hover is also the GIF's play control: a
+	// Hoverable inside it would steal the frame's own (innermost wins), so the
+	// animator listens here rather than on the picture.
+	var onHover func(bool)
+	if anim != nil {
+		onHover = anim.SetPlaying
+	}
+
+	stack := NewHoverableStack(content, onTap, onHover)
 	stack.onSecondaryTap = onMenu
 
 	return stack
 }
 
-func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {
+func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar fyne.CanvasObject) (*fyne.Container, *gifAnimator) {
 	bounds := fyne.NewSize(theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)
 
 	// No usable metadata: reserve a wide half-height box so the row barely moves
@@ -88,7 +96,12 @@ func buildImageAttachment(images *cache.ImageCache, attachment *domain.File, bar
 
 	picture := imageFrame(images, attachment, bounds, reserve, theme.Colors.ServerDefaultBg, nil)
 
-	return VBoxNoSpacing(picture, bar)
+	var anim *gifAnimator
+	if gifCandidate(attachment) {
+		anim = newGIFAnimator(images, fileCacheID(attachment), attachment.URL, picture)
+	}
+
+	return VBoxNoSpacing(picture, bar), anim
 }
 
 func buildTextAttachment(texts *cache.TextCache, attachment *domain.File, bar fyne.CanvasObject) *fyne.Container {

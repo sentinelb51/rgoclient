@@ -45,6 +45,10 @@ const (
 	replyButtonSize = 20
 	replyIconSize   = 18
 
+	// replyFrozenDim is how far a stale card's mention toggle is faded — past the
+	// 0.5 an inactive toggle already wears, so "off" and "out of play" stay apart.
+	replyFrozenDim = 0.7
+
 	// uploadRefused is what a drop or a paste into a channel that forbids uploads
 	// reports, from wherever the file came in.
 	uploadRefused = "You can't upload files in this channel."
@@ -123,13 +127,24 @@ type MessageInput struct {
 	//
 	// AttachButton queues a file the same way a drop does, and is offered on the
 	// upload permission rather than on the send one — the two are given separately.
+	//
+	// GIFButton is the third and picks from the service rather than from anything
+	// this client holds. What it inserts is a link: the GIF is sent as its page and
+	// Revolt unfurls that, so nothing is uploaded and the composer's own send rules
+	// — the permission, slowmode, the queued replies — are unchanged.
 	EmojiButton  *IconButton
+	GIFButton    *IconButton
 	AttachButton *IconButton
 
 	// permissions is what the account may do in the open channel, *pushed* by the
 	// app rather than looked up — the composer has no channel of its own. Zero, the
 	// state it starts and ends in, allows nothing.
 	permissions domain.Permission
+
+	// channelID is which channel that is, pushed the same way and for the same
+	// reason. Only the reply cards read it: a reply names a message, and a message
+	// can only be answered from the channel it is in — see SetChannel.
+	channelID string
 
 	deps         Deps
 	window       fyne.Window
@@ -152,6 +167,7 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	}
 	m.Mentions = NewMentionPicker(deps, m.acceptMention)
 	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
+	m.GIFButton = NewIconButton(assets.ActionGIFIcon, m.pickGIF, nil)
 	m.AttachButton = NewIconButton(assets.ActionAddIcon, m.attachFile, nil)
 	m.ExtendBaseWidget(m)
 	m.MultiLine = true
@@ -169,6 +185,16 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 func (m *MessageInput) pickEmoji() {
 	m.deps.Actions.OnPickEmoji(m.EmojiButton, nil, func(choice EmojiChoice) {
 		m.insert(choice.Token() + " ")
+	})
+}
+
+// pickGIF opens the GIF picker beside the button and writes the link back into
+// the entry, exactly as the emoji picker writes a token. It is not sent from
+// here: a draft already typed would be lost by it, and the link *is* the message
+// once Enter is pressed.
+func (m *MessageInput) pickGIF() {
+	m.deps.Actions.OnPickGIF(m.GIFButton, func(pageURL string) {
+		m.insert(pageURL + " ")
 	})
 }
 
@@ -254,6 +280,25 @@ func (m *MessageInput) SetPermissions(permissions domain.Permission) {
 	m.Disable()
 	m.EmojiButton.Hide()
 	m.AttachButton.Hide()
+}
+
+// SetChannel tells the composer which channel it is standing in. Pushed from the
+// same place as SetPermissions and for the same reason: the composer has no
+// channel of its own.
+//
+// What it changes is the reply cards. A queued reply belongs to the channel its
+// message is in, so leaving that channel leaves the cards behind holding
+// something this composer cannot send; they grey out rather than disappearing,
+// and come back live on returning — see buildReplyCard and RepliesHere.
+func (m *MessageInput) SetChannel(channelID string) {
+	if m.channelID == channelID {
+		return
+	}
+
+	m.channelID = channelID
+	if len(m.Replies) > 0 {
+		m.rebuildReplies()
+	}
 }
 
 // refuse reports an input the composer would not take. Silent when nobody is
@@ -676,12 +721,40 @@ type AudioDevice struct {
 	Default bool
 }
 
+// InputMeter is one sample of the microphone, as the Voice section's two
+// diagnostic bars draw it. It crosses the seam an AudioDevice does: both
+// figures are ratios because the scales they came off — decibels, and a model's
+// own probability — are `audio`'s, and a second copy of either mapping up here
+// would be free to drift from the one the gate decides by.
+type InputMeter struct {
+	// Level is the loudness, on the scale SettingsHooks.GateRatio places the
+	// gate's threshold on, and LevelDB is that same reading as the figure the bar
+	// says in words — dBFS, the unit the threshold is now set in. Both come off
+	// one sample, so the bar and the number cannot disagree.
+	Level   float32
+	LevelDB int
+
+	// Speech is how sure noise suppression is that the frame held a voice, 0-1,
+	// and **negative** where nothing is computing one — the model runs only
+	// while suppression does, and a bar left standing at its last answer would
+	// report a microphone nothing is listening to.
+	Speech float32
+}
+
 // VoiceNode is one media server the instance offers calls through, crossing the
 // seam an AudioDevice does and for the same reason: `ui` has no business knowing
 // what LiveKit is, and which node to prefer stays on the controller's side.
 type VoiceNode struct {
 	Name string
 	URL  string
+}
+
+// TypingProfile is one board the built-in keystrokes can be synthesised from,
+// crossing that same seam: what a board is made of is `audio`'s, and all a row
+// needs is what the setting stores and what to call it.
+type TypingProfile struct {
+	Value string
+	Label string
 }
 
 type Keystroke int
@@ -1050,7 +1123,17 @@ func attachmentPreview(path string) fyne.CanvasObject {
 /* Replies */
 
 // AddReply adds a reply target, ignoring duplicates and respecting maxReplies.
+//
+// A reply from a different channel to whatever is queued **replaces** the lot:
+// one message can only answer messages in its own channel, so a set spanning two
+// of them has no send that would honour it, and the greyed cards left over from
+// the channel that was walked away from are what the reader has just said they
+// are done with. Cleared before the ceiling is read, so a full set from
+// elsewhere cannot refuse the first reply queued here.
 func (m *MessageInput) AddReply(message *domain.Message) {
+	if len(m.Replies) > 0 && m.Replies[0].ChannelID != message.ChannelID {
+		m.Replies = nil
+	}
 	if len(m.Replies) >= maxReplies {
 		return
 	}
@@ -1060,6 +1143,20 @@ func (m *MessageInput) AddReply(message *domain.Message) {
 
 	m.Replies = append(m.Replies, Reply{ID: message.ID, ChannelID: message.ChannelID})
 	m.rebuildReplies()
+}
+
+// RepliesHere is what a message sent from this composer may answer: the queued
+// replies whose message lives in the open channel. Everything else is a card
+// drawn stale, which is the promise that it is not going out with this send.
+func (m *MessageInput) RepliesHere() []Reply {
+	here := make([]Reply, 0, len(m.Replies))
+	for _, reply := range m.Replies {
+		if reply.ChannelID == m.channelID {
+			here = append(here, reply)
+		}
+	}
+
+	return here
 }
 
 // RemoveReply removes a reply target by message ID.
@@ -1088,21 +1185,39 @@ func (m *MessageInput) rebuildReplies() {
 // buildReplyCard is the slim chip for one pending reply: avatar, author, a
 // truncated preview, a mention toggle and a remove button, outlined in the
 // author's role colour and falling back to the app accent.
+//
+// A card whose message is not in the open channel is drawn **stale** — sunken
+// fill, no role colour, muted text and a mention toggle that no longer answers
+// the pointer — because it is not going out with the next send (RepliesHere) and
+// nothing else on screen would say so. It keeps its remove button: leaving one
+// behind is the reader's own doing, so taking it back has to stay theirs too.
 func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 	author, content := resolveReply(m.deps, reply.ChannelID, reply.ID)
 	if author.Name == "" {
 		author.Name = "Unknown"
 	}
 
+	stale := reply.ChannelID != m.channelID
+
 	accent := author.Color
 	if accent == nil {
 		accent = theme.Colors.ServerSelectedBg
 	}
 
+	fill := theme.Colors.SwiftActionBg
+	nameColor, contentColor := theme.Colors.TextPrimary, theme.Colors.TimestampText
+	if stale {
+		// One colour for the edge and both lines: the card reads as a single greyed
+		// thing rather than an outlined one. The theme's own Outline is *darker* than
+		// the sunken fill, which would leave the card with no edge at all.
+		accent, fill = theme.Colors.ReplyStaleText, theme.Colors.ReplyStaleBg
+		nameColor, contentColor = theme.Colors.ReplyStaleText, theme.Colors.ReplyStaleText
+	}
+
 	avatar := circularAvatar(m.deps.Images, author.AvatarURL, fyne.NewSize(replyAvatarSize, replyAvatarSize))
 
-	authorLabel := newBoldText(author.Name, theme.Colors.TextPrimary, replyTextSize)
-	contentLabel := newText(content, theme.Colors.TimestampText, replyTextSize)
+	authorLabel := newBoldText(author.Name, nameColor, replyTextSize)
+	contentLabel := newText(content, contentColor, replyTextSize)
 
 	// NewCenter vertically centres each element in the card's height; HBoxNoSpacing
 	// keeps the horizontal gaps explicit rather than inheriting theme padding.
@@ -1124,6 +1239,9 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 		mention.SetActive(!mention.active)
 		reply.Mention = mention.active
 	})
+	if stale {
+		mention.freeze()
+	}
 	right := HBoxNoSpacing(
 		container.NewCenter(mention),
 		HorizontalSpacer(2),
@@ -1133,7 +1251,7 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 
 	row := NewMinHeightContainer(replyCardHeight, container.NewBorder(nil, nil, HBoxNoSpacing(left...), right))
 
-	background := canvas.NewRectangle(theme.Colors.SwiftActionBg)
+	background := canvas.NewRectangle(fill)
 	background.CornerRadius = 6
 	background.StrokeColor = accent
 	background.StrokeWidth = 1
@@ -1144,6 +1262,10 @@ func (m *MessageInput) buildReplyCard(reply *Reply) fyne.CanvasObject {
 // replyIconButton is the small square button the reply card's mention and close
 // controls share. A momentary one (toggle=false) brightens on hover; a toggle
 // also takes an accent background and stays bright while active.
+//
+// frozen is one that still reports its state and no longer takes any: the stale
+// card's mention toggle, which would otherwise light under the pointer and flip
+// a flag nothing is going to send.
 type replyIconButton struct {
 	tapBase
 	icon *canvas.Image
@@ -1152,6 +1274,7 @@ type replyIconButton struct {
 	toggle  bool
 	active  bool
 	hovered bool
+	frozen  bool
 }
 
 var (
@@ -1184,7 +1307,26 @@ func (b *replyIconButton) SetActive(active bool) {
 	b.applyState()
 }
 
+// freeze takes the button out of play, leaving what it is showing.
+func (b *replyIconButton) freeze() {
+	b.frozen = true
+	b.onTap = nil
+	b.applyState()
+}
+
+func (b *replyIconButton) Cursor() desktop.Cursor {
+	if b.frozen {
+		return desktop.DefaultCursor
+	}
+
+	return desktop.PointerCursor
+}
+
 func (b *replyIconButton) MouseIn(*desktop.MouseEvent) {
+	if b.frozen {
+		return
+	}
+
 	b.hovered = true
 	b.applyState()
 }
@@ -1208,6 +1350,12 @@ func (b *replyIconButton) applyState() {
 	default:
 		b.bg.FillColor = color.Transparent
 		b.icon.Translucency = 0.25
+	}
+
+	// Dimmed on top of whatever it is showing rather than instead of it: an active
+	// toggle keeps its tint, so a stale card still says a mention was asked for.
+	if b.frozen {
+		b.icon.Translucency = max(b.icon.Translucency, replyFrozenDim)
 	}
 
 	b.bg.Refresh()

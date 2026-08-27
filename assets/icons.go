@@ -49,6 +49,9 @@ var headphonesSVG []byte
 //go:embed headphones-off.svg
 var headphonesOffSVG []byte
 
+//go:embed speaker-off.svg
+var speakerOffSVG []byte
+
 //go:embed call-end.svg
 var callEndSVG []byte
 
@@ -170,6 +173,12 @@ var (
 	HeadphonesIcon    fyne.Resource = fyne.NewStaticResource("headphones.svg", headphonesSVG)
 	HeadphonesOffIcon fyne.Resource = fyne.NewStaticResource("headphones-off.svg", headphonesOffSVG)
 
+	// SpeakerOffIcon is the third mark a voice row can wear, and the only one that
+	// is about this machine rather than about the person: their volume is off here
+	// and nowhere else. A speaker rather than a headphone, the pair above being
+	// what *they* did — and struck through the way both of those are.
+	SpeakerOffIcon fyne.Resource = fyne.NewStaticResource("speaker-off.svg", speakerOffSVG)
+
 	// The two ends of a call: hang up, and join the voice channel on screen. One
 	// handset at two angles, set down and lifted, and the only *solid* marks in
 	// the set — outlined, a handset at the 17 units one is drawn at reads as a
@@ -266,6 +275,11 @@ var (
 	// picker. Alone among the marks it is a filled silhouette rather than an
 	// outline — a stoat at 20 units has no room for a stroke to describe it.
 	ActionEmojiIcon = actionIcon("action-emoji.svg")
+
+	// ActionGIFIcon opens the GIF picker from the composer, beside it. Its play
+	// mark is filled for the reason the two handsets are: a triangle 5 units on a
+	// side has no room for a stroke and its own hole.
+	ActionGIFIcon = actionIcon("action-gif.svg")
 )
 
 // A profile's dates: when the account was made, and when it joined the server

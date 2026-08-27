@@ -122,6 +122,11 @@ type MessageActions interface {
 	// affordance off rather than opening an empty picker.
 	OnPickEmoji(anchor fyne.CanvasObject, allowed []string, onPick func(EmojiChoice))
 
+	// OnPickGIF opens the GIF picker beside anchor and reports the page URL of what
+	// is chosen. The controller opens it for a harder version of the emoji picker's
+	// reason: every list in it is a request, and this package makes none.
+	OnPickGIF(anchor fyne.CanvasObject, onPick func(pageURL string))
+
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message
 

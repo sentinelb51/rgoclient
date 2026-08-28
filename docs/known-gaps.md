@@ -105,7 +105,8 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   too (`GOAMD64: v3` in both workflows), which costs no compatibility the C floor
   has not already spent. AVX-512 was measured and left alone: 3 % on the one
   workload that moves, against ruling out every Intel consumer part since Rocket
-  Lake. See `docs/voice-chat-todo.md`.
+  Lake. The measurements live in the retired `docs/voice-chat-todo.md` (git
+  history; the path is `docs/screenshare-todo.md` now).
   The encoder CTLs are reached through `voice.opusTuning`, an interface assertion
   rather than a direct call, so the client still builds against a binding without
   them — at the cost of a deeper jitter buffer, and it says so once at join.

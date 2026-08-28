@@ -120,9 +120,11 @@ change in `markdown/` does not pay for the Fyne footguns:
 - `internal/ui/CLAUDE.md` — the Fyne footguns.
 - `docs/known-gaps.md` — what is not built, and what revoltgo or Fyne prevents
   rather than effort.
-- `docs/voice-chat-todo.md` — the voice work queue: what is missing, what is
-  compromised, and what was measured and left alone. Read it before touching
-  `internal/voice`, `internal/audio` or the call half of `internal/app`.
+- `docs/screenshare-todo.md` — the screenshare design and work queue: both
+  directions of a share as LiveKit video tracks over the video player's
+  sandbox discipline, the per-OS capture story, and what the voice queue it
+  replaced still owes. Read it before touching `internal/voice`,
+  `internal/audio` or the call half of `internal/app`.
 - `docs/video-player.md` — the video player's threat model and the map of the
   built pieces: why the decoder is a sandboxed ffmpeg subprocess rather than a
   library, which layer refuses what, and what remains unbuilt. Read it before

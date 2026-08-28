@@ -480,7 +480,8 @@ worked through and every one is worse:
 - **Spinning on that ticket.** Burns a core for the length of every call.
 - **A `time.Ticker` on the filler.** Playout paced by a timer beside the device
   rather than by the device: the exact drift the current arrangement was built to
-  remove (`voice-chat-todo.md`, "Playout is now the device's clock").
+  remove ("Playout is now the device's clock", in the retired
+  `docs/voice-chat-todo.md` — git history).
 - **`sync.Cond` / a mutex hand-off.** Both park, which turns a bounded ~100 ns
   runtime lock into an unbounded one held by whatever the scheduler chose.
 - **Decimating the kick** — ticket every period, channel send every *N*th — is

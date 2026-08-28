@@ -52,22 +52,28 @@ func buildAttachments(deps Deps, attachments []*domain.File, onMenu func(*fyne.P
 func buildAttachment(deps Deps, attachment *domain.File, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
 	isImage := attachment.Kind == domain.FileImage
 	isText := attachment.Kind == domain.FileText
-	bar := attachmentBar(attachment.Name, attachment.Size, nil)
+	isVideo := attachment.Kind == domain.FileVideo && attachment.URL != ""
 
 	var content *fyne.Container
 	var anim *gifAnimator
+	var video *VideoCard
 	switch {
 	case isImage:
-		content, anim = buildImageAttachment(deps.Images, attachment, bar)
+		content, anim = buildImageAttachment(deps.Images, attachment, attachmentBar(attachment.Name, attachment.Size, nil))
 	case isText:
-		content = buildTextAttachment(deps.Texts, attachment, bar)
+		content = buildTextAttachment(deps.Texts, attachment, attachmentBar(attachment.Name, attachment.Size, nil))
+	case isVideo:
+		content, video = buildVideoAttachment(deps, attachment)
 	default:
-		content = buildGenericAttachment(bar)
+		content = buildGenericAttachment(attachmentBar(attachment.Name, attachment.Size, nil))
 	}
 
 	var onTap func()
-	if isImage || isText {
+	switch {
+	case isImage || isText:
 		onTap = func() { deps.Actions.OnAttachmentTapped(attachment) }
+	case isVideo:
+		onTap = func() { deps.Actions.OnVideoTapped(attachment, video) }
 	}
 
 	// The stack frames the card, drawing the outline *over* the content — square,

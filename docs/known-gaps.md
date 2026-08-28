@@ -311,10 +311,11 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   carry one are re-rendered, `markdown.HasRelativeTimestamp` being what says so.
   It is still not hoverable — the absolute instant behind an "R" is not
   reachable, a body carrying no tooltip.
-- **Embeds** render site line, title, description, colour and one picture. A bare
-  **video** embed is dropped at the boundary (revoltgo carries only the URL, and
-  there is no player — `docs/video-player.md` is the plan for one); a bare
-  **image** embed has the same missing dimensions, so it
+- **Embeds** render site line, title, description, colour, one picture and one
+  video. A bare **video** embed draws the player card against the reserve box —
+  Revolt puts its dimensions beside the type where revoltgo has no field for
+  them, so the probe answers once the file is fetched; a bare **image** embed
+  has the same missing dimensions, so it
   draws against the placeholder until the picture lands.
 - **An invite card does not refresh.** A server joined from another client keeps
   offering Join until the channel is reopened, the card being filled once when it
@@ -676,14 +677,26 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **A GIF moves only under the pointer, and only where the client can reach the
   file.** `ui.gifAnimator` plays an uploaded GIF attachment, a `.gif` image
   embed and a picker tile on hover — fetched, decoded and freed per hover, at
-  rest always the first-frame still. What still never moves: the embed Revolt
-  unfurls from a gifbox page, which carries an MP4 and a poster and no `.gif`
-  URL (that is the video player's problem — see `docs/video-player.md`); a GIF
+  rest always the first-frame still. The embed Revolt unfurls from a gifbox
+  page — an MP4 and a poster, no `.gif` URL — now plays through the video card
+  instead: **click-to-play**, looped and silent, not the hover gesture a real
+  GIF gets (see `docs/video-player.md` for why hover is not wired to a decoder
+  subprocess yet). What still never moves: a GIF
   served with no `image/gif` content type and no `.gif` in its name or URL,
   `gifCandidate` having nothing to go on; an animated **custom emoji** or
   avatar; and the attachment viewer, whose picture is a plain mount. A GIF
   cached before the animator existed re-fetches its bytes on first hover — the
   disk cache held only the PNG still.
+
+- **A video plays inline only where ffmpeg is on PATH.** The player is a
+  sandboxed subprocess by design (`docs/video-player.md` — discovery, not
+  bundling), so a machine without ffmpeg gets the card, the open-in-player
+  button and a notice saying what to install, and no poster, duration or
+  playback; bundling is a release-pipeline decision not yet taken. Within the
+  player, the deliberate remainders are listed at the end of that file: the
+  attachment viewer still offers no video preview, decode is at the card's
+  logical size (soft on HiDPI), downloads do not resume, decoding is software
+  only, and the Windows sandbox caps the child without cutting its network.
 - **The GIF picker asks for one page.** `next` is carried by the route and
   dropped: there is no scroll-to-load in the grid, so a search is its first fifty
   results. The trending list and the categories are one request each per opening,

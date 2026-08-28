@@ -79,48 +79,55 @@ var Colors = struct {
 	/* Elements */
 
 	AttachmentHoverBorder color.Color
-	AvatarPlaceholder     color.Color
-	UnreadIndicator       color.Color
-	MentionIndicator      color.Color
-	MentionBadgeBg        color.Color
-	MentionBadgeText      color.Color
-	HashtagIcon           color.Color
-	CategoryText          color.Color
-	CategoryIndicator     color.Color
-	TextPrimary           color.Color
-	TimestampText         color.Color
-	DaySeparatorText      color.Color
-	DaySeparatorLine      color.Color
-	SystemMessageText     color.Color
-	SystemMessageIcon     color.Color
-	SystemMessageJoin     color.Color
-	SystemMessageLeave    color.Color
-	SystemMessageDanger   color.Color
-	SystemMessageChange   color.Color
-	SystemMessageCall     color.Color
-	SwiftActionIcon       color.Color
-	SwiftActionConfirm    color.Color
-	SwiftActionCaution    color.Color
-	SwiftActionDanger     color.Color
-	ReplyLine             color.Color
-	ReplyMentionActive    color.Color
-	ReplyStaleBg          color.Color
-	ReplyStaleText        color.Color
-	MentionText           color.Color
-	MentionHandleText     color.Color
-	LinkText              color.Color
-	LinkTextHover         color.Color
-	SlowmodeText          color.Color
-	DockBadgeBg           color.Color
-	SlowmodeWaiting       color.Color
-	TypingText            color.Color
-	TypingMark            color.Color
-	JumpBarBg             color.Color
-	JumpBarHoverBg        color.Color
-	JumpBarAction         color.Color
-	MessageStatusMark     color.Color
-	ChannelTopicText      color.Color
-	ErrorText             color.Color
+
+	// VideoScrim is the wash a video card's chrome sits on — the play badge,
+	// the duration chip, the scrub track — over whatever frame is behind it.
+	// Kept darker than translucent-safe limits require: its channels stay
+	// under its alpha, the premultiplied trap theme.Fade names.
+	VideoScrim color.Color
+
+	AvatarPlaceholder   color.Color
+	UnreadIndicator     color.Color
+	MentionIndicator    color.Color
+	MentionBadgeBg      color.Color
+	MentionBadgeText    color.Color
+	HashtagIcon         color.Color
+	CategoryText        color.Color
+	CategoryIndicator   color.Color
+	TextPrimary         color.Color
+	TimestampText       color.Color
+	DaySeparatorText    color.Color
+	DaySeparatorLine    color.Color
+	SystemMessageText   color.Color
+	SystemMessageIcon   color.Color
+	SystemMessageJoin   color.Color
+	SystemMessageLeave  color.Color
+	SystemMessageDanger color.Color
+	SystemMessageChange color.Color
+	SystemMessageCall   color.Color
+	SwiftActionIcon     color.Color
+	SwiftActionConfirm  color.Color
+	SwiftActionCaution  color.Color
+	SwiftActionDanger   color.Color
+	ReplyLine           color.Color
+	ReplyMentionActive  color.Color
+	ReplyStaleBg        color.Color
+	ReplyStaleText      color.Color
+	MentionText         color.Color
+	MentionHandleText   color.Color
+	LinkText            color.Color
+	LinkTextHover       color.Color
+	SlowmodeText        color.Color
+	DockBadgeBg         color.Color
+	SlowmodeWaiting     color.Color
+	TypingText          color.Color
+	TypingMark          color.Color
+	JumpBarBg           color.Color
+	JumpBarHoverBg      color.Color
+	JumpBarAction       color.Color
+	MessageStatusMark   color.Color
+	ChannelTopicText    color.Color
+	ErrorText           color.Color
 
 	/* Reactions */
 
@@ -436,6 +443,7 @@ var Colors = struct {
 	// than drawing it: a hover border a shade off the outline it replaces would
 	// read as nothing happening at all.
 	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
+	VideoScrim:            color.RGBA{R: 8, G: 9, B: 12, A: 176},      // near-black wash
 	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
 	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
 
@@ -857,6 +865,9 @@ var Sizes = struct {
 	MessageContentPadding         float32
 	MessageImageMaxWidth          float32
 	MessageImageMaxHeight         float32
+	VideoBadgeSize                float32
+	VideoScrubHeight              float32
+	VideoScrubLine                float32
 	MessageVerticalPadding        float32
 	MessageGroupedVerticalPadding float32
 	MessageHorizontalPadding      float32
@@ -1443,6 +1454,9 @@ var Sizes = struct {
 	MessageContentPadding:         12,
 	MessageImageMaxWidth:          400,
 	MessageImageMaxHeight:         300,
+	VideoBadgeSize:                44,
+	VideoScrubHeight:              14,
+	VideoScrubLine:                4,
 	MessageVerticalPadding:        10,
 	MessageGroupedVerticalPadding: 2,
 	MessageHorizontalPadding:      12,

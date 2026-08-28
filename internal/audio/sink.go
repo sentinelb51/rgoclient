@@ -67,6 +67,34 @@ func (s *Sink) StartEcho() { s.Open(echoLane) }
 // running, and safe to call twice.
 func (s *Sink) StopEcho() { s.Remove(echoLane) }
 
+// videoLane is the message video player's lane, reserved the way echoLane is
+// and for the same reasons: not a ULID, never a participant's, and the
+// identifier never leaves this package. A lane rather than a voice of its own
+// because a lane is paced by the speakers (Wake/Want), which is the shape a
+// decoder feeding a pipe needs — a fire-and-forget voice is for a buffer
+// already rendered.
+const videoLane = "\x00video"
+
+// StartVideo opens the video player's lane; the decoder tops it up against
+// VideoWant on the speakers' wake, exactly as a participant's is.
+func (s *Sink) StartVideo() { s.Open(videoLane) }
+
+// StopVideo closes it, dropping whatever it had buffered — a stopped video
+// should not play out a tail.
+func (s *Sink) StopVideo() { s.Remove(videoLane) }
+
+// WriteVideo hands the player's decoded audio to the speakers: 48 kHz mono,
+// signed 16-bit, like every lane.
+func (s *Sink) WriteVideo(pcm []int16) { s.Write(videoLane, pcm) }
+
+// VideoWant is Want for the player's lane.
+func (s *Sink) VideoWant() int { return s.Want(videoLane) }
+
+// SetVideoGain scales the player — the card's mute, and nothing else. The
+// sink remembers it like any gain, so the controller re-asserts it as each
+// playback starts rather than trusting what the last one left.
+func (s *Sink) SetVideoGain(gain float64) { s.SetGain(videoLane, gain) }
+
 // Wake fires when the speakers have rendered a period with a lane open. It is
 // the whole clock of the playout path: whoever writes a lane waits on this and
 // tops every lane back up to what Want reports, so audio is decoded at the rate
@@ -162,13 +190,15 @@ func (s *Sink) Remove(userID string) {
 // buffered for it should still be heard.
 //
 // The microphone test's lane is not a call's and survives one, or a test running
-// while a call ended would go silent with its switch still on.
+// while a call ended would go silent with its switch still on. The video
+// player's survives for the same reason: a call ending must not mute a video
+// mid-play.
 func (s *Sink) Reset() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	for id, index := range s.byOne {
-		if id == echoLane {
+		if id == echoLane || id == videoLane {
 			continue
 		}
 

@@ -28,6 +28,7 @@ import (
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
+	"RGOClient/internal/video"
 	"RGOClient/internal/voice"
 )
 
@@ -67,6 +68,20 @@ type App struct {
 	// settings page names the directory in use rather than the configured one — a
 	// change to it only takes effect at the next start.
 	assetDir string
+
+	/* Video playback, see video.go */
+
+	// videoTools is the discovered ffmpeg/ffprobe pair; videoInline is whether
+	// both were found, decided once — the card offers inline play only then.
+	videoTools  video.Tools
+	videoInline bool
+	videoMedia  *cache.MediaCache
+
+	video       *videoPlayback           // the one running playback, or nil
+	videoInfo   map[string]video.Info    // probed shape by cache id
+	videoAt     map[string]time.Duration // where a play would resume, by cache id
+	videoBusy   map[string]bool          // a mount's poster job in flight, by cache id
+	videoFailed map[string]bool          // files that will never probe, by cache id
 
 	/* Alerts, see alerts.go */
 
@@ -538,7 +553,13 @@ func New(fyneApp fyne.App, info Info) *App {
 		fetchedReplies:      make(map[string]bool),
 		slowmodeUntil:       make(map[string]time.Time),
 		typing:              make(map[string]map[string]time.Time),
+		videoMedia:          cache.NewMediaCache(assetDir, cache.VideosFolder, settings.VideoDiskBytes()),
+		videoInfo:           make(map[string]video.Info),
+		videoAt:             make(map[string]time.Duration),
+		videoBusy:           make(map[string]bool),
+		videoFailed:         make(map[string]bool),
 	}
+	a.videoTools, a.videoInline = video.Discover()
 
 	// Built here rather than on first open, so the layer is a fixed object buildUI
 	// can stack: both pages have to survive the rebuild a style change asks for.

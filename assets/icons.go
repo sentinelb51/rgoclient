@@ -52,6 +52,15 @@ var headphonesOffSVG []byte
 //go:embed speaker-off.svg
 var speakerOffSVG []byte
 
+//go:embed speaker.svg
+var speakerSVG []byte
+
+//go:embed play.svg
+var playSVG []byte
+
+//go:embed pause.svg
+var pauseSVG []byte
+
 //go:embed call-end.svg
 var callEndSVG []byte
 
@@ -179,6 +188,16 @@ var (
 	// what *they* did — and struck through the way both of those are.
 	SpeakerOffIcon fyne.Resource = fyne.NewStaticResource("speaker-off.svg", speakerOffSVG)
 
+	// SpeakerIcon is SpeakerOffIcon without the strike — the video card's sound
+	// toggle at rest, so the pair reads the way the mic and headphone pairs do.
+	SpeakerIcon fyne.Resource = fyne.NewStaticResource("speaker.svg", speakerSVG)
+
+	// PlayIcon and PauseIcon are the video card's transport. The triangle is
+	// solid for the handsets' reason: outlined at badge size its three strokes
+	// collapse into a smudge, and a play mark has one job.
+	PlayIcon  fyne.Resource = fyne.NewStaticResource("play.svg", playSVG)
+	PauseIcon fyne.Resource = fyne.NewStaticResource("pause.svg", pauseSVG)
+
 	// The two ends of a call: hang up, and join the voice channel on screen. One
 	// handset at two angles, set down and lifted, and the only *solid* marks in
 	// the set — outlined, a handset at the 17 units one is drawn at reads as a
@@ -256,6 +275,11 @@ var (
 	ActionSaveIcon   = actionIcon("action-save.svg")
 	ActionCancelIcon = actionIcon("action-cancel.svg")
 	ActionAddIcon    = actionIcon("action-add.svg")
+
+	// ActionOpenIcon is a box with the arrow leaving it — the video card's
+	// "open in your player", something handed out of the client rather than
+	// saved into it.
+	ActionOpenIcon = actionIcon("action-open.svg")
 
 	// The pair a list row offers its place in an order with — a server settings
 	// list rather than a message, but the same set: an action is drawn the same

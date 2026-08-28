@@ -1068,3 +1068,38 @@ naming and the test policy.
   through `DoOnUI`, not a `fyne.Animation` — gen-guarded, the fired-timer trap —
   and each tick asks `CanvasForObject` before painting, because a dropped row
   hears nothing and the tick is the only thing placed to stop itself.
+- **The video card is pushed into, and decides nothing** (`ui/video.go`). Every
+  `VideoCard` setter is UI-thread only and every decision is an `OnVideo*`
+  action — the controller owns fetching, decoding and the one-playback rule
+  (`internal/app/CLAUDE.md` item 45). What is this package's:
+  - **The chrome is one custom layout over the picture stack**
+    (`videoChromeLayout`): scrub along the bottom edge, chip lower-left above
+    it, sound toggle upper-right, badge centred. It reports no minimum — the
+    poster box under it is what sizes the stack, reserved and re-fitted the way
+    `imageFrame` does it (`SetInfo` refits when the server sent no dimensions).
+  - **`ShowFrame` copies.** The pump's scratch is reused the moment its waited
+    hop returns, and Fyne's renderer uploads the mounted image on its own
+    thread — so the card keeps its own `playBuf` and the copy is what keeps the
+    painter off bytes the pump is about to overwrite. `EndPlayback` drops the
+    buffer and restores the poster, the GIF animator's stop-frees-everything
+    rule.
+  - **The badge and chip are not widgets**, so a tap on either falls through to
+    the `HoverableStack` whose tap is the transport toggle. The sound toggle
+    and the bar's open button are `GlyphButton`s and win their own taps
+    (innermost); they steal hover from the stack, which for this card costs
+    only the outline lift. The toggle swaps its own `icon.Resource` — same
+    package — rather than being rebuilt.
+  - **The scrub strip is taller than the line it draws** (`VideoScrubHeight`
+    over `VideoScrubLine`, the stateBar's arrangement): the gap above is the
+    hover room a 3-pixel target does not have. `setFraction` resizes the fill
+    directly — placement, not layout — and its refresh rides the frame that is
+    already dirtying the canvas. Tap seeks by fraction; there is no drag.
+  - **The chip is one slot with a precedence** (`syncChip`): a status outranks
+    the clock, the clock exists only while playing, the duration only once
+    probed, and a card with none wears no chip. Status text arrives from the
+    controller (fetch progress, "Not playable") and empty restores the rest.
+  - `buildEmbedVideo` is the same card inside an embed, wearing the tap and
+    menu wiring an attachment's stack carries — an embed is otherwise inert —
+    and seeds the unfurl's own poster so the box is filled before any decode
+    has run. `VideoCard.Loop` is the GIF mark: a fact set at build, read as
+    policy by the controller.

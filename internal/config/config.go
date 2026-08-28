@@ -317,6 +317,11 @@ type Cache struct {
 	ImageMemoryMiB int `json:"image_memory_mib"`
 	MaxImageEdge   int `json:"max_image_edge"`
 
+	// VideoDiskMiB bounds the folder of fetched video originals — its own
+	// budget, apart from the pictures', so an afternoon of videos cannot evict
+	// every avatar. Videos are only ever on disk; nothing holds one decoded.
+	VideoDiskMiB int `json:"video_disk_mib"`
+
 	// ImageLoaders bounds how many pictures are downloaded at once. A member list
 	// scrolled quickly asks for a picture per row it passes, and without a bound
 	// that is one goroutine and one connection each.
@@ -690,6 +695,7 @@ func Default() Settings {
 		Cache: Cache{
 			ImageDiskMiB:       512,
 			ImageMemoryMiB:     192,
+			VideoDiskMiB:       1024,
 			MaxImageEdge:       1600,
 			ImageLoaders:       8,
 			TextPreviews:       100,
@@ -771,6 +777,11 @@ func (c Cache) ImageDiskBytes() int64 {
 // the same way.
 func (c Cache) ImageMemoryBytes() int64 {
 	return int64(c.ImageMemoryMiB) * 1024 * 1024
+}
+
+// VideoDiskBytes is the on-disk budget for fetched video originals.
+func (c Cache) VideoDiskBytes() int64 {
+	return int64(c.VideoDiskMiB) * 1024 * 1024
 }
 
 /* The current settings */
@@ -937,6 +948,7 @@ func (s *Settings) sanitise() {
 
 	floor(&s.Cache.ImageDiskMiB, 1)
 	floor(&s.Cache.ImageMemoryMiB, 1)
+	floor(&s.Cache.VideoDiskMiB, 1)
 	floor(&s.Cache.MaxImageEdge, 64)
 	floor(&s.Cache.ImageLoaders, 1)
 	floor(&s.Cache.TextPreviews, 1)

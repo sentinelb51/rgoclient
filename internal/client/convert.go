@@ -220,23 +220,15 @@ func toEmbedKind(kind string) domain.EmbedKind {
 	return domain.EmbedNone
 }
 
-// toEmbed converts one embed, reporting nil for the ones nothing can draw.
-//
-// A video is one of them: Revolt puts a bare video's dimensions beside its type
-// rather than under a field of their own, so revoltgo carries only the URL, and
-// there is no player here to hand it to. The other is an unfurl that came back
-// with nothing to say — no title, no text and no picture — which would otherwise
-// draw an empty card under the link.
+// toEmbed converts one embed, reporting nil only for an unfurl that came back
+// with nothing to say — no title, no text, no picture and no video — which
+// would otherwise draw an empty card under the link.
 func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 	if embed == nil {
 		return nil
 	}
 
 	kind := toEmbedKind(embed.Type)
-	if kind == domain.EmbedVideo {
-		return nil
-	}
-
 	out := &domain.Embed{
 		Kind:        kind,
 		URL:         embed.URL,
@@ -252,6 +244,30 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 		out.Color = colour
 	}
 
+	// A website's unfurl can carry a video beside everything else — a gifbox
+	// page is one, its "GIF" being an MP4 and a poster. A *bare* video embed is
+	// its URL and nothing more: Revolt puts its dimensions beside the type,
+	// where revoltgo has no field for them, so the player's probe answers what
+	// the wire did not.
+	switch {
+	case embed.Video != nil && embed.Video.URL != "":
+		out.Video = &domain.File{
+			Name:    nameFromURL(embed.Video.URL),
+			URL:     embed.Video.URL,
+			Kind:    domain.FileVideo,
+			Width:   embed.Video.Width,
+			Height:  embed.Video.Height,
+			Foreign: true,
+		}
+	case kind == domain.EmbedVideo && out.URL != "":
+		out.Video = &domain.File{
+			Name: nameFromURL(out.URL), URL: out.URL, Kind: domain.FileVideo, Foreign: true,
+		}
+	}
+	if embed.Special != nil && embed.Special.Type == revoltgo.MessageEmbedSpecialGIF {
+		out.GIF = true
+	}
+
 	switch {
 	case embed.Image != nil:
 		out.Image = &domain.File{
@@ -263,9 +279,15 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 			Foreign: true,
 		}
 	case embed.Media != nil:
-		// An integration can attach anything to its card; only a picture is drawn.
-		if media := toFile(embed.Media); media.Kind == domain.FileImage {
+		// An integration can attach anything to its card; a picture and a video
+		// are what is drawn.
+		switch media := toFile(embed.Media); media.Kind {
+		case domain.FileImage:
 			out.Image = media
+		case domain.FileVideo:
+			if out.Video == nil {
+				out.Video = media
+			}
 		}
 	case kind == domain.EmbedImage:
 		// A bare image embed *is* its URL, and its dimensions sit beside the type
@@ -276,7 +298,7 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 		}
 	}
 
-	if out.Title == "" && out.Description == "" && out.Image == nil {
+	if out.Title == "" && out.Description == "" && out.Image == nil && out.Video == nil {
 		return nil
 	}
 

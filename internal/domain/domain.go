@@ -406,6 +406,15 @@ type Embed struct {
 
 	Image *File
 	Color color.Color // the accent stripe; nil for the default
+
+	// Video is the playable media an unfurl named: the whole embed for a bare
+	// video link, or the MP4 a page like gifbox serves in a GIF's place. Always
+	// Foreign — it lives wherever the unfurl found it.
+	Video *File
+
+	// GIF marks a video the provider calls a GIF: silent, looped, and drawn
+	// with a GIF's manners rather than a film's.
+	GIF bool
 }
 
 /* GIFs */

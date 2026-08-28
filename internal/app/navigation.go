@@ -921,6 +921,11 @@ func (a *App) selectChannel(channelID string) {
 	// longer see they hold. Before syncComposer, which reads the mode.
 	a.endSelection()
 
+	// A playing video's rows are about to go with the window; the decoder dies
+	// now rather than at its next paint. The position is kept, so coming back
+	// resumes.
+	a.stopVideo()
+
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)
 	permissions := a.store.Permissions(channelID)

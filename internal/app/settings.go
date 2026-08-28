@@ -130,6 +130,7 @@ func (a *App) updateSettings(mutate func(*config.Settings)) {
 	settings := config.Current().Cache
 	a.images.SetLimits(imageLimits(settings))
 	a.emojis.SetLimits(emojiLimits(settings))
+	a.videoMedia.SetBudget(settings.VideoDiskBytes())
 
 	a.refreshMemberList()
 

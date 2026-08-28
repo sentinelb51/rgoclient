@@ -18,6 +18,7 @@ import (
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/video"
 )
 
 const sessionsFile = ".rgoclient_sessions.json"
@@ -164,6 +165,16 @@ func (a *App) resetSessionState() {
 	// left holding the input device for the rest of the run.
 	a.leaveCall()
 	a.forgetInputMonitor()
+
+	// A video's decoder is a device the way a microphone is: stopped by whoever
+	// drops the surface, and signing out drops every surface. What was learned
+	// about the files goes too — it is bounded only by use, and the next session
+	// re-derives it from the store on the way past.
+	a.stopVideo()
+	a.videoInfo = make(map[string]video.Info)
+	a.videoAt = make(map[string]time.Duration)
+	a.videoBusy = make(map[string]bool)
+	a.videoFailed = make(map[string]bool)
 
 	a.resetInvites()
 

@@ -688,8 +688,8 @@ func Default() Settings {
 
 			// On: a clean stream costs about a quarter more per frame (the model is
 			// fed either way) and concealment ~13× — 1 % of realtime per concealed
-			// stream — which a machine already losing packets is glad to pay. See
-			// docs/voice-chat-todo.md §5.
+			// stream — which a machine already losing packets is glad to pay.
+			// Measured in the retired docs/voice-chat-todo.md §5 (git history).
 			DeepPLC: true,
 		},
 		Cache: Cache{

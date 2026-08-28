@@ -271,11 +271,23 @@ func (c *MediaCache) trim(keep string) {
 	}
 }
 
-// validMediaID keeps an id a bare filename stem: ids are ULIDs or hex hashes,
-// and anything else has no business naming a path.
+// validMediaID keeps an id a bare filename stem, by allowlist rather than by
+// naming the dangerous characters: every legitimate id is an Autumn ID
+// (alphanumerics, "_", "-") or a "~"-prefixed hex hash, and anything else has
+// no business naming a path — "..", a separator, or the ":" NTFS reads as an
+// alternate stream included.
 func validMediaID(id string) bool {
-	if id == "" || strings.ContainsAny(id, `/\.`) {
+	if id == "" {
 		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '_' || c == '-' || c == '~':
+		default:
+			return false
+		}
 	}
 
 	return true

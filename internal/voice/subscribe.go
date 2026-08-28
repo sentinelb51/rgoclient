@@ -7,6 +7,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/webrtc/v4"
 	"github.com/sentinelb51/gopus"
@@ -30,6 +31,8 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 
 		OnParticipantDisconnected: func(p *lksdk.RemoteParticipant) {
 			c.closeLane(p.Identity(), nil)
+			c.closeLane(ShareLane(p.Identity()), nil)
+			c.forgetShare(p.Identity())
 			c.forgetHeld(p.Identity())
 			c.emit(ParticipantChanged{UserID: p.Identity(), Joined: false})
 		},
@@ -43,41 +46,72 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 		ParticipantCallback: lksdk.ParticipantCallback{
 			// A track arrives with its mute already set, so this is where somebody
 			// who was holding their microphone before we joined is first seen —
-			// the transition callbacks below only ever report a *change*.
+			// the transition callbacks below only ever report a *change*. The held
+			// mark is the microphone's alone: a share's audio track carries a mute
+			// of its own that says nothing about the person.
 			OnTrackPublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				if pub.Kind() == lksdk.TrackKindAudio {
+				c.registerPublication(pub, rp)
+
+				if pub.Kind() == lksdk.TrackKindAudio && !shareAudioSource(pub) {
 					c.setHeld(rp.Identity(), pub.IsMuted())
 				}
 			},
 
+			OnTrackUnpublished: func(pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				c.unregisterPublication(pub, rp.Identity())
+			},
+
 			OnTrackMuted: func(pub lksdk.TrackPublication, p lksdk.Participant) {
-				if pub.Kind() == lksdk.TrackKindAudio {
+				if pub.Kind() == lksdk.TrackKindAudio && !shareAudioSource(pub) {
 					c.setHeld(p.Identity(), true)
 				}
 			},
 
 			OnTrackUnmuted: func(pub lksdk.TrackPublication, p lksdk.Participant) {
-				if pub.Kind() == lksdk.TrackKindAudio {
+				if pub.Kind() == lksdk.TrackKindAudio && !shareAudioSource(pub) {
 					c.setHeld(p.Identity(), false)
 				}
 			},
 
-			OnTrackSubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				// Audio only: lksdk subscribes to whatever is published, and a
-				// camera or screen share fed to an Opus decoder would replace the
-				// participant's working audio lane with garbage.
-				if track.Kind() != webrtc.RTPCodecTypeAudio {
+			OnTrackSubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				// Video is read only by a watch that asked for it: everything
+				// else was unsubscribed at publish, and whatever slips through
+				// before that lands is dropped unread.
+				if track.Kind() == webrtc.RTPCodecTypeVideo {
+					c.startShareReader(pub, track, rp.Identity())
 					return
 				}
 
-				c.subscribe(track, rp.Identity())
+				c.subscribe(track, audioLane(pub, rp.Identity()))
 			},
 
-			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
-				c.closeLane(rp.Identity(), track)
+			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+				if track.Kind() == webrtc.RTPCodecTypeVideo {
+					return // a watch's reader notices its own track ending
+				}
+
+				c.closeLane(audioLane(pub, rp.Identity()), track)
 			},
 		},
 	}
+}
+
+// shareAudioSource is whether a publication is a screenshare's sound rather
+// than somebody's microphone.
+func shareAudioSource(pub lksdk.TrackPublication) bool {
+	return pub.Source() == livekit.TrackSource_SCREEN_SHARE_AUDIO
+}
+
+// audioLane is which sink lane an audio track plays through: the person's
+// own, or their share's, kept apart so the two volumes are separate dials —
+// and so a share's sound can never replace the working microphone lane the
+// same identity already holds.
+func audioLane(pub lksdk.TrackPublication, userID string) string {
+	if shareAudioSource(pub) {
+		return ShareLane(userID)
+	}
+
+	return userID
 }
 
 // applySpeakers turns the room's speaking set into transitions. Anybody in the

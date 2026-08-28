@@ -178,6 +178,11 @@ var Colors = struct {
 	// against both.
 	VoiceSpeaking color.Color
 
+	// VoiceShareLive is the screenshare mark on a participant's row, in a colour
+	// of its own because it is a target as well as a mark: tapping it opens the
+	// stream. Not the danger red — a stream is live, not destructive.
+	VoiceShareLive color.Color
+
 	// The two colours a mute or a deafen mark is drawn in, which is the whole of
 	// what separates them: the glyph says *what* is held and the colour says who
 	// held it. Server is a moderator's, and is the only one of the pair the person
@@ -602,6 +607,8 @@ var Colors = struct {
 	// Bright enough to carry against the hover fill, which is the harder of the
 	// two backgrounds it is drawn over.
 	VoiceSpeaking: color.RGBA{R: 61, G: 214, B: 140, A: 255}, // #3DD68C
+
+	VoiceShareLive: color.RGBA{R: 154, G: 106, B: 222, A: 255}, // #9A6ADE, streaming's own hue
 
 	VoiceHoldServer: color.RGBA{R: 217, G: 92, B: 92, A: 255},  // #D95C5C, a moderator's
 	VoiceHoldSelf:   color.RGBA{R: 217, G: 164, B: 65, A: 255}, // #D9A441, their own

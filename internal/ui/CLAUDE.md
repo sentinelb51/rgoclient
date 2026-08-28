@@ -949,7 +949,11 @@ naming and the test policy.
   about this machine rather than about them. What a participant is *sharing*
   cannot change under a standing row — the gateway announces it and the column is
   rebuilt — so those marks are added only where they apply; a hold can, so all
-  three are built hidden by `newVoiceHold`. Each is the glyph **and the gap after
+  three are built hidden by `newVoiceHold`. The screenshare mark is the one that
+  answers a tap (`shareWatchTap` → `Actions.OnWatchShare`, in `VoiceShareLive`
+  so a target reads apart from the grey marks): a `tapBase` widget on purpose —
+  not Hoverable, so the row keeps its hover, the pointer cursor being the whole
+  affordance. Each is the glyph **and the gap after
   it** in one container, hidden together: an HBox skips an invisible child when it
   measures, but a spacer beside a hidden mark is not itself hidden, and three of
   those are dead width at the end of every row that holds nothing. `SetMarks`

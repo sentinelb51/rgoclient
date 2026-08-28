@@ -21,6 +21,7 @@ type stubActions struct{}
 func (stubActions) OnUserTapped(string, fyne.CanvasObject)     {}
 func (stubActions) OnChannelTapped(string)                     {}
 func (stubActions) OnServerTapped(string)                      {}
+func (stubActions) OnWatchShare(string, string)                {}
 func (stubActions) OnJoinInvite(string)                        {}
 func (stubActions) OnAttachmentTapped(*domain.File)            {}
 func (stubActions) OnLinkTapped(_, _ string)                   {}

@@ -235,8 +235,6 @@ github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU
 github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
 github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f h1:K2WN3CTjThFoREJKHtPLnEl304gbCTOLrXElrNjyT4Y=
 github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f/go.mod h1:AWEx797SwA4yqgOFWVpgapUkTk6MmeoJ+1nTwMt33T8=
-github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493 h1:Eyn8j6rmjp41LAAld+nJKhqMSapnWXyofTfArLjVmmE=
-github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66 h1:BeY1/dsQALbPZCJkEnxAIbUQCsaA/e9YMvhSeLRwBK8=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.8 h1:8S5csEZJEmuLbdFCgAtRyFCm7Zu9psjttihZj4CXTtQ=

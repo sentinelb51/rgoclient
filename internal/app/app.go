@@ -373,6 +373,10 @@ type App struct {
 	// microphone.
 	callJoining bool
 
+	// share is the one watched screenshare, or nil — one decoder child and one
+	// window, the one-playback rule again. See screenshare.go.
+	share *shareView
+
 	// voiceNodes is the media servers this instance offers, fetched once off Ready
 	// beside the node warm-up that shares its round trip. Only the settings page
 	// reads it, and only to offer the choice: which node a call actually dials is

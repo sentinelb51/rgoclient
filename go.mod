@@ -10,6 +10,7 @@ require (
 	github.com/livekit/protocol v1.50.4
 	github.com/livekit/server-sdk-go/v2 v2.18.1
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.18
 	// libopus, vendored and statically linked, so a fresh clone builds with no
 	// system libraries. A fork of layeh.com/gopus rather than upstream for the
@@ -22,6 +23,7 @@ require (
 	github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66
 	golang.design/x/clipboard v0.9.0
 	golang.org/x/image v0.45.0
+	golang.org/x/sys v0.47.0
 )
 
 require (
@@ -88,7 +90,6 @@ require (
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
 	github.com/pion/rtcp v1.2.17 // indirect
-	github.com/pion/rtp v1.10.5 // indirect
 	github.com/pion/sctp v1.11.1 // indirect
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect
@@ -125,7 +126,6 @@ require (
 	golang.org/x/mobile v0.0.0-20260821190718-4776eadac327 // indirect
 	golang.org/x/net v0.58.0 // indirect
 	golang.org/x/sync v0.22.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.41.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260819154853-08b0e4226688 // indirect

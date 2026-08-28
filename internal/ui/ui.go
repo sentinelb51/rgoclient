@@ -59,6 +59,12 @@ type MessageActions interface {
 	// inside it, so the controller picks the first channel it can see.
 	OnServerTapped(serverID string)
 
+	// OnWatchShare opens the window watching somebody's screenshare — the tap
+	// on the live mark a voice participant's row wears. The controller owns it
+	// because whether it can be watched is a question about the running call,
+	// which the mark, drawn from the gateway's voice state, cannot answer.
+	OnWatchShare(channelID, userID string)
+
 	// OnJoinInvite redeems an invite code. The joined server arrives through the
 	// gateway, so nothing is expected back.
 	OnJoinInvite(code string)

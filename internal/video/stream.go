@@ -91,6 +91,87 @@ func (t Tools) Frames(cfg FrameConfig) (*Stream, error) {
 	return start(t.FFmpeg, args, cfg.Path)
 }
 
+// LiveConfig is a live pipe's shape: a muxed byte stream arrives on the
+// child's stdin and exact-size RGBA frames come back, with no file anywhere.
+// Format is the demuxer to force and is the caller's word — the codec came
+// from the media session, not from sniffing — matched against the allowlist
+// below. Width and Height are this side's numbers, as ever.
+type LiveConfig struct {
+	Format string
+
+	Width  int
+	Height int
+}
+
+// liveFormats is what LiveFrames accepts: IVF carrying VP8/VP9, and bare
+// Annex-B H.264. The string reaches a command line, so it is matched exactly
+// rather than trusted.
+var liveFormats = map[string]bool{"ivf": true, "h264": true}
+
+// LiveFrames starts a child decoding a live byte stream written to its
+// stdin into raw RGBA frames — the player's exact-byte contract with no file
+// and no clock: frames come out as the stream delivers them, and the caller
+// must always drain the pipe. Its buffer is smaller than one frame, so a
+// stalled reader backpressures the decoder into latency, which is the wrong
+// trade live.
+//
+// The child runs in the full sandbox minus the media bind — a remote
+// participant's bitstream is exactly as hostile as a message attachment.
+// Closing the returned writer ends the stream: the child flushes what it
+// holds and exits, and the frame side answers io.EOF.
+func (t Tools) LiveFrames(cfg LiveConfig) (*Stream, io.WriteCloser, error) {
+	if err := checkFrameSize(cfg.Width, cfg.Height); err != nil {
+		return nil, nil, err
+	}
+	if !liveFormats[cfg.Format] {
+		return nil, nil, fmt.Errorf("video: not a live format this player accepts: %q", cfg.Format)
+	}
+
+	// No -nostdin: stdin is the input. The latency flags stop the analysis
+	// buffering ahead of the decode; IVF's 32-byte header answers everything
+	// probing would, where H.264 has to be left to find its SPS in the stream.
+	// Deliberately no `-fflags nobuffer`: it makes the IVF demuxer misframe a
+	// piped stream — every packet refused as invalid — and what it would buy
+	// is already bought by the zeroed analysis.
+	args := []string{"-v", "error", "-threads", liveThreads(cfg.Width, cfg.Height),
+		"-flags", "low_delay", "-analyzeduration", "0"}
+	if cfg.Format == "ivf" {
+		args = append(args, "-probesize", "32")
+	}
+	args = append(args,
+		"-f", cfg.Format,
+		"-i", "pipe:0",
+		"-an", "-sn", "-dn",
+		"-vf", liveScaleFilter(cfg.Width, cfg.Height),
+		"-f", "rawvideo", "-pix_fmt", "rgba",
+		"pipe:1",
+	)
+
+	return launch(t.FFmpeg, args, "", true)
+}
+
+// liveScaleFilter fits the source into the asked-for box and pads the rest
+// black: unlike a file's, a live source's dimensions can move mid-stream,
+// and the pad is what keeps every frame exactly Width×Height×4 bytes through
+// it — the cost is letterboxing until the caller relaunches at the new
+// aspect.
+func liveScaleFilter(width, height int) string {
+	return fmt.Sprintf(
+		"scale=%d:%d:force_original_aspect_ratio=decrease:flags=bilinear,pad=%d:%d:(ow-iw)/2:(oh-ih)/2",
+		width, height, width, height)
+}
+
+// liveThreads sizes the live decoder by its output area the way
+// decodeThreads sizes a chat card's: a stream watched at 1080p is worth
+// twice the card's two.
+func liveThreads(width, height int) string {
+	if width*height > 1280*720 {
+		return "4"
+	}
+
+	return decodeThreads
+}
+
 // PCM starts a child decoding the file's audio into s16le mono at PCMRate.
 func (t Tools) PCM(cfg PCMConfig) (*Stream, error) {
 	args := []string{"-v", "error", "-nostdin", "-threads", decodeThreads}
@@ -206,6 +287,15 @@ func (s *Stream) Stderr() string {
 // start launches one sandboxed child. media names the input file so the
 // sandbox can offer exactly that one path read-only.
 func start(tool string, args []string, media string) (*Stream, error) {
+	s, _, err := launch(tool, args, media, false)
+
+	return s, err
+}
+
+// launch is the one place a child is spawned. stdin asks for the write end
+// of the child's stdin, for a live stream fed by the caller; a file-fed
+// child takes none.
+func launch(tool string, args []string, media string, stdin bool) (*Stream, io.WriteCloser, error) {
 	argv := sandboxArgv(tool, args, media)
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -213,17 +303,25 @@ func start(tool string, args []string, media string) (*Stream, error) {
 	cmd.Stderr = stderr
 	platformAttrs(cmd)
 
+	var in io.WriteCloser
+	if stdin {
+		var err error
+		if in, err = cmd.StdinPipe(); err != nil {
+			return nil, nil, fmt.Errorf("video: %w", err)
+		}
+	}
+
 	out, err := cmd.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("video: %w", err)
+		return nil, nil, fmt.Errorf("video: %w", err)
 	}
 	if err := cmd.Start(); err != nil {
-		return nil, fmt.Errorf("video: %w", err)
+		return nil, nil, fmt.Errorf("video: %w", err)
 	}
 
 	release := harden(cmd)
 
-	return &Stream{cmd: cmd, out: out, stderr: stderr, release: release, done: make(chan struct{})}, nil
+	return &Stream{cmd: cmd, out: out, stderr: stderr, release: release, done: make(chan struct{})}, in, nil
 }
 
 // run is start for the tools that answer and exit — probe and poster: capped

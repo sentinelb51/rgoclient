@@ -72,70 +72,59 @@ module's.
   blocked on the backend, not on this client. Ground against
   https://github.com/stoatchat/stoatchat if the answer is surprising.
 
-## Phase 0 — before anything is built
+## Phase 0 — built, but for the grant check
 
-Two small changes, worth shipping on their own:
+- **Unsubscribe video publications** — built. `registerPublication` in
+  `voice/share.go` switches every video and share-audio publication off as it
+  appears, and `sweepPublications` at the join covers what was already in the
+  room, so a share costs nothing until watched. `WatchShare` is what turns
+  exactly one back on.
+- **The JWT grant check**, live against stoat.chat, is still owed — it gates
+  "Sending", not the receive half.
 
-- **Unsubscribe video publications.** In `OnTrackPublished` / on subscribe,
-  `pub.SetSubscribed(false)` for any video track. Turns "a share bills the
-  room" into "a share costs nothing until watched", and is the hook watch will
-  reuse.
-- **The JWT grant check**, live against stoat.chat. Everything in "Sending"
-  assumes the answer is yes.
+## Receiving — built
 
-## Receiving
+`voice/share.go` → `video.LiveFrames` → `app/screenshare.go`, the path as
+designed; what stands, and what is still open on this side:
 
-**Path:** watch → `SetSubscribed(true)` → a reader goroutine per video track
-(`ReadRTP` → `samplebuilder` → whole frames) → remux → decoder child → RGBA →
-the view.
-
-- **Depacketising is pion's, already in the tree**: lksdk depends on
-  `pion/webrtc/v4`, whose `pkg/media/samplebuilder` plus the
-  `pion/rtp/codecs` depacketizers (`VP8Packet`, `VP9Packet`, `H264Packet`)
-  reassemble RTP into whole frames and drop what a lost packet truncated.
-  `H264Packet` emits Annex-B by default (verify: `IsAVC` unset).
-- **The seam**: `voice` writes a *muxed byte stream* — IVF for VP8/VP9 (32-byte
-  header + 12-byte frame headers; timebase 1/90000 so the RTP timestamp is the
-  pts verbatim), Annex-B for H.264 — into an `io.Writer` the app supplies, and
-  emits `ScreenshareChanged{UserID, Started/Ended}` events beside
-  `ParticipantChanged`. Structural like `PCMSource`: the contract is "a byte
-  stream ffmpeg's `-f ivf` / `-f h264` demuxer reads", named in a doc comment,
-  and `voice` still imports nothing of `video`.
-- **The decoder is `internal/video`'s child, sandboxed in full.** A remote
-  participant's bitstream is exactly as hostile as a message attachment. A new
-  `LiveFrames(cfg)` beside `Frames`: input `pipe:0` instead of a file (the
-  bwrap profile *loses* the media ro-bind — strictly smaller than the
-  player's), `-f ivf`/`-f h264` forced by the caller (the codec came from SDP,
-  not from sniffing), low-latency flags (`-fflags nobuffer -flags low_delay
-  -probesize 32 -analyzeduration 0`), and the output contract is the player's:
-  `-f rawvideo -pix_fmt rgba` at exactly W×H. **The scale filter gains a pad**:
-  `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2`
-  — a shared window resizes mid-stream and the source dimensions move under
-  the decoder, and this is what keeps the byte-per-frame contract standing
-  through it (the cost is letterboxing until the view re-launches at the new
-  aspect).
-- **Live pacing is not the player's pacing.** No wall clock: a drain goroutine
-  always reads the frame pipe and keeps only the newest frame (a depth-1
-  mailbox), the UI hop paints what is newest when it runs. The pipe must always
-  be drained — its buffer is smaller than one frame, so a stalled reader
-  backpressures the decoder into latency rather than dropping, which is the
-  wrong trade live.
-- **Keyframes**: `WritePLI` on watch-start and on every decoder relaunch; the
-  decoder discards until an IDR/keyframe arrives, so without it a watch starts
-  up to a GOP late.
-- **View resize / quality**: relaunch the decoder at the new size + PLI —
-  pause/seek's restart discipline, cheap. `SetVideoQuality` waits for a
-  simulcast sender, which phase 3's single-layer publish is not.
-- **Share audio** is one more Opus lane: a `SCREEN_SHARE_AUDIO` track decodes
-  through the existing lane machinery, keyed apart from the participant's voice
-  (`userID+"\x00share"` beside the reserved-lane convention) so their volume
-  and the share's are separate dials.
-- **Costs**: 1080p30 RGBA over the pipe ≈ 250 MB/s — noise for a pipe. Software
-  VP8/H.264 decode at 1080p30 is well under one core. The real cost is the
-  player's: one texture upload and one full-window repaint per frame
-  (`Canvas.dirty`), continuous while watching. `decodeThreads` is sized for a
-  chat card; the live decoder should take threads by area (2 up to 720p, 4
-  above).
+- **Watch**: the row's live mark (`ui.shareWatchTap`, drawn from the
+  gateway's `Screensharing` flag) → `App.OnWatchShare` →
+  `Call.WatchShare(userID, open)`. voice subscribes the share's video and
+  audio publications, and when the track lands runs `open(codec, w, h)` on
+  its own goroutine — the app launches the decoder and answers with its
+  stdin. The seam stayed structural: `open` answers an `io.WriteCloser`, and
+  `voice` imports nothing of `video`.
+- **Depacketising is pion's as planned** (`samplebuilder` + `VP8Packet` /
+  `VP9Packet` / `H264Packet`; `H264Packet` does emit Annex-B with `IsAVC`
+  unset). The remux is `ivfMux` (timebase 1/90000, RTP timestamp unwrapped as
+  the pts, keyframe-gated for VP8) and `annexBMux` (IDR-gated); both hold the
+  stream until a frame a decoder can enter on. `WritePLI` fires at watch
+  start and, throttled to one per 500 ms, per hole the reassembler reports
+  (`PrevDroppedPackets`). Verified offline: frames carved out of a recorded
+  IVF, re-muxed with synthetic timestamps, decode whole through `-f ivf`.
+- **The decoder is `LiveFrames`**: full sandbox minus the media bind, `-f
+  ivf`/`-f h264` forced by the caller, the pad-scale filter keeping the
+  byte-per-frame contract through a mid-stream source resize. One flag from
+  the design did not survive contact: **`-fflags nobuffer` makes the IVF
+  demuxer misframe a piped stream** (every packet refused as invalid), so the
+  latency flags are `-flags low_delay -analyzeduration 0` (+`-probesize 32`
+  for IVF) and nothing else.
+- **Pacing**: the pump paints on arrival under a waited hop — no wall clock,
+  the sender paces the stream — and always drains. The share window is its
+  own `fyne.Window` with its own canvas, so a frame repaints nothing of the
+  main window. `endShareWatch` / `closeShare` / `settleShareEnd` are the
+  teardown meeting points; `dropCall` closes the watch with the call.
+- **Share audio** is the lane machinery unchanged under
+  `voice.ShareLane(userID)`, its own volume on the participant menu
+  ("Screenshare volume"), persisted under the same map as the user gains.
+- Still open on receive: a **watch resolution option** (today the sender's
+  declared size capped at 1080p; relaunch-on-resize wants a voice-side
+  re-open seam); `SetVideoQuality` once a simulcast sender exists; **AV1**
+  (OBU remux unbuilt — refused with the codec named); VP9 keyframe *gating*
+  (unparsed; the decoder skips to one at the cost of a logged complaint); and
+  the backpressure edge: a consumer slower than the stream backs up into
+  pion's receive buffer and drops until the next PLI — self-limiting, not yet
+  measured on a weak machine.
 
 ## Sending
 
@@ -244,16 +233,16 @@ which is the decoder's W×H and free to differ from the sender's.
 
 ## Order of work
 
-0. **Unsubscribe unwatched video + the JWT grant check.** Shippable alone.
-1. **`video.LiveFrames`** — the stdin decoder with the pad-scale contract,
-   testable offline by feeding a recorded IVF and counting bytes.
-2. **Receive**: `voice` subscribe/depacketise/remux + events + the writer seam;
-   `app/screenshare.go` wiring watch/unwatch, PLI, the mailbox pump into
-   whatever surface exists to paint on.
+0. ~~Unsubscribe unwatched video~~ **done**; the JWT grant check remains, and
+   is the first task of the send half.
+1. ~~`video.LiveFrames`~~ **done** — validated offline against a recorded IVF
+   (count the bytes, check the letterbox corner).
+2. ~~Receive~~ **done** — see "Receiving" above for what stayed open.
 3. **Send, monitors, X11 + Windows**: capture+encode child, IVF, publish,
    every stop path.
 4. **Options**: window sources + enumeration, fps/resolution/bitrate, audio
-   share (WASAPI loopback, pulse monitor).
+   share (WASAPI loopback, pulse monitor) — and the receive-side watch
+   resolution beside them.
 5. **Polish**: self-preview tee, hw-encoder probe, macOS screens, the Wayland
    portal investigation.
 

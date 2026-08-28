@@ -229,8 +229,8 @@ internal/
   app/                   app.go, session.go, events.go, navigation.go, messages.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          groups.go, pins.go, search.go, mentions.go, emoji.go,
-                         gifs.go, video.go, notify.go, alerts.go, security.go,
-                         settings.go, serversettings.go, updates.go
+                         gifs.go, video.go, screenshare.go, notify.go, alerts.go,
+                         security.go, settings.go, serversettings.go, updates.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
                          gifs.go, video.go, embed.go, invite.go, search.go,
@@ -259,12 +259,18 @@ internal/
                          drift against the device), jitter.go (the Jitter interface
                          and the adaptive buffer behind it — what is left of
                          mouth-to-ear latency lives here, which is why it is
-                         replaceable)
+                         replaceable), share.go (the receive half of a screenshare:
+                         the registry and the nothing-video-until-watched
+                         subscription policy, and the watch — RTP reassembled and
+                         remuxed into the byte stream a decoder reads on stdin.
+                         The seam is an io.WriteCloser the app supplies, so voice
+                         never imports video)
   video/                 the sandboxed ffmpeg driver: video.go (discovery, the
                          magic-byte sniff that forces the demuxer, the probe whose
                          every answer is clamped, the poster), stream.go (the
                          frame and PCM pipes, their exact-byte contract and the
-                         one-Wait kill discipline), sandbox_{linux,windows,darwin,
+                         one-Wait kill discipline — and LiveFrames, that same
+                         contract fed a live stream on stdin), sandbox_{linux,windows,darwin,
                          other}.go (bwrap / restricted-token + job / sandbox-exec,
                          each self-tested once and falling back to a plain child
                          under limits). See docs/video-player.md for the threat
@@ -360,6 +366,9 @@ package's own `CLAUDE.md`; this is the map:
   a tap decodes with, the one-playback rule, the two pumps, and which file the
   OS is handed. See `internal/app/CLAUDE.md` item 45 and
   `docs/video-player.md`.
+- `app/screenshare.go` — watching a screenshare: the one watch, its window,
+  the arrival-paced frame pump, and every teardown. See `internal/app/CLAUDE.md`
+  item 46 and `docs/screenshare-todo.md`.
 - `ui/members.go` — the member list end to end, its own subsystem: the flat
   model (`NewMemberModel`), the geometry (`memberOffsets`, `visibleRange`,
   `memberOffsets`, `visibleRange`), the virtualised `MemberList`, the recycled `MemberRow` /

@@ -1932,3 +1932,28 @@ DAG and conventions.
     path, that gate being for destinations somebody else chose. A file
     nothing recognises is refused with the reason, not handed to a shell that
     would believe its name.
+46. **Watching a screenshare.** `screenshare.go` is the receive half of
+    `docs/screenshare-todo.md`, the video player's seam pointed at a live
+    stream: `voice` owns the track (the registry, the nothing-video-until-
+    watched subscription policy and the depacketise/remux — `voice/share.go`),
+    `video.LiveFrames` owns the sandboxed decode from stdin, and `app` is
+    where the writer the one hands the other is made. The way in is the row's
+    live mark (`ui.shareWatchTap`, drawn from the gateway's `Screensharing`
+    flag — which is why it stands even out of the call): `OnWatchShare`
+    refuses out-of-call and no-ffmpeg taps with a notice, keeps **one watch**
+    (a second tap focuses the window, a different sender replaces it), opens
+    the window *before* the subscription — a watch that never delivers must
+    leave something to close — and hands `voice.WatchShare` a `ShareOpen`
+    that launches the decoder at `shareDecodeSize` (the sender's declared
+    size, believed only under the 1080p cap) and starts the pump. The pump is
+    `pumpVideoFrames` minus the clock: live is paced by the sender, so it
+    paints on arrival under a waited hop and always drains; the share window
+    is its own `fyne.Window`, so a frame dirties nothing of the main canvas.
+    Every teardown meets in `closeShare`: the window's own close,
+    `voice.ShareEnded` (a sender stopping is silent, a failure is a notice),
+    the pipe dying (`settleShareEnd`, guarded on `stopped` so an owner's kill
+    is not reported twice), and `dropCall` — the window must not outlive the
+    media session feeding it. Share audio is the lane machinery unchanged
+    under `voice.ShareLane(userID)`; its dial is "Screenshare volume" on the
+    participant menu, offered while the store says they are sharing, written
+    to the sink and to `config.SetUserGain` under the lane's own key.

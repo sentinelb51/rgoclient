@@ -16,12 +16,15 @@ package voice
 // the media side — whether the track is actually here to watch.
 
 import (
+	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -618,4 +621,204 @@ func clampUint16(v int) uint16 {
 	}
 
 	return uint16(v)
+}
+
+/* Sending */
+
+// ShareStopped reports this end's own share ending on its own terms rather
+// than the caller's: the byte stream feeding the track hit EOF or broke — the
+// captured window closed, the encoder died. Nothing follows StopShare or the
+// call ending; the caller caused those.
+type ShareStopped struct{}
+
+func (ShareStopped) isVoiceEvent() {}
+
+// outboundShare is this end's own stream: the source the reader track eats
+// and the publication the room knows it as. stopped marks one being taken
+// down on purpose; settled marks the write loop having already ended, for the
+// start that races it. All of it is guarded by the call's mu.
+type outboundShare struct {
+	src   io.ReadCloser
+	track *lksdk.LocalTrack
+	pub   *lksdk.LocalTrackPublication
+
+	stopped bool
+	settled bool
+}
+
+// CanShare reports whether the join token grants publishing a screenshare.
+// Stoat mints the grant off the channel's Video permission and the instance's
+// video flag, so this is the server's own answer read locally — what greys
+// the button before a refused AddTrack has to say it.
+func (c *Call) CanShare() bool { return c.canShare }
+
+// StartShare publishes a screenshare: VP8 in IVF read from src — an encoder's
+// stdout — declared to the room at width×height, which every viewer sizes a
+// window by and the server enforces its limits against. It blocks for the
+// publish negotiation, so it belongs on a worker. One share at a time; the
+// source is closed by whatever ends it.
+//
+// fps is what the track is *paced* by, and it is asked for rather than read
+// off the stream on purpose. lksdk derives a sample's duration from the IVF
+// timebase and the timestamp delta, and ffmpeg does not write those two in
+// agreement for every grabber: x11grab declares 1/fps and then steps the
+// timestamps by fps, which comes out as a second per frame and publishes the
+// share at a fifteenth of its speed. The capture child is held to a constant
+// rate by its own fps filter, so the duration is a number this side already
+// knows — ReaderTrackWithFrameDuration overrides that arithmetic with it.
+func (c *Call) StartShare(src io.ReadCloser, width, height, fps int) error {
+	if src == nil {
+		return errors.New("no stream to publish")
+	}
+	if fps < 1 {
+		return errors.New("no frame rate to pace the share by")
+	}
+	if !c.canShare {
+		return errors.New("the server does not allow publishing a screenshare here")
+	}
+	if c.room == nil {
+		return errors.New("no call to share into")
+	}
+
+	out := &outboundShare{src: src}
+
+	c.mu.Lock()
+	if c.outShare != nil {
+		c.mu.Unlock()
+		return errors.New("already sharing")
+	}
+	c.outShare = out
+	c.mu.Unlock()
+
+	release := func() {
+		c.mu.Lock()
+		if c.outShare == out {
+			c.outShare = nil
+		}
+		c.mu.Unlock()
+	}
+
+	track, err := lksdk.NewLocalReaderTrack(src, webrtc.MimeTypeVP8,
+		lksdk.ReaderTrackWithFrameDuration(time.Second/time.Duration(fps)),
+		lksdk.ReaderTrackWithOnWriteComplete(func() { c.settleShareSend(out) }))
+	if err != nil {
+		release()
+		return fmt.Errorf("share track: %w", err)
+	}
+
+	pub, err := c.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+		Name:        "screenshare",
+		Source:      livekit.TrackSource_SCREEN_SHARE,
+		VideoWidth:  width,
+		VideoHeight: height,
+	})
+	if err != nil {
+		release()
+		return fmt.Errorf("publish the share: %w", err)
+	}
+
+	c.mu.Lock()
+	out.track, out.pub = track, pub
+	settled := out.settled
+	c.mu.Unlock()
+
+	// The stream can end inside the negotiation window — a capture child that
+	// died at its first frame. The completion callback found no publication to
+	// retire, so the track published a moment later is retired here, and the
+	// error is the report where the event would have been.
+	if settled {
+		_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
+		return errors.New("the stream ended as it was being published")
+	}
+
+	return nil
+}
+
+// StopShare takes this end's stream down on purpose: unpublish, and the
+// source closed so the encoder behind it learns now rather than at its next
+// frame. No event follows — the caller asked. Safe with nothing running.
+func (c *Call) StopShare() {
+	c.mu.Lock()
+	out := c.outShare
+	if out != nil {
+		out.stopped = true
+		c.outShare = nil
+	}
+	c.mu.Unlock()
+
+	if out == nil {
+		return
+	}
+
+	if out.pub != nil {
+		_ = c.room.LocalParticipant.UnpublishTrack(out.pub.SID())
+	}
+	_ = out.src.Close()
+}
+
+// settleShareSend is the reader track's write loop ending — EOF from the
+// encoder, or the track closed under it. Only an end nobody here asked for is
+// reported; a share that never finished publishing is StartShare's error to
+// carry instead.
+func (c *Call) settleShareSend(out *outboundShare) {
+	c.mu.Lock()
+	out.settled = true
+	current := c.outShare == out
+	stopped := out.stopped
+	if current {
+		c.outShare = nil
+	}
+	pub := out.pub
+	c.mu.Unlock()
+
+	if !current || stopped {
+		return
+	}
+
+	_ = out.src.Close()
+	if pub == nil {
+		return // StartShare is still in flight and will see settled
+	}
+
+	_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
+	c.emit(ShareStopped{})
+}
+
+// tokenAllowsScreen reads the join token's video grant without verifying it —
+// the server holds the key and the enforcement; this is only what greys a
+// button. LiveKit's semantics: canPublish false forbids everything, and a
+// canPublishSources list restricts to what it names, an empty or absent list
+// restricting nothing. Stoat lists "screen_share" exactly when the channel
+// grants the Video permission and the instance has video on. An unreadable
+// token answers true and leaves the server to say no.
+func tokenAllowsScreen(token string) bool {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return true
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		if payload, err = base64.StdEncoding.DecodeString(parts[1]); err != nil {
+			return true
+		}
+	}
+
+	var claims struct {
+		Video struct {
+			CanPublish        *bool    `json:"canPublish"`
+			CanPublishSources []string `json:"canPublishSources"`
+		} `json:"video"`
+	}
+	if json.Unmarshal(payload, &claims) != nil {
+		return true
+	}
+
+	if claims.Video.CanPublish != nil && !*claims.Video.CanPublish {
+		return false
+	}
+	if len(claims.Video.CanPublishSources) == 0 {
+		return true
+	}
+
+	return slices.Contains(claims.Video.CanPublishSources, "screen_share")
 }

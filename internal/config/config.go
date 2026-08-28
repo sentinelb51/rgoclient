@@ -59,6 +59,26 @@ type State struct {
 	// these — a different one signing in replaces the set rather than inheriting it.
 	DismissedAccount  string   `json:"dismissed_account,omitempty"`
 	DismissedMentions []string `json:"dismissed_mentions,omitempty"`
+
+	// What the screenshare picker was last answered with, so a reader who
+	// shares the same monitor every call answers one card rather than three
+	// questions. The source is a platform handle and is only ever *offered*
+	// back — a window that has since closed is not in the list, and the picker
+	// falls through to the first thing there.
+	ShareSource string `json:"share_source,omitempty"`
+	ShareHeight int    `json:"share_height,omitempty"`
+	ShareFPS    int    `json:"share_fps,omitempty"`
+}
+
+// RememberShare records what the picker was answered with. Nothing here is a
+// setting — no row writes to it — it is what stops the same three answers
+// being given every call.
+func RememberShare(source string, height, fps int) {
+	Update(func(s *Settings) {
+		s.State.ShareSource = source
+		s.State.ShareHeight = height
+		s.State.ShareFPS = fps
+	})
 }
 
 // MaxDismissedMentions is how many waved-off mentions are carried between runs.

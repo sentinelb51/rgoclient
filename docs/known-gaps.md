@@ -20,10 +20,28 @@ Everything a server, role, member or channel can do is handled.
 
 Where something is limited by revoltgo or Fyne rather than by effort:
 
-- **A call is audio only.** Joining works — `internal/voice` publishes one Opus
-  track to Stoat's LiveKit node and mixes everybody else — but there is no
-  camera, no screen share and no way to *watch* either, so a participant sharing
-  one is drawn with the mark and nothing behind it. Nothing records a call.
+- **A call carries voice and screenshares, and no camera.** `internal/voice`
+  publishes one Opus track to Stoat's LiveKit node, mixes everybody else, and
+  both watches and sends a screenshare (`docs/screenshare-todo.md`). There is
+  no camera in either direction — a participant's is unsubscribed with every
+  other video track and has no surface — and nothing records a call.
+  Three limits on the share itself, all in that doc's own queue: no **share
+  audio** yet, so a stream is silent whatever the sender publishes beside it;
+  **AV1** is refused with the codec named, its OBU remux being unbuilt; and
+  the sender cannot answer a viewer's keyframe request — a CLI encoder has no
+  way to hear a PLI — so a late joiner waits up to the two-second GOP for a
+  picture.
+- **Sharing a screen needs X11 or Windows.** Capture is `x11grab` and
+  `gdigrab`, and enumeration is RandR/EWMH and `EnumDisplayMonitors`/
+  `EnumWindows`. **Wayland has no grabber in stock ffmpeg** — the citizen's
+  path is the `org.freedesktop.portal.ScreenCast` portal, which means
+  consuming a PipeWire node ourselves — so a pure Wayland session is told
+  there is nothing to capture; XWayland windows still work. macOS is
+  `avfoundation` and unbuilt, so the picker there says the same. Watching a
+  share works everywhere ffmpeg does.
+- **An occluded X11 window captures whatever the server still holds for it**,
+  which without a compositor is garbage over the covered region. Every X11
+  capturer shares this; the picker says so rather than pretending otherwise.
   A *remote* speaking ring comes from the voice server's active-speaker report;
   this account's own comes off the capture gate instead, that report being about
   other people and landing about half a second late.

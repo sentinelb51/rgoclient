@@ -307,6 +307,7 @@ func (a *App) onReady(event client.Ready) {
 	a.background(func() error {
 		a.client.WarmVoiceNode()
 		a.loadVoiceNodes()
+		a.loadVideoLimits()
 
 		return nil
 	}, func(error) {})

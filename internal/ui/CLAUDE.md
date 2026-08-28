@@ -852,6 +852,17 @@ naming and the test policy.
     is chosen to cut a card in half: the rows carry their own mark down the right
     edge, which is where a bar would land, so the cut is the whole of what says
     the list goes on.
+- **The screenshare picker is that same island row with a radio's rule.**
+  `ui/screenshare.go`'s `shareSourceRow` is `pickRow` — the same card, the same
+  three fills in the same precedence, the same `pickMark` at the end — and the
+  only difference is that picking one *unpicks* the rest, which the dialog
+  enforces rather than the row. Its two option runs are `searchChip`s carrying
+  the number they stand for (`shareOptionChip`): a filter chip is a bit where
+  one of these is a member of a set, so `markShareChips` is what a tap runs and
+  the chip itself stays the same widget. The list is `cappedHeightLayout` +
+  `NewPlainVScroll`, `panels.go`'s arrangement, because a machine with thirty
+  windows would otherwise open a card taller than the screen it is offering to
+  share.
 - **`IconButton` is a mark; `OutlinedIconButton` is a target.** The first is
   right where the row has already said what is going on and the icons are
   *revealed* — a message's hover actions — and wrong where the icon is the only
@@ -1036,10 +1047,14 @@ naming and the test policy.
 
   It sits over the message header, which means it covers whatever is in that row's
   centre — the channel topic. That is the cost of the slot, not a bug.
-  Its two toggles **replace** their buttons rather than recolouring them:
+  Its **three** toggles replace their buttons rather than recolouring them:
   `OutlinedIconButton` bakes its mark, its tint and its `disabled()` state at
   construction, so a slot with a rebuilt button is the only way to change any of
-  the three.
+  the three. The share button is the third and has three states rather than two
+  — sharing (`VoiceShareLive`, so the card says at a glance that this machine is
+  on screen somewhere), on offer, and greyed where the call's own token does not
+  grant it. Greyed rather than absent, for the reason the join offer is: a
+  control that vanished reads as a client that forgot.
 - **A wrapping grid reports one row until it has been laid out.**
   `layout.GridWrap`'s `MinSize` multiplies the cell by a `rowCount` computed
   during `Layout`, so a fresh grid measures one cell tall whatever is in it. The

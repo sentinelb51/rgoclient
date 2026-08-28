@@ -377,6 +377,20 @@ type App struct {
 	// window, the one-playback rule again. See screenshare.go.
 	share *shareView
 
+	// sending is this account's own share: the capture child feeding the
+	// published track, nil while none runs. shareStarting single-flights the
+	// start, which is a picker, an enumeration and a publish negotiation deep.
+	// videoLimits is what the instance enforces about a published track,
+	// fetched once per session — a share is fitted under it before publishing,
+	// the backend disconnecting a publisher whose declared size is over.
+	sending       *sendingShare
+	shareStarting bool
+
+	// shareDialog is the picker while it is up, kept so a refused start is
+	// reported into the card it came from rather than as a notice over it.
+	shareDialog *ui.ShareDialog
+	videoLimits domain.VideoLimitTiers
+
 	// voiceNodes is the media servers this instance offers, fetched once off Ready
 	// beside the node warm-up that shares its round trip. Only the settings page
 	// reads it, and only to offer the choice: which node a call actually dials is

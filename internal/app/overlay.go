@@ -72,6 +72,7 @@ func (a *App) closeOverlay() {
 	a.prompt = nil
 	a.channelDialog = nil
 	a.groupDialog = nil
+	a.shareDialog = nil
 	a.challengeCard = nil
 	a.secretCard = nil
 	a.closePins()

@@ -226,9 +226,11 @@ func (a *App) dropCall() {
 	a.callJoining = false
 	a.disarmPushToTalk()
 
-	// A watched stream was the call's; the window must not outlive the media
-	// session feeding it.
+	// Both halves of a screenshare were the call's: the window must not
+	// outlive the media session feeding it, and the capture child must not
+	// outlive the track it was feeding.
 	a.closeShare()
+	a.stopSharing()
 
 	if a.call != nil {
 		a.call.Close() // there is no leave route: leaving *is* disconnecting
@@ -343,6 +345,8 @@ func (a *App) onCallEvent(call *voice.Call, event voice.Event) {
 		}
 	case voice.ShareEnded:
 		a.onShareEnded(e)
+	case voice.ShareStopped:
+		a.onShareStopped()
 	case voice.ConnectionChanged:
 		a.onCallConnection(e)
 	case voice.CallEnded:
@@ -587,6 +591,11 @@ func (a *App) syncCallIsland() {
 		a.callIsland.SetCall(a.voiceWhere(a.callChannelID))
 		a.callIsland.SetMuted(a.muted)
 		a.callIsland.SetDeafened(a.deafened)
+
+		// Sharing is offered only where the call's own token grants it, which
+		// is Revolt's Video permission read back off the JWT rather than
+		// guessed at from the channel.
+		a.callIsland.SetSharing(a.sending != nil, a.call != nil && a.call.CanShare())
 
 		// The bar is otherwise whatever the last ConnectionChanged painted it, which
 		// for a call that has not landed yet is nothing at all.
@@ -1077,6 +1086,30 @@ func (a *App) loadVoiceNodes() {
 			return
 		}
 		a.voiceNodes = toVoiceNodes(nodes)
+	}, false)
+}
+
+// loadVideoLimits records what the instance enforces about a published video
+// track, so a share is fitted under it before publishing rather than being
+// disconnected for declaring a size the ingress refuses. Asked once per
+// session beside the node warm-up — it is instance configuration and cannot
+// change under a running client. Call off the UI thread.
+func (a *App) loadVideoLimits() {
+	epoch := a.epoch
+
+	limits, err := a.client.VideoLimits()
+	if err != nil {
+		// Not worth reporting: with no answer the share is fitted under
+		// nothing here and the server has the last word either way.
+		log.Printf("instance video limits: %v", err)
+		return
+	}
+
+	a.doOnUI(func() {
+		if a.stale(epoch) {
+			return
+		}
+		a.videoLimits = limits
 	}, false)
 }
 

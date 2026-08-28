@@ -501,3 +501,19 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   Rate-limit buckets key on the path alone (scheme and host are dropped), so
   `/search`, `/trending` and `/categories` would share a bucket with API routes of
   those names; none exists today.
+
+## `features.limits` is dropped at parse
+
+`revoltgo.InstanceConfig` models `features` — the captcha, autumn, january and
+the LiveKit nodes — and **not `features.limits`**, so nothing typed reaches the
+publish limits a screenshare has to fit under. `Client.VideoLimits` asks
+`GET /` again by hand (`session.HTTP.Request` against `revoltgo.BaseURL()`,
+the `requestFriend` shape) and reads the slice it needs.
+
+Two things about the answer are easy to get wrong. `video_resolution` is a
+**pair whose product is an area cap**, not a box — the ingress compares
+`width * height` against `res[0] * res[1]`, so a 1920×405 track passes a
+`[1280, 720]` limit. And a tier's guards are *conditional*: the area is
+enforced only where both halves are non-zero, the aspect only where the two
+bounds differ, which is what `toVideoLimits` folds into zeroes meaning
+unenforced.

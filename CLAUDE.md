@@ -26,7 +26,7 @@ written against the domain. The dependency graph is a strict DAG:
 domain, markdown, config       no internal dependencies
 update                         no internal dependencies    (GitHub releases, net/http)
 cpu                            no internal dependencies    (Win32 / sysfs, no cgo)
-video                          no internal dependencies    (sandboxed ffmpeg child, os/exec)
+video                          no internal dependencies    (ffmpeg child, os/exec, xgb/x-sys)
 audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
 audio      -> audio/rnnoise                  (+ malgo, go-mp3)
 voice      -> domain                         (+ lksdk, gopus)
@@ -52,12 +52,15 @@ on a dual-chiplet one — is a policy, and it lives in
 `app.resolveCores` beside the setting that names it. The counts reach the settings
 page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 
-`video` crosses the same seam the way `cpu` does: it drives a sandboxed ffmpeg
-child and answers with pixels and PCM at sizes the caller chose, knowing nothing
-of Revolt, Fyne or the mixer. `ui`'s `VideoCard` never imports it — every
-decision a card needs is an `OnVideo*` action — so `app` is the only package
-importing both, and `app/video.go` is where a frame pipe meets a widget and the
-sound meets a mixer lane (`Sink.StartVideo`, reserved the way the echo lane is).
+`video` crosses the same seam the way `cpu` does: it drives an ffmpeg child and
+answers with pixels and PCM at sizes the caller chose, knowing nothing of
+Revolt, Fyne or the mixer. It also points that child the other way — the screen
+into VP8 — and lists what this machine can capture, which reaches the picker as
+`ui.ShareSource` the way a device list reaches the settings page.
+`ui`'s `VideoCard` never imports it — every decision a card needs is an
+`OnVideo*` action — so `app` is the only package importing both, and
+`app/video.go` is where a frame pipe meets a widget and the sound meets a mixer
+lane (`Sink.StartVideo`, reserved the way the echo lane is).
 
 `voice` declares `PCMSource` / `PCMSink` **structurally** and never imports
 `audio`, so `app` is the only package importing both and therefore the only place
@@ -233,7 +236,7 @@ internal/
                          security.go, settings.go, serversettings.go, updates.go
   ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
-                         gifs.go, video.go, embed.go, invite.go, search.go,
+                         gifs.go, video.go, screenshare.go, embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, group.go, panels.go, notice.go,
                          login.go (the card the screens before Ready are drawn on,
@@ -259,13 +262,17 @@ internal/
                          drift against the device), jitter.go (the Jitter interface
                          and the adaptive buffer behind it — what is left of
                          mouth-to-ear latency lives here, which is why it is
-                         replaceable), share.go (the receive half of a screenshare:
+                         replaceable), share.go (both halves of a screenshare:
                          the registry and the nothing-video-until-watched
                          subscription policy, and the watch — RTP reassembled and
-                         remuxed into the byte stream a decoder reads on stdin.
-                         The seam is an io.WriteCloser the app supplies, so voice
+                         remuxed into the byte stream a decoder reads on stdin;
+                         then the send half, an encoder's stdout published as one
+                         SCREEN_SHARE track, paced by the rate asked for rather
+                         than the stream's own timestamps, plus tokenAllowsScreen,
+                         which reads the join JWT's grant. Both seams are plain
+                         io: an io.WriteCloser in, an io.ReadCloser out, so voice
                          never imports video)
-  video/                 the sandboxed ffmpeg driver: video.go (discovery, the
+  video/                 the ffmpeg driver, both directions: video.go (discovery, the
                          magic-byte sniff that forces the demuxer, the probe whose
                          every answer is clamped, the poster), stream.go (the
                          frame and PCM pipes, their exact-byte contract and the
@@ -273,8 +280,13 @@ internal/
                          contract fed a live stream on stdin), sandbox_{linux,windows,darwin,
                          other}.go (bwrap / restricted-token + job / sandbox-exec,
                          each self-tested once and falling back to a plain child
-                         under limits). See docs/video-player.md for the threat
-                         model that shaped all of it
+                         under limits), capture.go + capture_{linux,windows,other}.go
+                         (the other direction: what this machine can share, and the
+                         one child that grabs, scales and encodes it to VP8/IVF.
+                         Contained rather than sandboxed — the strict profile
+                         severs the display capture needs, and the input is this
+                         machine's own screen). See docs/video-player.md for the
+                         threat model that shaped the receiving half
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
                          over each block's whole text
@@ -366,9 +378,11 @@ package's own `CLAUDE.md`; this is the map:
   a tap decodes with, the one-playback rule, the two pumps, and which file the
   OS is handed. See `internal/app/CLAUDE.md` item 45 and
   `docs/video-player.md`.
-- `app/screenshare.go` — watching a screenshare: the one watch, its window,
-  the arrival-paced frame pump, and every teardown. See `internal/app/CLAUDE.md`
-  item 46 and `docs/screenshare-todo.md`.
+- `app/screenshare.go` — both halves of a screenshare. Watching: the one watch,
+  its window, the arrival-paced frame pump. Sending: the picker, the box the
+  encoder is started at — which the instance's publish limits *bound*, being a
+  disconnection rather than a refusal — and every teardown on both sides. See
+  `internal/app/CLAUDE.md` item 46 and `docs/screenshare-todo.md`.
 - `ui/members.go` — the member list end to end, its own subsystem: the flat
   model (`NewMemberModel`), the geometry (`memberOffsets`, `visibleRange`,
   `memberOffsets`, `visibleRange`), the virtualised `MemberList`, the recycled `MemberRow` /
@@ -460,6 +474,14 @@ package's own `CLAUDE.md`; this is the map:
   is deliberately dumb — every decision is an `OnVideo*` action on the
   controller — and playback paints the way `gifanim.go` does: one reusable
   RGBA buffer into one mounted `canvas.Image`.
+- `ui/screenshare.go` — the card that starts a share: the source list under its
+  two headings, and quality and frame rate as runs of the search page's own
+  chip with a radio's rule laid over them (one of a set, which the tap enforces
+  rather than the chip). It decides nothing about capture — a source is a
+  `ShareSource` the controller enumerated, the `ui.AudioDevice` seam again, and
+  the answer is a `ShareChoice` the controller turns into encoder arguments.
+  The *share button* is not here: it is the call island's, beside the
+  microphone and the headphones.
 - `ui/invite.go` — the invite card *and* `inviteCodesIn`, the scan that decides
   a message has one. `NewInviteCardFor` is the same card built from an invite
   already in hand — the join dialog's preview, which draws the banner and no

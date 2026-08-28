@@ -39,6 +39,7 @@ func (a *App) buildUI() fyne.CanvasObject {
 		OnHangUp:  a.leaveCall,
 		OnJoin:    a.joinCallHere,
 		OnChannel: func() { a.OnChannelTapped(a.callChannelID) },
+		OnShare:   a.OnShare,
 		OnState:   a.showCallState,
 	})
 	a.callIslandLayer = ui.NewCallIslandLayer(a.callIsland)

@@ -253,6 +253,15 @@ func (s *Stream) ReadPCM(buf []int16) (int, error) {
 	return samples, err
 }
 
+// Close is Stop as an io.Closer, so a stream can be handed to something that
+// owns a reader — the screenshare publisher's track, which closes its source
+// when the track ends. Killing the child is the right answer to either.
+func (s *Stream) Close() error {
+	s.Stop()
+
+	return nil
+}
+
 // Stop kills the child and waits for it. Idempotent, callable from any
 // goroutine; a reader blocked in Read unblocks with an error as the pipe
 // goes.

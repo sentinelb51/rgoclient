@@ -1243,6 +1243,16 @@ var Sizes = struct {
 	GroupPickerHeight float32
 	GroupPickMarkSize float32
 
+	// The screenshare picker's list: how much of it is on screen before it
+	// scrolls, one row's height, the gap between two, and the glyph leading
+	// one. A row is shorter than a person's — it carries a mark rather than a
+	// face — and the ceiling cuts a row in half on purpose, which is what says
+	// the list goes on.
+	ShareSourceListHeight float32
+	ShareSourceRowHeight  float32
+	ShareSourceGap        float32
+	ShareSourceGlyph      float32
+
 	/* The message islands: pins, mentions and channel search */
 
 	IslandWidth   float32
@@ -1848,8 +1858,12 @@ var Sizes = struct {
 	// carry their own mark down the right-hand edge, where one would land — so the
 	// cut card is the whole of what says the list goes on, and a ceiling that left
 	// the fourth resting flush against the edge would say the opposite.
-	GroupPickerHeight: 302,
-	GroupPickMarkSize: 18,
+	GroupPickerHeight:     302,
+	GroupPickMarkSize:     18,
+	ShareSourceListHeight: 232,
+	ShareSourceRowHeight:  46,
+	ShareSourceGap:        4,
+	ShareSourceGlyph:      16,
 
 	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
 	// narrower and the heading shortens a name to fit a date beside it.

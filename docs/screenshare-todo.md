@@ -1,10 +1,12 @@
 # Screenshare: the work queue
 
-Sending and receiving a screenshare in voice calls. Nothing below is built; this
-file is the design and the order to build it in, grounded in what was verified
-against the pinned dependencies (file:line where it matters). The voice queue
-that used to live at this path is basically done — what it still owed is carried
-at the tail, and `git log docs/voice-chat-todo.md` keeps the full record.
+Sending and receiving a screenshare in voice calls. Both directions are now
+built for X11 and Windows; this file is the design, what each half actually
+does, and what is still owed — grounded in what was verified against the
+pinned dependencies and the backend (file:line where it matters). The voice
+queue that used to live at this path is basically done — what it still owed is
+carried at the tail, and `git log docs/voice-chat-todo.md` keeps the full
+record.
 
 Written to be read cold. Companion to `known-gaps.md` and `performance.md`;
 `video-player.md` holds the threat model this reuses.
@@ -64,23 +66,40 @@ module's.
   WASAPI loopback, so sharing system audio on Windows needs no virtual device
   and no new dependency: it is a capture device the existing publisher path can
   read.
-- **Not verified: whether Stoat's token grants video publish.** The first task
-  of any of this: `client.JoinCall`'s token is a JWT — decode the payload and
-  read the `video` grant (`canPublish`, `canPublishSources`). An absent or
-  empty `canPublishSources` allows every source; one that lists sources without
-  `SCREEN_SHARE` means the server rejects the AddTrack and the send half is
-  blocked on the backend, not on this client. Ground against
-  https://github.com/stoatchat/stoatchat if the answer is surprising.
+- **Stoat's token does grant video publish** — verified against the backend
+  and against the live instance. `voice_client.rs:87` sets
+  `can_publish_sources` from `get_allowed_sources`, which lists `camera`,
+  `screen_share` and `screen_share_audio` when the channel grants
+  `ChannelPermission::Video` and the tier has `video = true`
+  (`core/database/src/voice/mod.rs:161-170`). `tokenAllowsScreen` reads it
+  back: an absent or empty list allows every source, `canPublish: false`
+  forbids all of them.
+- **The instance publishes what it will enforce**, at `GET /` under
+  `features.limits` — `video`, `video_resolution` (a *pair whose product* is
+  the area cap, not a box), `video_aspect_ratio`, and `global.new_user_hours`
+  choosing the tier. Live at stoat.chat today: new_user `[1080, 720]`,
+  default `[1280, 720]`, both `[0.3, 2.5]`, both `video = true`. revoltgo's
+  `InstanceConfig` **drops the whole limits block**, so it is asked by hand.
+- **Over the limit is a disconnection, not a refusal**
+  (`daemons/voice-ingress/src/api.rs:296-320`): the ingress calls
+  `remove_user` and deletes the voice state. This is why the sender fits its
+  own box rather than letting the server say no.
 
-## Phase 0 — built, but for the grant check
+## Phase 0 — built
 
 - **Unsubscribe video publications** — built. `registerPublication` in
   `voice/share.go` switches every video and share-audio publication off as it
   appears, and `sweepPublications` at the join covers what was already in the
   room, so a share costs nothing until watched. `WatchShare` is what turns
   exactly one back on.
-- **The JWT grant check**, live against stoat.chat, is still owed — it gates
-  "Sending", not the receive half.
+- **The JWT grant check** — built (`tokenAllowsScreen`), and the answer is
+  yes: `voice_client.rs:87` mints `canPublishSources` from
+  `get_allowed_sources`, which appends `camera`, `screen_share` and
+  `screen_share_audio` whenever the channel grants `ChannelPermission::Video`
+  and the account's tier has `video = true`
+  (`core/database/src/voice/mod.rs:167`). Both stoat.chat tiers have it on.
+  The token is read rather than verified — it is what greys the button, and
+  the server is still the one enforcing.
 
 ## Receiving — built
 
@@ -126,97 +145,88 @@ designed; what stands, and what is still open on this side:
   pion's receive buffer and drops until the next PLI — self-limiting, not yet
   measured on a weak machine.
 
-## Sending
+## Sending — built (monitors and windows, X11 + Windows)
 
-**Path:** picker → one ffmpeg child (grab → scale/fps → encode → mux) → stdout
-→ `NewLocalReaderTrack` → `PublishTrack(Source: SCREEN_SHARE)`.
+`ui.ShareDialog` → `app/screenshare.go` → `video.CaptureShare` →
+`Call.StartShare` → `PublishTrack(Source: SCREEN_SHARE)`. The path as designed;
+what stands, and what the build turned up:
 
-A share starts mid-call, so it is an ordinary renegotiation — one offer/answer
-at share start, nothing touching the join fast path. Stop is symmetric: the
-child exits (or the window it captured closed, which *is* the child exiting),
-the reader track EOFs, unpublish, event. `leaveCall` tears the child down with
-the rest; starting a new share stops the old one first — the one-playback rule
-again.
-
-- **Codec: VP8 in IVF by default.** Universal in WebRTC, and IVF's own
-  timestamps mean the track is paced by the encoder's real output, not by a
-  declared constant. H.264 (`-c:v libx264 -tune zerolatency -preset ultrafast`,
-  Annex-B, plus `ReaderTrackWithFrameDuration`) where a hardware encoder is
-  discovered — probe `ffmpeg -encoders` once beside `Discover` and prefer
-  nvenc/qsv/amf/videotoolbox, which is most of what Discord's "go live" spends
-  a GPU on. VP8 flags: `-deadline realtime -cpu-used 8` (up to 16 trades
-  quality for CPU), `-b:v` + `-maxrate` + `-bufsize` for a bounded stream.
-- **Keyframes are a fixed GOP** (`-g 2*fps`): a CLI encoder cannot answer a
-  viewer's PLI, so a late joiner waits up to the GOP for a picture. Two seconds
-  is the Discord-ish trade: ~0.5 % bitrate overhead against a two-second worst
-  join. This is the one real compromise of the subprocess encoder, and the
-  honest alternative (an in-process encoder answering PLI) is a cgo encoder
-  dependency — not worth it until someone measures the wait mattering.
-- **Capture, per OS** (the genuinely platform half):
-  - *Windows*: `gdigrab` first — `-i desktop` with `-offset_x/y -video_size`
-    for one monitor, `-i title=…` for a window; CPU BitBlt, works everywhere.
-    `ddagrab` (Desktop Duplication) is the upgrade: GPU frames, pairs
-    zero-copy with `h264_nvenc`, monitors only — take it when hw encode is
-    also present, else the hwdownload erases the win.
-  - *X11*: `x11grab`, `-window_id` for a window, `-video_size`+`grab_x/y` for
-    a monitor (geometry from the toolkit's own screen info). Occluded windows
-    capture whatever X has for the drawable — without a compositing WM that is
-    garbage over the covered region; every X11 capturer shares this and it is
-    a note in the picker, not a bug to fix.
-  - *macOS*: `avfoundation` (`-i "N:"`) captures whole screens and triggers
-    the OS Screen Recording consent prompt; window capture is ScreenCaptureKit
-    (native, later). Screens only at first.
-  - *Wayland*: no grabber in stock ffmpeg; the portal
-    (`org.freedesktop.portal.ScreenCast` → a PipeWire node) is the only
-    citizen's path and means consuming PipeWire ourselves. **A known gap at
-    first**, stated in the picker; X11 and XWayland windows still work via
-    x11grab.
-- **Window enumeration is native, not ffmpeg's** (ffmpeg lists nothing):
-  Windows `EnumWindows`/`EnumDisplayMonitors` through `x/sys` — no cgo, the
-  `cpu` package's precedent, skipping cloaked/toolwindow handles; X11 the
-  EWMH `_NET_CLIENT_LIST` walk, which wants an X connection — `github.com/jezek/xgb`
-  is pure Go and the cleanest way to one we own (Fyne's is glfw's, not
-  reachable). The list crosses to the picker as data (`ui.ShareSource{ID,
-  Kind, Title}`), the `ui.AudioDevice` seam again.
-- **Audio share**: a second capture through the *existing* chain-free publisher
-  path (no RNNoise, no gate — it is not a microphone), encoded by the same
-  Opus code, published as `SCREEN_SHARE_AUDIO`. Windows: malgo `Loopback` on
-  the playback device. Linux: the PulseAudio monitor source (`….monitor`
-  appears in ordinary capture enumeration). macOS: no OS loopback exists —
-  the same gap Discord has there; the toggle greys out.
-- **Self-preview costs no new machinery**: tee the encoder's stdout — one copy
-  to the LiveKit track, one to the *receive* pipeline's own sandboxed decoder.
-  The preview is then exactly what viewers see (artifacts included, which is a
-  feature), and nothing platform-specific is added. Windows note: a second
-  child pipe via `ExtraFiles` does not exist there, which the tee sidesteps —
-  it is all in-process `io` plumbing.
-- **Sandboxing the send child: containment, not isolation.** The strict
-  profile forbids exactly what capture is (`--unshare-all` severs the X11
-  abstract socket, macOS's `(deny network*)` and the Windows low-IL token are
-  each a plausible capture breaker), and the input is this machine's own
-  screen — nobody else's bytes reach the child, so the player's threat model
-  simply does not apply. What it keeps is the resource half of `harden()`:
-  niced, memory-capped, CPU-capped, kill-on-parent (job object / prlimit /
-  setpriority). On Linux a *middle* profile is worth one self-test: bwrap
-  keeping the network namespace and binding `/tmp/.X11-unix` and the cookie,
-  everything else the full profile — grab one frame under it at `Discover`
-  time, fall back to the plain hardened child the way every sandbox here
-  already falls back.
-- **Costs**: gdigrab/x11grab 1080p30 is a copy per frame — a few percent of a
-  core; libx264 ultrafast 1080p30 is roughly a core, libvpx realtime somewhat
-  more; hw encode is why the probe prefers it. **Measure here before picking
-  defaults.** One interplay worth a line: `cpu.Pin`'s affinity is inherited by
-  children, so the encoder competes inside the pinned set — an encoder child on
-  the efficiency cores is the default's actual meaning, and possibly the right
-  one; just know it when a share stutters on a pinned laptop.
+- **The button is the call island's**, beside the microphone and the
+  headphones: live in `VoiceShareLive` while this machine is sharing, offered
+  in the card's own text colour otherwise, and greyed where the join token
+  does not grant it (`Call.CanShare`). A tap stops a running share and opens
+  the picker otherwise.
+- **The picker** is the modal layer's own card: the sources under two
+  headings, then quality (Source / 1080p / 720p / 480p, the *short* edge and a
+  ceiling — nothing is upscaled) and frame rate (5 / 15 / 30 / 60) as chip
+  runs. Answers are remembered in `config.State`, which is where the client
+  keeps what it was told rather than what was chosen.
+- **Enumeration is native**, ffmpeg listing nothing. X11 is `jezek/xgb` — a
+  pure-Go connection of our own, the toolkit's belonging to glfw — with RandR
+  for the monitors and the EWMH `_NET_CLIENT_LIST` for the windows; Windows is
+  `EnumDisplayMonitors` / `EnumWindows` through `x/sys`, the `cpu` package's
+  precedent, skipping cloaked, minimised, tool-window and untitled handles.
+  The callbacks are built **once** at package level: `syscall.NewCallback`
+  slots are never freed and the process's allowance is small.
+- **One child does everything**: grab → `fps` → scale+pad → libvpx realtime →
+  IVF on stdout, which is exactly what `NewLocalReaderTrack` eats. The pad
+  half of the filter keeps the declared size true through a window resized
+  mid-share.
+- **The child is contained, not sandboxed.** The strict profile forbids what
+  capture *is* — bwrap's `--unshare-all` severs the X11 socket, the Windows
+  low-integrity token cannot BitBlt another program's window — and the input
+  is this machine's own screen, so the player's threat model does not apply.
+  What is kept is the resource half: priority, memory cap, no core files,
+  kill-on-parent. **No CPU-seconds cap**, unlike a decode: an encoder honestly
+  spends an hour of CPU on an afternoon of sharing, which is what `RLIMIT_CPU`
+  would kill mid-call.
+- **The publish limits are a disconnection, not a refusal.** `voice-ingress`
+  measures the *declared* width×height on `track_published` and, over the
+  tier's area or outside its aspect band, calls `remove_user` and drops the
+  voice state (`daemons/voice-ingress/src/api.rs:296-320`). So the box is
+  fitted here first: `Client.VideoLimits` fetches the tiers by hand — revoltgo
+  parses `features` but drops `features.limits` — and `fitShareBox` applies
+  them. **The order is load-bearing and is not the obvious one**: area, then
+  even, then aspect. Both of the first two truncate, and truncating the two
+  edges independently *moves the ratio* — an ultrawide fitted exactly to 2.5
+  comes out of the area scale at 2.502 and is refused. Aspect goes last and
+  only ever shrinks, so the area already fitted still holds, and it aims a
+  percent inside the band: the ingress compares in `f32` where this computes
+  in `float64`. Before the fetch lands, the *new-user* tier's numbers are
+  assumed — guessing low is the point, the cost of guessing high being
+  somebody's call.
+- **The track is paced by the rate that was asked for**, not by the stream's
+  own timestamps, and this is the one thing the design had wrong.
+  `ReaderSampleProvider` derives a sample's duration from the IVF timebase and
+  the timestamp delta — and ffmpeg does not write those two in agreement for
+  every grabber. Verified: `testsrc` gives timebase 1/30 stepping by 1, while
+  **x11grab gives timebase 1/15 stepping by 15**, which is a second per frame
+  through lksdk's arithmetic and publishes the share at a fifteenth of its
+  speed. `ReaderTrackWithFrameDuration` overrides it, which is honest because
+  the child's own `fps` filter is what holds the rate constant.
+- Every stop path meets in `stopSharing` / `onShareStopped`: the button, the
+  encoder dying (the captured window closed — `OnWriteComplete` → unpublish →
+  `ShareStopped`), `dropCall`, and logging out.
+- Still open on send: **share audio** (a second Opus track from a WASAPI
+  loopback or a Pulse monitor), **the bitrate override** (auto is 0.1 bit per
+  pixel per frame and there is no row to change it), **hardware encoders**
+  (probe `ffmpeg -encoders`, prefer nvenc/qsv/amf), **self-preview** (tee the
+  encoder's stdout into the receive path's own decoder), **ddagrab** on
+  Windows, **macOS** (avfoundation screens plus the consent prompt), and
+  **Wayland**, which has no grabber in stock ffmpeg — the portal is its own
+  project, so a machine with no X says so in the picker and offers nothing.
 
 ## Options (the Discord-parity surface)
 
 All read at share start and applied by **restarting the child** — a share
 restart costs one GOP, which is what makes every option cheap to honour
-mid-share. Stored under a new `config.Screenshare` section; the per-share picker
-seeds from it and writes nothing back (the picker is a choice, the settings are
-the default).
+mid-share. What the picker was last answered with is remembered in
+`config.State` (not a settings section: no row writes to it, and it is what the
+client was told rather than what was chosen), so the same monitor at the same
+rate is one press next time.
+
+Source, resolution and framerate are built; the rest of the table is still the
+plan.
 
 | Option | Values | Where it lands |
 | --- | --- | --- |
@@ -238,13 +248,13 @@ which is the decoder's W×H and free to differ from the sender's.
 1. ~~`video.LiveFrames`~~ **done** — validated offline against a recorded IVF
    (count the bytes, check the letterbox corner).
 2. ~~Receive~~ **done** — see "Receiving" above for what stayed open.
-3. **Send, monitors, X11 + Windows**: capture+encode child, IVF, publish,
-   every stop path.
-4. **Options**: window sources + enumeration, fps/resolution/bitrate, audio
-   share (WASAPI loopback, pulse monitor) — and the receive-side watch
-   resolution beside them.
-5. **Polish**: self-preview tee, hw-encoder probe, macOS screens, the Wayland
-   portal investigation.
+3. ~~Send, monitors, X11 + Windows~~ **done** — and windows with them, the
+   enumeration being the same walk. See "Sending" above.
+4. **Options still owed**: the bitrate override, audio share (WASAPI
+   loopback, pulse monitor) — and the receive-side watch resolution beside
+   them.
+5. **Polish**: self-preview tee, hw-encoder probe, ddagrab, macOS screens, the
+   Wayland portal investigation.
 
 ## Carried from the voice queue
 

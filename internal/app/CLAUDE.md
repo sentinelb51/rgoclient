@@ -1932,7 +1932,9 @@ DAG and conventions.
     path, that gate being for destinations somebody else chose. A file
     nothing recognises is refused with the reason, not handed to a shell that
     would believe its name.
-46. **Watching a screenshare.** `screenshare.go` is the receive half of
+46. **A screenshare, both halves.** `screenshare.go` is both, and the sending
+    one is item 47.
+    Watching is the receive half of
     `docs/screenshare-todo.md`, the video player's seam pointed at a live
     stream: `voice` owns the track (the registry, the nothing-video-until-
     watched subscription policy and the depacketise/remux — `voice/share.go`),
@@ -1957,3 +1959,50 @@ DAG and conventions.
     under `voice.ShareLane(userID)`; its dial is "Screenshare volume" on the
     participant menu, offered while the store says they are sharing, written
     to the sink and to `config.SetUserGain` under the lane's own key.
+
+47. **Sending a screenshare.** The other half of `screenshare.go`, and shorter
+    than the watch for one reason: **nothing here reads the stream**. The
+    capture child's stdout *is* the published track's source
+    (`Call.StartShare` takes an `io.ReadCloser`), so lksdk drains the pipe on
+    its own goroutine and there is no pump, no scratch buffer and no UI hop
+    per frame.
+    The way in is the **call island's** share button (`SetSharing`), which is
+    live while this machine is sharing, offered otherwise, and greyed where
+    `Call.CanShare` says the join token does not grant it — Revolt's `Video`
+    permission, read back off the JWT (`voice.tokenAllowsScreen`) rather than
+    guessed at from the channel, and never *trusted*: it greys a button, and
+    the server still enforces.
+    `OnShare` stops a running share and otherwise opens the picker.
+    Enumeration talks to the display server — a round trip per window on X11 —
+    so it is a worker, and `ui.NewShareDialog` is raised with the answer,
+    seeded from `config.State` (what the picker was last told, which is not a
+    setting: no row writes to it). `beginShare` is the **installCall
+    arrangement** again: the encoder's first frame and the publish
+    renegotiation both block, so both are off-thread with one hop to install,
+    and a share that landed into a call the reader has since left is killed
+    rather than left publishing.
+    **The publish limits are the whole reason the box is computed here.**
+    `voice-ingress` measures the *declared* width×height on `track_published`
+    and, over the tier's area or outside its aspect band, **removes the
+    publisher from the voice channel** — it does not refuse the track. So
+    `Client.VideoLimits` fetches the tiers once per session (revoltgo parses
+    `features` and drops `features.limits`, so it is a hand-sent `GET /`) and
+    `fitShareBox` applies them **in an order that is not the obvious one**:
+    area, then even, then aspect. Both of the first two truncate, and
+    truncating the two edges independently *moves the ratio* — an ultrawide
+    fitted exactly to 2.5 comes out of the area scale at 2.502 and is refused
+    — so aspect goes last, only ever shrinks (a smaller box is never a larger
+    area), and aims a percent inside the band, the ingress comparing in `f32`
+    where this computes in `float64`. With nothing fetched yet the *new-user*
+    tier's numbers are assumed: guessing low costs a few pixels, guessing high
+    costs somebody their call.
+    **The track is paced by the rate that was asked for**, not by the stream:
+    `ReaderSampleProvider` derives a duration from the IVF timebase and the
+    timestamp delta, and ffmpeg does not write those in agreement for every
+    grabber — x11grab declares 1/fps and steps the timestamps *by* fps, which
+    is a second per frame and publishes at a fifteenth speed.
+    `ReaderTrackWithFrameDuration` overrides it, which is honest because the
+    child's own `fps` filter holds the rate constant.
+    Every stop meets in `stopSharing` (the button, `dropCall`, logging out) or
+    `onShareStopped` (`voice.ShareStopped` — the encoder died, the captured
+    window closed), and both are idempotent through `sendingShare.halt`.

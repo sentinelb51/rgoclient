@@ -127,7 +127,7 @@ func (a *App) OnVideoMounted(file *domain.File, card *ui.VideoCard) {
 	if info, ok := a.videoInfo[id]; ok {
 		card.SetInfo(info.Width, info.Height, info.Duration)
 	}
-	if a.videoFailed[id] {
+	if _, failed := a.videoFailed[id]; failed {
 		card.SetStatus("Not playable")
 		return
 	}
@@ -149,7 +149,7 @@ func (a *App) OnVideoMounted(file *domain.File, card *ui.VideoCard) {
 			}
 			if err != nil {
 				if permanentVideoError(err) {
-					a.videoFailed[id] = true
+					a.videoFailed[id] = err.Error()
 					card.SetStatus("Not playable")
 				}
 				return
@@ -191,8 +191,8 @@ func (a *App) OnVideoTapped(file *domain.File, card *ui.VideoCard) {
 				"\"Open in your player\" still works once one is installed for it to open with.")
 		return
 	}
-	if a.videoFailed[id] {
-		a.notify(ui.ToneWarning, "This file is not a video this client can play.")
+	if reason, failed := a.videoFailed[id]; failed {
+		a.notifyTitled(ui.ToneWarning, "Not playable", "%s", reason)
 		return
 	}
 
@@ -288,7 +288,7 @@ func (a *App) startVideo(id string, file *domain.File, card *ui.VideoCard) {
 	}, func(err error) {
 		card.SetStatus("")
 		if permanentVideoError(err) {
-			a.videoFailed[id] = true
+			a.videoFailed[id] = err.Error()
 		}
 		a.notifyTitled(ui.ToneDanger, "Not played", "%v", err)
 	}, func() {

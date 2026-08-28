@@ -177,8 +177,9 @@ func videoBar(name string, size int, trailing fyne.CanvasObject) fyne.CanvasObje
 /* What the controller pushes in */
 
 // SetInfo records the probed shape: the box takes the real aspect where the
-// server sent no dimensions, and the chip gains the running time. Zero
-// duration is the container not saying, and the chip stays what it was.
+// server sent no dimensions, and the chip gains the running time. A probed
+// duration is always positive — the controller refuses a file declaring none
+// — so the zero guard is only a defence.
 func (w *VideoCard) SetInfo(width, height int, duration time.Duration) {
 	if !w.known && width > 0 && height > 0 {
 		bounds := fyne.NewSize(theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight)

@@ -174,7 +174,7 @@ func (a *App) resetSessionState() {
 	a.videoInfo = make(map[string]video.Info)
 	a.videoAt = make(map[string]time.Duration)
 	a.videoBusy = make(map[string]bool)
-	a.videoFailed = make(map[string]bool)
+	a.videoFailed = make(map[string]string)
 
 	a.resetInvites()
 

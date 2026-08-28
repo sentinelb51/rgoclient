@@ -35,8 +35,8 @@ const (
 	maxPixels    = 32 << 20
 
 	// maxDuration bounds the figure drawn on the card and used to place a
-	// seek. Past it the duration is unknown rather than believed — a negative
-	// or absurd timestamp is the classic crafted-metadata crash.
+	// seek. A claim past it fails the probe with the file — a negative or
+	// absurd timestamp is the classic crafted-metadata crash.
 	maxDuration = 24 * time.Hour
 
 	// toolTimeout fells a probe or poster child that hangs on its input. A
@@ -146,7 +146,8 @@ func sniffHead(head []byte) (format, ext string, ok bool) {
 
 // Info is what one probe answers, already clamped: dimensions are display
 // dimensions (rotation applied, sample aspect folded in) and safe to size a
-// buffer by; a Duration of zero is the container not saying.
+// buffer by, and Duration is always positive — a file declaring none fails
+// the probe.
 type Info struct {
 	Width, Height int
 	Duration      time.Duration
@@ -238,13 +239,19 @@ func (r *probeReport) validate() (Info, error) {
 		return Info{}, errors.New("video: no video stream")
 	}
 
-	if seconds, err := strconv.ParseFloat(r.Format.Duration, 64); err == nil {
-		if !math.IsNaN(seconds) && !math.IsInf(seconds, 0) && seconds > 0 {
-			if d := time.Duration(seconds * float64(time.Second)); d <= maxDuration {
-				info.Duration = d
-			}
-		}
+	// A file with no declared, finite, positive length is refused whole rather
+	// than played "unknown": the scrub would have no scale to place a seek on,
+	// and an unbounded or absurd length is the crafted-metadata class the rest
+	// of this function refuses.
+	seconds, err := strconv.ParseFloat(r.Format.Duration, 64)
+	if err != nil || math.IsNaN(seconds) || math.IsInf(seconds, 0) || seconds <= 0 {
+		return Info{}, errors.New("video: the file declares no length")
 	}
+	duration := time.Duration(seconds * float64(time.Second))
+	if duration <= 0 || duration > maxDuration {
+		return Info{}, fmt.Errorf("video: refusing a claimed length of %v", duration)
+	}
+	info.Duration = duration
 
 	return info, nil
 }

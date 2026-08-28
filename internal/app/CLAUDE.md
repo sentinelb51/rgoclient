@@ -1887,9 +1887,11 @@ DAG and conventions.
     through `internal/video`'s sandboxed children. The probe's answer is
     memoised in `a.videoInfo` and the poster as an ordinary image-cache entry
     (`id+"-poster"`), so a remount costs two lookups. A file that will never
-    probe is memoised too (`a.videoFailed`, via `permanentVideoError`) — the
-    driver's own refusals stay true on retry where a lost connection does not
-    — and its card says "Not playable" instead of retrying per scroll.
+    play is memoised too (`a.videoFailed`, via `permanentVideoError`, holding
+    the refusal's reason — a file declaring no length is one of them, the
+    probe refusing it) — the driver's own refusals stay true on retry where a
+    lost connection does not — so its card says "Not playable" instead of
+    retrying per scroll, and a tap answers with the reason.
     **A tap toggles, and one video plays at a time.** `OnVideoTapped` on the
     playing card is `pauseVideo`; on anything else it is `startVideo`, which
     stops what was playing first. Pause **is** a stop that remembers: the

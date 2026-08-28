@@ -46,11 +46,12 @@ The layers, and what each one refuses:
   disclosure class, and the sniffed extension is the only name the file is
   ever stored or opened under.
 - **Validation of everything a child reports** (`video.Probe`). Dimensions are
-  bounded (32 Mpx, the image cache's own ceiling), durations are finite,
-  positive and capped, aspect ratios and rotations clamped — the 2021-era
-  Discord crashers were clients doing arithmetic on exactly these fields as
-  sent. ffprobe's output is size-capped; stderr is size-capped; a probe or
-  poster child lives `toolTimeout` and is killed.
+  bounded (32 Mpx, the image cache's own ceiling); a duration must be
+  declared, finite, positive and under a cap or the file is refused whole — a
+  playhead with no scale is unseekable, and the 2021-era Discord crashers
+  were clients doing arithmetic on exactly these fields as sent. Aspect
+  ratios and rotations are clamped; ffprobe's output is size-capped; stderr
+  is size-capped; a probe or poster child lives `toolTimeout` and is killed.
 - **A byte contract nothing in the file can move.** Frames cross the pipe as
   exactly width×height×4 bytes at the rate this side asked for
   (`scale=W:H` forces both dimensions), so a wrong probe costs a stretched

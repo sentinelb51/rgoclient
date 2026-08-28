@@ -81,7 +81,7 @@ type App struct {
 	videoInfo   map[string]video.Info    // probed shape by cache id
 	videoAt     map[string]time.Duration // where a play would resume, by cache id
 	videoBusy   map[string]bool          // a mount's poster job in flight, by cache id
-	videoFailed map[string]bool          // files that will never probe, by cache id
+	videoFailed map[string]string        // files that will never play, by cache id, holding the refusal's reason
 
 	/* Alerts, see alerts.go */
 
@@ -557,7 +557,7 @@ func New(fyneApp fyne.App, info Info) *App {
 		videoInfo:           make(map[string]video.Info),
 		videoAt:             make(map[string]time.Duration),
 		videoBusy:           make(map[string]bool),
-		videoFailed:         make(map[string]bool),
+		videoFailed:         make(map[string]string),
 	}
 	a.videoTools, a.videoInline = video.Discover()
 

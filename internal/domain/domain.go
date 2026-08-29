@@ -406,6 +406,15 @@ type Embed struct {
 
 	Image *File
 	Color color.Color // the accent stripe; nil for the default
+
+	// Video is the playable media an unfurl named: the whole embed for a bare
+	// video link, or the MP4 a page like gifbox serves in a GIF's place. Always
+	// Foreign — it lives wherever the unfurl found it.
+	Video *File
+
+	// GIF marks a video the provider calls a GIF: silent, looped, and drawn
+	// with a GIF's manners rather than a film's.
+	GIF bool
 }
 
 /* GIFs */
@@ -642,6 +651,29 @@ type VoiceParticipant struct {
 type CallCredentials struct {
 	URL   string
 	Token string
+}
+
+// VideoLimits is what the instance enforces about a published video track, a
+// screenshare included. The backend checks the *declared* dimensions on
+// publish: an area past MaxArea, or a width/height ratio outside
+// [AspectMin, AspectMax], disconnects the publisher from the voice channel
+// entirely — so a sender fits under these before publishing, never after.
+// Zero values are limits the instance does not enforce.
+type VideoLimits struct {
+	Enabled   bool
+	MaxArea   int
+	AspectMin float64
+	AspectMax float64
+}
+
+// VideoLimitTiers is both advertised tiers and the boundary between them: an
+// account younger than NewUserHours lives under NewUser, everybody else under
+// Default. Which applies is the caller's to decide, the age being readable
+// off the account's own ULID.
+type VideoLimitTiers struct {
+	NewUserHours int
+	NewUser      VideoLimits
+	Default      VideoLimits
 }
 
 /* Servers */

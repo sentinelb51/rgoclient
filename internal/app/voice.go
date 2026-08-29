@@ -226,6 +226,12 @@ func (a *App) dropCall() {
 	a.callJoining = false
 	a.disarmPushToTalk()
 
+	// Both halves of a screenshare were the call's: the window must not
+	// outlive the media session feeding it, and the capture child must not
+	// outlive the track it was feeding.
+	a.closeShare()
+	a.stopSharing()
+
 	if a.call != nil {
 		a.call.Close() // there is no leave route: leaving *is* disconnecting
 		a.call = nil
@@ -337,6 +343,10 @@ func (a *App) onCallEvent(call *voice.Call, event voice.Event) {
 			a.onSpeakingChanged(voice.SpeakingChanged{UserID: e.UserID})
 			a.onMuteChanged(voice.MuteChanged{UserID: e.UserID})
 		}
+	case voice.ShareEnded:
+		a.onShareEnded(e)
+	case voice.ShareStopped:
+		a.onShareStopped()
 	case voice.ConnectionChanged:
 		a.onCallConnection(e)
 	case voice.CallEnded:
@@ -581,6 +591,11 @@ func (a *App) syncCallIsland() {
 		a.callIsland.SetCall(a.voiceWhere(a.callChannelID))
 		a.callIsland.SetMuted(a.muted)
 		a.callIsland.SetDeafened(a.deafened)
+
+		// Sharing is offered only where the call's own token grants it, which
+		// is Revolt's Video permission read back off the JWT rather than
+		// guessed at from the channel.
+		a.callIsland.SetSharing(a.sending != nil, a.call != nil && a.call.CanShare())
 
 		// The bar is otherwise whatever the last ConnectionChanged painted it, which
 		// for a call that has not landed yet is nothing at all.
@@ -922,6 +937,12 @@ func (a *App) voiceParticipantMenu(anchor fyne.CanvasObject, channelID,
 	// item here is already refused for the same person by memberVoiceItems.
 	if userID != a.store.SelfID() {
 		items = append(items, a.userVolumeItem(anchor, channelID, userID))
+
+		// The stream's sound is its own lane and its own dial, offered only
+		// while there is a stream to be loud.
+		if a.voiceParticipantOf(channelID, userID).Screensharing {
+			items = append(items, a.shareVolumeItem(anchor, channelID, userID))
+		}
 	}
 
 	channel, ok := a.store.Channel(channelID)
@@ -991,6 +1012,45 @@ func (a *App) showUserVolume(anchor fyne.CanvasObject, channelID, userID string)
 	a.showPopover(card, anchor)
 }
 
+// shareVolumeItem is how loud somebody's stream is heard, beside their voice's
+// own dial: the two are separate lanes on purpose, a friend worth hearing
+// being able to share a game worth turning down.
+func (a *App) shareVolumeItem(anchor fyne.CanvasObject, channelID, userID string) *fyne.MenuItem {
+	return fyne.NewMenuItemWithIcon("Screenshare volume", fynetheme.VolumeUpIcon(),
+		func() { a.showShareVolume(anchor, channelID, userID) })
+}
+
+// showShareVolume is showUserVolume pointed at the share's lane: same range,
+// same card — marked with the screenshare glyph where the voice's wears the
+// headphones — written down the same twice, the sink for this run and config
+// for the next. The lane's key is the voice package's to mint, being the key
+// its decode goroutine writes under.
+func (a *App) showShareVolume(anchor fyne.CanvasObject, channelID, userID string) {
+	lane := voice.ShareLane(userID)
+	current := audio.DecibelsFromGain(a.sounds.Sink().Gain(lane), config.VoiceGainOffDB)
+
+	unity := 0.0
+
+	card := ui.NewSliderCard(ui.SliderCard{
+		Title:   a.voiceParticipantOf(channelID, userID).Name,
+		Icon:    assets.ScreenshareIcon,
+		Low:     config.VoiceGainOffDB,
+		High:    config.VoiceGainMaxDB,
+		Step:    1,
+		Value:   float64(current),
+		Pivot:   &unity,
+		Reading: func(db float64) string { return callVolumeLabel(int(math.Round(db))) },
+		OnChanged: func(db float64) {
+			level := int(math.Round(db))
+
+			a.sounds.Sink().SetGain(lane, float64(audio.GainFromDB(level, config.VoiceGainOffDB)))
+			config.SetUserGain(lane, level)
+		},
+	})
+
+	a.showPopover(card, anchor)
+}
+
 // callVolumeLabel names one level. The bottom of the range is silence rather than
 // a quantity, and unity is what everybody is at until somebody moves them, so
 // neither reads as a decibel figure.
@@ -1026,6 +1086,30 @@ func (a *App) loadVoiceNodes() {
 			return
 		}
 		a.voiceNodes = toVoiceNodes(nodes)
+	}, false)
+}
+
+// loadVideoLimits records what the instance enforces about a published video
+// track, so a share is fitted under it before publishing rather than being
+// disconnected for declaring a size the ingress refuses. Asked once per
+// session beside the node warm-up — it is instance configuration and cannot
+// change under a running client. Call off the UI thread.
+func (a *App) loadVideoLimits() {
+	epoch := a.epoch
+
+	limits, err := a.client.VideoLimits()
+	if err != nil {
+		// Not worth reporting: with no answer the share is fitted under
+		// nothing here and the server has the last word either way.
+		log.Printf("instance video limits: %v", err)
+		return
+	}
+
+	a.doOnUI(func() {
+		if a.stale(epoch) {
+			return
+		}
+		a.videoLimits = limits
 	}, false)
 }
 

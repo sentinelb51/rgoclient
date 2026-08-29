@@ -79,48 +79,55 @@ var Colors = struct {
 	/* Elements */
 
 	AttachmentHoverBorder color.Color
-	AvatarPlaceholder     color.Color
-	UnreadIndicator       color.Color
-	MentionIndicator      color.Color
-	MentionBadgeBg        color.Color
-	MentionBadgeText      color.Color
-	HashtagIcon           color.Color
-	CategoryText          color.Color
-	CategoryIndicator     color.Color
-	TextPrimary           color.Color
-	TimestampText         color.Color
-	DaySeparatorText      color.Color
-	DaySeparatorLine      color.Color
-	SystemMessageText     color.Color
-	SystemMessageIcon     color.Color
-	SystemMessageJoin     color.Color
-	SystemMessageLeave    color.Color
-	SystemMessageDanger   color.Color
-	SystemMessageChange   color.Color
-	SystemMessageCall     color.Color
-	SwiftActionIcon       color.Color
-	SwiftActionConfirm    color.Color
-	SwiftActionCaution    color.Color
-	SwiftActionDanger     color.Color
-	ReplyLine             color.Color
-	ReplyMentionActive    color.Color
-	ReplyStaleBg          color.Color
-	ReplyStaleText        color.Color
-	MentionText           color.Color
-	MentionHandleText     color.Color
-	LinkText              color.Color
-	LinkTextHover         color.Color
-	SlowmodeText          color.Color
-	DockBadgeBg           color.Color
-	SlowmodeWaiting       color.Color
-	TypingText            color.Color
-	TypingMark            color.Color
-	JumpBarBg             color.Color
-	JumpBarHoverBg        color.Color
-	JumpBarAction         color.Color
-	MessageStatusMark     color.Color
-	ChannelTopicText      color.Color
-	ErrorText             color.Color
+
+	// VideoScrim is the wash a video card's chrome sits on — the play badge,
+	// the duration chip, the scrub track — over whatever frame is behind it.
+	// Kept darker than translucent-safe limits require: its channels stay
+	// under its alpha, the premultiplied trap theme.Fade names.
+	VideoScrim color.Color
+
+	AvatarPlaceholder   color.Color
+	UnreadIndicator     color.Color
+	MentionIndicator    color.Color
+	MentionBadgeBg      color.Color
+	MentionBadgeText    color.Color
+	HashtagIcon         color.Color
+	CategoryText        color.Color
+	CategoryIndicator   color.Color
+	TextPrimary         color.Color
+	TimestampText       color.Color
+	DaySeparatorText    color.Color
+	DaySeparatorLine    color.Color
+	SystemMessageText   color.Color
+	SystemMessageIcon   color.Color
+	SystemMessageJoin   color.Color
+	SystemMessageLeave  color.Color
+	SystemMessageDanger color.Color
+	SystemMessageChange color.Color
+	SystemMessageCall   color.Color
+	SwiftActionIcon     color.Color
+	SwiftActionConfirm  color.Color
+	SwiftActionCaution  color.Color
+	SwiftActionDanger   color.Color
+	ReplyLine           color.Color
+	ReplyMentionActive  color.Color
+	ReplyStaleBg        color.Color
+	ReplyStaleText      color.Color
+	MentionText         color.Color
+	MentionHandleText   color.Color
+	LinkText            color.Color
+	LinkTextHover       color.Color
+	SlowmodeText        color.Color
+	DockBadgeBg         color.Color
+	SlowmodeWaiting     color.Color
+	TypingText          color.Color
+	TypingMark          color.Color
+	JumpBarBg           color.Color
+	JumpBarHoverBg      color.Color
+	JumpBarAction       color.Color
+	MessageStatusMark   color.Color
+	ChannelTopicText    color.Color
+	ErrorText           color.Color
 
 	/* Reactions */
 
@@ -170,6 +177,11 @@ var Colors = struct {
 	// over the row's hover fill as well as over its rest state, so it has to read
 	// against both.
 	VoiceSpeaking color.Color
+
+	// VoiceShareLive is the screenshare mark on a participant's row, in a colour
+	// of its own because it is a target as well as a mark: tapping it opens the
+	// stream. Not the danger red — a stream is live, not destructive.
+	VoiceShareLive color.Color
 
 	// The two colours a mute or a deafen mark is drawn in, which is the whole of
 	// what separates them: the glyph says *what* is held and the colour says who
@@ -436,6 +448,7 @@ var Colors = struct {
 	// than drawing it: a hover border a shade off the outline it replaces would
 	// read as nothing happening at all.
 	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
+	VideoScrim:            color.RGBA{R: 8, G: 9, B: 12, A: 176},      // near-black wash
 	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
 	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
 
@@ -594,6 +607,8 @@ var Colors = struct {
 	// Bright enough to carry against the hover fill, which is the harder of the
 	// two backgrounds it is drawn over.
 	VoiceSpeaking: color.RGBA{R: 61, G: 214, B: 140, A: 255}, // #3DD68C
+
+	VoiceShareLive: color.RGBA{R: 154, G: 106, B: 222, A: 255}, // #9A6ADE, streaming's own hue
 
 	VoiceHoldServer: color.RGBA{R: 217, G: 92, B: 92, A: 255},  // #D95C5C, a moderator's
 	VoiceHoldSelf:   color.RGBA{R: 217, G: 164, B: 65, A: 255}, // #D9A441, their own
@@ -857,6 +872,9 @@ var Sizes = struct {
 	MessageContentPadding         float32
 	MessageImageMaxWidth          float32
 	MessageImageMaxHeight         float32
+	VideoBadgeSize                float32
+	VideoScrubHeight              float32
+	VideoScrubLine                float32
 	MessageVerticalPadding        float32
 	MessageGroupedVerticalPadding float32
 	MessageHorizontalPadding      float32
@@ -1225,6 +1243,16 @@ var Sizes = struct {
 	GroupPickerHeight float32
 	GroupPickMarkSize float32
 
+	// The screenshare picker's list: how much of it is on screen before it
+	// scrolls, one row's height, the gap between two, and the glyph leading
+	// one. A row is shorter than a person's — it carries a mark rather than a
+	// face — and the ceiling cuts a row in half on purpose, which is what says
+	// the list goes on.
+	ShareSourceListHeight float32
+	ShareSourceRowHeight  float32
+	ShareSourceGap        float32
+	ShareSourceGlyph      float32
+
 	/* The message islands: pins, mentions and channel search */
 
 	IslandWidth   float32
@@ -1443,6 +1471,9 @@ var Sizes = struct {
 	MessageContentPadding:         12,
 	MessageImageMaxWidth:          400,
 	MessageImageMaxHeight:         300,
+	VideoBadgeSize:                44,
+	VideoScrubHeight:              14,
+	VideoScrubLine:                4,
 	MessageVerticalPadding:        10,
 	MessageGroupedVerticalPadding: 2,
 	MessageHorizontalPadding:      12,
@@ -1827,8 +1858,12 @@ var Sizes = struct {
 	// carry their own mark down the right-hand edge, where one would land — so the
 	// cut card is the whole of what says the list goes on, and a ceiling that left
 	// the fourth resting flush against the edge would say the opposite.
-	GroupPickerHeight: 302,
-	GroupPickMarkSize: 18,
+	GroupPickerHeight:     302,
+	GroupPickMarkSize:     18,
+	ShareSourceListHeight: 232,
+	ShareSourceRowHeight:  46,
+	ShareSourceGap:        4,
+	ShareSourceGlyph:      16,
 
 	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
 	// narrower and the heading shortens a name to fit a date beside it.

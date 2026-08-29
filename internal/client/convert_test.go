@@ -9,20 +9,17 @@ import (
 	"RGOClient/internal/domain"
 )
 
-// TestToEmbedDropsWhatCannotBeDrawn covers the two embeds that reach the UI as
-// nothing: a bare video, whose dimensions Revolt puts beside the type where
-// revoltgo has no field for them and which nothing here could play anyway, and
-// an unfurl that came back with neither text nor a picture. Both would otherwise
-// draw an empty card under the link that produced them.
+// TestToEmbedDropsWhatCannotBeDrawn covers the embeds that reach the UI as
+// nothing: an unfurl that came back with neither text, a picture nor a video,
+// which would otherwise draw an empty card under the link that produced it.
 func TestToEmbedDropsWhatCannotBeDrawn(t *testing.T) {
 	tests := []struct {
 		name  string
 		embed *revoltgo.MessageEmbed
 	}{
 		{"nil", nil},
-		{"video", &revoltgo.MessageEmbed{Type: "Video", URL: "https://example.test/clip.mp4"}},
 		{"nothing unfurled", &revoltgo.MessageEmbed{Type: "Website", SiteName: "example.test"}},
-		{"non-image media", &revoltgo.MessageEmbed{
+		{"non-media attachment", &revoltgo.MessageEmbed{
 			Type:  "Text",
 			Media: &revoltgo.File{ID: "aFile", Filename: "notes.pdf"},
 		}},
@@ -32,6 +29,45 @@ func TestToEmbedDropsWhatCannotBeDrawn(t *testing.T) {
 		if got := toEmbed(tt.embed); got != nil {
 			t.Errorf("%s: got %+v, want nil", tt.name, got)
 		}
+	}
+}
+
+// TestToEmbedVideo covers the two shapes a playable embed arrives in: a bare
+// video, which is its URL and nothing else (the dimensions sit beside the type
+// where revoltgo has no field for them, so the player's probe answers), and a
+// GIF provider's unfurl, whose video rides beside the poster and the mark that
+// gives it a GIF's manners.
+func TestToEmbedVideo(t *testing.T) {
+	bare := toEmbed(&revoltgo.MessageEmbed{Type: "Video", URL: "https://example.test/clip.mp4"})
+	if bare == nil || bare.Video == nil {
+		t.Fatalf("bare video: got %+v, want a video embed", bare)
+	}
+	if bare.Video.Kind != domain.FileVideo || !bare.Video.Foreign || bare.Video.URL != "https://example.test/clip.mp4" {
+		t.Errorf("bare video file = %+v", bare.Video)
+	}
+	if bare.GIF {
+		t.Error("a bare video is not a GIF")
+	}
+
+	gif := toEmbed(&revoltgo.MessageEmbed{
+		Type:     "Website",
+		URL:      "https://gifbox.example/page",
+		SiteName: "GIFBox",
+		Special:  &revoltgo.MessageEmbedSpecial{Type: revoltgo.MessageEmbedSpecialGIF},
+		Video:    &revoltgo.MessageEmbedVideo{URL: "https://gifbox.example/file.mp4", Width: 320, Height: 180},
+		Image:    &revoltgo.MessageEmbedImage{URL: "https://gifbox.example/poster.png", Width: 320, Height: 180},
+	})
+	if gif == nil || gif.Video == nil {
+		t.Fatalf("gif unfurl: got %+v, want a video embed", gif)
+	}
+	if !gif.GIF {
+		t.Error("the provider's GIF mark was dropped")
+	}
+	if gif.Video.Width != 320 || gif.Video.Height != 180 {
+		t.Errorf("video dimensions = %dx%d, want 320x180", gif.Video.Width, gif.Video.Height)
+	}
+	if gif.Image == nil {
+		t.Error("the poster was dropped")
 	}
 }
 
@@ -129,7 +165,7 @@ func TestToEmbedTextFallsBackToOriginalURL(t *testing.T) {
 // the slice, so nothing above the boundary ever holds a nil embed.
 func TestToEmbedsSkipsTheUndrawable(t *testing.T) {
 	got := toEmbeds([]*revoltgo.MessageEmbed{
-		{Type: "Video", URL: "https://example.test/clip.mp4"},
+		{Type: "Website", SiteName: "nothing.unfurled"},
 		{Type: "Website", Title: "Kept"},
 		nil,
 	})

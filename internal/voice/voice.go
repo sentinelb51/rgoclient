@@ -240,6 +240,17 @@ type Call struct {
 	held     map[string]bool  // ditto, for a participant's own microphone hold
 	lanes    map[string]*lane // who has an open lane, so a leave closes exactly one
 
+	// shares is who is publishing a screenshare, by user ID: the publications
+	// a watch subscribes and the watch running against one. Guarded by mu
+	// with the lanes.
+	shares map[string]*share
+
+	// outShare is this end's own published screenshare, nil while none runs.
+	// Guarded by mu. canShare is the join token's word on whether one may be
+	// published at all — written once at Join, read-only after.
+	outShare *outboundShare
+	canShare bool
+
 	// lanesGen is bumped inside the same critical section as every write to
 	// lanes, and is what tells the filler its snapshot is still the truth. A
 	// mutation that forgets to bump leaves the filler holding a lane that has
@@ -292,6 +303,7 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 		speaking: make(map[string]bool),
 		held:     make(map[string]bool),
 		lanes:    make(map[string]*lane),
+		shares:   make(map[string]*share),
 		done:     make(chan struct{}),
 	}
 	// Deafened implies muted: a reader who cannot hear the room has not agreed to
@@ -299,6 +311,7 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	c.muted.Store(opts.Muted || opts.Deafened)
 	c.deafened.Store(opts.Deafened)
 	c.deepPLC.Store(opts.DeepPLC)
+	c.canShare = tokenAllowsScreen(creds.Token)
 
 	started := time.Now()
 
@@ -307,6 +320,11 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 		return nil, err
 	}
 	c.room = room
+
+	// Anything video already in the room is switched off before it can cost
+	// its bitrate; publications arriving later reach the same policy through
+	// the publish callback.
+	c.sweepPublications()
 
 	dialled := time.Now()
 
@@ -560,6 +578,7 @@ func (c *Call) teardown() {
 	// holds a jitter buffer and an Opus decoder. An expiry in the past brings them
 	// all back now to see that done is closed, rather than one read timeout later;
 	// dropping the lanes here is what stops the last of them pinning a decoder.
+	// A share watch's reader is parked the same way and wakes to c.done closed.
 	c.mu.Lock()
 	for _, l := range c.lanes {
 		if l.track != nil {
@@ -568,7 +587,26 @@ func (c *Call) teardown() {
 	}
 	clear(c.lanes)
 	c.lanesGen++
+	for _, sh := range c.shares {
+		if sh.watch != nil {
+			sh.watch.silent = true
+			sh.watch.end()
+		}
+	}
+	clear(c.shares)
+	// This end's own share goes down with the room — no unpublish, the whole
+	// connection is about to — and stopped keeps the write loop's completion
+	// callback from reporting an end the hang-up already is.
+	out := c.outShare
+	if out != nil {
+		out.stopped = true
+		c.outShare = nil
+	}
 	c.mu.Unlock()
+
+	if out != nil {
+		_ = out.src.Close()
+	}
 
 	if c.room != nil {
 		c.room.Disconnect()

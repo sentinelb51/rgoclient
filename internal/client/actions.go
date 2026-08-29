@@ -1385,6 +1385,67 @@ func chosenVoiceNode(nodes []revoltgo.InstanceConfigVoiceNode, want string) stri
 	return nearestVoiceNode(nodes)
 }
 
+// videoLimitsReport mirrors the slice of GET / this package reads for the
+// publish limits. revoltgo's InstanceConfig drops features.limits at parse, so
+// the route is asked again by hand — see the CLAUDE.md note.
+type videoLimitsReport struct {
+	Features struct {
+		Limits struct {
+			Global struct {
+				NewUserHours int64 `json:"new_user_hours"`
+			} `json:"global"`
+			NewUser videoLimitsTier `json:"new_user"`
+			Default videoLimitsTier `json:"default"`
+		} `json:"limits"`
+	} `json:"features"`
+}
+
+type videoLimitsTier struct {
+	Video            bool      `json:"video"`
+	VideoResolution  []int64   `json:"video_resolution"`
+	VideoAspectRatio []float64 `json:"video_aspect_ratio"`
+}
+
+// VideoLimits fetches what the instance enforces about a published video
+// track. A request — the whole instance config — so the controller asks once
+// and holds the answer; it cannot change under a running client any more than
+// the node list can.
+func (c *Client) VideoLimits() (domain.VideoLimitTiers, error) {
+	session := c.session.Load()
+	if session == nil {
+		return domain.VideoLimitTiers{}, ErrNoSession
+	}
+
+	var report videoLimitsReport
+	if err := session.HTTP.Request(http.MethodGet, revoltgo.BaseURL(), nil, &report); err != nil {
+		return domain.VideoLimitTiers{}, fmt.Errorf("instance limits: %w", err)
+	}
+
+	limits := report.Features.Limits
+
+	return domain.VideoLimitTiers{
+		NewUserHours: int(limits.Global.NewUserHours),
+		NewUser:      toVideoLimits(limits.NewUser),
+		Default:      toVideoLimits(limits.Default),
+	}, nil
+}
+
+// toVideoLimits mirrors the ingress's own two guards: the area is enforced
+// only where both halves are non-zero, and the aspect only where the two
+// bounds differ — a tier saying neither carries zeroes, meaning unenforced.
+func toVideoLimits(tier videoLimitsTier) domain.VideoLimits {
+	limits := domain.VideoLimits{Enabled: tier.Video}
+
+	if len(tier.VideoResolution) >= 2 && tier.VideoResolution[0] > 0 && tier.VideoResolution[1] > 0 {
+		limits.MaxArea = int(tier.VideoResolution[0] * tier.VideoResolution[1])
+	}
+	if len(tier.VideoAspectRatio) >= 2 && tier.VideoAspectRatio[0] != tier.VideoAspectRatio[1] {
+		limits.AspectMin, limits.AspectMax = tier.VideoAspectRatio[0], tier.VideoAspectRatio[1]
+	}
+
+	return limits
+}
+
 // WarmVoiceNode resolves the node ahead of anybody asking for a call, so the
 // instance config is not a REST round trip the first join of a session pays for
 // while somebody watches a button they pressed. Blocking, and a failure is not

@@ -28,6 +28,7 @@ import (
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
+	"RGOClient/internal/video"
 	"RGOClient/internal/voice"
 )
 
@@ -67,6 +68,20 @@ type App struct {
 	// settings page names the directory in use rather than the configured one — a
 	// change to it only takes effect at the next start.
 	assetDir string
+
+	/* Video playback, see video.go */
+
+	// videoTools is the discovered ffmpeg/ffprobe pair; videoInline is whether
+	// both were found, decided once — the card offers inline play only then.
+	videoTools  video.Tools
+	videoInline bool
+	videoMedia  *cache.MediaCache
+
+	video       *videoPlayback           // the one running playback, or nil
+	videoInfo   map[string]video.Info    // probed shape by cache id
+	videoAt     map[string]time.Duration // where a play would resume, by cache id
+	videoBusy   map[string]bool          // a mount's poster job in flight, by cache id
+	videoFailed map[string]string        // files that will never play, by cache id, holding the refusal's reason
 
 	/* Alerts, see alerts.go */
 
@@ -358,6 +373,24 @@ type App struct {
 	// microphone.
 	callJoining bool
 
+	// share is the one watched screenshare, or nil — one decoder child and one
+	// window, the one-playback rule again. See screenshare.go.
+	share *shareView
+
+	// sending is this account's own share: the capture child feeding the
+	// published track, nil while none runs. shareStarting single-flights the
+	// start, which is a picker, an enumeration and a publish negotiation deep.
+	// videoLimits is what the instance enforces about a published track,
+	// fetched once per session — a share is fitted under it before publishing,
+	// the backend disconnecting a publisher whose declared size is over.
+	sending       *sendingShare
+	shareStarting bool
+
+	// shareDialog is the picker while it is up, kept so a refused start is
+	// reported into the card it came from rather than as a notice over it.
+	shareDialog *ui.ShareDialog
+	videoLimits domain.VideoLimitTiers
+
 	// voiceNodes is the media servers this instance offers, fetched once off Ready
 	// beside the node warm-up that shares its round trip. Only the settings page
 	// reads it, and only to offer the choice: which node a call actually dials is
@@ -538,7 +571,13 @@ func New(fyneApp fyne.App, info Info) *App {
 		fetchedReplies:      make(map[string]bool),
 		slowmodeUntil:       make(map[string]time.Time),
 		typing:              make(map[string]map[string]time.Time),
+		videoMedia:          cache.NewMediaCache(assetDir, cache.VideosFolder, settings.VideoDiskBytes()),
+		videoInfo:           make(map[string]video.Info),
+		videoAt:             make(map[string]time.Duration),
+		videoBusy:           make(map[string]bool),
+		videoFailed:         make(map[string]string),
 	}
+	a.videoTools, a.videoInline = video.Discover()
 
 	// Built here rather than on first open, so the layer is a fixed object buildUI
 	// can stack: both pages have to survive the rebuild a style change asks for.

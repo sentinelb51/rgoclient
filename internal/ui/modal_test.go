@@ -21,6 +21,7 @@ type stubActions struct{}
 func (stubActions) OnUserTapped(string, fyne.CanvasObject)     {}
 func (stubActions) OnChannelTapped(string)                     {}
 func (stubActions) OnServerTapped(string)                      {}
+func (stubActions) OnWatchShare(string, string)                {}
 func (stubActions) OnJoinInvite(string)                        {}
 func (stubActions) OnAttachmentTapped(*domain.File)            {}
 func (stubActions) OnLinkTapped(_, _ string)                   {}
@@ -45,6 +46,14 @@ func (stubActions) OnPickGIF(fyne.CanvasObject, func(string))                  {
 // ResolveInvite never answers, which leaves an invite card in the state it
 // mounts in — the state every test that isn't about one wants it to stay in.
 func (stubActions) ResolveInvite(string, func(domain.Invite, error)) {}
+
+// The video actions do nothing, which leaves a video card resting on its
+// placeholder — no poster resolves and no subprocess is anywhere near a test.
+func (stubActions) OnVideoMounted(*domain.File, *VideoCard)       {}
+func (stubActions) OnVideoTapped(*domain.File, *VideoCard)        {}
+func (stubActions) OnVideoSeek(*domain.File, *VideoCard, float64) {}
+func (stubActions) OnVideoMuted(*domain.File, *VideoCard, bool)   {}
+func (stubActions) OnVideoOpen(*domain.File, *VideoCard)          {}
 
 // TestAttachmentViewerFits checks that every attachment kind builds a card that
 // stays inside the bounds it was given — the modal is centred at its MinSize, so

@@ -112,6 +112,8 @@ github.com/hajimehoshi/go-mp3 v0.3.4/go.mod h1:fRtZraRFcWb0pu7ok0LqyFhCUrPeMsGRS
 github.com/hajimehoshi/oto/v2 v2.3.1/go.mod h1:seWLbgHH7AyUMYKfKYT9pg7PhUu9/SisyJvNTT+ASQo=
 github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade h1:FmusiCI1wHw+XQbvL9M+1r/C3SPqKrmBaIOYwVfQoDE=
 github.com/jeandeaual/go-locale v0.0.0-20250612000132-0ef82f21eade/go.mod h1:ZDXo8KHryOWSIqnsb/CiDq7hQUYryCgdVnxbj8tDG7o=
+github.com/jezek/xgb v1.3.1 h1:NQCAEfQyzN+3RjWUSHBuVIxQcy2YfG3/mNvKfs/0rEg=
+github.com/jezek/xgb v1.3.1/go.mod h1:nrhwO0FX/enq75I7Y7G8iN1ubpSGZEiA3v9e9GyRFlk=
 github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25 h1:YLvr1eE6cdCqjOe972w/cYF+FjW34v27+9Vo5106B4M=
 github.com/jsummers/gobmp v0.0.0-20230614200233-a9de23ed2e25/go.mod h1:kLgvv7o6UM+0QSf0QjAse3wReFDsb9qbZJdfexWlrQw=
 github.com/jxskiss/base62 v1.1.0 h1:A5zbF8v8WXx2xixnAKD2w+abC+sIzYJX+nxmhA6HWFw=
@@ -235,8 +237,6 @@ github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU
 github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
 github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f h1:K2WN3CTjThFoREJKHtPLnEl304gbCTOLrXElrNjyT4Y=
 github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f/go.mod h1:AWEx797SwA4yqgOFWVpgapUkTk6MmeoJ+1nTwMt33T8=
-github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493 h1:Eyn8j6rmjp41LAAld+nJKhqMSapnWXyofTfArLjVmmE=
-github.com/sentinelb51/revoltgo v0.0.0-20260825165602-657f0385b493/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66 h1:BeY1/dsQALbPZCJkEnxAIbUQCsaA/e9YMvhSeLRwBK8=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.8 h1:8S5csEZJEmuLbdFCgAtRyFCm7Zu9psjttihZj4CXTtQ=

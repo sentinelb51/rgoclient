@@ -44,8 +44,13 @@ func buildEmbeds(deps Deps, embeds []*domain.Embed, onMenu func(*fyne.PointEvent
 // picture — are widgets, and each takes onMenu so a right-click still raises the
 // message's menu.
 func buildEmbed(deps Deps, embed *domain.Embed, onMenu func(*fyne.PointEvent)) fyne.CanvasObject {
-	if embed.Title == "" && embed.Description == "" && embed.SiteName == "" && embed.Image != nil {
-		return buildEmbedImage(deps, embed.Image, theme.Sizes.EmbedMaxWidth, onMenu)
+	if embed.Title == "" && embed.Description == "" && embed.SiteName == "" {
+		if embed.Video != nil {
+			return buildEmbedVideo(deps, embed, onMenu)
+		}
+		if embed.Image != nil {
+			return buildEmbedImage(deps, embed.Image, theme.Sizes.EmbedMaxWidth, onMenu)
+		}
 	}
 
 	width := embedContentWidth(embed)
@@ -104,7 +109,12 @@ func buildEmbedBody(deps Deps, embed *domain.Embed, width float32, onMenu func(*
 		// exactly as they do in a message.
 		add(newFlushContainer(renderMessageBody(deps, embed.Description, onMenu)))
 	}
-	if embed.Image != nil {
+	// A video outranks the picture beside it: an unfurl carrying both is a
+	// player and its poster, and the poster already fills the card's box.
+	switch {
+	case embed.Video != nil:
+		add(buildEmbedVideo(deps, embed, onMenu))
+	case embed.Image != nil:
 		add(buildEmbedImage(deps, embed.Image, width, onMenu))
 	}
 
@@ -230,6 +240,16 @@ func embedContentWidth(embed *domain.Embed) float32 {
 	if embed.Image != nil {
 		width = max(width, fitWithin(embed.Image.Width, embed.Image.Height,
 			theme.Sizes.EmbedMaxWidth, theme.Sizes.EmbedImageMaxHeight).Width)
+	}
+	if embed.Video != nil {
+		// The card's own fit, or the reserve box a video with no dimensions
+		// opens at — the same numbers newVideoCard uses.
+		fitted := fitWithin(embed.Video.Width, embed.Video.Height,
+			theme.Sizes.MessageImageMaxWidth, theme.Sizes.MessageImageMaxHeight).Width
+		if fitted <= 0 {
+			fitted = theme.Sizes.MessageImageMaxWidth
+		}
+		width = max(width, fitted)
 	}
 
 	return min(width, theme.Sizes.EmbedMaxWidth)

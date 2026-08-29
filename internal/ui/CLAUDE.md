@@ -852,6 +852,17 @@ naming and the test policy.
     is chosen to cut a card in half: the rows carry their own mark down the right
     edge, which is where a bar would land, so the cut is the whole of what says
     the list goes on.
+- **The screenshare picker is that same island row with a radio's rule.**
+  `ui/screenshare.go`'s `shareSourceRow` is `pickRow` — the same card, the same
+  three fills in the same precedence, the same `pickMark` at the end — and the
+  only difference is that picking one *unpicks* the rest, which the dialog
+  enforces rather than the row. Its two option runs are `searchChip`s carrying
+  the number they stand for (`shareOptionChip`): a filter chip is a bit where
+  one of these is a member of a set, so `markShareChips` is what a tap runs and
+  the chip itself stays the same widget. The list is `cappedHeightLayout` +
+  `NewPlainVScroll`, `panels.go`'s arrangement, because a machine with thirty
+  windows would otherwise open a card taller than the screen it is offering to
+  share.
 - **`IconButton` is a mark; `OutlinedIconButton` is a target.** The first is
   right where the row has already said what is going on and the icons are
   *revealed* — a message's hover actions — and wrong where the icon is the only
@@ -949,7 +960,11 @@ naming and the test policy.
   about this machine rather than about them. What a participant is *sharing*
   cannot change under a standing row — the gateway announces it and the column is
   rebuilt — so those marks are added only where they apply; a hold can, so all
-  three are built hidden by `newVoiceHold`. Each is the glyph **and the gap after
+  three are built hidden by `newVoiceHold`. The screenshare mark is the one that
+  answers a tap (`shareWatchTap` → `Actions.OnWatchShare`, in `VoiceShareLive`
+  so a target reads apart from the grey marks): a `tapBase` widget on purpose —
+  not Hoverable, so the row keeps its hover, the pointer cursor being the whole
+  affordance. Each is the glyph **and the gap after
   it** in one container, hidden together: an HBox skips an invisible child when it
   measures, but a spacer beside a hidden mark is not itself hidden, and three of
   those are dead width at the end of every row that holds nothing. `SetMarks`
@@ -1032,10 +1047,14 @@ naming and the test policy.
 
   It sits over the message header, which means it covers whatever is in that row's
   centre — the channel topic. That is the cost of the slot, not a bug.
-  Its two toggles **replace** their buttons rather than recolouring them:
+  Its **three** toggles replace their buttons rather than recolouring them:
   `OutlinedIconButton` bakes its mark, its tint and its `disabled()` state at
   construction, so a slot with a rebuilt button is the only way to change any of
-  the three.
+  the three. The share button is the third and has three states rather than two
+  — sharing (`VoiceShareLive`, so the card says at a glance that this machine is
+  on screen somewhere), on offer, and greyed where the call's own token does not
+  grant it. Greyed rather than absent, for the reason the join offer is: a
+  control that vanished reads as a client that forgot.
 - **A wrapping grid reports one row until it has been laid out.**
   `layout.GridWrap`'s `MinSize` multiplies the cell by a `rowCount` computed
   during `Layout`, so a fresh grid measures one cell tall whatever is in it. The
@@ -1068,3 +1087,38 @@ naming and the test policy.
   through `DoOnUI`, not a `fyne.Animation` — gen-guarded, the fired-timer trap —
   and each tick asks `CanvasForObject` before painting, because a dropped row
   hears nothing and the tick is the only thing placed to stop itself.
+- **The video card is pushed into, and decides nothing** (`ui/video.go`). Every
+  `VideoCard` setter is UI-thread only and every decision is an `OnVideo*`
+  action — the controller owns fetching, decoding and the one-playback rule
+  (`internal/app/CLAUDE.md` item 45). What is this package's:
+  - **The chrome is one custom layout over the picture stack**
+    (`videoChromeLayout`): scrub along the bottom edge, chip lower-left above
+    it, sound toggle upper-right, badge centred. It reports no minimum — the
+    poster box under it is what sizes the stack, reserved and re-fitted the way
+    `imageFrame` does it (`SetInfo` refits when the server sent no dimensions).
+  - **`ShowFrame` copies.** The pump's scratch is reused the moment its waited
+    hop returns, and Fyne's renderer uploads the mounted image on its own
+    thread — so the card keeps its own `playBuf` and the copy is what keeps the
+    painter off bytes the pump is about to overwrite. `EndPlayback` drops the
+    buffer and restores the poster, the GIF animator's stop-frees-everything
+    rule.
+  - **The badge and chip are not widgets**, so a tap on either falls through to
+    the `HoverableStack` whose tap is the transport toggle. The sound toggle
+    and the bar's open button are `GlyphButton`s and win their own taps
+    (innermost); they steal hover from the stack, which for this card costs
+    only the outline lift. The toggle swaps its own `icon.Resource` — same
+    package — rather than being rebuilt.
+  - **The scrub strip is taller than the line it draws** (`VideoScrubHeight`
+    over `VideoScrubLine`, the stateBar's arrangement): the gap above is the
+    hover room a 3-pixel target does not have. `setFraction` resizes the fill
+    directly — placement, not layout — and its refresh rides the frame that is
+    already dirtying the canvas. Tap seeks by fraction; there is no drag.
+  - **The chip is one slot with a precedence** (`syncChip`): a status outranks
+    the clock, the clock exists only while playing, the duration only once
+    probed, and a card with none wears no chip. Status text arrives from the
+    controller (fetch progress, "Not playable") and empty restores the rest.
+  - `buildEmbedVideo` is the same card inside an embed, wearing the tap and
+    menu wiring an attachment's stack carries — an embed is otherwise inert —
+    and seeds the unfurl's own poster so the box is filled before any decode
+    has run. `VideoCard.Loop` is the GIF mark: a fact set at build, read as
+    policy by the controller.

@@ -39,6 +39,7 @@ func (a *App) buildUI() fyne.CanvasObject {
 		OnHangUp:  a.leaveCall,
 		OnJoin:    a.joinCallHere,
 		OnChannel: func() { a.OnChannelTapped(a.callChannelID) },
+		OnShare:   a.OnShare,
 		OnState:   a.showCallState,
 	})
 	a.callIslandLayer = ui.NewCallIslandLayer(a.callIsland)
@@ -920,6 +921,11 @@ func (a *App) selectChannel(channelID string) {
 	// be replaced, and a set carried across the switch is one the reader can no
 	// longer see they hold. Before syncComposer, which reads the mode.
 	a.endSelection()
+
+	// A playing video's rows are about to go with the window; the decoder dies
+	// now rather than at its next paint. The position is kept, so coming back
+	// resumes.
+	a.stopVideo()
 
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)

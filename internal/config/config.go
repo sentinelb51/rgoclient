@@ -59,6 +59,26 @@ type State struct {
 	// these — a different one signing in replaces the set rather than inheriting it.
 	DismissedAccount  string   `json:"dismissed_account,omitempty"`
 	DismissedMentions []string `json:"dismissed_mentions,omitempty"`
+
+	// What the screenshare picker was last answered with, so a reader who
+	// shares the same monitor every call answers one card rather than three
+	// questions. The source is a platform handle and is only ever *offered*
+	// back — a window that has since closed is not in the list, and the picker
+	// falls through to the first thing there.
+	ShareSource string `json:"share_source,omitempty"`
+	ShareHeight int    `json:"share_height,omitempty"`
+	ShareFPS    int    `json:"share_fps,omitempty"`
+}
+
+// RememberShare records what the picker was answered with. Nothing here is a
+// setting — no row writes to it — it is what stops the same three answers
+// being given every call.
+func RememberShare(source string, height, fps int) {
+	Update(func(s *Settings) {
+		s.State.ShareSource = source
+		s.State.ShareHeight = height
+		s.State.ShareFPS = fps
+	})
 }
 
 // MaxDismissedMentions is how many waved-off mentions are carried between runs.
@@ -316,6 +336,11 @@ type Cache struct {
 	ImageDiskMiB   int `json:"image_disk_mib"`
 	ImageMemoryMiB int `json:"image_memory_mib"`
 	MaxImageEdge   int `json:"max_image_edge"`
+
+	// VideoDiskMiB bounds the folder of fetched video originals — its own
+	// budget, apart from the pictures', so an afternoon of videos cannot evict
+	// every avatar. Videos are only ever on disk; nothing holds one decoded.
+	VideoDiskMiB int `json:"video_disk_mib"`
 
 	// ImageLoaders bounds how many pictures are downloaded at once. A member list
 	// scrolled quickly asks for a picture per row it passes, and without a bound
@@ -683,13 +708,14 @@ func Default() Settings {
 
 			// On: a clean stream costs about a quarter more per frame (the model is
 			// fed either way) and concealment ~13× — 1 % of realtime per concealed
-			// stream — which a machine already losing packets is glad to pay. See
-			// docs/voice-chat-todo.md §5.
+			// stream — which a machine already losing packets is glad to pay.
+			// Measured in the retired docs/voice-chat-todo.md §5 (git history).
 			DeepPLC: true,
 		},
 		Cache: Cache{
 			ImageDiskMiB:       512,
 			ImageMemoryMiB:     192,
+			VideoDiskMiB:       1024,
 			MaxImageEdge:       1600,
 			ImageLoaders:       8,
 			TextPreviews:       100,
@@ -771,6 +797,11 @@ func (c Cache) ImageDiskBytes() int64 {
 // the same way.
 func (c Cache) ImageMemoryBytes() int64 {
 	return int64(c.ImageMemoryMiB) * 1024 * 1024
+}
+
+// VideoDiskBytes is the on-disk budget for fetched video originals.
+func (c Cache) VideoDiskBytes() int64 {
+	return int64(c.VideoDiskMiB) * 1024 * 1024
 }
 
 /* The current settings */
@@ -937,6 +968,7 @@ func (s *Settings) sanitise() {
 
 	floor(&s.Cache.ImageDiskMiB, 1)
 	floor(&s.Cache.ImageMemoryMiB, 1)
+	floor(&s.Cache.VideoDiskMiB, 1)
 	floor(&s.Cache.MaxImageEdge, 64)
 	floor(&s.Cache.ImageLoaders, 1)
 	floor(&s.Cache.TextPreviews, 1)

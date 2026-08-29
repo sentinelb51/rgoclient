@@ -59,6 +59,12 @@ type MessageActions interface {
 	// inside it, so the controller picks the first channel it can see.
 	OnServerTapped(serverID string)
 
+	// OnWatchShare opens the window watching somebody's screenshare — the tap
+	// on the live mark a voice participant's row wears. The controller owns it
+	// because whether it can be watched is a question about the running call,
+	// which the mark, drawn from the gateway's voice state, cannot answer.
+	OnWatchShare(channelID, userID string)
+
 	// OnJoinInvite redeems an invite code. The joined server arrives through the
 	// gateway, so nothing is expected back.
 	OnJoinInvite(code string)
@@ -126,6 +132,30 @@ type MessageActions interface {
 	// is chosen. The controller opens it for a harder version of the emoji picker's
 	// reason: every list in it is a request, and this package makes none.
 	OnPickGIF(anchor fyne.CanvasObject, onPick func(pageURL string))
+
+	// The video card's five, all owned by the controller because every one of
+	// them is a policy: what a mount fetches, what a tap decodes with, and
+	// what a file is opened by are decisions about a sender-controlled
+	// bitstream (docs/video-player.md), and this package makes none.
+
+	// OnVideoMounted announces a card standing, so the controller can fill in
+	// the poster and duration under its own fetch policy.
+	OnVideoMounted(file *domain.File, card *VideoCard)
+
+	// OnVideoTapped toggles playback — play, pause, resume — the controller
+	// holding what a session is and how many run at once (one).
+	OnVideoTapped(file *domain.File, card *VideoCard)
+
+	// OnVideoSeek asks for the playhead at a fraction of the running time.
+	OnVideoSeek(file *domain.File, card *VideoCard, frac float64)
+
+	// OnVideoMuted reports the card's sound toggle; the controller owns the
+	// lane the sound plays through.
+	OnVideoMuted(file *domain.File, card *VideoCard, muted bool)
+
+	// OnVideoOpen hands the file to the system player — the fetched bytes
+	// under a sniffed name, never the sender's.
+	OnVideoOpen(file *domain.File, card *VideoCard)
 
 	// ResolveMessage looks a message up in the local cache, never the network.
 	ResolveMessage(channelID, messageID string) *domain.Message

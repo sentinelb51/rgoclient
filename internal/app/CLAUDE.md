@@ -1874,3 +1874,135 @@ DAG and conventions.
     the send rules — the permission, slowmode, the queued replies — are the
     composer's own and unchanged, and a draft already typed is not lost. Revolt
     unfurls that page into the embed (item 6).
+45. **Playing a video.** `video.go` is the controller half of
+    `docs/video-player.md`: the card (`ui.VideoCard`) is dumb on purpose, and
+    every `OnVideo*` action lands here because each one is a policy about a
+    sender-controlled bitstream — what a mount may fetch, what a tap decodes
+    with, which file the OS is handed.
+    **A mount fills the card in, under a ceiling.** `OnVideoMounted` answers
+    from `a.videoInfo` and the poster's image-cache entry where it can, and
+    otherwise runs one worker per file (`a.videoBusy`, the poster job's own
+    single-flight): fetch — only under `videoPosterFetchBytes`, scrolling past
+    a large video must not download it — then sniff, probe, poster, all
+    through `internal/video`'s sandboxed children. The probe's answer is
+    memoised in `a.videoInfo` and the poster as an ordinary image-cache entry
+    (`id+"-poster"`), so a remount costs two lookups. A file that will never
+    play is memoised too (`a.videoFailed`, via `permanentVideoError`, holding
+    the refusal's reason — a file declaring no length is one of them, the
+    probe refusing it) — the driver's own refusals stay true on retry where a
+    lost connection does not — so its card says "Not playable" instead of
+    retrying per scroll, and a tap answers with the reason.
+    **A tap toggles, and one video plays at a time.** `OnVideoTapped` on the
+    playing card is `pauseVideo`; on anything else it is `startVideo`, which
+    stops what was playing first. Pause **is** a stop that remembers: the
+    children are killed and `a.videoAt[id]` keeps the position, because `-ss`
+    on a restarted child is the only correct seek over a pipe — so pause,
+    resume, and `OnVideoSeek` while playing are all the same restart
+    (`launchVideo`). A resume within `videoResumeSlack` of the end starts
+    over; a finished video drops its position; a stop keeps it, so leaving a
+    channel mid-film resumes on return.
+    **Launching is the installCall arrangement.** `startVideo` prepares on a
+    worker (`backgroundThen`, fetch progress reaching the card's chip through
+    `videoProgress`), then `launchVideo` reads the card's box on the UI thread
+    — the frame pipe carries exactly that many pixels — and starts the
+    children off-thread; one hop installs them, and a playback landing into a
+    replaced session or after another play took over is closed rather than
+    installed. `a.video` is the one playback; `videoPlayback.halt` is
+    idempotent and tolerates streams not yet installed.
+    **Two pumps, two clocks.** `pumpVideoFrames` paces by wall clock against
+    the rate this side asked for, paints through one *waited* hop per frame
+    (the scratch buffer is reused the moment it returns), drops and re-anchors
+    when more than two frames late, and is what notices a dropped card —
+    `card.Mounted()` per paint, the tick-stops-itself rule the GIF animator
+    keeps. `pumpVideoSound` tops the reserved mixer lane up to `VideoWant` on
+    the speakers' wake, exactly as a call participant's writer does, with a
+    20 ms ticker as insurance for the wake a concurrent call's playout
+    consumed. Mute is lane gain (`SetVideoGain`), re-asserted at every start
+    from the card's own toggle.
+    **Every teardown path is explicit**: `selectChannel` (the window goes, the
+    position stays), `resetSessionState` (beside `leaveCall`, with all four
+    maps), EOF (`settleVideoEnd`, which the kill path skips by reading
+    `p.stop`), and the paint that finds the card off-canvas. A **GIF-marked
+    embed** (`card.Loop`) decodes through `-stream_loop` — one child for any
+    number of passes, no EOF to settle — starts silent, and wraps its clock
+    through `videoPlayback.position`.
+    **Open in your player** (`OnVideoOpen`) fetches like play does and hands
+    the OS the stored file — named by sniffed magic, never the sender's
+    filename — through `openLocalFile`'s file URL; `ui.openURL` is not the
+    path, that gate being for destinations somebody else chose. A file
+    nothing recognises is refused with the reason, not handed to a shell that
+    would believe its name.
+46. **A screenshare, both halves.** `screenshare.go` is both, and the sending
+    one is item 47.
+    Watching is the receive half of
+    `docs/screenshare-todo.md`, the video player's seam pointed at a live
+    stream: `voice` owns the track (the registry, the nothing-video-until-
+    watched subscription policy and the depacketise/remux — `voice/share.go`),
+    `video.LiveFrames` owns the sandboxed decode from stdin, and `app` is
+    where the writer the one hands the other is made. The way in is the row's
+    live mark (`ui.shareWatchTap`, drawn from the gateway's `Screensharing`
+    flag — which is why it stands even out of the call): `OnWatchShare`
+    refuses out-of-call and no-ffmpeg taps with a notice, keeps **one watch**
+    (a second tap focuses the window, a different sender replaces it), opens
+    the window *before* the subscription — a watch that never delivers must
+    leave something to close — and hands `voice.WatchShare` a `ShareOpen`
+    that launches the decoder at `shareDecodeSize` (the sender's declared
+    size, believed only under the 1080p cap) and starts the pump. The pump is
+    `pumpVideoFrames` minus the clock: live is paced by the sender, so it
+    paints on arrival under a waited hop and always drains; the share window
+    is its own `fyne.Window`, so a frame dirties nothing of the main canvas.
+    Every teardown meets in `closeShare`: the window's own close,
+    `voice.ShareEnded` (a sender stopping is silent, a failure is a notice),
+    the pipe dying (`settleShareEnd`, guarded on `stopped` so an owner's kill
+    is not reported twice), and `dropCall` — the window must not outlive the
+    media session feeding it. Share audio is the lane machinery unchanged
+    under `voice.ShareLane(userID)`; its dial is "Screenshare volume" on the
+    participant menu, offered while the store says they are sharing, written
+    to the sink and to `config.SetUserGain` under the lane's own key.
+
+47. **Sending a screenshare.** The other half of `screenshare.go`, and shorter
+    than the watch for one reason: **nothing here reads the stream**. The
+    capture child's stdout *is* the published track's source
+    (`Call.StartShare` takes an `io.ReadCloser`), so lksdk drains the pipe on
+    its own goroutine and there is no pump, no scratch buffer and no UI hop
+    per frame.
+    The way in is the **call island's** share button (`SetSharing`), which is
+    live while this machine is sharing, offered otherwise, and greyed where
+    `Call.CanShare` says the join token does not grant it — Revolt's `Video`
+    permission, read back off the JWT (`voice.tokenAllowsScreen`) rather than
+    guessed at from the channel, and never *trusted*: it greys a button, and
+    the server still enforces.
+    `OnShare` stops a running share and otherwise opens the picker.
+    Enumeration talks to the display server — a round trip per window on X11 —
+    so it is a worker, and `ui.NewShareDialog` is raised with the answer,
+    seeded from `config.State` (what the picker was last told, which is not a
+    setting: no row writes to it). `beginShare` is the **installCall
+    arrangement** again: the encoder's first frame and the publish
+    renegotiation both block, so both are off-thread with one hop to install,
+    and a share that landed into a call the reader has since left is killed
+    rather than left publishing.
+    **The publish limits are the whole reason the box is computed here.**
+    `voice-ingress` measures the *declared* width×height on `track_published`
+    and, over the tier's area or outside its aspect band, **removes the
+    publisher from the voice channel** — it does not refuse the track. So
+    `Client.VideoLimits` fetches the tiers once per session (revoltgo parses
+    `features` and drops `features.limits`, so it is a hand-sent `GET /`) and
+    `fitShareBox` applies them **in an order that is not the obvious one**:
+    area, then even, then aspect. Both of the first two truncate, and
+    truncating the two edges independently *moves the ratio* — an ultrawide
+    fitted exactly to 2.5 comes out of the area scale at 2.502 and is refused
+    — so aspect goes last, only ever shrinks (a smaller box is never a larger
+    area), and aims a percent inside the band, the ingress comparing in `f32`
+    where this computes in `float64`. With nothing fetched yet the *new-user*
+    tier's numbers are assumed: guessing low costs a few pixels, guessing high
+    costs somebody their call.
+    **The track is paced by the rate that was asked for**, not by the stream:
+    `ReaderSampleProvider` derives a duration from the IVF timebase and the
+    timestamp delta, and ffmpeg does not write those in agreement for every
+    grabber — x11grab declares 1/fps and steps the timestamps *by* fps, which
+    is a second per frame and publishes at a fifteenth speed.
+    `ReaderTrackWithFrameDuration` overrides it, which is honest because the
+    child's own `fps` filter holds the rate constant.
+    Every stop meets in `stopSharing` (the button, `dropCall`, logging out) or
+    `onShareStopped` (`voice.ShareStopped` — the encoder died, the captured
+    window closed), and both are idempotent through `sendingShare.halt`.

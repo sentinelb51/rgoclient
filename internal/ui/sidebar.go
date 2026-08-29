@@ -687,7 +687,7 @@ func voiceMarks(w *VoiceParticipantRow, participant domain.VoiceParticipant) *fy
 		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
 	}
 	if participant.Screensharing {
-		marks.Add(container.NewCenter(voiceMark(assets.ScreenshareIcon)))
+		marks.Add(container.NewCenter(newShareWatchTap(w.deps, w.channelID, participant.UserID)))
 		marks.Add(HorizontalSpacer(theme.Sizes.VoiceMarkGap))
 	}
 	if participant.Camera {
@@ -730,6 +730,32 @@ func voiceMark(res fyne.Resource) *canvas.Image {
 	side := theme.Sizes.VoiceMarkSize
 
 	return newScaledIcon(tintedIcon(res, theme.Colors.VoiceParticipantMark), side)
+}
+
+// shareWatchTap is the screenshare mark made a target: tapping it asks the
+// controller to open the stream. Its own small widget rather than a
+// GlyphButton so it stays exactly a voiceMark in the strip — same box, no
+// hover fill — and deliberately not Hoverable: innermost wins, and hover
+// belongs to the row under it. tapBase's pointer cursor is what says it
+// answers at all.
+type shareWatchTap struct {
+	tapBase
+	icon *canvas.Image
+}
+
+func newShareWatchTap(deps Deps, channelID, userID string) *shareWatchTap {
+	w := &shareWatchTap{
+		icon: newScaledIcon(tintedIcon(assets.ScreenshareIcon, theme.Colors.VoiceShareLive),
+			theme.Sizes.VoiceMarkSize),
+	}
+	w.onTap = func() { deps.Actions.OnWatchShare(channelID, userID) }
+	w.ExtendBaseWidget(w)
+
+	return w
+}
+
+func (w *shareWatchTap) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(w.icon)
 }
 
 // voiceNameColor colours a participant's name: their role's, or the row's own

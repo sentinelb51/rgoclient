@@ -49,6 +49,7 @@ type CallIsland struct {
 	// than one recoloured. Two slots, two states each.
 	micSlot       *fyne.Container
 	headphoneSlot *fyne.Container
+	shareSlot     *fyne.Container
 
 	/* The join half */
 
@@ -82,10 +83,18 @@ type CallIsland struct {
 	onMute   func()
 	onDeafen func()
 	onJoin   func()
+	onShare  func()
 
 	muted    bool
 	deafened bool
 	joinable bool
+
+	// sharing is whether this account's own stream is up, and shareable
+	// whether one may be started at all — the server's word, read off the
+	// call's token. A button that cannot do anything is drawn disabled
+	// rather than left out, the way the join offer is.
+	sharing   bool
+	shareable bool
 }
 
 var _ fyne.Widget = (*CallIsland)(nil)
@@ -98,6 +107,7 @@ type CallIslandActions struct {
 	OnHangUp  func()
 	OnJoin    func() // joins the voice channel the reader is looking at
 	OnChannel func() // the call's name is tappable and goes back to its channel
+	OnShare   func() // starts this account's screenshare, or stops the running one
 
 	// OnState reports the pointer entering or leaving the state bar, carrying the
 	// word the bar's colour stands for. The tooltip is a layer the controller owns,
@@ -160,6 +170,7 @@ func NewCallIsland(images *cache.ImageCache, actions CallIslandActions) *CallIsl
 		onMute:   actions.OnMute,
 		onDeafen: actions.OnDeafen,
 		onJoin:   actions.OnJoin,
+		onShare:  actions.OnShare,
 	}
 
 	gap := theme.Sizes.CallIslandGap
@@ -214,6 +225,7 @@ func (w *CallIsland) buildLive(actions CallIslandActions, gap float32) {
 
 	w.micSlot = container.NewStack(w.micButton())
 	w.headphoneSlot = container.NewStack(w.headphoneButton())
+	w.shareSlot = container.NewStack(w.shareButton())
 
 	// Outlined rather than plain: these are targets, and an outlined destructive
 	// button wears the hairline in its own tint, so hanging up needs no other
@@ -228,7 +240,7 @@ func (w *CallIsland) buildLive(actions CallIslandActions, gap float32) {
 		})
 
 	buttons := NewGapRow(theme.Sizes.CallIslandButtonGap,
-		w.micSlot, w.headphoneSlot, hangUp)
+		w.micSlot, w.headphoneSlot, w.shareSlot, hangUp)
 
 	// The bar is the half's own bottom edge rather than the card's: what it reports
 	// is this call, and the other half is an offer with no state to report. It ends
@@ -386,6 +398,20 @@ func (w *CallIsland) SetDeafened(deafened bool) {
 	// disabled rather than by pretending it can be pressed.
 	w.micSlot.Objects = []fyne.CanvasObject{w.micButton()}
 	w.micSlot.Refresh()
+}
+
+// SetSharing redraws the share toggle: live where this account's own stream
+// is up, an offer otherwise. shareable is whether the server allows one at
+// all — false draws the button disabled rather than dropping it, a control
+// that vanished reading as a client that forgot.
+func (w *CallIsland) SetSharing(sharing, shareable bool) {
+	if w.sharing == sharing && w.shareable == shareable {
+		return
+	}
+	w.sharing, w.shareable = sharing, shareable
+
+	w.shareSlot.Objects = []fyne.CanvasObject{w.shareButton()}
+	w.shareSlot.Refresh()
 }
 
 /* The join half */
@@ -645,6 +671,31 @@ func (w *CallIsland) joinButton() *OutlinedIconButton {
 	return NewOutlinedIconButton(tintedIcon(assets.CallJoinIcon, tint), tint, func() {
 		if w.onJoin != nil {
 			w.onJoin()
+		}
+	})
+}
+
+// shareButton builds the screenshare toggle, rebuilt rather than recoloured
+// for the reason the other two are. Three states: sharing, which wears the
+// live tint so the card says at a glance that this machine is on screen
+// somewhere; on offer, in the card's own text colour like the microphone; and
+// unavailable, greyed the way an unjoinable channel's button is — the action
+// is not offered here, which is not the same as dangerous.
+func (w *CallIsland) shareButton() *OutlinedIconButton {
+	if !w.shareable && !w.sharing {
+		tint := theme.Colors.ButtonDisabledText
+
+		return NewOutlinedIconButton(tintedIcon(assets.ScreenshareIcon, tint), tint, nil).disabled()
+	}
+
+	tint := theme.Colors.CallIslandText
+	if w.sharing {
+		tint = theme.Colors.VoiceShareLive
+	}
+
+	return NewOutlinedIconButton(tintedIcon(assets.ScreenshareIcon, tint), tint, func() {
+		if w.onShare != nil {
+			w.onShare()
 		}
 	})
 }

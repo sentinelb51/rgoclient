@@ -25,15 +25,14 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   both watches and sends a screenshare (`docs/screenshare-todo.md`). There is
   no camera in either direction — a participant's is unsubscribed with every
   other video track and has no surface — and nothing records a call.
-  Three limits on the share itself, all in that doc's own queue: no **share
+  Two limits on the share itself, both in that doc's own queue: no **share
   audio** yet, so a stream is silent whatever the sender publishes beside it;
-  **AV1** is refused with the codec named, its OBU remux being unbuilt; and
-  the sender cannot answer a viewer's keyframe request — a CLI encoder has no
-  way to hear a PLI — so a late joiner waits up to the two-second GOP for a
+  and the sender cannot answer a viewer's keyframe request — a CLI encoder has
+  no way to hear a PLI — so a late joiner waits up to the two-second GOP for a
   picture.
-- **Sharing a screen needs X11 or Windows.** Capture is `x11grab` and
-  `gdigrab`, and enumeration is RandR/EWMH and `EnumDisplayMonitors`/
-  `EnumWindows`. **Wayland has no grabber in stock ffmpeg** — the citizen's
+- **Sharing a screen needs X11 or Windows.** Capture is `x11grab` on Linux and,
+  on Windows, `ddagrab` for a monitor with `gdigrab` behind it; enumeration is
+  RandR/EWMH and `EnumDisplayMonitors`/`EnumWindows`. **Wayland has no grabber in stock ffmpeg** — the citizen's
   path is the `org.freedesktop.portal.ScreenCast` portal, which means
   consuming a PipeWire node ourselves — so a pure Wayland session is told
   there is nothing to capture; XWayland windows still work. macOS is
@@ -42,6 +41,30 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **An occluded X11 window captures whatever the server still holds for it**,
   which without a compositor is garbage over the covered region. Every X11
   capturer shares this; the picker says so rather than pretending otherwise.
+- **Sharing one *window* on Windows flickers the mouse pointer.** gdigrab's
+  `BitBlt` carries `CAPTUREBLT`, which redraws the pointer once per captured
+  frame — visible to everybody at the machine, not only in the stream, and
+  worst at low frame rates where the redraws do not fuse. Monitors escape it
+  by going through `ddagrab` (Desktop Duplication, no DC), but that has no
+  window form: the window equivalent is Windows Graphics Capture, which is
+  WinRT and has no ffmpeg input. The picker says so; a reader who wants a
+  steady pointer shares a whole screen. `ddagrab` also needs ffmpeg 6.0 and a
+  session that can duplicate an output, so an RDP session or an older ffmpeg
+  falls back to `gdigrab` for monitors too — probed once per monitor per run,
+  never guessed at.
+- **A share encodes in hardware only where the ffmpeg build and the driver
+  agree.** The codec families are AV1 and H.264 exactly so NVENC, AMF, QSV
+  and VAAPI are reachable — no VP8 encoder exists in silicon — and each
+  candidate is probed with a real test encode; AV1 is hardware or nothing,
+  H.264 falls to libx264. What the probe cannot fix is the pairing: a new
+  ffmpeg can demand a newer driver API than the installed driver speaks (seen
+  live: gyan.dev 7.0.1 wants nvenc 12.2, a 537 driver offers 12.1, so an RTX
+  4070 encoded on the CPU until the driver moved). The probe's log line says
+  which way it went, and the self preview's title carries the codec and
+  encoder name; nothing surfaces it before a share starts. And hardware AV1 is
+  a *generation* question on top: NVENC AV1 needs Ada (RTX 40), AMF AV1 an
+  RX 7000, QSV AV1 Arc or Meteor Lake — older silicon probes clean out of
+  the AV1 family and shares go H.264 without a word.
   A *remote* speaking ring comes from the voice server's active-speaker report;
   this account's own comes off the capture gate instead, that report being about
   other people and landing about half a second late.
@@ -716,6 +739,19 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   attachment viewer still offers no video preview, decode is at the card's
   logical size (soft on HiDPI), downloads do not resume, decoding is software
   only, and the Windows sandbox caps the child without cutting its network.
+- **Only Windows 11 says what it is doing to the microphone.**
+  `audio.InputEffects` is `IAudioEffectsManager`, which is build 22000 and
+  later; Windows 10 has no such interface. macOS states the mic mode through
+  `AVCaptureDevice.activeMicrophoneMode` and would need an Objective-C bridge
+  this package does not have, and Linux applies nothing by default — a
+  PipeWire echo-cancel node is a device somebody picked, not a filter over the
+  one they did. All three report an error rather than an empty list, so the
+  warning simply does not fire; nothing is claimed about a machine that was
+  never asked. Reading the list needs a stream, not an endpoint, so a client is
+  opened and never started — and its buffer duration must be **non-zero**,
+  zero being documented as the engine's choice but on a capture endpoint never
+  returning at all.
+
 - **The GIF picker asks for one page.** `next` is carried by the route and
   dropped: there is no scroll-to-load in the grid, so a search is its first fifty
   results. The trending list and the categories are one request each per opening,

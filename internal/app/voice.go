@@ -5,6 +5,8 @@ import (
 	"iter"
 	"log"
 	"math"
+	"slices"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -211,6 +213,11 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 	// be a second open the backend may refuse, and one joinCall released for the
 	// dial has no stream at all until it is restarted here.
 	a.restartInputMonitor()
+
+	// Asked once the call is up rather than on the way into it: the answer is the
+	// same either way, and the enumeration it can reach has no business on the
+	// path to being heard.
+	a.checkInputEffects(config.Current().Voice.InputDevice)
 
 	go a.pumpCall(call)
 }
@@ -1557,4 +1564,134 @@ func (a *App) voiceChannelOfSelf(selfID string) string {
 	}
 
 	return ""
+}
+
+/* What the OS is already doing to the microphone */
+
+// stackedEffects are the effects an OS applies to a microphone that do the same
+// work as this client's own capture chain, and the words a reader knows them by.
+//
+// The rest of what Windows reports is deliberately absent: beamforming and tone
+// removal do not double up with anything here, and echo cancellation is work
+// this client does not do at all. A warning naming those would be noise.
+var stackedEffects = map[audio.EffectKind]string{
+	audio.EffectNoiseSuppression:     "noise suppression",
+	audio.EffectDeepNoiseSuppression: "Voice Focus",
+	audio.EffectGainControl:          "automatic gain control",
+}
+
+// checkInputEffects says once that the OS is already cleaning the microphone
+// this client is also cleaning, the two together being what hollows a voice out.
+//
+// It only ever reports: turning an effect off reaches outside this process for
+// something the reader configured, and the notice leads to the Voice section
+// instead. Call on the UI thread.
+func (a *App) checkInputEffects(device string) {
+	epoch := a.epoch
+
+	a.background(func() error {
+		effects, err := audio.InputEffects(device)
+		if err != nil {
+			return err
+		}
+
+		names := stackedNames(effects)
+		if len(names) == 0 {
+			return nil
+		}
+
+		// Reached only once there is something to warn about, an enumeration
+		// being too much to spend on every join for a sentence nobody will read.
+		name, named := a.inputName(device)
+
+		key := name
+		if key == "" {
+			key = device
+		}
+		if config.InputEffectsWarned(key, strings.Join(names, ",")) {
+			return nil
+		}
+
+		subject := "your input device"
+		if named {
+			subject = name
+		}
+
+		a.doOnUI(func() {
+			if a.stale(epoch) {
+				return
+			}
+
+			config.RememberInputEffectsWarning(key, strings.Join(names, ","))
+
+			a.notifyNotice(ui.Notice{
+				Tone:  ui.ToneWarning,
+				Title: "Windows is already filtering this microphone",
+				Body: fmt.Sprintf(
+					"Windows has %s on for %s. This client's noise suppression runs on top of it, "+
+						"which can make your voice sound thin — open Voice settings to turn one of them off.",
+					listPhrase(names), subject,
+				),
+				OnTap: func() { a.openSettingsAt(ui.SectionVoice) },
+			})
+		}, false)
+
+		return nil
+	}, func(err error) {
+		// Not worth a notice: every platform but Windows 11 answers this way, and
+		// there is nothing a reader could do about it if it were said.
+		log.Printf("input effects: %v", err)
+	})
+}
+
+// stackedNames is what to call the effects that collide with this client's own
+// chain. Sorted and deduplicated because the joined string is what the warning
+// is remembered by, and an order the OS chose would make the same situation look
+// like a new one.
+func stackedNames(effects []audio.Effect) []string {
+	var names []string
+
+	for _, effect := range effects {
+		if name, ok := stackedEffects[effect.Kind]; ok {
+			names = append(names, name)
+		}
+	}
+
+	slices.Sort(names)
+
+	return slices.Compact(names)
+}
+
+// listPhrase writes a list the way a sentence does rather than the way a key
+// does, the stored form being joined without spaces beside it.
+func listPhrase(names []string) string {
+	switch len(names) {
+	case 0:
+		return ""
+
+	case 1:
+		return names[0]
+	}
+
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
+}
+
+// inputName is what to call a microphone in a sentence, and the name the warning
+// about it is filed under. An unnamed device reports false: the identifier is
+// still a usable key, but it is not something to put in front of a reader.
+func (a *App) inputName(id string) (string, bool) {
+	devices, err := audio.Inputs()
+	if err != nil {
+		log.Printf("name microphone: %v", err)
+
+		return "", false
+	}
+
+	for _, device := range devices {
+		if (id == "" && device.Default) || (id != "" && device.ID == id) {
+			return device.Name, device.Name != ""
+		}
+	}
+
+	return "", false
 }

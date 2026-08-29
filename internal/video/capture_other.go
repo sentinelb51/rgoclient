@@ -17,9 +17,11 @@ func ShareSources() ([]CaptureSource, error) {
 	return nil, errors.New("sharing your screen is not supported on this platform yet")
 }
 
-func grabArgs(cfg CaptureConfig) ([]string, error) {
-	return nil, errors.New("video: no capture on this platform")
+func grabArgs(_ string, cfg CaptureConfig) (grab, error) {
+	return grab{}, errors.New("video: no capture on this platform")
 }
+
+func captureFallback(_ string, _ []CaptureSource) bool { return false }
 
 func captureAttrs(cmd *exec.Cmd) {}
 

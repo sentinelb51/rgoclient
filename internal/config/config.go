@@ -38,6 +38,7 @@ type Settings struct {
 	Behaviour     Behaviour     `json:"behaviour"`
 	Notifications Notifications `json:"notifications"`
 	Voice         Voice         `json:"voice"`
+	Screenshare   Screenshare   `json:"screenshare"`
 	Cache         Cache         `json:"cache"`
 	Performance   Performance   `json:"performance"`
 	Updates       Updates       `json:"updates"`
@@ -68,6 +69,24 @@ type State struct {
 	ShareSource string `json:"share_source,omitempty"`
 	ShareHeight int    `json:"share_height,omitempty"`
 	ShareFPS    int    `json:"share_fps,omitempty"`
+
+	// WarnedInputs is the microphones the reader has already been told the OS is
+	// processing for them, oldest first. Bounded by MaxWarnedInputs: an entry is
+	// one device ever plugged in and nothing else removes one.
+	WarnedInputs []WarnedInput `json:"warned_inputs,omitempty"`
+}
+
+// WarnedInput is one microphone that warning has been given for, and what the OS
+// was doing to it at the time.
+//
+// Device is the name rather than the identifier: an ID does not survive a
+// re-plug (see audio.Device), so keying on one would warn twice for the same
+// headset. Effects is kept because switching one on later is a different
+// situation and worth saying again — the pair is what has been answered for,
+// not the device alone.
+type WarnedInput struct {
+	Device  string `json:"device"`
+	Effects string `json:"effects"`
 }
 
 // RememberShare records what the picker was answered with. Nothing here is a
@@ -78,6 +97,54 @@ func RememberShare(source string, height, fps int) {
 		s.State.ShareSource = source
 		s.State.ShareHeight = height
 		s.State.ShareFPS = fps
+	})
+}
+
+// MaxWarnedInputs is how many microphones the input-processing warning
+// remembers. Past it the oldest goes, which is the device least likely to be
+// the one plugged in now.
+const MaxWarnedInputs = 32
+
+// InputEffectsWarned reports whether this microphone has already been warned
+// about doing exactly this. A device whose effects have changed since answers
+// false: what it is doing now is not what was answered for.
+func InputEffectsWarned(device, effects string) bool {
+	if device == "" {
+		return false
+	}
+
+	for _, warned := range Current().State.WarnedInputs {
+		if warned.Device == device {
+			return warned.Effects == effects
+		}
+	}
+
+	return false
+}
+
+// RememberInputEffectsWarning records that the warning has been given, replacing
+// whatever that device was last known to be doing.
+func RememberInputEffectsWarning(device, effects string) {
+	if device == "" {
+		return
+	}
+
+	Update(func(s *Settings) {
+		warned := s.State.WarnedInputs
+		for i := range warned {
+			if warned[i].Device == device {
+				warned[i].Effects = effects
+
+				return
+			}
+		}
+
+		warned = append(warned, WarnedInput{Device: device, Effects: effects})
+		if extra := len(warned) - MaxWarnedInputs; extra > 0 {
+			warned = slices.Delete(warned, 0, extra)
+		}
+
+		s.State.WarnedInputs = warned
 	})
 }
 
@@ -518,6 +585,41 @@ type Voice struct {
 	Node string `json:"node"`
 }
 
+// Screenshare is how a share is encoded. Only the encoder's effort lives here:
+// the source, the size and the frame rate are the picker's, chosen per share
+// and remembered in State rather than settled once.
+type Screenshare struct {
+	// EncoderSpeed is what the encoder may spend on a frame — ShareSpeedQuality,
+	// ShareSpeedBalanced or ShareSpeedFast, spelled by each encoder as presets
+	// of its own. It buys CPU back with picture on a processor encode; on a
+	// hardware one the spend is the silicon's and the level barely matters.
+	EncoderSpeed string `json:"encoder_speed"`
+
+	// Latency is how long the encoder may sit on frames before answering with
+	// bytes. ShareLatencyLowest answers frame by frame; ShareLatencyBuffered
+	// lets rate control read a short run ahead, which sharpens the picture at
+	// the same bitrate and holds what viewers see up to a second behind.
+	Latency string `json:"latency"`
+
+	// Codec is which codec family a share goes out in. ShareCodecAuto takes
+	// AV1 where the graphics card encodes it — the same picture for around
+	// two thirds of the bandwidth — and H.264 otherwise; ShareCodecH264
+	// forces the fallback, for viewers whose clients cannot take AV1.
+	Codec string `json:"codec"`
+
+	// Bandwidth cuts the automatic bitrate budget a share's size and frame
+	// rate earn: all of it, half, or a quarter. The dial for a slow uplink —
+	// fewer bits soften what moves rather than shrinking the picture.
+	Bandwidth string `json:"bandwidth"`
+
+	// Keyframes is how often the whole picture is resent rather than only
+	// what changed. Frequent recovers fastest from loss and shows a joining
+	// viewer the picture soonest; sparse waits longest to do either. Under
+	// capped VBR the bandwidth between them is small — see
+	// app.shareKeyframeSeconds for what it was measured at.
+	Keyframes string `json:"keyframes"`
+}
+
 // What a voice gain may be set to, in decibels. Decibels rather than a
 // percentage because a percentage is linear on amplitude — half of one is -6 dB,
 // so the whole of the useful boost crowds into the top of the scale — and
@@ -573,6 +675,45 @@ const (
 const (
 	VoiceModeActivity = "activity"
 	VoiceModePush     = "push"
+)
+
+// What a screenshare's encoder may spend on a frame. Three rather than a range
+// because the levels are presets on every encoder here — nvenc's p1/p3/p4,
+// x264's ultrafast/superfast/veryfast — and the travel between two of them is
+// not a scale anybody could read. Deliberately no "automatic": what a machine
+// can afford is not answerable from the share's size alone, and a guess dressed
+// as a measurement is worse than a choice somebody made — the same reason the
+// cores below have none.
+const (
+	ShareSpeedQuality  = "quality"
+	ShareSpeedBalanced = "balanced"
+	ShareSpeedFast     = "fast"
+)
+
+// How long a share's encoder may hold frames back.
+const (
+	ShareLatencyLowest   = "lowest"
+	ShareLatencyBuffered = "buffered"
+)
+
+// Which codec family a share goes out in.
+const (
+	ShareCodecAuto = "auto"
+	ShareCodecH264 = "h264"
+)
+
+// How much of the automatic bitrate budget a share may spend.
+const (
+	ShareBandwidthAuto    = "auto"
+	ShareBandwidthHalf    = "half"
+	ShareBandwidthQuarter = "quarter"
+)
+
+// How often a share resends the whole picture.
+const (
+	ShareKeyframesFrequent = "frequent"
+	ShareKeyframesStandard = "standard"
+	ShareKeyframesSparse   = "sparse"
 )
 
 // Which cores the client runs on. The first two name Intel's hybrid split; the
@@ -688,11 +829,16 @@ func Default() Settings {
 
 			// On: what it costs is ~0.5 % of one core while capturing, and the
 			// microphone that does not want it — a studio interface in a treated
-			// room — is the rare one. Full strength and no speech veto is the
-			// stage exactly as it behaved before either dial existed.
+			// room — is the rare one.
 			NoiseSuppression:   true,
 			NoiseSuppressionDB: VoiceSuppressionMaxDB,
-			VADThreshold:       0,
+
+			// The model reads a keyboard or a door well under half, so a veto
+			// here rejects them wherever it is set. Higher only buys the noises
+			// it half-believes, and it is paid for at the start of a sentence:
+			// an unvoiced consonant scores low, and the gate opens on the frame
+			// the estimate clears rather than the one the word did.
+			VADThreshold: 75,
 
 			InputGainDB:  0,
 			OutputGainDB: 0,
@@ -712,6 +858,14 @@ func Default() Settings {
 			// Measured in the retired docs/voice-chat-todo.md §5 (git history).
 			DeepPLC: true,
 		},
+		// Quality is the level shares ran at before the setting existed, and
+		// the one any machine that can encode at all affords at the sizes the
+		// picker offers.
+		// Lowest latency because a share is usually pointed at, talked over
+		// and reacted to; the buffered mode is for showing rather than telling.
+		Screenshare: Screenshare{EncoderSpeed: ShareSpeedQuality, Latency: ShareLatencyLowest,
+			Codec: ShareCodecAuto, Bandwidth: ShareBandwidthAuto, Keyframes: ShareKeyframesStandard},
+
 		Cache: Cache{
 			ImageDiskMiB:       512,
 			ImageMemoryMiB:     192,
@@ -929,6 +1083,34 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.ScrollSpeed, 1)
 	floor(&s.Behaviour.MemberOverscan, 0)
 
+	// An unknown speed — a hand-edited file, or one written before the setting
+	// existed — is the default rather than an argument the encoder would reject.
+	switch s.Screenshare.EncoderSpeed {
+	case ShareSpeedQuality, ShareSpeedBalanced, ShareSpeedFast:
+	default:
+		s.Screenshare.EncoderSpeed = ShareSpeedQuality
+	}
+	switch s.Screenshare.Latency {
+	case ShareLatencyLowest, ShareLatencyBuffered:
+	default:
+		s.Screenshare.Latency = ShareLatencyLowest
+	}
+	switch s.Screenshare.Codec {
+	case ShareCodecAuto, ShareCodecH264:
+	default:
+		s.Screenshare.Codec = ShareCodecAuto
+	}
+	switch s.Screenshare.Bandwidth {
+	case ShareBandwidthAuto, ShareBandwidthHalf, ShareBandwidthQuarter:
+	default:
+		s.Screenshare.Bandwidth = ShareBandwidthAuto
+	}
+	switch s.Screenshare.Keyframes {
+	case ShareKeyframesFrequent, ShareKeyframesStandard, ShareKeyframesSparse:
+	default:
+		s.Screenshare.Keyframes = ShareKeyframesStandard
+	}
+
 	floor(&s.Notifications.LifetimeSeconds, 1)
 	floor(&s.Notifications.MaxStacked, 1)
 	floor(&s.Notifications.ModalSeconds, 1)
@@ -1100,10 +1282,12 @@ func (s *Settings) clone() *Settings {
 	next.Notifications.SoundFiles = maps.Clone(s.Notifications.SoundFiles)
 	next.Voice.UserGainsDB = maps.Clone(s.Voice.UserGainsDB)
 
-	// A slice rather than a map, and the one here that is trimmed from the front:
+	// Slices rather than maps, and the two here that are trimmed from the front:
 	// slices.Delete shifts in place, which without this would rewrite the elements
-	// a reader is still holding the previous snapshot for.
+	// a reader is still holding the previous snapshot for. WarnedInputs is also
+	// edited element-wise, which is the same hazard reached the other way.
 	next.State.DismissedMentions = slices.Clone(s.State.DismissedMentions)
+	next.State.WarnedInputs = slices.Clone(s.State.WarnedInputs)
 
 	return &next
 }

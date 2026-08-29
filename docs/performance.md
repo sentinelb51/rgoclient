@@ -333,6 +333,110 @@ order of size:
   message was considered and rejected: it buys back microseconds per remount
   and costs held ASTs plus invalidation on every edit.
 
+## What a screenshare costs (2026-08)
+
+Measured on an i7-13700HX. Two things about the send half were worth a number
+rather than an assumption:
+
+- **Windows monitor capture is `ddagrab`, not `gdigrab`, and that is a
+  performance answer as much as a correctness one.** gdigrab is a CPU `BitBlt`
+  of the desktop DC per frame; ddagrab is Desktop Duplication, which hands
+  back a D3D11 surface the GPU already has. The visible symptom that found it
+  was the pointer flickering machine-wide once per captured frame — gdigrab's
+  BitBlt carries `CAPTUREBLT` — but the copy is the cost underneath it. The
+  fallback still exists (ffmpeg under 6.0, or a session with no output to
+  duplicate) and is **probed once per output per run** rather than guessed at;
+  the picker warns when it is what a share will use, so a machine paying for
+  the old path is told rather than left to wonder.
+- **The send encode is capped VBR, not CBR, and that is the largest single
+  saving in the send half.** A screen is idle most of the time, and CBR pays
+  the target rate for a still picture — nvenc pads the difference with filler
+  NALs (type 12). Measured on an RTX 4070 Laptop, 1080p30, 6.22 Mbps target,
+  150 frames, the production argument list: a static screen costs **5.97 Mbps
+  under `-rc cbr` against 0.05 under `-rc vbr`** — 119× — moderate motion 5.97
+  against 1.18, and content that genuinely needs the budget an identical 6.35
+  either way. So the ceiling is unchanged and the peak quality is unchanged;
+  what goes is the padding. Every contract the pipeline depends on survives it:
+  1.0 slices per frame, IDRs exactly at the `-g` interval, SPS/PPS ahead of
+  each, AV1 sequence headers at the same points, and zero filler. `libx264`
+  never had the problem — it pads only under `nal-hrd=cbr`, which nothing here
+  sets. The mode is per encoder (`shareEncoder.rateControl`): `vbr` on NVENC,
+  `vbr_latency`/`vbr_peak` on AMF, `rc_mode VBR` on VAAPI, and on QSV the
+  *inequality* between `-b:v` and `-maxrate`, which is the only thing it reads.
+- **Keyframe interval is nearly free under VBR, so Sparse is four seconds and
+  not eight.** Same rig, 300 frames, moderate motion: 1 s = 1.29 Mbps, 2 s =
+  1.20, 4 s = 1.17, 8 s = 1.17. Eight seconds bought **nothing** over four
+  while doubling how long a joining viewer stares at nothing — the receive half
+  drops frames until a keyframe and a CLI encoder cannot answer a PLI — so the
+  interval nobody pays for is the one that halves the wait. Frequent (1 s)
+  costs about 7% over Standard, which under CBR it could not have, the
+  keyframe there being stolen from the P-frames rather than added.
+- **(Historical: the send encode is H.264 now — hardware where a probe finds
+  NVENC/AMF/QSV/VAAPI willing, libx264 otherwise — and libvpx is retired.
+  The measurement stays as the record of why EncoderSpeed has exactly three
+  levels.)** libvpx's `-cpu-used` is not a dial — it is four steps, and the
+  first twelve values are one of them. Measured at 720p30 on captured desktop
+  pixels panned to force full-frame motion, single thread, 300 frames, output
+  compared by md5: 0 through 12 encode **byte-identical** output (2.95
+  ms/frame, SSIM 0.9992); 13-14 are a second behaviour; 15 is 2.37 ms at
+  0.9959; 16 is 1.72 ms at 0.9688. The client had been passing 8, which is
+  exactly 0. The three levels `config.ShareSpeedQuality/Balanced/Fast` name are
+  8, 15 and 16 — the values that actually differ. On an *idle* desktop every
+  value produces identical output, so the setting only means anything under
+  motion.
+- **GPU-side scaling was tried and rejected: `scale_d3d11` does not work
+  here.** The theory was good — the chain downloads the whole desktop as BGRA
+  (16.4 MB/frame at 2560×1600) before swscale shrinks it, so scaling on the
+  GPU first would cut the readback ~13× and delete a CPU stage. Two things
+  killed it. The win is far smaller than it looks: the *entire* capture +
+  download + scale + convert path measures 0.47-1.15 ms/frame in the real
+  4-thread pipeline against an encoder at ~3.7-5.7 ms/frame, so the ceiling on
+  the saving is under a fifth of the child's CPU, not the 2.7 ms/frame a
+  single-threaded synthetic swscale suggests. And on an RTX 4070 Laptop
+  (driver 537.13) with a current ffmpeg master build, `scale_d3d11` fails to
+  allocate its output texture — `Could not create the texture (80070057)`,
+  `E_INVALIDARG` — for every output format, **including its own documented
+  d3d11va-decode path**, so the filter is unusable here rather than merely
+  unhelpful. It also takes only `width`/`height`/`format`, with no
+  `force_original_aspect_ratio` and no pad, so the fit would have to be
+  computed on our side and padded on the CPU anyway. Revisit only with
+  evidence the filter works on the target machine.
+- **`ShareTee` costs a share with no preview open almost nothing**, and what
+  it does cost is framing, not copying. Passing a synthetic 7.7 MB IVF stream
+  (3000 frames, one 42 KB keyframe per 30, sizes taken off a real 1214×758
+  capture) through a 32 KB buffer:
+
+  | | per 7.7 MB | over a plain read | allocations |
+  |---|---|---|---|
+  | plain read, no tee | 171 µs | — | none |
+  | tee, nothing attached | 213 µs | 42 µs | 240 B |
+  | tee, nothing attached, copying bodies | 318 µs | 147 µs | 90 KB |
+
+  The third row is what it did first, and the second is after **a body nobody
+  is watching is counted past rather than copied**: only the 32-byte file
+  header and each frame's 12-byte header are ever kept when the preview is
+  closed. 3.5× off the overhead, and the 90 KB — one buffer grown to hold the
+  largest keyframe, then held for the life of the share — goes away with it.
+  In real terms the tee costs **~1 µs of CPU per second of sharing** at
+  1.4 Mbps and ~8 µs at 1080p60 and 12 Mbps.
+
+  (The numbers above are the IVF tee's; the H.264 move rewrote it for
+  Annex-B, where framing has to be a byte scan for start codes rather than
+  length hops — the same order of cost, paid per byte instead of per
+  header. The AV1 send brought the IVF walk back beside it, so an AV1 share's
+  tee is the cheap per-header kind again. The skip survived the rewrite: whether an access unit is copied is
+  decided **once, at its first NAL**, and with nothing attached only the
+  parameter sets — a few dozen bytes per GOP — are ever kept, replayed to a
+  preview that attaches mid-share so its decoder can enter at the next IDR.)
+
+  **Bandwidth is zero either way and in both states**: the tee is local, and a
+  preview neither publishes nor subscribes anything. With the preview open the
+  tee adds one clone per frame (~1.7 KB at these sizes); the benchmark cannot
+  put a useful number on that row, because a 45 GB/s producer against one
+  writer goroutine measures the drop path rather than the work. The real cost
+  of watching your own share is the second ffmpeg child decoding it and the
+  paint, which is the receive path's cost, not the tee's.
+
 ## Still needs more than a patch
 
 - **A D3D or Vulkan painter.** `gl.Painter` is a clean, small interface

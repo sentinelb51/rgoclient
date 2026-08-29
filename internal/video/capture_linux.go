@@ -153,7 +153,7 @@ func windowName(conn *xgb.Conn, win xproto.Window, utf8Name, utf8String xproto.A
 // offset, a window is the drawable itself. An occluded window captures
 // whatever X holds for it — garbage without a compositor — which is every X11
 // capturer's limit, stated in the picker rather than fixed here.
-func grabArgs(cfg CaptureConfig) ([]string, error) {
+func grabArgs(_ string, cfg CaptureConfig) (grab, error) {
 	display := os.Getenv("DISPLAY")
 	if display == "" {
 		display = ":0"
@@ -164,21 +164,25 @@ func grabArgs(cfg CaptureConfig) ([]string, error) {
 	switch cfg.Source.Kind {
 	case CaptureWindow:
 		if cfg.Source.ID == "" {
-			return nil, errors.New("video: the window has no id")
+			return grab{}, errors.New("video: the window has no id")
 		}
 
-		return append(args, "-window_id", cfg.Source.ID, "-i", display), nil
+		return grab{args: append(args, "-window_id", cfg.Source.ID, "-i", display)}, nil
 
 	case CaptureMonitor:
 		args = append(args,
 			"-video_size", fmt.Sprintf("%dx%d", cfg.Source.Width, cfg.Source.Height),
 			"-i", fmt.Sprintf("%s+%d,%d", display, cfg.Source.X, cfg.Source.Y))
 
-		return args, nil
+		return grab{args: args}, nil
 	}
 
-	return nil, fmt.Errorf("video: unknown capture kind %d", cfg.Source.Kind)
+	return grab{}, fmt.Errorf("video: unknown capture kind %d", cfg.Source.Kind)
 }
+
+// captureFallback is always false here: x11grab is the only grabber this
+// platform has, so there is nothing to have fallen back *from*.
+func captureFallback(_ string, _ []CaptureSource) bool { return false }
 
 // captureAttrs has nothing to set on Linux; the priority lands in
 // hardenCapture, the process already running.

@@ -1959,24 +1959,45 @@ DAG and conventions.
     under `voice.ShareLane(userID)`; its dial is "Screenshare volume" on the
     participant menu, offered while the store says they are sharing, written
     to the sink and to `config.SetUserGain` under the lane's own key.
+    **This account's own mark is the same tap**, and the one watch a room
+    cannot deliver: LiveKit never sends a publisher their own track back. So
+    `shareView.self` marks it, `startSelfPreview` stands in for
+    `voice.WatchShare` — same window, same `LiveFrames` child, same pump, fed
+    by `sendingShare.tee` — and `releaseShareSource` is the one place that
+    knows which of the two a view has to be let go of. A tap while nothing is
+    being sent is a notice, not a window: the gateway's flag can stand a
+    moment before this side's encoder does.
 
 47. **Sending a screenshare.** The other half of `screenshare.go`, and shorter
     than the watch for one reason: **nothing here reads the stream**. The
     capture child's stdout *is* the published track's source
     (`Call.StartShare` takes an `io.ReadCloser`), so lksdk drains the pipe on
     its own goroutine and there is no pump, no scratch buffer and no UI hop
-    per frame.
+    per frame. What is published is a `video.ShareTee` around that stdout
+    rather than the stream itself, which is what makes a self-preview
+    possible without a second capture; the tee drops frames rather than ever
+    making that drain wait, and `sendingShare.halt` goes through
+    `tee.Close()` so stopping a share also lets go of the preview watching
+    it and refuses one still being launched.
     The way in is the **call island's** share button (`SetSharing`), which is
     live while this machine is sharing, offered otherwise, and greyed where
     `Call.CanShare` says the join token does not grant it — Revolt's `Video`
     permission, read back off the JWT (`voice.tokenAllowsScreen`) rather than
     guessed at from the channel, and never *trusted*: it greys a button, and
     the server still enforces.
+    How hard the encoder works is the one part of a share that is a *setting*
+    rather than a per-share choice: `config.Screenshare.EncoderSpeed` through
+    `captureSpeed` to `video.CaptureSpeed`, filed here for the reason
+    `resolveCores` is — `video` knows what a level costs, and which one somebody
+    asked for is this side's.
     `OnShare` stops a running share and otherwise opens the picker.
     Enumeration talks to the display server — a round trip per window on X11 —
     so it is a worker, and `ui.NewShareDialog` is raised with the answer,
     seeded from `config.State` (what the picker was last told, which is not a
-    setting: no row writes to it). `beginShare` is the **installCall
+    setting: no row writes to it). That same worker asks
+    `videoTools.CaptureFallback`, which is what the picker's note **warns**
+    with where a share would run on a slower grabber than the platform has —
+    the probes behind it being ones the share would have paid for anyway. `beginShare` is the **installCall
     arrangement** again: the encoder's first frame and the publish
     renegotiation both block, so both are off-thread with one hop to install,
     and a share that landed into a call the reader has since left is killed
@@ -1997,12 +2018,42 @@ DAG and conventions.
     tier's numbers are assumed: guessing low costs a few pixels, guessing high
     costs somebody their call.
     **The track is paced by the rate that was asked for**, not by the stream:
-    `ReaderSampleProvider` derives a duration from the IVF timebase and the
-    timestamp delta, and ffmpeg does not write those in agreement for every
-    grabber — x11grab declares 1/fps and steps the timestamps *by* fps, which
-    is a second per frame and publishes at a fifteenth speed.
-    `ReaderTrackWithFrameDuration` overrides it, which is honest because the
-    child's own `fps` filter holds the rate constant.
+    Annex-B carries no timing, so `ReaderSampleProvider` stamps a flat 33 ms
+    per slice. `ReaderTrackWithFrameDuration` overrides it, which is honest
+    because the child's own `fps` filter holds the rate constant — for H.264
+    it is applied per VCL NAL, which is why the encoder is held to one slice
+    per frame (`video`'s side of the contract), and for AV1 per IVF frame,
+    where the contract holds by construction.
+    **The codec is `config.Screenshare.Codec` through `captureCodec`**, one
+    of five dials beside effort and latency: Auto is AV1 where the GPU
+    encodes it — at `shareAV1BitrateScale` of the H.264 bitrate, the gain
+    taken as bandwidth — and a publish the room refuses at AV1 is retried
+    once as H.264 inside `beginShare`'s worker before anything is reported.
+    The last two dials are the slow-uplink pair: Bandwidth scales the
+    automatic bitrate budget inside `shareBitrate` (×1 / ×0.5 / ×0.25), and
+    Keyframes is `shareKeyframeSeconds` (1 / 2 / 8 s) into
+    `CaptureConfig.KeyframeSeconds` — policy here, clamped in `video`.
+    What a feed's bytes are is worn by its window title once it mounts
+    (`shareView.codecTag`): the negotiated codec for a watch, threaded
+    through `voice.ShareOpen`'s name, and codec · encoder for the self
+    preview, off `sendingShare.encoder`.
     Every stop meets in `stopSharing` (the button, `dropCall`, logging out) or
     `onShareStopped` (`voice.ShareStopped` — the encoder died, the captured
     window closed), and both are idempotent through `sendingShare.halt`.
+
+48. **Saying once that the OS is already filtering the microphone.**
+    `checkInputEffects` runs from `installCall`, off the UI thread, and asks
+    `audio.InputEffects` what Windows has switched on for the input this call
+    opened. `stackedEffects` is the policy half: only the three that do the
+    same work as this client's own chain — noise suppression, Voice Focus,
+    automatic gain control — are worth a word, the rest doubling up with
+    nothing here. It **only ever warns**. An effect can report itself
+    unchangeable, and turning off one that is not would reach outside this
+    process for something the reader configured for every app, so the notice
+    carries `OnTap` to the Voice section and lets them decide.
+    Remembered by **device and effect set together** (`config.WarnedInputs`),
+    never by device alone: an ID does not survive a re-plug — which is why the
+    name is the key — and switching Voice Focus on afterwards is a situation
+    nothing has answered for yet. The device is named only once there is
+    something to say, an enumeration being too much to spend on every join for
+    a sentence that will not be shown.

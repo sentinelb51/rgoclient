@@ -1,6 +1,6 @@
 # rgoclient
 
-A Fyne v2.8.0 desktop chat client (Discord-like) for Revolt, in Go 1.26.4. Uses
+A Fyne v2.8.0 desktop chat client (Discord-like) for Revolt, in Go 1.27. Uses
 `github.com/sentinelb51/revoltgo` for the REST API and gateway websocket.
 
 ## Sources of truth
@@ -55,7 +55,9 @@ page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 `video` crosses the same seam the way `cpu` does: it drives an ffmpeg child and
 answers with pixels and PCM at sizes the caller chose, knowing nothing of
 Revolt, Fyne or the mixer. It also points that child the other way — the screen
-into VP8 — and lists what this machine can capture, which reaches the picker as
+into AV1 or H.264, on the GPU where a probe finds an encoder willing (AV1
+hardware or nothing, H.264 down to libx264) — and lists
+what this machine can capture, which reaches the picker as
 `ui.ShareSource` the way a device list reaches the settings page.
 `ui`'s `VideoCard` never imports it — every decision a card needs is an
 `OnVideo*` action — so `app` is the only package importing both, and
@@ -210,6 +212,14 @@ internal/
                          release whose model ships in-tree; symbols rnn_-prefixed
                          so it coexists with gopus's libopus), device.go
                          (enumeration and the process's one miniaudio context),
+                         effects.go + effects_{windows,other}.go (what the OS is
+                         already doing to a microphone before this client's chain
+                         sees it — on Windows 11 the IAudioEffectsManager list,
+                         which is a stream's rather than an endpoint's and so
+                         costs a client opened and never started; every other
+                         platform answers an error rather than an empty list,
+                         nothing applied and nothing asked being different
+                         answers),
                          decode.go (WAV + MP3 -> the device's format),
                          synth.go (the built-in sounds, rendered rather than shipped —
                          a keystroke being a list of impacts through resonators
@@ -282,10 +292,20 @@ internal/
                          each self-tested once and falling back to a plain child
                          under limits), capture.go + capture_{linux,windows,other}.go
                          (the other direction: what this machine can share, and the
-                         one child that grabs, scales and encodes it to VP8/IVF.
-                         Contained rather than sandboxed — the strict profile
+                         one child that grabs, scales and encodes it — AV1 in IVF
+                         where the GPU offers an encoder, H.264 Annex-B otherwise;
+                         NVENC/AMF/QSV/VAAPI probed once per run per family,
+                         libx264 the H.264 floor and AV1 hardware-only. Contained rather than sandboxed — the strict profile
                          severs the display capture needs, and the input is this
-                         machine's own screen). See docs/video-player.md for the
+                         machine's own screen. Also ShareTee, which splits that
+                         child's stdout so this end can watch what it sends: the
+                         publisher's every byte, and a copy of each whole frame
+                         that is *dropped* rather than queued, a preview never
+                         being allowed to stall the share). capture_windows.go
+                         additionally holds why a monitor is ddagrab and not
+                         gdigrab — whose BitBlt flickers the machine's own mouse
+                         pointer — and the DXGI walk saying which output a
+                         monitor is. See docs/video-player.md for the
                          threat model that shaped the receiving half
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
@@ -379,7 +399,10 @@ package's own `CLAUDE.md`; this is the map:
   OS is handed. See `internal/app/CLAUDE.md` item 45 and
   `docs/video-player.md`.
 - `app/screenshare.go` — both halves of a screenshare. Watching: the one watch,
-  its window, the arrival-paced frame pump. Sending: the picker, the box the
+  its window, the arrival-paced frame pump — and the one watch no room can
+  deliver, this end's own stream, which is that same window and pump fed by the
+  encoder's tee, LiveKit never sending a publisher their own track back.
+  Sending: the picker, the box the
   encoder is started at — which the instance's publish limits *bound*, being a
   disconnection rather than a refusal — and every teardown on both sides. See
   `internal/app/CLAUDE.md` item 46 and `docs/screenshare-todo.md`.
@@ -625,6 +648,13 @@ package's own `CLAUDE.md`; this is the map:
 - Colours and sizes come from `ui/theme`, never hardcoded. Don't express one
   size as an offset from an unrelated one — add a named entry, which makes it
   configurable the same day: the settings page reaches the table by reflection.
+- **Performance is a design input, not a tuning pass.** Before settling a
+  codec, format, library or pipeline, name the hardware path for it — what
+  silicon or OS machinery can carry the steady-state cost, and what the
+  fallback costs — and let that veto the convenient choice. The send half
+  shipped VP8 because it was the pipe lksdk ate most directly, and no GPU on
+  earth encodes VP8; H.264 was the fix and the redesign cost more than the
+  check would have. `docs/performance.md` is where the numbers land.
 - A tunable the user should be able to change is a field on `config.Settings`
   read at its use site, not a `const`. Everything else stays a `const` — the
   settings page is not a dumping ground for every number in the client.

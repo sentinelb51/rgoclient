@@ -964,7 +964,9 @@ naming and the test policy.
   answers a tap (`shareWatchTap` → `Actions.OnWatchShare`, in `VoiceShareLive`
   so a target reads apart from the grey marks): a `tapBase` widget on purpose —
   not Hoverable, so the row keeps its hover, the pointer cursor being the whole
-  affordance. Each is the glyph **and the gap after
+  affordance. It is built for **every** participant including this account,
+  whose own tap opens a preview of what is being sent; the widget knows nothing
+  of that, the controller deciding what a mark means. Each is the glyph **and the gap after
   it** in one container, hidden together: an HBox skips an invisible child when it
   measures, but a spacer beside a hidden mark is not itself hidden, and three of
   those are dead width at the end of every row that holds nothing. `SetMarks`

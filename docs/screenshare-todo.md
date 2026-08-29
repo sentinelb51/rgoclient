@@ -17,9 +17,17 @@ Stoat's voice is LiveKit, and a screenshare is just a **video track in the room
 the call already holds** — no new signalling, no new route. Both directions are
 the video player's architecture pointed at a live stream:
 
-- **Sending** is one ffmpeg child that captures, scales and encodes in a single
-  pass, writing an IVF (VP8) or Annex-B (H.264) byte stream to stdout, which
-  lksdk packetises and publishes (`NewLocalReaderTrack` takes exactly that).
+- **Sending** is one ffmpeg child that captures, scales and encodes in a
+  single pass, writing to stdout what lksdk packetises and publishes
+  (`NewLocalReaderTrack` takes exactly that): AV1 in IVF where the GPU
+  encodes it — probed per family, hardware or nothing, no CPU holding a live
+  AV1 encode — and H.264 as bare Annex-B otherwise, hardware where the
+  machine has any (NVENC, AMF, QSV or VAAPI, probed once per run with a test
+  encode) and libx264 at the last. H.264 as the floor *because* of that: no
+  VP8 encoder exists in silicon on any GPU. AV1 ships the same picture at
+  ~0.7× the bitrate (`app.shareAV1BitrateScale`), the gain taken as
+  bandwidth; a room that refuses the AV1 publish is retried as H.264, and
+  `config.Screenshare.Codec` forces H.264 for viewers that cannot take AV1.
 - **Receiving** is lksdk handing back encoded frames, remuxed to the same byte
   stream and fed to a **sandboxed** ffmpeg child on stdin, which answers RGBA
   at the size the view chose — the video player's exact-byte contract, live.
@@ -40,9 +48,11 @@ module's.
 - **`NewLocalReaderTrack(io.ReadCloser, mime)` eats an encoder child's stdout
   verbatim** (`readersampleprovider.go:226`): Annex-B for H.264/H.265, IVF for
   VP8/VP9/AV1 — `NewLocalFileTrack` sniffs the codec from the IVF header's
-  FourCC. **IVF frames are paced by the IVF timebase** (`:482`), so a VP8 child
-  carries its own clock; **Annex-B has no timestamps** and defaults to a fixed
-  33 ms per frame, so H.264 needs `ReaderTrackWithFrameDuration(time.Second/fps)`.
+  FourCC. **Annex-B has no timestamps** and defaults to a fixed 33 ms per
+  frame, so H.264 needs `ReaderTrackWithFrameDuration(time.Second/fps)` — and
+  the duration is applied **per VCL NAL**, so the encoder must emit one slice
+  per frame (x264's zerolatency tune does not until sliced-threads=0 unwinds
+  it; hardware encoders default to one).
 - **`PublishTrack` takes the source**: `TrackPublicationOptions{Source:
   livekit.TrackSource_SCREEN_SHARE, VideoWidth, VideoHeight}`, and
   `TrackSource_SCREEN_SHARE_AUDIO` exists for the sound half — a second,
@@ -108,7 +118,10 @@ designed; what stands, and what is still open on this side:
 
 - **Watch**: the row's live mark (`ui.shareWatchTap`, drawn from the
   gateway's `Screensharing` flag) → `App.OnWatchShare` →
-  `Call.WatchShare(userID, open)`. voice subscribes the share's video and
+  `Call.WatchShare(userID, open)`. This account's own mark is the same tap
+  and lands on `startSelfPreview` instead — the same window, child and pump,
+  fed by the tee — so the one-watch rule covers both and watching somebody
+  else replaces the preview. voice subscribes the share's video and
   audio publications, and when the track lands runs `open(codec, w, h)` on
   its own goroutine — the app launches the decoder and answers with its
   stdin. The seam stayed structural: `open` answers an `io.WriteCloser`, and
@@ -138,8 +151,10 @@ designed; what stands, and what is still open on this side:
   ("Screenshare volume"), persisted under the same map as the user gains.
 - Still open on receive: a **watch resolution option** (today the sender's
   declared size capped at 1080p; relaunch-on-resize wants a voice-side
-  re-open seam); `SetVideoQuality` once a simulcast sender exists; **AV1**
-  (OBU remux unbuilt — refused with the codec named); VP9 keyframe *gating*
+  re-open seam); `SetVideoQuality` once a simulcast sender exists (AV1 is
+  received now — pion's `AV1Depacketizer` emits the low-overhead bitstream,
+  which is exactly an IVF frame, so it rides the ivfMux as `AV01` gated on a
+  sequence-header unit); VP9 keyframe *gating*
   (unparsed; the decoder skips to one at the cost of a logged complaint); and
   the backpressure edge: a consumer slower than the stream backs up into
   pion's receive buffer and drops until the next PLI — self-limiting, not yet
@@ -168,10 +183,61 @@ what stands, and what the build turned up:
   precedent, skipping cloaked, minimised, tool-window and untitled handles.
   The callbacks are built **once** at package level: `syscall.NewCallback`
   slots are never freed and the process's allowance is small.
-- **One child does everything**: grab → `fps` → scale+pad → libvpx realtime →
-  IVF on stdout, which is exactly what `NewLocalReaderTrack` eats. The pad
-  half of the filter keeps the declared size true through a window resized
+- **One child does everything**: grab → `fps` → scale+pad → encode → IVF or
+  Annex-B on stdout, which is exactly what `NewLocalReaderTrack` eats. The pad half
+  of the filter keeps the declared size true through a window resized
   mid-share.
+- **A Windows monitor is grabbed with `ddagrab`, not `gdigrab`**, and this is
+  a fix rather than a preference. gdigrab's `BitBlt` carries `CAPTUREBLT`,
+  which redraws the mouse pointer once per captured frame — *on the machine*,
+  for everybody at it, not only inside the stream. Measured here: no flicker
+  with ddagrab at 5 fps, obvious flicker with gdigrab at the same rate, and at
+  60 fps it beats against the panel's refresh into a slow blink instead of
+  disappearing. ddagrab is a **filter source**, not an input device, so the
+  grab seam answers with either args or a filter (`video.grab`) and the child
+  gets `-filter_complex` instead of `-vf`.
+  Two things it needs and gdigrab did not: a D3D11 device
+  (`-init_hw_device d3d11va:<adapter>`) and `hwdownload,format=bgra` to bring
+  the surfaces where `scale` can reach them. `output_idx` counts within *one*
+  adapter, so both numbers are needed — which is what `dxgiOutputs` is for: a
+  hand-rolled COM walk of `IDXGIFactory`→adapters→outputs, keyed by the
+  `HMONITOR` each output reports, which is the one key `EnumDisplayMonitors`
+  also hands out. Matching on that rather than trusting two enumerations to
+  agree in order is the whole point. **`IID_IDXGIFactory1` is not
+  `770aae78-…`** whatever the memory says — `CreateDXGIFactory1` answers
+  `E_NOINTERFACE` for it; the plain `IID_IDXGIFactory` (`7b7166ec-…`) through
+  `CreateDXGIFactory` works and carries `EnumAdapters` at the same slot.
+  Availability is **probed**, once per *address* per run, by grabbing a single
+  frame to `null`: ffmpeg predating the filter and a session with no output to
+  duplicate (RDP) both answer no, and both fall back to gdigrab. The key is the
+  address alone — a key carrying the frame rate re-probes the same output once
+  per rate, which it did until it was caught. Probing costs a few hundred ms on
+  the worker enumerating for the picker, where finding out at the first frame
+  would cost a live track that publishes nothing. `Tools.CaptureFallback` asks
+  the same probes about the whole enumerated set, which is what lets the picker
+  **warn** that a share will run on the slower path — the one limit here that
+  can be fixed from outside the client. `docs/performance.md` carries why the
+  path matters beyond the flicker. **Windows still have no non-flickering grabber** — WGC is WinRT
+  with no ffmpeg input — so the picker says so.
+- **Self-preview is a tee, not a subscription.** LiveKit never sends a
+  publisher their own track back, so the bytes only exist twice if this side
+  makes them: `video.ShareTee` wraps the capture child's stdout, hands the
+  publisher every byte unchanged, and offers a copy of each whole frame to
+  whatever is watching locally. It is **lossy on purpose** — the publisher's
+  `Read` must never wait on a preview, or a decoder stalled behind a blocked
+  UI thread (dragging a window is enough on Windows) would stall the share
+  everybody else is watching — so a frame the preview is behind on is dropped.
+  Dropping is safe because every access unit opens with its own start code: a
+  gap costs the decoder its prediction until the next IDR, never the framing.
+  The tee parses whether or not anybody is attached — Annex-B has no lengths
+  to hop by, so framing is a scan for start codes — and a preview opened
+  mid-share is handed the latest SPS/PPS first, then gated to the next IDR,
+  so the decoder is not handed a mid-GOP stream to complain about. It
+  **parses without copying** where nothing is attached: whether an access
+  unit is kept is decided once, at its first NAL, and only the parameter
+  sets are ever copied for nobody. See `docs/performance.md` for what that
+  is worth. `Attach` after `Close` is
+  refused rather than left waiting on frames that can no longer come.
 - **The child is contained, not sandboxed.** The strict profile forbids what
   capture *is* — bwrap's `--unshare-all` severs the X11 socket, the Windows
   low-integrity token cannot BitBlt another program's window — and the input
@@ -209,12 +275,11 @@ what stands, and what the build turned up:
   `ShareStopped`), `dropCall`, and logging out.
 - Still open on send: **share audio** (a second Opus track from a WASAPI
   loopback or a Pulse monitor), **the bitrate override** (auto is 0.1 bit per
-  pixel per frame and there is no row to change it), **hardware encoders**
-  (probe `ffmpeg -encoders`, prefer nvenc/qsv/amf), **self-preview** (tee the
-  encoder's stdout into the receive path's own decoder), **ddagrab** on
-  Windows, **macOS** (avfoundation screens plus the consent prompt), and
-  **Wayland**, which has no grabber in stock ffmpeg — the portal is its own
-  project, so a machine with no X says so in the picker and offers nothing.
+  pixel per frame and there is no row to change it), **Windows window capture
+  without the pointer flicker** (WGC, which is WinRT and has no ffmpeg input),
+  **macOS** (avfoundation screens plus the consent prompt), and **Wayland**,
+  which has no grabber in stock ffmpeg — the portal is its own project, so a
+  machine with no X says so in the picker and offers nothing.
 
 ## Options (the Discord-parity surface)
 
@@ -235,7 +300,9 @@ plan.
 | Framerate | 5 / 15 / 30 / 60 | grabber `-framerate` (+`fps` filter where the grabber rounds) |
 | Quality | Auto / bitrate override | `-b:v/-maxrate/-bufsize`; auto ≈ 0.1 bit per pixel per frame (720p30 ≈ 2.5 Mbps, 1080p30 ≈ 4.5, 1080p60 ≈ 8) |
 | Audio | on / off | the loopback capture + second track; greyed on macOS |
-| Codec | Auto / VP8 / H.264 | Auto = hw H.264 where probed, else VP8 (advanced row) |
+| Codec | Auto (AV1 where the GPU encodes it) / H.264 | AV1 hardware-only, ~0.7× the bitrate for the same picture; H.264 the floor, libx264 at the last; VP8/VP9 remain receive-only, for senders that are browsers |
+| Bandwidth | Auto / Half / Quarter | a scale on the automatic bitrate budget, the slow-uplink dial |
+| Keyframes | Frequent (1 s) / Standard (2 s) / Sparse (8 s) | `-g`; the whole loss-recovery story — a CLI encoder cannot answer a PLI, so the interval is both the join wait and the smear after loss |
 
 Receive-side options are the view's: which share is watched (one at a time
 first — one decoder child, the one-playback rule), and the watch resolution,
@@ -253,8 +320,13 @@ which is the decoder's W×H and free to differ from the sender's.
 4. **Options still owed**: the bitrate override, audio share (WASAPI
    loopback, pulse monitor) — and the receive-side watch resolution beside
    them.
-5. **Polish**: self-preview tee, hw-encoder probe, ddagrab, macOS screens, the
-   Wayland portal investigation.
+5. **Polish**: ~~self-preview tee~~ **done**; ~~ddagrab~~ **done**;
+   ~~hw-encoder probe~~ **done** (and the codec moved to H.264 outright — the
+   probe order, flags and the one-slice contract live in
+   `video/capture.go`); ~~AV1~~ **done**, both directions (hardware-only
+   send at a bitrate discount, IVF through the same tee and reader track;
+   receive through pion's depacketizer into the ivfMux). Left: macOS screens,
+   the Wayland portal investigation, and Windows window capture through WGC.
 
 ## Carried from the voice queue
 

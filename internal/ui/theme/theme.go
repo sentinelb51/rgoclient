@@ -1251,7 +1251,6 @@ var Sizes = struct {
 	ShareSourceListHeight float32
 	ShareSourceRowHeight  float32
 	ShareSourceGap        float32
-	ShareSourceGlyph      float32
 
 	/* The message islands: pins, mentions and channel search */
 
@@ -1863,7 +1862,6 @@ var Sizes = struct {
 	ShareSourceListHeight: 232,
 	ShareSourceRowHeight:  46,
 	ShareSourceGap:        4,
-	ShareSourceGlyph:      16,
 
 	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
 	// narrower and the heading shortens a name to fit a date beside it.

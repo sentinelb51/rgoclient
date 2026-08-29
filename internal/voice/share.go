@@ -56,11 +56,12 @@ const (
 
 // ShareOpen is the watcher's half of a watch: called once, from the call's
 // own goroutine, when the share's track has actually arrived and its codec
-// is known. width and height are what the sender declared, zero where they
-// declared nothing. It answers with where the muxed bytes go — that writer
-// closing is how the watcher's decoder learns the stream ended — or an
-// error, which abandons the watch.
-type ShareOpen func(codec ShareCodec, width, height int) (io.WriteCloser, error)
+// is known. codec is the demuxer to force and name the codec as a reader
+// would say it ("AV1"), which is all a window title wants. width and height
+// are what the sender declared, zero where they declared nothing. It answers
+// with where the muxed bytes go — that writer closing is how the watcher's
+// decoder learns the stream ended — or an error, which abandons the watch.
+type ShareOpen func(codec ShareCodec, name string, width, height int) (io.WriteCloser, error)
 
 // ErrNoShare answers a watch of somebody who is not screensharing here: the
 // mark that was tapped was drawn from the gateway's voice state, and the
@@ -372,14 +373,14 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 
 	width, height := shareDimensions(pub)
 
-	codec, mux, depacketizer, ok := shareCodec(track, width, height)
+	codec, name, mux, depacketizer, ok := shareCodec(track, width, height)
 	if !ok {
 		c.endShareWatch(userID, w,
 			fmt.Errorf("the share is %s, which this client cannot take yet", track.Codec().MimeType))
 		return
 	}
 
-	out, err := w.open(codec, width, height)
+	out, err := w.open(codec, name, width, height)
 	if err != nil {
 		c.endShareWatch(userID, w, err)
 		return
@@ -469,20 +470,25 @@ func shareDimensions(pub *lksdk.RemoteTrackPublication) (int, int) {
 }
 
 // shareCodec maps the negotiated mime onto the container the decoder will be
-// told and the depacketizer that reassembles it. Not ok is a codec this
-// client cannot remux — AV1, until somebody builds its OBU handling.
-func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, shareMux, rtp.Depacketizer, bool) {
+// told, the codec's reader-facing name and the depacketizer that reassembles
+// it. AV1 rides the IVF muxer like the VP codecs: the depacketizer emits
+// temporal units in the low-overhead bitstream, which is exactly what an IVF
+// frame holds. Not ok is a codec this client cannot remux — H.265, should a
+// browser ever send one.
+func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, string, shareMux, rtp.Depacketizer, bool) {
 	mime := track.Codec().MimeType
 	switch {
 	case strings.EqualFold(mime, webrtc.MimeTypeVP8):
-		return ShareIVF, newIVFMux("VP80", width, height), &codecs.VP8Packet{}, true
+		return ShareIVF, "VP8", newIVFMux("VP80", width, height), &codecs.VP8Packet{}, true
 	case strings.EqualFold(mime, webrtc.MimeTypeVP9):
-		return ShareIVF, newIVFMux("VP90", width, height), &codecs.VP9Packet{}, true
+		return ShareIVF, "VP9", newIVFMux("VP90", width, height), &codecs.VP9Packet{}, true
+	case strings.EqualFold(mime, webrtc.MimeTypeAV1):
+		return ShareIVF, "AV1", newIVFMux("AV01", width, height), &codecs.AV1Depacketizer{}, true
 	case strings.EqualFold(mime, webrtc.MimeTypeH264):
-		return ShareH264, &annexBMux{}, &codecs.H264Packet{}, true
+		return ShareH264, "H.264", &annexBMux{}, &codecs.H264Packet{}, true
 	}
 
-	return "", nil, nil, false
+	return "", "", nil, nil, false
 }
 
 /* Muxing */
@@ -532,10 +538,16 @@ func newIVFMux(fourCC string, width, height int) *ivfMux {
 
 func (m *ivfMux) write(out io.Writer, sample *media.Sample) error {
 	if !m.started {
-		// VP8 says whether a frame is a keyframe in its first bit; VP9's
-		// header is not worth parsing here, and a decoder skips what it
-		// cannot enter at the cost of a logged complaint.
+		// VP8 says whether a frame is a keyframe in its first bit, and an
+		// AV1 keyframe is entered at its sequence header — which the RTP
+		// spec makes a new coded video sequence carry, so the unit the PLI
+		// demands is recognisable. VP9's header is not worth parsing here,
+		// and a decoder skips what it cannot enter at the cost of a logged
+		// complaint.
 		if m.fourCC == "VP80" && !vp8KeyframeStarts(sample.Data) {
+			return nil
+		}
+		if m.fourCC == "AV01" && !av1SequenceHeaderIn(sample.Data) {
 			return nil
 		}
 		if err := m.writeHeader(out); err != nil {
@@ -587,6 +599,46 @@ func vp8KeyframeStarts(frame []byte) bool {
 	return len(frame) > 0 && frame[0]&0x01 == 0
 }
 
+// av1SequenceHeaderIn hops a temporal unit's OBUs asking for a sequence
+// header — the OBU a decoder cannot enter the stream without. The
+// depacketizer writes a size field onto every OBU it emits, so the walk can
+// always hop.
+func av1SequenceHeaderIn(unit []byte) bool {
+	for i := 0; i < len(unit); {
+		header := unit[i]
+		if header&0x80 != 0 {
+			return false // the forbidden bit; this is not an OBU
+		}
+		if (header>>3)&0xF == 1 {
+			return true
+		}
+		i++
+		if header&0x04 != 0 {
+			i++ // the extension byte
+		}
+		if header&0x02 == 0 {
+			return false // no size field, so nothing to hop by
+		}
+
+		size, shift := 0, 0
+		for {
+			if i >= len(unit) || shift > 28 {
+				return false
+			}
+			c := unit[i]
+			i++
+			size |= int(c&0x7F) << shift
+			shift += 7
+			if c&0x80 == 0 {
+				break
+			}
+		}
+		i += size
+	}
+
+	return false
+}
+
 // h264KeyframeStarts scans the Annex-B units for an IDR slice or an SPS. An
 // SPS counts because encoders that send parameter sets in a sample of their
 // own put them just ahead of the IDR — a stream entered at the IDR alone
@@ -625,6 +677,32 @@ func clampUint16(v int) uint16 {
 
 /* Sending */
 
+// ShareSendCodec names what an outbound share's bytes are, which is what the
+// track is published as: H.264 as bare Annex-B, or AV1 in IVF — the two
+// shapes lksdk's reader track eats directly.
+type ShareSendCodec string
+
+const (
+	SendShareH264 ShareSendCodec = "h264"
+	SendShareAV1  ShareSendCodec = "av1"
+)
+
+// mime is the codec as the room negotiates it.
+func (c ShareSendCodec) mime() string {
+	if c == SendShareAV1 {
+		return webrtc.MimeTypeAV1
+	}
+
+	return webrtc.MimeTypeH264
+}
+
+// ErrShareRefused is the room turning a share away at the publish — the one
+// failure a caller can do something about, a codec the instance's LiveKit will
+// not negotiate being retryable at another. Every other refusal here is about
+// this end (no stream, no call, no permission) and retrying it is one more
+// encoder started for the same answer.
+var ErrShareRefused = errors.New("the room refused the share")
+
 // ShareStopped reports this end's own share ending on its own terms rather
 // than the caller's: the byte stream feeding the track hit EOF or broke — the
 // captured window closed, the encoder died. Nothing follows StopShare or the
@@ -652,21 +730,24 @@ type outboundShare struct {
 // the button before a refused AddTrack has to say it.
 func (c *Call) CanShare() bool { return c.canShare }
 
-// StartShare publishes a screenshare: VP8 in IVF read from src — an encoder's
-// stdout — declared to the room at width×height, which every viewer sizes a
-// window by and the server enforces its limits against. It blocks for the
-// publish negotiation, so it belongs on a worker. One share at a time; the
-// source is closed by whatever ends it.
+// StartShare publishes a screenshare: codec's bytes read from src — an
+// encoder's stdout — declared to the room at width×height, which every
+// viewer sizes a window by and the server enforces its limits against. It
+// blocks for the publish negotiation, so it belongs on a worker. One share
+// at a time; the source is closed by whatever ends it.
 //
 // fps is what the track is *paced* by, and it is asked for rather than read
-// off the stream on purpose. lksdk derives a sample's duration from the IVF
-// timebase and the timestamp delta, and ffmpeg does not write those two in
-// agreement for every grabber: x11grab declares 1/fps and then steps the
-// timestamps by fps, which comes out as a second per frame and publishes the
-// share at a fifteenth of its speed. The capture child is held to a constant
-// rate by its own fps filter, so the duration is a number this side already
-// knows — ReaderTrackWithFrameDuration overrides that arithmetic with it.
-func (c *Call) StartShare(src io.ReadCloser, width, height, fps int) error {
+// off the stream because Annex-B carries no timing at all: lksdk stamps a
+// flat 33 ms on every slice regardless of the real rate. The capture child
+// is held to a constant rate by its own fps filter, so the duration is a
+// number this side already knows — ReaderTrackWithFrameDuration overrides
+// the stamp with it. For H.264 it is applied per VCL NAL, which is why the
+// encoder's side of the contract is one slice per frame (video's args say so
+// too): a sliced encode would sleep once per slice and publish at a fraction
+// of its speed. For AV1 the sample is the IVF frame — one temporal unit —
+// so the contract holds by construction, and the IVF timestamps the encoder
+// wrote are overridden the same way.
+func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height, fps int) error {
 	if src == nil {
 		return errors.New("no stream to publish")
 	}
@@ -698,7 +779,7 @@ func (c *Call) StartShare(src io.ReadCloser, width, height, fps int) error {
 		c.mu.Unlock()
 	}
 
-	track, err := lksdk.NewLocalReaderTrack(src, webrtc.MimeTypeVP8,
+	track, err := lksdk.NewLocalReaderTrack(src, codec.mime(),
 		lksdk.ReaderTrackWithFrameDuration(time.Second/time.Duration(fps)),
 		lksdk.ReaderTrackWithOnWriteComplete(func() { c.settleShareSend(out) }))
 	if err != nil {
@@ -714,7 +795,7 @@ func (c *Call) StartShare(src io.ReadCloser, width, height, fps int) error {
 	})
 	if err != nil {
 		release()
-		return fmt.Errorf("publish the share: %w", err)
+		return fmt.Errorf("publish the share: %w: %w", ErrShareRefused, err)
 	}
 
 	c.mu.Lock()

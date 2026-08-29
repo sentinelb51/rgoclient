@@ -31,6 +31,7 @@ const (
 	SectionBehaviour
 	SectionNotifications
 	SectionVoice
+	SectionScreenshare
 	SectionCache
 	SectionPerformance
 	SectionUpdates
@@ -46,6 +47,7 @@ var railEntries = []railEntry{
 	{int(SectionBehaviour), "Behaviour", assets.BehaviourIcon},
 	{int(SectionNotifications), "Notifications", assets.NotifyIcon},
 	{int(SectionVoice), "Voice", assets.MicIcon},
+	{int(SectionScreenshare), "Screenshare", assets.ScreenshareIcon},
 	{int(SectionCache), "Cache", assets.CacheIcon},
 	{int(SectionPerformance), "Performance", assets.PerformanceIcon},
 	{int(SectionUpdates), "Updates", assets.UpdatesIcon},
@@ -622,6 +624,8 @@ func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 		return p.notificationsSection()
 	case SectionVoice:
 		return p.voiceSection()
+	case SectionScreenshare:
+		return p.screenshareSection()
 	case SectionCache:
 		return p.cacheSection()
 	case SectionPerformance:

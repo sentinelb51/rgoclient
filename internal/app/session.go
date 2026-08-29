@@ -31,13 +31,6 @@ const sessionsFile = ".rgoclient_sessions.json"
 // in..." forever, the one failure that looks like a hang rather than an error.
 const readyTimeout = 20 * time.Second
 
-// loginMargin is the gutter around the card on the screens before Ready. Neither
-// dimension is a number here: the card names its own width (ui.NewAuthCard) and
-// what it measures is what the window is resized to, the saved-login list being
-// as long as it is — a fixed height is a gap under one screen and a scrollbar on
-// the other.
-const loginMargin = 24
-
 // registerURL is Stoat's signup page. Registration cannot happen in the client:
 // POST /auth/account/create takes an hCaptcha token, which needs a browser to
 // solve, and the verification code arrives by email either way.
@@ -277,8 +270,7 @@ func (a *App) showLogin() {
 // The order is load-bearing twice over: a container reports a minimum only once
 // it holds something, and canvas focus is a property of the tree that is up.
 func (a *App) mountLogin(card fyne.CanvasObject, focus fyne.Focusable) {
-	framed := ui.NewInset(container.NewCenter(card), loginMargin, loginMargin, loginMargin, loginMargin)
-	content := container.NewStack(framed, a.modal.Layer)
+	content := container.NewStack(container.NewCenter(card), a.modal.Layer)
 
 	a.window.SetContent(content)
 

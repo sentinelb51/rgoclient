@@ -337,12 +337,6 @@ func newShareSourceRow(source ShareSource, onPick func(string)) *shareSourceRow 
 	}
 	w.onTap = func() { onPick(source.ID) }
 
-	icon := assets.ScreenshareIcon
-	if source.Kind == ShareWindow {
-		icon = assets.EmptyChannelIcon
-	}
-	glyph := newScaledIcon(tintedIcon(icon, theme.Colors.TimestampText), theme.Sizes.ShareSourceGlyph)
-
 	title := newText(source.Title, theme.Colors.TextPrimary, 0)
 	size := newText(fmt.Sprintf("%d × %d", source.Width, source.Height),
 		theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
@@ -351,9 +345,7 @@ func newShareSourceRow(source ShareSource, onPick func(string)) *shareSourceRow 
 	gap := theme.Sizes.FriendsGap
 	padV, padH := theme.Sizes.FriendsCardPaddingV, theme.Sizes.FriendsCardPaddingH
 
-	row := NewFillRow(2,
-		container.NewCenter(glyph),
-		HorizontalSpacer(gap),
+	row := NewFillRow(0,
 		vcenter(lines),
 		HorizontalSpacer(gap),
 		vcenter(w.mark),

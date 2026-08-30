@@ -308,10 +308,10 @@ frames a second, after the tenth patch:
 
 Scroll frames never promote to a full repaint at this window size — the message
 column is under the 80% coverage threshold — and the worst draw (~20 ms spikes)
-is glyph-run texture upload for rows newly scrolled into the overscan, not draw
-calls. Idle with a quiet channel on screen is ~0.4% of one core, and that is
-the gateway plus the 100 ms `idleWait` wakeups, not painting. What remains, in
-order of size:
+is the glyph runs of rows newly scrolled into the overscan, not draw calls.
+Idle with a quiet channel on screen is ~0.4% of one core, and that is the
+gateway plus the 100 ms `idleWait` wakeups, not painting. What remains, in order
+of size:
 
 - **The prep walk is the frame's biggest CPU phase** and is structural:
   `obj.MinSize()` per mounted object goes through a renderer cache lookup each.
@@ -322,6 +322,34 @@ order of size:
   a normal build `logGLError` compiles to an empty function and the calls cost
   nothing. The earlier claim here that gating it was "the cheap third" was
   wrong.
+- **The overscan spike is rasterisation, not upload, and asynchronous upload
+  is therefore a false lever.** This document used to say the spike was glyph-run
+  texture *upload*; it is not. `newGlTextTexture` does two things, and measured
+  in the fork (2026-08, i7-13700HX, a 79-character line at 14pt into a 700×20
+  RGBA, `internal/painter`):
+
+  | | cost | allocations |
+  |---|---|---|
+  | shaping alone (`MeasureString`) | 24 µs | 122 |
+  | shaping + rasterisation (`DrawString`) | 282 µs | 482 |
+  | the `image.NewRGBA` under it | 4.5 µs | 2 |
+
+  So **rasterisation is ~258 µs of the 282**, and the `TexImage2D` it feeds is
+  56 KB — single-digit microseconds. A PBO or a shared-context upload worker
+  would attack about 5% of the phase. A ~20 ms spike is ~70 of these.
+
+  Two costs are inside it, both in `go-text/render` rather than in Fyne.
+  `DrawShapedRunAt` builds a `rasterx` scanner and filler **per call**, sized to
+  the whole destination, which measures as ~6 ns per destination pixel: 700×20
+  costs 294 µs, 1400×20 costs 377 and 700×60 costs 463, for the same 79 glyphs.
+  The rest is ~2.7 µs per glyph outline, rasterised from segments every time —
+  there is no glyph cache anywhere in the path. **A glyph mask atlas is the
+  lever**, and it is a real project: per-glyph masks keyed by face, size and
+  subpixel phase, composited with `draw.DrawMask`, falling back to the current
+  path for bitmap and SVG glyphs. It lives in the fork's `internal/painter`, and
+  the shaper it would sit beside (`painter.shaper`, one package-level
+  `HarfbuzzShaper`) is not safe for concurrent use, so doing it on a worker
+  instead needs a pool first. Unbuilt.
 - **Batching/instancing** — one VBO, every rect in one instanced draw — is the
   "upgrade OpenGL" that would pay next (instancing needs 3.3+). A painter
   rewrite; at ~400 µs of draw per scroll frame it is not where the frame goes,
@@ -338,16 +366,28 @@ order of size:
 Measured on an i7-13700HX. Two things about the send half were worth a number
 rather than an assumption:
 
-- **Windows monitor capture is `ddagrab`, not `gdigrab`, and that is a
-  performance answer as much as a correctness one.** gdigrab is a CPU `BitBlt`
-  of the desktop DC per frame; ddagrab is Desktop Duplication, which hands
-  back a D3D11 surface the GPU already has. The visible symptom that found it
-  was the pointer flickering machine-wide once per captured frame — gdigrab's
-  BitBlt carries `CAPTUREBLT` — but the copy is the cost underneath it. The
-  fallback still exists (ffmpeg under 6.0, or a session with no output to
-  duplicate) and is **probed once per output per run** rather than guessed at;
-  the picker warns when it is what a share will use, so a machine paying for
-  the old path is told rather than left to wonder.
+- **Windows capture is `gfxcapture` first, and the win is the scale, not the
+  grab.** All three Windows grabbers were measured against each other. The
+  ladder is Graphics Capture → Desktop Duplication → GDI, and each step down
+  is slower: gdigrab is a CPU `BitBlt` of a DC per frame, ddagrab hands back a
+  full-size D3D11 surface the GPU already has, and gfxcapture hands back the
+  same surface **already scaled to the encode box**, which is the only one of
+  the three that can. That last part is where the money is: a 2560×1600
+  monitor into a 1280×720 share reads back 3.3 MB per frame instead of 16 MB,
+  and swscale is left with a format conversion instead of a resize. Measured
+  on an RTX 4070 Laptop at 30 fps over fifteen seconds, production filter
+  chain and encoder, 450 frames out either way: **0.23 s of process CPU with
+  the CPU scale, 0.05 s with the GPU one** — 4.6×. Window capture measured a
+  wash against gdigrab on CPU alone (0.52 s vs 0.59 s over ten seconds at
+  720p30) and is taken for the other three reasons: no machine-wide pointer
+  flicker, addressing by `HWND` rather than by title, and a covered window
+  captured correctly.
+  Two costs bought with it, both accepted. Graphics Capture starts slowly —
+  ~1.3 s before the first frame against gdigrab's ~0, one-off per share — and
+  on Windows 10 the system draws a yellow border around what is being
+  captured that cannot be turned off (Windows 11 can, and does here).
+  Each rung is **probed once per run** rather than guessed at, and the picker
+  warns only when the floor is what a share will actually use.
 - **The send encode is capped VBR, not CBR, and that is the largest single
   saving in the send half.** A screen is idle most of the time, and CBR pays
   the target rate for a still picture — nvenc pads the difference with filler
@@ -439,6 +479,11 @@ rather than an assumption:
 
 ## Still needs more than a patch
 
+- **Independent flip and MPO.** Not reachable from a WGL context at all: DWM's
+  overlay planes need a DXGI flip-model swapchain, and WGL presents through the
+  redirection surface. `docs/Fyne_fork_independent_flip.md` is the design for
+  the one route that exists — `WGL_NV_DX_interop2` into a flip-model chain —
+  and why it is not taken.
 - **A D3D or Vulkan painter.** `gl.Painter` is a clean, small interface
   (`internal/painter/gl/painter.go:16` — `Init`, `Clear`, `Paint`, `Free`,
   `Capture`, clipping, sizes) and a D3D11 implementation of it is a plausible
@@ -471,6 +516,102 @@ Only relevant if the patches above stop being enough.
 The seam that makes any of these thinkable is the one already enforced: only
 `internal/client` knows revoltgo, only `internal/ui` knows Fyne. Keeping that
 line clean is the cheapest insurance against needing this section.
+
+## What the OS is asked for
+
+Three things beyond the cores, all of them the platform's rather than Fyne's.
+
+### The frame clock is a timed wait, and Windows rounds one up
+
+The driver parks in the OS event queue for whatever is left until the next frame
+deadline (`glfw.WaitEventsTimeout` → `MsgWaitForMultipleObjectsEx`), and that
+timeout is quantised to the process's timer resolution. Go stopped raising it in
+1.16, when the runtime moved to high-resolution waitable timers for its own
+scheduler — which does nothing for a Win32 wait. Measured here:
+
+```
+NtQueryTimerResolution: min=15.6250ms max=0.5000ms current=15.6250ms
+  default: wait(1ms)=15.16ms  wait(8ms)=15.55ms  wait(16ms)=31.02ms
+  raised:  wait(1ms)= 1.21ms  wait(8ms)= 8.49ms  wait(16ms)=16.51ms
+```
+
+So the fork's `waitResolution = time.Millisecond` — commented as "the
+granularity of the OS wait — a millisecond on Win32" — was false as shipped.
+What it cost: **with vsync off the client was capped near 64 fps**, the present
+gate being defeated by the wait beneath it (the gate reports not-ready, the loop
+asks for a millisecond and sleeps 15.6); and any pacing not woken by input or a
+`DoOnUI` post quantised to the same tick. With vsync on and a 60 Hz panel it
+mostly hid, `SwapBuffers` blocking longer than the tick.
+
+`power.Precise` asks for it while the window is in front and gives it up behind,
+off `applyPower`. Since Windows 10 2004 the request is the calling process's
+alone, so this no longer holds the whole machine's clock fast — but it is still
+real idle power, which is why it follows the focus rather than being set once.
+It is asked for only where the deadline is finer than the coarse tick can
+express, so a reader who has set a low `FrameRate` pays nothing.
+
+### Efficiency mode, and the one thread it must not reach
+
+`SetProcessInformation(ProcessPowerThrottling, EXECUTION_SPEED)` is what Task
+Manager labels efficiency mode: efficient cores and a lower clock request. It is
+the natural partner of `BackgroundFrameRate` and rides the same hooks
+(`power.Throttle`, off `applyPower`).
+
+It reaches **every** thread, and miniaudio registers no MMCSS task for the one
+it renders on — `ma_wasapi_usage_default` maps to a NULL task name, and malgo
+exposes no way to ask for "Pro Audio" — so the mixer's 10 ms period is a plain
+thread's. A dropout is not a dropped frame, so **a live call withholds the
+throttle**: `App.callLive`, set by `installCall` and cleared by `dropCall`, both
+of which re-apply. Nothing exempts a single thread here, the thread not being
+ours to name.
+
+Windows only. Linux's nearest equivalent is nice and it is one-way — an
+unprivileged process may raise its nice value and cannot lower it again
+(RLIMIT_NICE defaults to 0), so a client that went quiet in the background would
+stay quiet for the session. macOS's is PRIO_DARWIN_BG, which throttles disk I/O
+hard enough to hold up the notification a backgrounded client exists to deliver.
+`internal/power`'s non-Windows file is those two reasons and nothing else.
+
+### The ffmpeg pipes are sized rather than defaulted
+
+`exec.Cmd`'s pipes take the platform default — `CreatePipe(..., 0)` on Windows,
+64 KiB on Linux — and a 1080p RGBA frame is 8.3 MB, so a frame crossed in
+thousands of kernel copies, each a writer blocked and a reader woken. Measured
+against a child writing 256 MiB, twice:
+
+| pipe buffer | throughput |
+|---|---|
+| default | 3.5 / 4.0 GB/s |
+| 64 KiB | 5.4 / 5.3 GB/s |
+| 1 MiB | 6.0 / 6.0 GB/s |
+
+`video.launch` makes both pipes itself now (`sizedPipe`, `pipeBytes` = 1 MiB;
+`CreatePipe` with a size on Windows, `F_SETPIPE_SZ` on Linux, `os.Pipe` on
+macOS, which has neither and grows a pipe to 64 KiB by itself). At 1080p30 that
+is roughly **62 → 42 ms of CPU per second of playback**, split across both
+processes. What it costs is the bookkeeping `exec` was doing: the child's ends
+are closed after `Start` and the read end by `reap` rather than by `Wait`.
+
+**`LiveFrames` deliberately keeps the small default.** Out, a buffer under one
+frame is what turns a stalled reader into decoder backpressure instead of a
+queue of stale frames; in, a megabyte of a 1.4 Mbps bitstream is six seconds of
+latency nothing takes back out. The size is a parameter for exactly that.
+
+### Looked at and not taken
+
+- **`SO_RCVBUF` on the RTP socket.** pion sets a read buffer only on its
+  server-side `udp_mux_multi`, so the client's gathered sockets take the OS
+  default. Raising it means a `SettingEngine` and a UDP mux threaded through
+  lksdk, which owns connection setup here and is handed none today — a fixed
+  local port and a new seam for an unmeasured benefit. Revisit with a measured
+  drop count under a 12 Mbps share.
+- **Per-monitor present gate.** `present_windows.go` opens the *primary*
+  adapter and says so, because the `HWND` does not exist when `newPresentGate`
+  is called. Fixing it means moving the call site, which is more than the
+  mispacing of a window dragged to a second panel is worth.
+- **The display's refresh rate as the `FrameRate` default.** It would *lower*
+  the ceiling on a 60 Hz panel, and a ceiling costs nothing at rest — that is a
+  behaviour change dressed as an optimisation.
 
 ## Which cores it runs on
 

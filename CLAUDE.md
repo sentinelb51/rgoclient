@@ -25,7 +25,9 @@ written against the domain. The dependency graph is a strict DAG:
 ```
 domain, markdown, config       no internal dependencies
 update                         no internal dependencies    (GitHub releases, net/http)
+deps                           no internal dependencies    (pinned ffmpeg, archive/zip, net/http)
 cpu                            no internal dependencies    (Win32 / sysfs, no cgo)
+power                          no internal dependencies    (Win32, no cgo)
 video                          no internal dependencies    (ffmpeg child, os/exec, xgb/x-sys)
 audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
 audio      -> audio/rnnoise                  (+ malgo, go-mp3)
@@ -34,7 +36,8 @@ util       -> config
 cache      -> domain
 client     -> cache, config, domain          (+ revoltgo)
 ui         -> cache, config, domain, markdown, util
-app        -> audio, voice, cache, client, config, cpu, domain, ui, update, util, video
+app        -> audio, voice, cache, client, config, cpu, deps, domain, power, ui,
+              update, util, video
 ```
 
 `config` is a leaf so everything above can read a setting. `cache` and `audio`
@@ -44,6 +47,13 @@ arrive as arguments, so either builds in a test with no settings file anywhere.
 (`ui.Keystroke`) and `app` decides what it sounds like. A device list crosses the
 same way, as `ui.AudioDevice`, and so does the microphone meter's scale — the
 level and the gate's threshold both arrive as ratios, decibels being `audio`'s.
+
+`power` is `cpu`'s neighbour and the same seam again: it asks the OS for a
+timer resolution and for permission to be run cheaply, and knows nothing of
+frames, focus or calls. *When* to ask is the policy — `app.applyPower`, beside
+the frame rate whose deadline is what wants the precision, and holding the one
+exception that is not the focus inverted: a live call, which is the only thread
+in this process with a deadline the OS must not be told to relax.
 
 `cpu` crosses the same seam from the other side. It reports which logical
 processors are which and pins the process to a set of them; what a *kind* of core
@@ -81,8 +91,9 @@ No globals. The `*app.App` controller owns the client, caches and widgets and
 passes widgets what they need through `ui.Deps` (`Store`, `Images`, `Texts`,
 `Actions`, `Tooltip`). `App.deps()` is the only producer, so **every field is
 always set** and widgets never nil-check them. The only package-level mutable
-state is measurement memoisation (`ui.lineHeights`, `ui.spaceWidths`), UI-thread
-only.
+state is memoisation of things that cannot change under a run: measurement
+(`ui.lineHeights`, `ui.spaceWidths`), UI-thread only, and `ui.TrayAvailable`,
+which is a `sync.OnceValue` and so safe from anywhere.
 
 ### The client's contract
 
@@ -137,6 +148,9 @@ change in `markdown/` does not pay for the Fyne footguns:
   GIF unfurls as an MP4 and plays through the same card).
 - `docs/performance.md` — what a frame costs, which levers are reachable and
   which need a fork of Fyne. Read it before optimising anything.
+- `docs/Fyne_fork_independent_flip.md` — the one design that would reach DWM's
+  overlay planes from an OpenGL painter, and why it is not taken. Unbuilt; read
+  it before proposing MPO or a flip-model swapchain again.
 
 A directory's `CLAUDE.md` arrives on its own when a file in that directory is
 touched. **Read the others by hand when a change crosses a boundary** — a new
@@ -239,19 +253,34 @@ internal/
                          that syscall having no process-wide form), cpu_other.go
                          (macOS: no affinity API exists, so no split is reported
                          and the setting is not drawn)
-  app/                   app.go, session.go, events.go, navigation.go, messages.go,
+  power/                 how hard the OS is asked to try. power.go (Precise — a
+                         timed wait honoured at the length it asked for, the
+                         client's frame clock being one — and Throttle),
+                         power_windows.go (timeBeginPeriod, balanced; and
+                         SetProcessInformation's execution-speed bit, which is
+                         what Task Manager calls efficiency mode),
+                         power_other.go (neither, and the file says why: Linux's
+                         nice is one-way without CAP_SYS_NICE and macOS's
+                         PRIO_DARWIN_BG would hold up the notification a
+                         backgrounded client exists to deliver)
+  app/                   app.go, session.go, events.go, navigation.go, messages.go, tools.go,
+                         pictures.go,
                          members.go, typing.go, overlay.go, profile.go, friends.go,
                          groups.go, pins.go, search.go, mentions.go, emoji.go,
                          gifs.go, video.go, screenshare.go, notify.go, alerts.go,
-                         security.go, settings.go, serversettings.go, updates.go
-  ui/                    ui.go, layouts.go, widgets.go, sidebar.go, members.go,
+                         security.go, settings.go, serversettings.go, system.go,
+                         updates.go
+  ui/                    ui.go, layouts.go, widgets.go, crop.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
                          gifs.go, video.go, screenshare.go, embed.go, invite.go, search.go,
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, group.go, panels.go, notice.go,
                          login.go (the card the screens before Ready are drawn on,
                          the only one here with no close button), settings*.go,
-                         theme/, titlebar_*.go, filedialog_{windows,darwin,linux}.go
+                         theme/, titlebar_*.go, tray*.go (whether this desktop
+                         draws a notification area at all — Windows and macOS
+                         always, XDG only with a StatusNotifier host),
+                         filedialog_{windows,darwin,linux}.go
                          (the OS picker — Fyne's is drawn in the canvas and is the
                          fallback, not the dialog)
   voice/                 the media half of a call: voice.go (Call, its own event
@@ -281,7 +310,12 @@ internal/
                          than the stream's own timestamps, plus tokenAllowsScreen,
                          which reads the join JWT's grant. Both seams are plain
                          io: an io.WriteCloser in, an io.ReadCloser out, so voice
-                         never imports video)
+                         never imports video), stats.go (how the connection itself
+                         is doing, sampled on a goroutine of its own so the receive
+                         path's clock is never the thing measuring: the round trip
+                         off the ICE agent's own consent checks, which travel the
+                         5-tuple the audio does, and the loss the jitter buffers
+                         already count. What a grade means is app's)
   video/                 the ffmpeg driver, both directions: video.go (discovery, the
                          magic-byte sniff that forces the demuxer, the probe whose
                          every answer is clamped, the poster), stream.go (the
@@ -302,14 +336,29 @@ internal/
                          publisher's every byte, and a copy of each whole frame
                          that is *dropped* rather than queued, a preview never
                          being allowed to stall the share). capture_windows.go
-                         additionally holds why a monitor is ddagrab and not
-                         gdigrab — whose BitBlt flickers the machine's own mouse
-                         pointer — and the DXGI walk saying which output a
+                         additionally holds the three-rung ladder every Windows
+                         source walks — Graphics Capture by handle, which alone
+                         scales on the GPU and so reads back the encode box
+                         rather than the screen; ddagrab where that is missing;
+                         gdigrab last, whose BitBlt flickers the machine's own
+                         mouse pointer — and the DXGI walk saying which output a
                          monitor is. See docs/video-player.md for the
                          threat model that shaped the receiving half
   markdown/              pure parser -> AST, no UI. parser.go is two passes:
                          classify each line into a block, then one byte scanner
                          over each block's whole text
+  deps/                  the one program the client needs and does not ship. deps.go
+                         (Root — the per-OS directory a downloaded dependency is
+                         kept in, which is deliberately *not* the cache root, a
+                         cache being what may be evicted; the pinned build table,
+                         one entry per platform, named by SHA-256 rather than by
+                         tag so a rebuilt archive fails the check instead of being
+                         run; and the download, which verifies the whole archive
+                         before opening it and never lets a member name a path on
+                         disk). Windows only — every Linux distribution ships
+                         ffmpeg and macOS has Homebrew, so both are told the
+                         command instead, the way update/ tells a platform outside
+                         its matrix it has no asset
   update/                whether a newer release of this client exists. One route —
                          GitHub's /releases/latest for this repository — plus the
                          calendar-version comparison (a -dev build precedes the
@@ -354,9 +403,12 @@ package's own `CLAUDE.md`; this is the map:
   load the first channel on the way past.
 - `app/members.go` — lazy author resolution as well as the member sidebar and
   the mention candidates: one `Store.Members` walk feeds all three. It also holds
-  what the member menu *does* to a member — nickname, roles, timeout — one route
-  under three permissions, filed with the people it is about rather than beside
-  the kick and ban confirmations in `notify.go`. And it holds the other list the
+  what the member menu *does* to a member — nickname, roles, timeout and the
+  per-server picture — one route under five permissions, filed with the people it
+  is about rather than beside the kick and ban confirmations in `notify.go`. That
+  picture is the one Revolt splits down the middle: `ChangeAvatar` covers only the
+  caller's own membership and `RemoveAvatars` only taking somebody else's off, so
+  a moderator is offered a removal and never a change. And it holds the other list the
   sidebar can draw: `refreshRecipients`, a **group's** own participants, filed
   here rather than in `groups.go` because it is the same sidebar under the same
   rule — one walk feeding the rows and the mention pool together.
@@ -394,6 +446,24 @@ package's own `CLAUDE.md`; this is the map:
 - `app/typing.go` — both halves of the typing indicator (the expiry map and its
   timer; the throttle that announces this account): one feature, one setting
   group, neither legible without the other.
+- `app/tools.go` — which ffmpeg this run uses and how one reaches a machine that
+  has none. Filed apart from `video.go` and `screenshare.go` because one pair of
+  binaries decides all four things those two do: PATH first (a reader's own build
+  may carry encoders the pinned one does not), the downloaded copy second,
+  resolved once per run — the encoder probe's memo is keyed by codec family
+  rather than by binary, so swapping mid-session would read a stale answer.
+- `app/pictures.go` — every picture the account uploads, from the file picker to
+  the file Autumn is handed: the crop card's controller half, the three shapes a
+  picture is asked for in (a face, a profile's strip, a server banner standing
+  up), and what a crop is written back as. Filed apart from `settings.go` because
+  two of the five callers are on another page entirely, and what they share is
+  the file rather than the row offering it.
+- `app/system.go` — the client's presence on the machine rather than in Revolt:
+  the icon beside the clock, what the window's close button does, and the one
+  teardown every way out of the process runs. Filed apart from `settings.go`
+  because none of it is a setting being applied — it is the *shape* of the
+  process, decided before the first screen and read again at the last. See
+  `internal/app/CLAUDE.md` item 50.
 - `app/video.go` — the video player's controller: what a mount may fetch, what
   a tap decodes with, the one-playback rule, the two pumps, and which file the
   OS is handed. See `internal/app/CLAUDE.md` item 45 and
@@ -411,7 +481,8 @@ package's own `CLAUDE.md`; this is the map:
   `memberOffsets`, `visibleRange`), the virtualised `MemberList`, the recycled `MemberRow` /
   `MemberSectionRow`, and `memberStatus`, the strip that speaks for the rows
   when there are none. The model is pure and theme-free so `App` can build it
-  off the UI thread.
+  off the UI thread — which is why a hoisted role's icon reaches a section head
+  as a URL (`sectionHead`) rather than as a picture.
 - `ui/messagelist.go` — the message column, the other virtualised list: the
   window's rows as data (`windowRow`, with `continuesGroup` / `dayLabel`
   deriving one from its neighbours), the estimate a row is placed by before it
@@ -505,6 +576,13 @@ package's own `CLAUDE.md`; this is the map:
   the answer is a `ShareChoice` the controller turns into encoder arguments.
   The *share button* is not here: it is the call island's, beside the
   microphone and the headphones.
+- `ui/crop.go` — the one card every picture the client uploads is chosen through.
+  It takes an `image.Image` and answers with an `image.Rectangle` in that
+  picture's own pixels — the `ui.ShareSource` seam again, so nothing here knows
+  what a file or a bucket is. `cropStage` is the picture with the frame over it:
+  the frame in source pixels rather than screen units, four bands of wash around
+  it because Fyne draws no hole, and one gesture that moves or resizes depending
+  on what it started over.
 - `ui/invite.go` — the invite card *and* `inviteCodesIn`, the scan that decides
   a message has one. `NewInviteCardFor` is the same card built from an invite
   already in hand — the join dialog's preview, which draws the banner and no
@@ -514,9 +592,18 @@ package's own `CLAUDE.md`; this is the map:
   the friends page's own card at the same sizes, minus that page's buttons — the
   whole row is one answer, so the only thing at its end is the mark saying whether
   it has been given.
-- `ui/panels.go` — the island all three message surfaces are drawn on and the
+- `ui/notice.go` — the three presentations of one vocabulary (the stack, the
+  modal, the confirmation) **and** the record behind the first: `NoticeStack`
+  files every notice pushed through it, ahead of the tone filter so one switched
+  off is still findable, and `NoticeHistoryDialog` is that record read back on
+  the message panels' own island. Filed here rather than beside them because a
+  history is what a transient card leaves behind, and the two are one feature.
+  Its rail button sits beside the inbox — see `app/navigation.go`.
+- `ui/panels.go` — the island all *four* panel surfaces are drawn on and the
   card one message is drawn as, plus two of the surfaces: pins and the mention
-  inbox. `messageIsland` is three surfaces deep (island, well, card) with a
+  inbox. The fourth is not about messages at all — `ui/notice.go`'s history — and
+  is what says the shell is a header, a count and a well rather than anything
+  message-shaped. `messageIsland` is three surfaces deep (island, well, card) with a
   header, a count line and an empty state that holds a floor open, so a panel
   reporting one sentence is still an island rather than a strip. `islandParts` is
   what a surface adds — blocks under the header, something opposite the count, and

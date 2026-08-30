@@ -24,6 +24,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/config"
 	"RGOClient/internal/ui/theme"
+	"RGOClient/internal/util"
 )
 
 /* Tones */
@@ -110,6 +111,26 @@ type NoticeStack struct {
 
 	images *cache.ImageCache // the faces a notice about a person is led by
 	list   *fyne.Container   // the cards, oldest first
+
+	// history is every notice raised this session, oldest first and bounded at
+	// noticeHistoryDepth. A card is on screen for seconds and gone; this is the
+	// only record that it ever said anything.
+	history []NoticeRecord
+}
+
+// noticeHistoryDepth is how many past notices are kept. A const rather than a
+// setting: it bounds a few kilobytes of strings nobody chose to spend, and a row
+// asking how much of a log to keep is a question the reader should not have to
+// have an opinion about.
+const noticeHistoryDepth = 100
+
+// NoticeRecord is one notice as the history holds it: what was said, and when.
+// The notice keeps its OnTap — a card leading to the message that named you is
+// still the way there an hour later, which is most of why a history is worth
+// having.
+type NoticeRecord struct {
+	Notice Notice
+	At     time.Time
 }
 
 // Notice is one transient message: what kind of thing happened, a heading, and
@@ -168,11 +189,21 @@ func (n *NoticeStack) Push(tone Tone, text string) {
 // thread.
 func (n *NoticeStack) PushNotice(notice Notice) {
 	settings := config.Current().Notifications
-	if notice.Body == "" || (!notice.Unfiltered && !notice.Tone.enabled(settings)) {
+	if notice.Body == "" {
 		return
 	}
 	if notice.Title == "" {
 		notice.Title = notice.Tone.title()
+	}
+
+	// Recorded ahead of the tone filter, and so recorded even when nothing is
+	// drawn: a switch turned off says "do not interrupt me", which is a different
+	// question from "never tell me" — and the history is where the second one is
+	// asked.
+	n.record(notice)
+
+	if !notice.Unfiltered && !notice.Tone.enabled(settings) {
+		return
 	}
 
 	lifetime := settings.Lifetime()
@@ -208,6 +239,33 @@ func (t Tone) enabled(settings config.Notifications) bool {
 
 	return settings.ShowInfo
 }
+
+// record files a notice in the history, dropping the oldest past the depth. Call
+// on the UI thread, which every push already is.
+func (n *NoticeStack) record(notice Notice) {
+	n.history = append(n.history, NoticeRecord{Notice: notice, At: time.Now()})
+
+	// Copied down rather than resliced: a slice held from the middle of the
+	// backing array keeps every string before it alive for the run.
+	if extra := len(n.history) - noticeHistoryDepth; extra > 0 {
+		n.history = append(n.history[:0], n.history[extra:]...)
+	}
+}
+
+// History is what has been said this session, newest first. The slice is the
+// caller's — the stack goes on appending to its own. Call on the UI thread.
+func (n *NoticeStack) History() []NoticeRecord {
+	out := make([]NoticeRecord, len(n.history))
+	for i, record := range n.history {
+		out[len(out)-1-i] = record
+	}
+
+	return out
+}
+
+// ForgetHistory drops the record, for a reader who has read it or an account
+// that has just been logged out of. Call on the UI thread.
+func (n *NoticeStack) ForgetHistory() { n.history = nil }
 
 // Clear takes every notice down at once, for when what they were about is no
 // longer on screen. Call on the UI thread.
@@ -887,15 +945,135 @@ func shiftSkipHint() fyne.CanvasObject {
 	return hint
 }
 
-// confirmHeader is the dialog's title row: the tone's glyph, the title, and the
-// close button.
-func confirmHeader(confirm Confirm, onClose func()) fyne.CanvasObject {
-	title := widget.NewLabelWithStyle(confirm.Title, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	title.Truncation = fyne.TextTruncateEllipsis
+/* The history panel */
 
-	icon := container.NewCenter(newScaledIcon(confirm.Tone.icon(), theme.Sizes.NoticeIconSize))
+// NoticeHistoryDialog lists what the notice layer has said this session. Drawn on
+// the same island the three message surfaces are — the shell is a header, a count
+// and a well, none of which is about messages — with a card of its own: a notice
+// has a tone and a heading where a message has an author and a face.
+//
+// It does not page. The history is bounded at noticeHistoryDepth and held in
+// memory, so there is never a next page to ask anybody for.
+type NoticeHistoryDialog struct {
+	Content fyne.CanvasObject
 
-	// Both ends are centred so neither is stretched to the row height by the
-	// border layout.
-	return container.NewBorder(nil, nil, icon, container.NewCenter(NewCloseButton(onClose)), title)
+	island *messageIsland
+}
+
+// NewNoticeHistoryDialog builds the panel. onClear drops the record; onClose
+// dismisses the layer.
+func NewNoticeHistoryDialog(deps Deps, onClear, onClose func()) *NoticeHistoryDialog {
+	island, content := newMessageIsland(deps, islandParts{
+		Mark:     assets.NotifyIcon,
+		Title:    "Notices",
+		Where:    "this session",
+		Trailing: NewButton("Clear", onClear),
+		OnClose:  onClose,
+	})
+
+	return &NoticeHistoryDialog{Content: content, island: island}
+}
+
+// SetRecords replaces the whole list, newest first. Call on the UI thread.
+func (d *NoticeHistoryDialog) SetRecords(records []NoticeRecord) {
+	cards := make([]fyne.CanvasObject, 0, len(records))
+	for _, record := range records {
+		cards = append(cards, newNoticeHistoryCard(record))
+	}
+	d.island.setCards(cards)
+
+	if len(records) == 0 {
+		d.island.setCount("")
+		d.island.say("Nothing has been reported this session.")
+
+		return
+	}
+
+	d.island.setCount(util.Quantity(len(records), "notice"))
+	d.island.say("")
+}
+
+// newNoticeHistoryCard draws one past notice: its tone, its heading and when it
+// was said, over the sentence it said. One line for the body rather than the
+// wrapped paragraph the live card draws — a history is read by scanning, and a
+// column of paragraphs is not scannable.
+func newNoticeHistoryCard(record NoticeRecord) fyne.CanvasObject {
+	gap := theme.Sizes.IslandCardGap
+	pad := theme.Sizes.IslandCardPadding
+
+	card := &noticeHistoryCard{background: canvas.NewRectangle(theme.Colors.IslandCardBg)}
+	card.onTap = record.Notice.OnTap
+	card.leads = record.Notice.OnTap != nil
+	card.background.CornerRadius = theme.Sizes.IslandCardRadius
+
+	title := newBoldText(record.Notice.Title, record.Notice.Tone.Color(), theme.Sizes.IslandNameSize)
+	when := newText(util.ShortAgo(record.At), theme.Colors.TimestampText, theme.Sizes.IslandTimeSize)
+
+	// The heading shortens and the time keeps its width, the way a message card's
+	// does: a long heading is worth less than knowing when it was said.
+	heading := NewFillRow(0,
+		NewEllipsisText(title),
+		HorizontalSpacer(gap),
+		container.NewCenter(when),
+	)
+
+	body := newText(record.Notice.Body, theme.Colors.TimestampText, theme.Sizes.IslandPreviewSize)
+
+	row := NewFillRow(2,
+		container.NewCenter(newNoticeBadge(record.Notice.Tone)),
+		HorizontalSpacer(gap),
+		VBoxNoSpacing(
+			heading,
+			VerticalSpacer(theme.Sizes.IslandCardSpacing*halfStep),
+			NewEllipsisText(body),
+		),
+	)
+
+	card.content = container.NewStack(card.background, NewInset(row, pad, pad, pad, pad))
+	card.ExtendBaseWidget(card)
+
+	return card
+}
+
+// noticeHistoryCard is one row of the history. It fills under the pointer only
+// where the notice led somewhere — most report an outcome and lead nowhere, and
+// a card that lights up under the pointer and then does nothing reads as broken.
+type noticeHistoryCard struct {
+	tapBase
+
+	background *canvas.Rectangle
+	content    fyne.CanvasObject
+
+	leads bool
+}
+
+var (
+	_ fyne.Tappable     = (*noticeHistoryCard)(nil)
+	_ desktop.Hoverable = (*noticeHistoryCard)(nil)
+)
+
+func (c *noticeHistoryCard) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(c.content)
+}
+
+func (c *noticeHistoryCard) Cursor() desktop.Cursor {
+	if c.leads {
+		return desktop.PointerCursor
+	}
+
+	return desktop.DefaultCursor
+}
+
+func (c *noticeHistoryCard) MouseIn(*desktop.MouseEvent) {
+	if !c.leads {
+		return
+	}
+
+	c.background.FillColor = theme.Colors.IslandCardHoverBg
+	c.background.Refresh()
+}
+
+func (c *noticeHistoryCard) MouseOut() {
+	c.background.FillColor = theme.Colors.IslandCardBg
+	c.background.Refresh()
 }

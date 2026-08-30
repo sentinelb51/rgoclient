@@ -322,7 +322,17 @@ DAG and conventions.
     focus-dependent one: `applyFrameRate` hands over `BackgroundFrameRate`
     instead while the window is unfocused, re-applied by the foreground hooks in
     `startAlerts` — off the UI thread, which is safe because everything it
-    touches is an atomic. `applyAffinity`
+    touches is an atomic. `a.focused` itself starts true in `Run`, ahead of the
+    first thing to read it: a client that began believing itself to be behind
+    would spend startup, its heaviest moment, at the background rate.
+    `applyPower` follows it there and is the same setting asked of the OS rather
+    than of Fyne (`internal/power`): the frame deadline is a *timed wait*, so a
+    platform that rounds one up to its own tick caps the client under the rate
+    it was told to draw at, and a window nobody is looking at may be run cheaply
+    as well as slowly. It reads `a.callLive` rather than `a.call` — the hooks are
+    not on the UI thread — and a live call is what withholds the throttle, that
+    reaching the thread `mixer.render` runs on. `installCall` and `dropCall` call
+    it for the same reason. `applyAffinity`
     hands the process itself to a set of cores through `internal/cpu`. `Run`
     calls both once at startup. The core setting is the one on the page that
     moves things nothing here draws — the gateway, the image loaders,
@@ -846,7 +856,8 @@ DAG and conventions.
     it refuses, and `App.setDisplayName` names that limit in a warning rather than
     letting `notifyFailure` say "could not" about a request never made.
     **The picture, the banner, the description and the username** are the rest of
-    it, and only the first is an ordinary edit: `SetAvatar` uploads into the
+    it. Both pictures go through the crop card first (item 51), and only the
+    first is an ordinary edit: `SetAvatar` uploads into the
     *avatars* bucket (see the revoltgo note) and the new picture arrives as a user
     update like anybody else's. The **profile** half arrives as nothing at all — it
     is not on the user record and no event announces it — so `App.selfProfile` is a
@@ -1581,8 +1592,25 @@ DAG and conventions.
     they are in it — and anybody the store cannot resolve, a blank circle not being
     a person. **A restyle rebuilds
     the tree** (`applyStyles` → `buildUI`), so the island is re-synced there or a
-    running call loses the only way to leave it; a connected call needs no
-    `SetState` to come back, a fresh card's bar already being green.
+    running call loses the only way to leave it — and `syncCallIsland` repaints
+    the bar unconditionally (`paintCallState`), a fresh card's bar being green
+    where the call it is rebuilt under may not be.
+    **The state bar is graded, not switched.** `callState` and `callStats` are
+    held side by side because either paints the bar and neither carries the
+    other: a `ConnectionChanged` says which of the three states the call is in
+    and measures nothing, a `StatsChanged` measures and says nothing about the
+    state. `callQuality` grades a *connected* call on the round trip and on the
+    loss, at whichever is worse, and everything short of connected is fair —
+    amber for a call that has not landed, red kept for one that is up and
+    unusable. What the thresholds are is policy and lives here, the way
+    `resolveCores` does; `ui.CallQuality` is the seam they cross.
+    **The number is read by pointing at it**, `callStateTooltip` composing the
+    word with the round trip and the loss, each left out until there is one — a
+    nought would claim a measurement nothing has made. It is composed here
+    rather than pushed into the widget so a sample costs no `settleCallIsland`,
+    and a tooltip standing open is re-shown on each sample (`callStateOver`):
+    somebody holding the pointer there is watching the number, not reading it
+    once.
     **The settings meter owns a device**, which is the one thing on that page that
     does. It is its own `audio.Capture`, not the call's, so adjusting the gate
     mid-call is not two things fighting over the microphone; it is sampled at
@@ -2030,7 +2058,10 @@ DAG and conventions.
     taken as bandwidth — and a publish the room refuses at AV1 is retried
     once as H.264 inside `beginShare`'s worker before anything is reported.
     The last two dials are the slow-uplink pair: Bandwidth scales the
-    automatic bitrate budget inside `shareBitrate` (×1 / ×0.5 / ×0.25), and
+    automatic bitrate budget inside `shareBitrate` (×1 / ×0.5 / ×0.25) or,
+    at `ShareBandwidthCustom`, hands it over to `Screenshare.Bitrate`
+    outright — a typed ceiling takes neither the cut nor AV1's discount,
+    the codec being chosen after it — and
     Keyframes is `shareKeyframeSeconds` (1 / 2 / 8 s) into
     `CaptureConfig.KeyframeSeconds` — policy here, clamped in `video`.
     What a feed's bytes are is worn by its window title once it mounts
@@ -2057,3 +2088,107 @@ DAG and conventions.
     nothing has answered for yet. The device is named only once there is
     something to say, an enumeration being too much to spend on every join for
     a sentence that will not be shown.
+
+49. **Getting hold of ffmpeg.** `tools.go` decides which one this run uses and
+    is the only way one reaches a machine with none. `resolveVideoTools` runs
+    once, in `New`: `video.Discover` (PATH) first, `deps.FFmpeg` (the downloaded
+    copy) second, neither third. PATH wins deliberately — a build somebody
+    installed themselves may carry encoders the pinned one does not, and
+    second-guessing that from here would be wrong more often than right. Once
+    per run, because `video`'s encoder probe memoises by codec family rather
+    than by binary, so a pair swapped mid-session would be measured against the
+    other one's answer.
+    **The download is consent-gated and single-flighted.** It is a hundred
+    megabytes, so nothing fetches it at startup and nothing fetches it on a
+    refused share: the row under Settings → Screenshare offers it, naming the
+    version, the size and the directory before anything is asked for, and
+    `App.installingFFmpeg` is the plain bool that makes a second press cost
+    nothing. Progress reaches the row through a `redraw` the *page* supplies
+    (`RefreshScreenshare`) rather than the page polling, and is throttled to
+    `ffmpegProgressStep` — the counter fires per read, and each hop is a repaint
+    of the whole window.
+    **What arrives is checked against a digest compiled into the client**, not
+    against a checksum fetched beside it: the point is that a release installs
+    the bytes it was tested with, which a file from the same host cannot
+    attest. A mismatch is refused outright and never retried — see
+    `internal/deps` for why the pin is gyan.dev's per-version release rather
+    than BtbN's rolling one, and why the archive is not in this repository.
+    **Three notices used to be one wrong word.** `!videoInline` is "ffmpeg not
+    found" and carries `ffmpegAdvice()`; the encoder probe answering nothing is
+    the *other* failure and says so where the share is attempted. They are
+    different things to fix and the old shared "No encoder" title named only the
+    rarer one.
+
+50. **Closing the window without ending the process.** `system.go` is the whole
+    of it: the icon beside the clock, what the close button does, and the one
+    teardown every exit runs. `config.System` is the two settings, and
+    `ui.TrayAvailable` decides whether either can be carried here at all — a
+    desktop with no notification area keeps a close button that quits, and the
+    System section greys its rows rather than dropping them.
+    **`startSystem` runs from `Run`, before the loop starts.** That is where
+    Fyne wants it: `SetSystemTrayMenu` registers the icon synchronously, and
+    what it queues for the main thread is executed inline while the driver is
+    still on it. The order *inside* is load-bearing —
+    `SetSystemTrayWindow` is the only way Fyne offers to point the icon's own
+    click at a window, and it overwrites the close intercept with a bare `Hide`,
+    so ours is set again after it or the window would close to the tray whatever
+    the setting says. The tray is also mounted whether or not the setting is on:
+    an icon that is missing is worth seeing before the window is, and Fyne has no
+    way to take one down again short of quitting.
+    **Every exit is `fyne.App.Quit`, never `window.Close`.** Once a tray is up
+    Fyne holds a hidden window of its own (`SystrayMonitor`), so the last real
+    window closing no longer ends the loop — a `Close` would leave the client
+    running with nothing on screen.
+    **Which is why the teardown moved off the window.** `SetOnClosed` fires for a
+    window being closed and not for the app being quit, which with a tray is the
+    common exit, so `shutdown` hangs off `Lifecycle().SetOnStopped` — queued by
+    the driver on every path, the close button, the tray's Quit and a signal
+    alike, and waited for before `Run` returns. It runs *off* the UI thread with
+    the loop already ended and touches no widget. Registered in `Run` rather than
+    in `showMainUI`, so quitting from the login screen saves the settings too,
+    which it never used to.
+    **A hidden window is not a silent one.** Sounds still play; the taskbar flash
+    does nothing, there being no button to flash. `showWindow` is the way back —
+    the icon's click and its first menu item — and it asks for focus as well as
+    showing, a restored window otherwise coming back where it was, behind
+    whatever has been opened over it since.
+    **The client always opens onto the screen.** A `StartHidden` setting was
+    built and taken out: `Run` shows the window before the loop as it always did,
+    which is also what keeps `ui.StyleTitlebar` simple — the title bar can only be
+    recoloured through a platform handle, and a window that has never been shown
+    has none.
+
+51. **Uploading a picture.** `pictures.go` is everything between a reader picking
+    a file and Autumn holding it, and it is one path for all five — this
+    account's avatar and banner, a server's icon and banner, a group's picture.
+    `choosePicture` takes a `pictureShape` and answers with a `picture`, so a
+    call site is still one `a.background` and the only thing it says about the
+    file is `defer pic.Close()`.
+    **The shape is policy and lives here**, the way `resolveCores` does: `ui`
+    draws whatever `CropAspect`s it is given, and which ones a picture is worth
+    offering is a fact about Revolt — `squarePicture` is round because an avatar
+    is seen through a circle, `widePicture` is the strip behind a profile, and
+    `tallPicture` is a server banner, the one picture Revolt draws standing up.
+    The longest edge each is reduced to lives there too: Autumn refuses a file
+    over its limit rather than resizing it, and an avatar is served back at 256.
+    **Two workers and one card between them.** The decode is off-thread (a
+    photograph off a phone is twenty-four megapixels and a settings page is on
+    screen), then `showCropCard` on the modal layer — which draws over the
+    settings page, `mountOverlay`'s whole arrangement — then the cut and the
+    scale off-thread again. The card is handed a *preview* capped at
+    `previewLimit` and the true pixel size beside it, so the frame is aimed at a
+    texture the GPU can hold while the crop is still taken from every pixel the
+    file has.
+    **A file this client cannot decode is not one it cannot send.** Autumn
+    decides what is a picture, so a decode failure skips the card and uploads
+    what was picked; `_ "golang.org/x/image/webp"` is registered so the one
+    format Revolt serves that Go does not read is croppable rather than only
+    sendable.
+    **What is written back is decided by the file, not by the pixels**: a JPEG
+    stays a JPEG and everything else becomes a PNG. A logo re-encoded as a JPEG
+    rings along every edge it has, and a photograph written as a PNG is several
+    megabytes of a limit measured in them. The name carries the extension of what
+    was actually written, Autumn sniffing the name it is given.
+    **An animated GIF is the one thing a crop cannot keep**, so the card says so
+    and offers the file whole — the second button, which is also the way to
+    upload anything without a re-encode at all. See `docs/known-gaps.md`.

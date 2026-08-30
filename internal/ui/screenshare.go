@@ -86,8 +86,8 @@ type ShareDialog struct {
 	rows   []*shareSourceRow
 	source string
 
-	heights []*shareOptionChip
-	rates   []*shareOptionChip
+	heights []*pickChip
+	rates   []*pickChip
 
 	choice ShareChoice
 	status dialogStatus
@@ -252,17 +252,17 @@ func (d *ShareDialog) buildHeights() fyne.CanvasObject {
 	chips := make([]fyne.CanvasObject, 0, len(shareHeights))
 
 	for _, height := range shareHeights {
-		chip := newShareOptionChip(assets.ScreenshareIcon, shareHeightLabel(height), height)
+		chip := newPickChip(assets.ScreenshareIcon, shareHeightLabel(height), height)
 		chip.onTap = func() {
 			d.choice.Height = chip.value
-			markShareChips(d.heights, chip.value)
+			markPickChips(d.heights, chip.value)
 		}
 
 		d.heights = append(d.heights, chip)
 		chips = append(chips, chip)
 	}
 
-	markShareChips(d.heights, d.choice.Height)
+	markPickChips(d.heights, d.choice.Height)
 
 	return NewFlow(shareDialogInnerWidth(), theme.Sizes.IslandChipGap, chips...)
 }
@@ -271,38 +271,19 @@ func (d *ShareDialog) buildRates() fyne.CanvasObject {
 	chips := make([]fyne.CanvasObject, 0, len(shareRates))
 
 	for _, fps := range shareRates {
-		chip := newShareOptionChip(assets.PlayIcon, shareRateLabel(fps), fps)
+		chip := newPickChip(assets.PlayIcon, shareRateLabel(fps), fps)
 		chip.onTap = func() {
 			d.choice.FPS = chip.value
-			markShareChips(d.rates, chip.value)
+			markPickChips(d.rates, chip.value)
 		}
 
 		d.rates = append(d.rates, chip)
 		chips = append(chips, chip)
 	}
 
-	markShareChips(d.rates, d.choice.FPS)
+	markPickChips(d.rates, d.choice.FPS)
 
 	return NewFlow(shareDialogInnerWidth(), theme.Sizes.IslandChipGap, chips...)
-}
-
-func markShareChips(chips []*shareOptionChip, value int) {
-	for _, chip := range chips {
-		chip.Set(chip.value == value)
-	}
-}
-
-// shareOptionChip is the search page's chip carrying the number it stands
-// for. A filter chip is a bit and this is one of a set, which is the whole
-// difference — the tap is what enforces it, not the chip.
-type shareOptionChip struct {
-	*searchChip
-
-	value int
-}
-
-func newShareOptionChip(res fyne.Resource, label string, value int) *shareOptionChip {
-	return &shareOptionChip{searchChip: newSearchChip(res, label, nil), value: value}
 }
 
 /* One source */

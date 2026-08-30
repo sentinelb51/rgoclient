@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// zeroWidth is the space Revolt's display-name pattern forbids, spelled out
-// because it is invisible in a source file.
-const zeroWidth = "​"
+// zeroWidth is the space Revolt's display-name pattern forbids, escaped because
+// the character itself is invisible in a source file.
+const zeroWidth = "\u200b"
 
 // validUsername is the client's copy of a pattern the server owns, and the only
 // thing standing between a typed name and a refusal with nothing to say why. A

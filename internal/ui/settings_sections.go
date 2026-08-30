@@ -1154,6 +1154,37 @@ func coresValue(cores string, machine CPUCores) string {
 	return config.CoresEfficiency
 }
 
+/* System */
+
+// systemSection is what closing the window does. It needs a notification area,
+// so on a desktop with none the row is greyed and says why — see
+// ui.TrayAvailable.
+func (p *SettingsPage) systemSection() []settingsGroup {
+	settings := config.Current().System
+	tray := TrayAvailable()
+
+	var noTray string
+	if !tray {
+		noTray = "This desktop has no notification area for the icon to sit in."
+	}
+
+	// The switch reads as what the client will do rather than as what the file
+	// says: it is on by default, and a row saying so over a desktop that cannot
+	// carry it would be describing a window that stays when it is closed.
+	return []settingsGroup{
+		p.group("Closing the window",
+			"The icon beside the clock opens the client again, and its menu quits it.",
+
+			p.locked(p.toggleRow("Close to the notification area",
+				"Closing the window leaves the client running behind its icon.",
+				tray && settings.CloseToTray,
+				func(s *config.Settings, on bool) { s.System.CloseToTray = on }), noTray),
+
+			p.note("While the window is hidden, sounds still play. Anything drawn is waiting when you open it."),
+		),
+	}
+}
+
 /* Advanced */
 
 // advancedSection lists what the curated groups did not claim. Long by

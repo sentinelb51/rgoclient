@@ -143,6 +143,11 @@ func buildSettingsIndex(hooks SettingsHooks) []settingsHit {
 	hooks.StopInputMonitor = nil
 	hooks.SetInputEcho = nil
 
+	// InstallFFmpeg starts a hundred-megabyte download. FFmpeg itself is left —
+	// it is a plain read of what startup resolved, and the row's label is what
+	// the index is after.
+	hooks.InstallFFmpeg = nil
+
 	basic := indexPass(hooks, false)
 
 	shown := make(map[hitKey]bool, len(basic))

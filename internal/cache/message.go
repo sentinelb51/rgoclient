@@ -104,7 +104,7 @@ func (c *MessageCache) Prepend(channelID string, page []*domain.Message) []*doma
 
 	older := chronological(page)
 
-	c.byChannel[channelID] = c.trimmed(append(older, c.byChannel[channelID]...))
+	c.byChannel[channelID] = c.trimmed(slices.Concat(older, c.byChannel[channelID]))
 	c.touch(channelID)
 
 	return older

@@ -3,6 +3,7 @@ package ui
 import (
 	"image/color"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -47,7 +48,7 @@ type MessageWidget struct {
 	deps    Deps
 	message *domain.Message
 
-	content    fyne.CanvasObject
+	content    *fyne.Container
 	background *canvas.Rectangle
 
 	// Kept so an author resolving after the mount is written in place by
@@ -205,8 +206,13 @@ func NewMessageWidget(deps Deps, message *domain.Message, dayLabel string, group
 	// The tick sits inside the row rather than bleeding above it the way the
 	// quick-actions do: it is up for as long as the mode is, so a row overlapping
 	// the one above would put two ticks in one gutter at the seam between groups.
+	// Hidden until first filled: the driver's walks prune on visibility, and two
+	// standing containers per mounted row is a real slice of the per-frame walk.
+	// Once filled they stay shown — their children carry their own visibility.
 	w.actionsOverlay = container.New(&overlayLayout{yOffset: -16, rightOffset: 6})
+	w.actionsOverlay.Hide()
 	w.selectOverlay = container.New(&overlayLayout{yOffset: 2, rightOffset: 6})
+	w.selectOverlay.Hide()
 	w.content = container.NewStack(inner, w.actionsOverlay, w.selectOverlay)
 
 	if dayLabel != "" {
@@ -236,19 +242,28 @@ func (w *MessageWidget) Message() *domain.Message { return w.message }
 func (w *MessageWidget) Editing() bool { return w.editing }
 
 // Author is the user this row names — the message's author, or for a system event
-// whoever it is about, that being what a lazy fetch has to bring back. An event
-// about a *message* names nobody and answers "": its target is a message ID, and
-// both being ULIDs, nothing about the value would stop one matching a user.
+// whoever the line's name stands for, that being what a lazy fetch has to bring
+// back. An event naming nobody answers "".
 func (w *MessageWidget) Author() string {
 	if system := w.message.System; system != nil {
-		if !system.TargetsUser() {
-			return ""
-		}
-
-		return system.Target
+		return system.Subject()
 	}
 
 	return w.message.AuthorID
+}
+
+// NamesAny reports whether the row draws any of these accounts, so a batch of
+// people just resolved knows which rows to repaint. A system line can name two —
+// whoever it is about and whoever did it — and only the first of them is Author.
+func (w *MessageWidget) NamesAny(userIDs []string) bool {
+	// An empty ID would otherwise match every system line that names nobody.
+	if author := w.Author(); author != "" && slices.Contains(userIDs, author) {
+		return true
+	}
+
+	system := w.message.System
+
+	return system != nil && system.By != "" && slices.Contains(userIDs, system.By)
 }
 
 // SetFollowedByGroup tightens (or restores) the bottom margin when a same-author
@@ -561,6 +576,7 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 		NewIconButton(actionMark(assets.ActionCancelIcon), cancel, nil),
 	))
 	w.actionsOverlay.Objects = []fyne.CanvasObject{buttons}
+	w.actionsOverlay.Show()
 	w.actionsOverlay.Refresh()
 
 	w.setHighlighted(true)
@@ -588,9 +604,11 @@ func (w *MessageWidget) RefreshRelativeTime() {
 
 	// The reading can change width and so a wrapped body's height — "in 1 minute"
 	// becoming "just now" — and the column places rows from measured heights, so
-	// the row is re-measured rather than repainted into the space the old text
-	// asked for.
-	w.Refresh()
+	// the row is re-laid rather than repainted into the space the old text asked
+	// for. Relayout, not w.Refresh(): the slot above covers the new body, and the
+	// whole-row walk re-uploaded the avatar and every attachment once a minute
+	// for every mounted row carrying a span.
+	Relayout(w.content)
 }
 
 // CancelEdit restores the rendered body and the hover quick-actions without
@@ -608,9 +626,11 @@ func (w *MessageWidget) CancelEdit() {
 	w.bodySlot.Refresh()
 
 	w.actionsOverlay.Objects = nil
+	w.actionsOverlay.Hide()
 	if w.actions != nil {
 		w.actions.Hide()
 		w.actionsOverlay.Objects = []fyne.CanvasObject{w.actions}
+		w.actionsOverlay.Show()
 	}
 	w.actionsOverlay.Refresh()
 
@@ -694,6 +714,7 @@ func (w *MessageWidget) ensureActions() {
 
 	w.actions = w.buildActions()
 	w.actionsOverlay.Objects = []fyne.CanvasObject{w.actions}
+	w.actionsOverlay.Show()
 	w.actionsOverlay.Refresh()
 }
 
@@ -763,6 +784,7 @@ func (w *MessageWidget) ensureTick() {
 	w.selectTick.onSecondaryTap = w.TappedSecondary
 
 	w.selectOverlay.Objects = []fyne.CanvasObject{w.selectTick}
+	w.selectOverlay.Show()
 	w.selectOverlay.Refresh()
 }
 
@@ -881,11 +903,15 @@ func (w *MessageWidget) SetDeleted(on bool) {
 	w.setHighlighted(w.overMessage || w.overChild)
 }
 
-// setHighlighted paints (or clears) the row's hover background.
+// setHighlighted paints (or clears) the row's hover background. Guarded on the
+// fill: every child hover crossing re-enters updateHover, so sweeping the
+// quick-action group repainted the row once per button.
 func (w *MessageWidget) setHighlighted(on bool) {
 	w.stopFlash() // the pointer arriving is the reader having found the row
-	w.background.FillColor = w.fill(on)
-	w.background.Refresh()
+	if fill := w.fill(on); fill != w.background.FillColor {
+		w.background.FillColor = fill
+		w.background.Refresh()
+	}
 }
 
 /* The jump mark */
@@ -1006,12 +1032,14 @@ func (w *MessageWidget) setGutterShown(shown bool) {
 		return
 	}
 
-	if shown {
-		w.gutterTimestamp.Color = theme.Colors.TimestampText
-	} else {
-		w.gutterTimestamp.Color = color.Transparent
+	var tint color.Color = theme.Colors.TimestampText
+	if !shown {
+		tint = color.Transparent
 	}
-	w.gutterTimestamp.Refresh()
+	if w.gutterTimestamp.Color != tint {
+		w.gutterTimestamp.Color = tint
+		w.gutterTimestamp.Refresh()
+	}
 }
 
 /* Content assembly */
@@ -1166,9 +1194,9 @@ func (w *MessageWidget) buildSystemLine(timestamp string) fyne.CanvasObject {
 	// Siblings in one row, so the smaller time centres itself against the line.
 	line := make([]fyne.CanvasObject, 0, 4)
 	if name != "" {
-		target := w.message.System.Target
+		subject := w.message.System.Subject()
 		w.systemName = newMentionText(name, theme.Sizes.SystemMessageTextSize, fyne.TextStyle{Bold: true},
-			func(anchor fyne.CanvasObject) { w.deps.Actions.OnUserTapped(target, anchor) },
+			func(anchor fyne.CanvasObject) { w.deps.Actions.OnUserTapped(subject, anchor) },
 			w.TappedSecondary)
 		line = append(line, w.systemName)
 	}
@@ -1790,8 +1818,9 @@ func (e *EditEntry) TypedKey(key *fyne.KeyEvent) {
 			e.OnCancel()
 		}
 	case key.Name != fyne.KeyReturn && key.Name != fyne.KeyEnter:
+		// No refresh after: the entry's own TypedKey ends in one, and a second
+		// is a second re-wrap per keystroke — MessageInput's reasoning.
 		e.Entry.TypedKey(key)
-		e.Refresh()
 	case e.shiftPressed:
 		e.TypedRune('\n')
 	default:
@@ -1803,5 +1832,4 @@ func (e *EditEntry) TypedKey(key *fyne.KeyEvent) {
 
 func (e *EditEntry) TypedRune(r rune) {
 	e.Entry.TypedRune(r)
-	e.Refresh()
 }

@@ -4,12 +4,12 @@ What is not built, and what is limited by revoltgo or Fyne rather than by
 effort. Linked from the root `CLAUDE.md`; read it before concluding something
 is missing by accident.
 
-Simply not built, no constraint behind it: role mentions, a notice history panel,
+Simply not built, no constraint behind it: role mentions,
 a hue wheel/alpha/eyedropper in the colour picker, `MessageEmbedSpecial`
-(YouTube, Spotify, …), a **channel's own icon** and a group's **owner transfer**
-— both fields of the edit route, the second wanting a member picker — and a
-member's **per-server avatar** (`ChangeAvatar`/`RemoveAvatars`), which is an
-upload into a bucket with no surface here.
+(YouTube, Spotify, …), and a group's **owner transfer** — a field of the edit
+route wanting a member picker over the group's own recipients, plus a
+confirmation, since the account that made a group is otherwise the only one that
+can ever remove somebody from it.
 
 The gateway events still unregistered are the ones nothing here has to do about:
 `EventEmojiCreate` / `Delete` (revoltgo's own default handlers file them into
@@ -31,7 +31,8 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   no way to hear a PLI — so a late joiner waits up to the two-second GOP for a
   picture.
 - **Sharing a screen needs X11 or Windows.** Capture is `x11grab` on Linux and,
-  on Windows, `ddagrab` for a monitor with `gdigrab` behind it; enumeration is
+  on Windows, `gfxcapture` for either kind with `ddagrab` and then `gdigrab`
+  behind it; enumeration is
   RandR/EWMH and `EnumDisplayMonitors`/`EnumWindows`. **Wayland has no grabber in stock ffmpeg** — the citizen's
   path is the `org.freedesktop.portal.ScreenCast` portal, which means
   consuming a PipeWire node ourselves — so a pure Wayland session is told
@@ -41,17 +42,17 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **An occluded X11 window captures whatever the server still holds for it**,
   which without a compositor is garbage over the covered region. Every X11
   capturer shares this; the picker says so rather than pretending otherwise.
-- **Sharing one *window* on Windows flickers the mouse pointer.** gdigrab's
-  `BitBlt` carries `CAPTUREBLT`, which redraws the pointer once per captured
-  frame — visible to everybody at the machine, not only in the stream, and
-  worst at low frame rates where the redraws do not fuse. Monitors escape it
-  by going through `ddagrab` (Desktop Duplication, no DC), but that has no
-  window form: the window equivalent is Windows Graphics Capture, which is
-  WinRT and has no ffmpeg input. The picker says so; a reader who wants a
-  steady pointer shares a whole screen. `ddagrab` also needs ffmpeg 6.0 and a
-  session that can duplicate an output, so an RDP session or an older ffmpeg
-  falls back to `gdigrab` for monitors too — probed once per monitor per run,
-  never guessed at.
+- **Windows capture only reaches `gdigrab` on an old machine, and then it
+  flickers the mouse pointer.** gdigrab's `BitBlt` carries `CAPTUREBLT`, which
+  redraws the pointer once per captured frame — visible to everybody at the
+  machine, not only in the stream, and worst at low frame rates where the
+  redraws do not fuse. Both kinds of source escape it through Graphics Capture
+  (`gfxcapture`), and a monitor has `ddagrab` in between; each is probed once
+  per run rather than guessed at, and the picker warns only when the floor is
+  what a share will actually use. What is left is genuinely old: Graphics
+  Capture wants Windows 10 1903 and an ffmpeg carrying the filter, and
+  Desktop Duplication wants ffmpeg 6.0 and a session with an output to
+  duplicate, which an RDP session has not.
 - **A share encodes in hardware only where the ffmpeg build and the driver
   agree.** The codec families are AV1 and H.264 exactly so NVENC, AMF, QSV
   and VAAPI are reachable — no VP8 encoder exists in silicon — and each
@@ -100,6 +101,24 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   `fe80::` link-local on a machine with no global IPv6. It still connects, the
   working adapter's candidate winning, but the dead ones are checked first and
   logged per pair. Fixing it means a hook upstream in `livekit/server-sdk-go`.
+
+- **A call measures one direction of its loss.** The state bar's grade and its
+  tooltip come from `voice.Stats`: the round trip off the ICE agent's own consent
+  checks, and the worst loss the jitter buffers have counted — both about what
+  reaches *this* client. What the voice node makes of what this end sends comes
+  back in RTCP receiver reports, which lksdk reads for its own congestion control
+  behind `LocalTrackPublication.readRTCP` and does not pass on; a
+  `RemoteInboundRTPStreamStats` off the peer connection would need pion's stats
+  interceptor registered, which is lksdk's registry to build. So a reader whose
+  upload is the broken half sees a green bar and is told about it by the people
+  who cannot hear them.
+
+- **Loss is measured over speech, not over time.** The window is 200 played
+  packets — four seconds of somebody talking — so a quiet room's percentage is
+  however long ago the last conversation was, and a call nobody has spoken in has
+  none at all. DTX gaps are deliberately not counted as loss (a pause would
+  otherwise read as a dead connection), which is the same decision seen from the
+  other side.
 
 - **No echo cancellation.** The capture chain is a high-pass, RNNoise, a preamp
   and a noise gate; `audio.Processor` is the seam AEC would go in and `Engine`
@@ -165,6 +184,28 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   over the client's. What is built instead is `ui.FlashTaskbar`, which answers for
   any window with a handle. **On anything but Windows nothing is signalled at
   all** — the settings group is dropped rather than drawn.
+- **A client hidden in the notification area can only be heard.** Closing to the
+  tray is `config.System.CloseToTray`, on by default, and while the window is
+  hidden the alerts that reach the reader are the sounds alone: the notice card
+  is drawn into a window nobody can see, and `ui.FlashTaskbar` has no taskbar
+  button to flash. The toast that would answer for both is the gap above.
+- **A second launch is a second client, and the tray hides that.** Nothing here
+  is a single instance: starting the binary again opens another window, another
+  gateway session and another set of alert sounds. That was always true and
+  visible; with the window hidden it is neither. The fix is a lock file plus an
+  IPC hop to raise the first instance's window — a named pipe on Windows, a unix
+  socket elsewhere — and it is simply not built.
+- **The tray icon cannot be taken down, so there is no setting to hide it.** Fyne
+  exposes `SetSystemTrayMenu` and nothing that undoes it; `systray.Quit` is
+  reached only by quitting the app. So the icon is mounted for the run whatever
+  the settings say, and the System section offers no switch that would have to
+  apologise for taking effect at the next start.
+- **The client always opens onto the screen, and nothing opens it at login.**
+  Starting into the notification area was built and taken out — a client that
+  draws no window is a process somebody has to be *told* is running — so there is
+  no `StartHidden`. Running at login is the other half and is not built either:
+  it is a registry Run key on Windows, an autostart `.desktop` on XDG and a
+  LaunchAgent on macOS, three files rather than a setting.
 - **A sound is a WAV or an MP3, and the built-ins are synthesised.** Nothing ships
   as an asset: `audio/synth.go` renders each default, so there is no licence, no
   binary and no missing-file state, and a custom file replaces one rather than
@@ -196,7 +237,8 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   re-entering the server. Joins and leaves *are* followed: revoltgo files them
   into `State` and `onMembersChanged` refreshes the sidebar for the open server.
   The sections are Revolt's *hoisted* roles as the server defines them, with no way to
-  reorder or collapse one, and a role's icon is dropped at the boundary. Presence
+  reorder or collapse one; a hoisted role's icon heads its section where it has
+  one (`ui.sectionHead`, drawn square in the glyph's box). Presence
   reordering is the client's own debounce rather than anything the gateway batches.
   Its **timeout gives up watching rather than giving up**: revoltgo takes no
   context, so `memberFetchTimeout` only stops the strip claiming to be loading —
@@ -204,10 +246,16 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   and waits on the first, and an answer arriving after the strip has offered a
   retry is still installed. Nothing reports progress either: the endpoint is one
   response, so the mark sweeps rather than filling.
-- **Slowmode** runs off the client's own clock: the `InSlowmode` rejection carries
-  an authoritative `retry_after`, but revoltgo surfaces failures as a formatted
-  string. A send refused because the cooldown started elsewhere reports the generic
-  notice, and nothing hints at a cooldown outside the open channel.
+- **Slowmode runs off the client's own clock until the server corrects it.** The
+  badge counts down from what this client last sent, so a cooldown begun in another
+  client of the same account is invisible — until a send is refused, at which point
+  `client.SlowmodeRetry` reads the `InSlowmode` rejection's `retry_after` (whole
+  seconds, the TTL left on Revolt's own key) and `App.holdSlowmode` sets the badge
+  from it. That refusal is the only authoritative answer there is, so it is the
+  only one that may extend a running wait. What is still missing: nothing hints at
+  a cooldown outside the open channel, and a refused send loses what was typed —
+  the composer is cleared before the request goes out, which is true of every
+  failure and not of slowmode alone.
 - **Messages are deleted in bulk, and the limits are Revolt's not this client's.**
   Selecting is entered from a row's menu, needs `ManageMessages` — the bulk route
   asks for it even over the account's own words, unlike a single delete — and
@@ -319,8 +367,12 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **A channel is edited for its name, topic, cooldown, user limit and age gate.**
   Stoat gates the whole edit on one permission (`ManageChannel`), so the card
   offers everything its kind has or does not open — there is no field to grey out.
-  Two of the route's fields are left: the icon and a group's owner transfer want a
-  file picker and a member picker. `archived` is not a gap — the spec lists it and
+  The **icon** is beside the card rather than on it — Change icon / Remove icon on
+  the sidebar's own menu, under that same one permission — because the card is
+  fields filled in and submitted together and a picture is an upload that lands on
+  its own, which is why a group's is on a page instead. One route either way
+  (`Client.SetChannelIcon`). One field of it is left: a group's **owner transfer**,
+  which wants a member picker. `archived` is not a gap — the spec lists it and
   `channel_edit.rs` reads it nowhere, so no client can set it.
 - **A composed mention** stays a visible `<@id>` until sent — Fyne can't draw a chip
   inside an entry, and mapping names back to IDs at send time breaks on duplicates.
@@ -410,8 +462,16 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   what everyone else is shown, not what they have actually received: the local
   echo does not know whether the announcement reached the gateway, and with
   `SendTyping` off it is a preview of a line nobody is being sent.
-- **A system line** names only the subject — Revolt sends no actor, so a kick reads
-  "X was kicked". A rename says only that it happened.
+- **A system line draws one name, and two events have nobody to blame.** The actor
+  is carried now (`domain.SystemMessage.By`), so a rename reads "X renamed the
+  channel to general" and a pin names who made it. Revolt sends **no actor for a
+  kick or a ban** — the spec's `user_kicked`/`user_banned` variants carry the
+  subject alone — so those two still read "X was kicked". Only one name per line
+  is tappable (`Subject`): where an event has both a subject and an actor, the
+  actor is plain text at the end ("X added to group by Y").
+  `channel_ownership_changed` carries `from`/`to` and no actor, and is the one
+  kind still drawn impersonally: naming it wants two resolved accounts and a
+  second mention the line has no slot for.
 - **Profiles** don't refresh while open, and the banner is flat: a `canvas.Image`
   takes no gradient mask. The About section is the dialog's alone, and scrolls, as
   are the mutual ones. All three kinds of mutual are drawn — servers, groups and
@@ -576,16 +636,29 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   searchable. The login screen has no notice layer (it isn't built until Ready), so
   everything it reports — a dead token, a refused password, a refused second
   factor, a snapshot that never came — goes on its one `ui.StatusLine`, one
-  message at a time and gone at the next screen.
+  message at a time and gone at the next screen. **Those are the ones the history
+  cannot hold**: `NoticeStack.record` files every notice pushed through the layer,
+  including the ones a tone switch drops, so the rail's Notices panel is where a
+  card that has already gone is read back — but nothing said before Ready ever
+  reaches that layer. The record is `noticeHistoryDepth` (100) deep, in memory,
+  and dies with the run.
 - **The status line is drawn on a profile and nowhere else.** Not the member
   sidebar, not a message row, not beside this account's own name — so the one
   place it is visible is a card somebody has to open, and the settings field that
   writes it shows what the store last said rather than what was just typed: the
   change returns as a gateway event, and the page is not rebuilt for one.
-- **A picture is sent as it is, and a profile is a snapshot.** Nothing is checked
-  about a file before it is uploaded: Autumn owns the size limit and the accepted
-  types, and a refusal arrives as a status code, so the notice can only offer
-  "it may be too large". The bio and the banner are not on the user record — the
+- **A picture is cropped or sent whole, and a profile is a snapshot.** The crop
+  card is the only thing between a file and Autumn: nothing is checked against a
+  limit, because Autumn owns the size limit and the accepted types and a refusal
+  arrives as a status code, so the notice can only offer "it may be too large".
+  Two things a crop cannot do. An **animated GIF** flattens to its first frame —
+  cropping every frame means compositing each against its own disposal, cropping,
+  and re-quantising onto a palette, and what comes out is full frames rather than
+  diffs, which is a larger file than the one that went in — so the card says so
+  and the other button sends the file untouched. And a **WebP** is croppable but
+  never written back as one: `x/image/webp` decodes and encodes nothing, so a
+  cropped WebP is re-encoded as a PNG, which for a photograph is several times
+  the file it came from. The bio and the banner are not on the user record — the
   v0 user model has no `profile` field at all, so no event announces either —
   which makes them a request asked once per session
   and again after each edit made here; one made from another client appears when
@@ -648,10 +721,12 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   Categories are also the one field of that route gated on `ManageChannel` rather
   than `ManageServer`, which is what the section asks for. There is no drag: Fyne
   gives a list no reordering affordance, so a place in the order is two buttons.
-- **A role is edited at server scope, in hex, without a picture.** The editor sets
-  a role's name, colour, hoist, seniority and all thirty-four permission bits, and
-  three things about one are out of reach. Revolt's role **icon** is neither read
-  nor set. The **colour** is a hex — Revolt takes any CSS colour, gradients
+- **A role is edited at server scope, in hex, and its picture is read-only.** The
+  editor sets a role's name, colour, hoist, seniority and all thirty-four
+  permission bits, and three things about one are out of reach. Revolt's role
+  **icon** is read — `domain.Role.IconURL`, which leads the row in the Roles list
+  and heads the member sidebar's section — but never **set**: uploading one is an
+  Autumn round trip with no surface here. The **colour** is a hex — Revolt takes any CSS colour, gradients
   included, and the client's own palette and swatch agree on hexes — so a role
   already wearing a gradient keeps it until somebody picks a colour and there is
   no way to type one back; `domain.Role.ColorText` is what the field opens on
@@ -690,9 +765,14 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   and the client asks all five.** A nickname, a set of roles and a timeout are one
   route (`ServerMemberEdit`) under `ChangeNickname`/`ManageNicknames`,
   `AssignRoles` and `TimeoutMembers`; roles are additionally gated on rank, since
-  Revolt refuses one at or above the actor's own. What it does **not** offer is a
-  per-server avatar (`ChangeAvatar`/`RemoveAvatars`), which is an upload into a
-  bucket with no surface here. A timeout has no server-side maximum, so the six
+  Revolt refuses one at or above the actor's own. The **per-server avatar** is
+  offered too, and split the way Revolt splits it: `member_edit.rs` takes
+  `ChangeAvatar` for the caller's own membership and refuses `avatar` for anybody
+  else's outright, while taking one off is `RemoveAvatars` — so a moderator is
+  offered a removal and never a change. `domain.Member.ServerAvatar` is what says
+  there is one to remove, the membership's picture and the account's being
+  indistinguishable once one has fallen back to the other.
+  A timeout has no server-side maximum, so the six
   spans the menu lists are the client's own; a member's remaining time is not
   drawn anywhere either — the menu offers to end one, which is the only place a
   standing timeout shows at all.
@@ -730,11 +810,20 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   cached before the animator existed re-fetches its bytes on first hover — the
   disk cache held only the PNG still.
 
-- **A video plays inline only where ffmpeg is on PATH.** The player is a
+- **Only Windows can be handed an ffmpeg.** `internal/deps` downloads a pinned
+  one where the machine has none (gyan.dev's essentials build, by digest — see
+  the package comment for why not BtbN and why not a repo folder), which covers
+  inline video and both halves of a screenshare. Linux and macOS are told to run
+  their package manager instead: both have a one-line install, the Linux archives
+  are `.tar.xz` which the standard library cannot read, and a 127 MB download the
+  client has to carry a digest for buys nothing over `apt install ffmpeg`. The
+  pin is bumped by hand — nothing checks for a newer ffmpeg, and a machine whose
+  own PATH build is older keeps it, PATH winning by design.
+- **A video plays inline only where ffmpeg is found.** The player is a
   sandboxed subprocess by design (`docs/video-player.md` — discovery, not
-  bundling), so a machine without ffmpeg gets the card, the open-in-player
-  button and a notice saying what to install, and no poster, duration or
-  playback; bundling is a release-pipeline decision not yet taken. Within the
+  bundling), so a machine with neither a PATH copy nor a downloaded one gets the
+  card, the open-in-player button and a notice saying what to install, and no
+  poster, duration or playback. Within the
   player, the deliberate remainders are listed at the end of that file: the
   attachment viewer still offers no video preview, decode is at the card's
   logical size (soft on HiDPI), downloads do not resume, decoding is software

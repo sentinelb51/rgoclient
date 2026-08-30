@@ -115,6 +115,30 @@ type CallIslandActions struct {
 	OnState func(text string, over fyne.CanvasObject, hovering bool)
 }
 
+// CallQuality is how good the connection under a running call is, in the three
+// answers a colour can carry. The grading is the controller's — what counts as a
+// poor call is policy, the way a keystroke's sound is — and this is the seam it
+// crosses, as ui.AudioDevice is for a device list.
+type CallQuality int
+
+const (
+	CallQualityGood CallQuality = iota
+	CallQualityFair
+	CallQualityPoor
+)
+
+// tint is the bar's colour for a grade.
+func (q CallQuality) tint() color.Color {
+	switch q {
+	case CallQualityFair:
+		return theme.Colors.CallIslandStateFair
+	case CallQualityPoor:
+		return theme.Colors.CallIslandStatePoor
+	}
+
+	return theme.Colors.CallIslandStateGood
+}
+
 // CallIslandWhere is where one half's channel is: the channel itself, what to
 // say under it, and what to draw beside it. A server channel is its server; a
 // group is how many are in it; a direct message is neither and gets a name and a
@@ -360,17 +384,12 @@ func (w *CallIsland) ClearCall() {
 	w.joinReserve.Hide()
 }
 
-// SetState says how the call is doing. good is false for anything the reader
-// would want to know about. The word is not drawn — it is what the bar's tooltip
+// SetState says how the call is doing: the word the bar stands for, and the
+// grade it is painted at. The word is not drawn — it is what the bar's tooltip
 // answers with — so a card in a call that is fine says nothing it would have to
 // be reread.
-func (w *CallIsland) SetState(text string, good bool) {
-	tint := theme.Colors.CallIslandStatePoor
-	if good {
-		tint = theme.Colors.CallIslandStateGood
-	}
-
-	w.bar.set(text, tint)
+func (w *CallIsland) SetState(text string, quality CallQuality) {
+	w.bar.set(text, quality.tint())
 }
 
 // SetMuted and SetDeafened redraw the two toggles. Both are no-ops on an
@@ -455,7 +474,9 @@ func (w *CallIsland) Sync() {
 		w.Hide()
 	}
 
-	w.Refresh()
+	// No refresh of its own: the one caller (app.settleCallIsland) refreshes the
+	// layer this floats on straight after, which walks this card too — a second
+	// walk here re-uploaded the island's picture per sync.
 }
 
 /* Parts */

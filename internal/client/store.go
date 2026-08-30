@@ -226,16 +226,23 @@ func (s *store) Relationships() []domain.User {
 
 	// The relationship is asked *before* the account is resolved: this walks every
 	// cached user, most of whom are members of a server and nothing more, and
-	// resolving one builds a handle, an avatar URL and a badge list. The answer is
-	// then carried into the resolution rather than asked for again — each ask takes
-	// the client's lock, and on a large server this loop runs thousands of times.
+	// resolving one builds a handle, an avatar URL and a badge list. The overlay
+	// is copied once ahead of the walk — HasIncomingRequest's shape — because
+	// asking per account takes the client's lock, and on a large server this
+	// loop runs a hundred thousand times. UserSeq rather than Users for the same
+	// reason: the slice snapshot is the whole cache allocated to be discarded.
+	known := s.client.knownRelations()
+
 	var related []keyed[domain.User]
-	for _, raw := range state.Users() {
+	for raw := range state.UserSeq() {
 		if raw == nil || raw.ID == selfID {
 			continue
 		}
 
-		relationship := s.client.relationshipWith(raw)
+		relationship, ok := known[raw.ID]
+		if !ok {
+			relationship = toRelationship(raw.Relationship)
+		}
 		if !relationship.Known() {
 			continue
 		}
@@ -352,7 +359,7 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, roles roleTa
 		out.Name, out.Nickname = *member.Nickname, *member.Nickname
 	}
 	if member.Avatar != nil {
-		out.AvatarURL = member.Avatar.URL(avatarSize)
+		out.AvatarURL, out.ServerAvatar = member.Avatar.URL(avatarSize), true
 	}
 	if member.Timeout != nil {
 		out.Timeout = *member.Timeout
@@ -386,6 +393,107 @@ func toMember(state *revoltgo.State, member *revoltgo.ServerMember, roles roleTa
 	out.ServerDeafened = member.CanReceive != nil && !*member.CanReceive
 
 	return out
+}
+
+// memberFace is the name, picture and bot mark of a membership with the account
+// behind it filled in — the three fields an author line and a typing row draw,
+// read without building the member. toMember keeps its own copy of this logic
+// because it reads more of the same user lookup.
+func memberFace(state *revoltgo.State, member *revoltgo.ServerMember) (name, avatarURL string, bot bool) {
+	if member.Nickname != nil {
+		name = *member.Nickname
+	}
+	if member.Avatar != nil {
+		avatarURL = member.Avatar.URL(avatarSize)
+	}
+	if user := state.User(member.ID.User); user != nil {
+		bot = user.Bot != nil
+		if name == "" {
+			name = displayName(user)
+		}
+		if avatarURL == "" {
+			avatarURL = user.AvatarURL(avatarSize)
+		}
+	}
+	if name == "" {
+		name = "Unknown user"
+	}
+
+	return name, avatarURL, bot
+}
+
+// memberColour is the senior coloured role's colour and nothing else: the walk
+// picks the winner by Rank first and parses one colour, where a roleTable would
+// convert — and parse — every role the member wears to answer the same question.
+// Per message row, that is most of what the table cost.
+func memberColour(server *revoltgo.Server, roleIDs []string) color.Color {
+	if server == nil || len(roleIDs) == 0 {
+		return nil
+	}
+
+	var winner *revoltgo.ServerRole
+	for _, id := range roleIDs {
+		role := server.Roles[id]
+		if role == nil || role.Colour == nil || *role.Colour == "" {
+			continue
+		}
+		if winner == nil || role.Rank < winner.Rank {
+			winner = role
+		}
+	}
+	if winner == nil {
+		return nil
+	}
+
+	if c, ok := parseColor(*winner.Colour); ok {
+		return c
+	}
+
+	return nil
+}
+
+// MemberIdentity is memberFace as a read: how a membership is named and drawn,
+// for the surfaces — the typing line — that would otherwise resolve a whole
+// Member for two fields.
+func (s *store) MemberIdentity(serverID, userID string) (name, avatarURL string, ok bool) {
+	state := s.state()
+	if state == nil || serverID == "" || userID == "" {
+		return "", "", false
+	}
+
+	member := state.Member(serverID, userID)
+	if member == nil {
+		return "", "", false
+	}
+
+	name, avatarURL, _ = memberFace(state, member)
+
+	return name, avatarURL, true
+}
+
+// VoiceChannelOf finds the voice channel of a server that userID is connected
+// to. Field reads only — the caller includes every MemberUpdated in the open
+// server, where walking VoiceParticipants would resolve and sort each call to
+// answer one membership test. No Kind filter: a text channel simply holds no
+// voice states.
+func (s *store) VoiceChannelOf(serverID, userID string) (channelID string, ok bool) {
+	state := s.state()
+	if state == nil || serverID == "" || userID == "" {
+		return "", false
+	}
+
+	server := state.Server(serverID)
+	if server == nil {
+		return "", false
+	}
+
+	for _, id := range server.Channels {
+		if state.VoiceState(id, userID) != nil {
+			return id, true
+		}
+	}
+
+	return "", false
 }
 
 // VoiceParticipants is everybody connected to a voice channel's call, ordered by
@@ -557,6 +665,9 @@ func toRole(id string, role *revoltgo.ServerRole) domain.Role {
 			out.Color = c
 		}
 	}
+	if role.Icon != nil {
+		out.IconURL = role.Icon.URL(avatarSize)
+	}
 
 	return out
 }
@@ -679,6 +790,14 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		out.LastMessageID = *channel.LastMessageID
 	}
 
+	// Revolt gives a text or voice channel its own icon as readily as a group, and
+	// this used to be read in the group arm below alone. Ahead of the switch so the
+	// two arms that draw a *person's* picture still overwrite it — neither kind can
+	// carry one, so nothing is actually taken away.
+	if channel.Icon != nil {
+		out.AvatarURL = channel.Icon.URL(avatarSize)
+	}
+
 	switch out.Kind {
 	case domain.ChannelSavedMessages:
 		out.Name = "Saved Notes"
@@ -700,10 +819,6 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 		out.Permissions = permissionInConversation
 		if channel.Permissions != nil {
 			out.Permissions = domain.Permission(*channel.Permissions)
-		}
-
-		if channel.Icon != nil {
-			out.AvatarURL = channel.Icon.URL(avatarSize)
 		}
 	}
 
@@ -802,10 +917,10 @@ func (s *store) Server(serverID string) (domain.Server, bool) {
 	return toServer(server), true
 }
 
-// channelServerID returns the server a channel belongs to, or "" for a
+// ChannelServerID returns the server a channel belongs to, or "" for a
 // conversation. It reads State directly rather than going through Channel, which
 // would resolve a name and an avatar nobody asked for.
-func (s *store) channelServerID(channelID string) string {
+func (s *store) ChannelServerID(channelID string) string {
 	state := s.state()
 	if state == nil {
 		return ""
@@ -895,10 +1010,18 @@ func (s *store) MessageAuthor(message *domain.Message) domain.Author {
 		return domain.Author{Name: message.Webhook.Name, AvatarURL: message.Webhook.AvatarURL, Mark: domain.AuthorWebhook}
 	}
 
-	if member, ok := s.Member(s.channelServerID(message.ChannelID), message.AuthorID); ok {
-		return domain.Author{
-			Name: member.Name, AvatarURL: member.AvatarURL, Color: member.Color,
-			Mark: authorMark(message, member.Bot),
+	// memberFace and memberColour rather than s.Member: this runs per row build,
+	// and the member read would convert every role the author wears — and their
+	// icons' URLs — to draw a name, a face and one colour.
+	if serverID := s.ChannelServerID(message.ChannelID); serverID != "" && message.AuthorID != "" {
+		if member := state.Member(serverID, message.AuthorID); member != nil {
+			name, avatarURL, bot := memberFace(state, member)
+
+			return domain.Author{
+				Name: name, AvatarURL: avatarURL,
+				Color: memberColour(state.Server(serverID), member.Roles),
+				Mark:  authorMark(message, bot),
+			}
 		}
 	}
 
@@ -937,9 +1060,17 @@ func authorMark(message *domain.Message, bot bool) domain.AuthorMark {
 	return domain.AuthorPerson
 }
 
-// SystemTextParts renders a system message, resolving whoever it is about.
+// SystemTextParts renders a system message, resolving whoever it is about and
+// whoever did it. Target is only looked up where it names an account: for a pin
+// it is a message ID, and both being ULIDs there is nothing about the value to
+// stop one matching a user.
 func (s *store) SystemTextParts(system *domain.SystemMessage) (name, rest string) {
-	return system.TextParts(s.UserName(system.Target))
+	var who string
+	if system.TargetsUser() {
+		who = s.UserName(system.Target)
+	}
+
+	return system.TextParts(who, s.UserName(system.By))
 }
 
 /* Permissions */

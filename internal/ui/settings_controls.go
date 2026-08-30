@@ -61,6 +61,70 @@ func newSettingsCard() *canvas.Rectangle {
 	return card
 }
 
+/* Rows this machine cannot apply */
+
+// lockedScrim covers a row whose setting is real but unreachable on this
+// machine: it washes the row out, swallows what is aimed at the control under
+// it, and names the reason under the pointer.
+//
+// One object over the whole row rather than a disabled state per control. Hit
+// testing takes the *last* match in the walk, so a scrim mounted over the row is
+// what makes everything in it unreachable — hover included, which is what lets
+// the reason be the only thing a locked row answers with.
+type lockedScrim struct {
+	widget.BaseWidget
+
+	// reason is what the pointer is told, and tooltip is where it is drawn. A nil
+	// tooltip leaves the row washed and silent rather than refusing to build: the
+	// index pass and the tests mount pages with no layer to float a label on.
+	reason  string
+	tooltip *Tooltip
+
+	wash *canvas.Rectangle
+}
+
+var (
+	_ fyne.Tappable     = (*lockedScrim)(nil)
+	_ desktop.Hoverable = (*lockedScrim)(nil)
+)
+
+func newLockedScrim(reason string, tooltip *Tooltip) *lockedScrim {
+	scrim := &lockedScrim{
+		reason:  reason,
+		tooltip: tooltip,
+		wash:    canvas.NewRectangle(theme.Colors.SettingsLockedScrim),
+	}
+	scrim.ExtendBaseWidget(scrim)
+
+	return scrim
+}
+
+func (s *lockedScrim) CreateRenderer() fyne.WidgetRenderer {
+	return widget.NewSimpleRenderer(s.wash)
+}
+
+// Tapped is where a tap on a locked row ends. Without it the tap would reach the
+// control below and move a setting the machine cannot carry.
+func (s *lockedScrim) Tapped(*fyne.PointEvent) {}
+
+func (s *lockedScrim) MouseIn(*desktop.MouseEvent) {
+	if s.tooltip != nil {
+		s.tooltip.ShowAbove(s.reason, s)
+	}
+}
+
+func (s *lockedScrim) MouseMoved(*desktop.MouseEvent) {}
+
+func (s *lockedScrim) MouseOut() {
+	if s.tooltip != nil {
+		s.tooltip.Hide()
+	}
+}
+
+// Cursor is the plain arrow: a pointer is what every other row's control answers
+// the hover with, and this one has nothing to answer.
+func (s *lockedScrim) Cursor() desktop.Cursor { return desktop.DefaultCursor }
+
 /* Toggle */
 
 // Toggle is the on/off switch every boolean setting uses: a pill filling with the
@@ -1159,15 +1223,16 @@ func newLevelBar() (bar *fyne.Container, setLevel, setThreshold func(ratio float
 	bar = container.New(layout, track, fill, marker)
 
 	// Redrawn from both setters, since either can change which side of the
-	// threshold the level is on.
+	// threshold the level is on. Relayout alone repaints the bar; fill.Refresh on
+	// top of it was a second walk per sample, and the colour only moves when the
+	// level crosses the threshold.
 	paint := func() {
 		open := layout.level >= layout.threshold && layout.level > 0
+		colour := theme.Colors.EmbedAccent
 		if open {
-			fill.FillColor = theme.Colors.PresenceOnline
-		} else {
-			fill.FillColor = theme.Colors.EmbedAccent
+			colour = theme.Colors.PresenceOnline
 		}
-		fill.Refresh()
+		fill.FillColor = colour
 		Relayout(bar)
 	}
 

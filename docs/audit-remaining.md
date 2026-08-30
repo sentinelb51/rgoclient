@@ -72,11 +72,11 @@ All seven are cross-package: the agent that found them did not own the other fil
 |---|---|
 | ~~B2-8~~ | **Done differently.** `syncChannelKind` now ends in `syncCallIsland` (`messages.go:704`), so the one call site covers both and the comment above it says why |
 | ~~C1-2~~ | **Done.** `MessageCache.Update` holds the lock across search+copy+apply+store; `Client.reviseMessage` is the one-line delegate its six call sites still go through |
-| C3-12 | The AST memo. Down from four parses per body to one (two with an invite) without it, but `PreviewText` and `resolveReply` still parse per call — they are about *other* messages than the row being built, so no per-row cache reaches them. Needs a `DocCache` beside `TextCache`, through `ui.Deps`, bounded from `config.Settings` |
-| C3-13 | `Store.Permissions` re-ranks the same member for every channel in a sidebar rebuild. The store must stay pure, so the memo belongs in `app/navigation.go`'s rebuild scope |
-| B2-13 | `fetchTextPreview`'s liveness guard on the miss path: needs a generation on `MessageWidget` bumped by a release called from `MessageList.mount` and the drop sites |
+| ~~C3-12~~ | **Closed as not worth the machinery** (2026-08-30). `markdown.Parse` measures ~390 ns for a typical line and ~37 µs for a 6.6 KB body (`docs/performance.md`), and a preview parse is per *mount*, not per frame. A `DocCache` through `ui.Deps` plus a config bound buys back microseconds at the cost of held ASTs and invalidation on edit — the same trade performance.md already rejected for the per-row cache. Reopen only with a profile showing preview parses in a frame |
+| ~~C3-13~~ | **Already landed.** `refreshChannelList` takes `Store.ServerChannelPermissions(serverID)` — one pass per rebuild (`navigation.go:345`, `viewable`). The remaining per-call `Store.Permissions` sites are one-shot action checks, not loops |
+| ~~B2-13~~ | **Done** (2026-08-30), without the generation: `fetchTextPreview`'s UI-thread callback now checks `CanvasForObject(preview) != nil` — the gifAnimator's own liveness guard — so a parse is never spent on a row rebuilt while the fetch was out |
 | B2-14 | Doc note only. The typing sweep repaints the whole window at frame rate while anyone types; no cheap fix under Fyne's one-bool dirty model. Prose is in the scratchpad's `rgoclient-wave1-report.md` under `docsNote` |
-| C1-1 | **Probably already fixed.** revoltgo's caches became copy-on-write, so a handed-out pointer can go stale but never change under its reader — which is exactly what the bare reads in `store.go`/`convert.go` needed. Confirm against the COW mutators, then say so in `internal/client/CLAUDE.md` rather than leaving the reads looking accidental |
+| ~~C1-1~~ | **Confirmed and documented** (2026-08-30). revoltgo's `state.go` clone helpers are the COW mutators; `internal/client/CLAUDE.md` now states the contract — a pointer can go stale but never change under its reader — beside the `Session.State` note |
 
 ## C5 — workaround retirements, none started
 
@@ -84,10 +84,10 @@ Needs `go.mod` pointed at the local revoltgo first (nothing is pushed):
 `replace github.com/sentinelb51/revoltgo => ../revoltgo`.
 
 - `flagMentionsEveryone` / `flagMentionsOnline` locals in `convert.go` — A1-8 landed, `MessageFlags` are real bits now
-- `answeredGone` / `statusOf` / `Transient` string parsing in `actions.go` — `APIError` landed. **Its `Error()` string is deliberately byte-identical**, so the parser still works and the switch to `errors.As` is safe to make at leisure. This also unlocks the slowmode `retry_after` notice in `known-gaps.md`
-- `Client.Mutual`, `Client.ServerBans`, `Client.BanMember` — verified **already fixed upstream**. `internal/client/CLAUDE.md:238-256` still calls them broken and is stale
+- ~~`answeredGone` / `statusOf` / `Transient` string parsing in `actions.go`~~ **done** — `apiError` is `errors.As` on `*revoltgo.APIError` and `statusOf` reads `StatusCode`; nothing parses `Error()` any more. The slowmode `retry_after` notice landed with it (`client.SlowmodeRetry` → `App.holdSlowmode`)
+- ~~`Client.Mutual`, `Client.ServerBans`, `Client.BanMember`~~ **done** — all three go through the fixed typed routes; the CLAUDE.md note and `Client.Mutual`'s stale "sent by hand" comment were rewritten (2026-08-30)
 - `Client.relations` overlay, hand-rolled MFA bodies, `Client.AddFriend` raw POST — blocked on A2-14b/A2-15 above
-- `MessageSystem` actor: A2-16 landed upstream, so `By` can now reach the system line through `convert.go` + `domain.SystemMessage` + `ui/message.go`
+- ~~`MessageSystem` actor~~ **done** — `By` and `Name` reach the line through `convert.go`, `domain.SystemMessage` and `ui/message.go`. `Subject()` is which account the line's one name stands for; `MessageWidget.NamesAny` replaced the single-ID compare in `refreshAuthorMessages`, a line being able to name two people
 
 ## Deliberately not done
 

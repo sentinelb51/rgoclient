@@ -361,14 +361,19 @@ func (w *VideoCard) setChip(text string) {
 		w.chip.Hide()
 		return
 	}
+	changed := false
 	if w.chipText.Text != text {
 		w.chipText.Text = text
 		w.chipText.Refresh()
+		changed = true
 	}
 	if !w.chip.Visible() {
 		w.chip.Show()
+		changed = true
 	}
-	w.chip.Refresh()
+	if changed {
+		w.chip.Refresh()
+	}
 }
 
 // syncChip re-decides what the chip says: a status outranks the clock, and a

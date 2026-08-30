@@ -54,6 +54,7 @@ var Colors = struct {
 	GroupPickChosenBg      color.Color
 	SettingsJumpBackground color.Color
 	SettingsBackText       color.Color
+	SettingsLockedScrim    color.Color
 	TooltipBg              color.Color
 	NoticeBg               color.Color
 	NoticeCardBg           color.Color
@@ -195,9 +196,12 @@ var Colors = struct {
 
 	// The card floating at the top of the window while this account is in a call or
 	// looking at a voice channel. Muted is the server line under each channel name
-	// and the rule between the halves. The two state colours are the connection's
+	// and the rule between the halves. The three state colours are the connection's
 	// health, carried by the bar along the card's bottom edge — a colour rather
-	// than a word, the word being what its tooltip is for. TextHover is what the
+	// than a word, the word and the numbers behind it being what its tooltip is
+	// for. Poor is the danger red rather than a reference to it: the two say
+	// different things — a control that is off, and a call that is hard work — and
+	// one being restyled must not move the other. TextHover is what the
 	// call's two lines light to under the pointer: they are the target, and the
 	// card is the only panel in play, so a fill behind them would read as a button
 	// nobody drew an edge on. Join and the danger tint are what the two ends of the
@@ -209,6 +213,7 @@ var Colors = struct {
 	CallIslandTextHover  color.Color
 	CallIslandMuted      color.Color
 	CallIslandStateGood  color.Color
+	CallIslandStateFair  color.Color
 	CallIslandStatePoor  color.Color
 	CallIslandJoin       color.Color
 	CallIslandDanger     color.Color
@@ -378,8 +383,13 @@ var Colors = struct {
 	// word is what is read, and a chevron at a label's own brightness is a second
 	// thing competing with it at the corner of the page.
 	SettingsBackText: color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
-	TooltipBg:        color.RGBA{R: 8, G: 9, B: 12, A: 240},      // darker than any column it floats over
-	NoticeBg:         color.RGBA{R: 43, G: 49, B: 66, A: 250},    // #2B3142, lifted off whatever it floats over
+	// The wash over a row this machine cannot apply. The card's own fill at part
+	// strength, laid over the row rather than a second set of dimmed colours for
+	// every object in one: a row is a dozen of them and only something in front of
+	// them all is sure to cover each.
+	SettingsLockedScrim: color.RGBA{R: 31, G: 35, B: 48, A: 170}, // SessionCardBg, part strength
+	TooltipBg:           color.RGBA{R: 8, G: 9, B: 12, A: 240},   // darker than any column it floats over
+	NoticeBg:            color.RGBA{R: 43, G: 49, B: 66, A: 250}, // #2B3142, lifted off whatever it floats over
 	// The transient card is the call island's surface rather than the centred
 	// notice's: both float over whatever is being read, and two floating cards a
 	// shade apart read as a mistake. Darker than anything below it, with an edge
@@ -625,7 +635,8 @@ var Colors = struct {
 	CallIslandTextHover:  color.RGBA{R: 255, G: 255, B: 255, A: 255}, // #FFFFFF
 	CallIslandMuted:      color.RGBA{R: 138, G: 146, B: 163, A: 255}, // #8A92A3
 	CallIslandStateGood:  color.RGBA{R: 61, G: 214, B: 140, A: 255},  // #3DD68C
-	CallIslandStatePoor:  color.RGBA{R: 232, G: 179, B: 84, A: 255},  // #E8B354
+	CallIslandStateFair:  color.RGBA{R: 232, G: 179, B: 84, A: 255},  // #E8B354
+	CallIslandStatePoor:  color.RGBA{R: 226, G: 92, B: 92, A: 255},   // #E25C5C
 	CallIslandJoin:       color.RGBA{R: 91, G: 124, B: 250, A: 255},  // #5B7CFA, the accent
 	CallIslandDanger:     color.RGBA{R: 226, G: 92, B: 92, A: 255},   // #E25C5C
 
@@ -756,6 +767,8 @@ var Sizes = struct {
 	MemberSectionHeight   float32
 	MemberSectionTopPad   float32
 	MemberSectionTextSize float32
+	MemberSectionIconSize float32
+	MemberSectionIconGap  float32
 
 	// The band around a member row's avatar, coloured by presence — the member
 	// list's only presence mark. It widens the avatar block by twice this on each
@@ -1252,6 +1265,18 @@ var Sizes = struct {
 	ShareSourceRowHeight  float32
 	ShareSourceGap        float32
 
+	/* The crop card */
+
+	// CropStageHeight is how much of a picture the frame is aimed at: tall enough
+	// that a face is a target rather than a thumbnail, short enough that the card
+	// still holds its chips and its buttons on a laptop. CropHandleSize is the
+	// corner grab, which is also how close a press has to land to take one, and
+	// CropFrameLine the outline between what is kept and what is dropped.
+	CropDialogWidth float32
+	CropStageHeight float32
+	CropHandleSize  float32
+	CropFrameLine   float32
+
 	/* The message islands: pins, mentions and channel search */
 
 	IslandWidth   float32
@@ -1387,6 +1412,8 @@ var Sizes = struct {
 	MemberSectionHeight:   30,
 	MemberSectionTopPad:   8,
 	MemberSectionTextSize: 12,
+	MemberSectionIconSize: 14,
+	MemberSectionIconGap:  5,
 
 	MemberPresenceRing: 2,
 
@@ -1862,6 +1889,11 @@ var Sizes = struct {
 	ShareSourceListHeight: 232,
 	ShareSourceRowHeight:  46,
 	ShareSourceGap:        4,
+
+	CropDialogWidth: 460,
+	CropStageHeight: 300,
+	CropHandleSize:  12,
+	CropFrameLine:   2,
 
 	// Wide enough for what a card holds: a heading, a line and a row of badges. Any
 	// narrower and the heading shortens a name to fit a date beside it.

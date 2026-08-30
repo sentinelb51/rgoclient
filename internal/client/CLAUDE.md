@@ -7,6 +7,12 @@ dependency DAG and the client's contract; this file is the wire-level notes.
 ## revoltgo notes
 
 - `Session.X(...)` = network. `Session.State.X(...)` = local cache, may be nil.
+- **A cached object is immutable once published.** revoltgo's `State` is
+  copy-on-write: a mutator clones the object, updates the clone and swaps it in
+  under the write lock. So a pointer read out of `State` can go *stale* but can
+  never change under its reader — which is why `store.go` and `convert.go` hold
+  and dereference those pointers without copying first. Deliberate, not
+  accidental; anything resolving *twice* should still re-read rather than hold.
 - Attachments, avatars and icons are all `*revoltgo.File`, whose `Metadata` is a
   *pointer*, nil for files the server couldn't introspect — `domain.File`
   carries plain `Width`/`Height`/`Kind` so `convert.go` absorbs that nil check
@@ -319,25 +325,17 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   bring and nothing in `State` to hold it. A bio or a banner is
   `Session.UserProfile` and nothing else, which is why the settings page re-reads
   it after every edit rather than recording what it sent.
-- **Typed calls that cannot work.** Two plain mis-declarations and one missing
-  body; each `Client` method sends its own request instead. (The rest of what
-  goes round the typed API is a missing route, `AddFriend`.)
-  - `Session.UserMutual` decodes `/users/{id}/mutual`'s single object into a
-    **slice**, so it fails on shape whatever the account; the struct also drops
-    `channels`, the groups and conversations both are in. → `Client.Mutual`.
-  - `Session.ServerBans` makes the same mistake: a **slice** where
-    `/servers/{id}/bans` answers one `{users, bans}` object. → `Client.ServerBans`.
-    Both halves inside are right — a `BannedUser` is `_id`, `username`,
-    `discriminator` and `avatar`, four fields of revoltgo's `User`, so it decodes
-    into one and keeps the default-avatar fallback every other row gets, and a
-    `ServerBan` is the reason plus a composite `{user, server}` ID. The two are
-    joined on that ID here, a ban naming somebody `users` left out still being a
-    ban.
-  - `Session.ServerMemberBan` sends the ban with **no body**, where
-    `ban_create`'s `DataBanCreate` is required — so `reason` (1024 characters)
-    and `delete_message_seconds` (up to 7 days) are out of reach through it
-    entirely. → `Client.BanMember`. Kicking is unaffected:
-    `ServerMemberDelete` takes nothing beyond the two IDs.
+- **Three typed calls that could not work, since fixed upstream.**
+  `Session.UserMutual` and `Session.ServerBans` decoded a single `{…}` response
+  into a **slice**, and `Session.ServerMemberBan` sent the ban with no body, so
+  `reason` and `delete_message_seconds` never reached the server. All three are
+  corrected in the pinned revoltgo and `Client.Mutual` / `Client.ServerBans` /
+  `Client.BanMember` go through them now — nothing here is sent by hand any
+  more. Worth keeping because the response shapes are not guessable:
+  `/users/{id}/mutual` is one `{users, servers, channels}` object, and
+  `/servers/{id}/bans` one `{users, bans}` object whose halves are joined on the
+  ban's composite `{user, server}` ID here, a ban naming somebody `users` left
+  out still being a ban.
 - **Four role and permission routes were mis-declared and were fixed in revoltgo**, none of
   them having been called before the role editor. Worth knowing because the shapes are not
   guessable and the failures differ:
@@ -467,13 +465,14 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   `SavedSession.SessionID` beside the token. Without it this client cannot mark
   its own row in the session list, and `EventAuth` cannot tell this session being
   revoked from anybody else's; both say so rather than guessing.
-- **An error carries no status.** Every non-2xx comes back as
-  `fmt.Errorf("bad status code %d: %s")` — no type, no code — so "it is not
-  there" and "the request failed" are one answer. `answeredGone` reads the number
-  back out of the text for the one caller that must tell them apart
-  (`ResolveMessages` reports `gone` so the mention inbox can forget a deleted
-  message without a dropped connection erasing a live one). A wording revoltgo
-  stops using reads as no status, which forgets nothing — the safe way round.
+- **An error carries its answer.** Every non-2xx comes back as
+  `*revoltgo.APIError` — status, method, URL and the body — reached through
+  `apiError` (`errors.As`), which is what `statusOf` and `answeredGone` are built
+  on; nothing here parses the error's sentence any more. The body is what makes a
+  *typed* refusal readable: `SlowmodeRetry` decodes
+  `{"type":"InSlowmode","retry_after":n}` for the send path. An error that is not
+  an answer at all — a dial, a timeout, a reset — reports no status, which is what
+  tells a network failure from a refusal (`Transient`).
 - **No `context.Context`.** revoltgo's REST layer takes none, so a superseded
   request can't be cancelled — only its result discarded. `Client.fetching`
   (per-channel in-flight dedup → `ErrBusy`) and the epoch counters do that
@@ -517,3 +516,19 @@ Two things about the answer are easy to get wrong. `video_resolution` is a
 enforced only where both halves are non-zero, the aspect only where the two
 bounds differ, which is what `toVideoLimits` folds into zeroes meaning
 unenforced.
+
+## `avatar` on a member edit is two permissions, not one
+
+`ServerMemberEditParams.Avatar` and `ServerMemberClearAvatar` are one route, but
+`member_edit.rs` reads them as two different requests. Setting one is
+`ChangeAvatar` **and self only** — an `avatar` sent for anybody else's membership
+is refused as `InvalidOperation`, whatever the caller holds. Removing one is
+`RemoveAvatars`, and that is the only thing the permission covers. So the menu
+offers a moderator a removal and never a change (`app.memberAvatarItems`), which
+is exactly the pair the route accepts.
+
+Which of the two pictures a membership is drawn with is not answerable from
+`domain.Member.AvatarURL`: `toMember` falls back to the account's where the
+membership has none, so the two are indistinguishable by then.
+`domain.Member.ServerAvatar` is set alongside and is what says there is one to
+take off.

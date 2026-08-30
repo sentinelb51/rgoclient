@@ -140,8 +140,8 @@ func (a *App) OnWatchShare(channelID, userID string) {
 		return
 	}
 	if !a.videoInline {
-		a.notifyTitled(ui.ToneWarning, "No video decoder",
-			"Watching a stream needs ffmpeg, which was not found on this machine.")
+		a.notifyTitled(ui.ToneWarning, "ffmpeg not found",
+			"Watching a stream needs ffmpeg, which is not installed. %s", ffmpegAdvice())
 		return
 	}
 
@@ -532,8 +532,8 @@ func (a *App) startSharing() {
 		return
 	}
 	if !a.videoInline {
-		a.notifyTitled(ui.ToneWarning, "No encoder",
-			"Sharing your screen needs ffmpeg, which was not found on this machine.")
+		a.notifyTitled(ui.ToneWarning, "ffmpeg not found",
+			"Sharing your screen needs ffmpeg, which is not installed. %s", ffmpegAdvice())
 		return
 	}
 	if !call.CanShare() {
@@ -551,6 +551,12 @@ func (a *App) startSharing() {
 	tools := a.videoTools
 
 	a.backgroundThen(func() error {
+		// The claim is released from here rather than from the two callbacks
+		// below: a success landing in a stale epoch runs neither (App.run), and
+		// the flag outlives the session it was set in — stuck true, OnShare is
+		// dead for the rest of the run.
+		defer a.doOnUI(func() { a.shareStarting = false }, false)
+
 		found, err := video.ShareSources()
 		if err != nil {
 			return err
@@ -567,10 +573,8 @@ func (a *App) startSharing() {
 
 		return nil
 	}, func(err error) {
-		a.shareStarting = false
 		a.notifyTitled(ui.ToneWarning, "Cannot share", "%v", err)
 	}, func() {
-		a.shareStarting = false
 		if a.call == nil || a.sending != nil {
 			return
 		}
@@ -628,7 +632,10 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 	attempt := func(codec video.CaptureCodec) (sending *sendingShare, refused bool, err error) {
 		enc, ok := tools.ShareEncoder(codec)
 		if !ok {
-			return nil, false, errors.New("nothing here encodes a share")
+			// The other half of what used to be one "No encoder": ffmpeg is
+			// here and none of the encoders this client probes for answered,
+			// which is a different thing to fix from not having ffmpeg at all.
+			return nil, false, errors.New("no encoder this client can use: the ffmpeg on this machine carries neither a hardware encoder nor libx264")
 		}
 
 		settings := config.Current().Screenshare
@@ -637,7 +644,7 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 			Width:           width,
 			Height:          height,
 			FPS:             choice.FPS,
-			Bitrate:         shareBitrate(width, height, choice.FPS, enc.AV1, settings.Bandwidth),
+			Bitrate:         shareBitrate(width, height, choice.FPS, enc.AV1, settings),
 			KeyframeSeconds: shareKeyframeSeconds(settings.Keyframes),
 			Codec:           codec,
 			Speed:           captureSpeed(settings.EncoderSpeed),
@@ -794,27 +801,23 @@ const (
 )
 
 // shareCaptureNote is the one line the picker gets to say about what capture
-// cannot do here, which is a different sentence per platform: X11 without a
-// compositor hands back whatever the server still holds for an occluded
-// window, and Windows has no window grabber but gdigrab, whose BitBlt copies
-// on the CPU and flickers the pointer for everybody at the machine. Both are
-// limits of the grabber rather than of this client — see docs/known-gaps.md.
+// cannot do here. Only two things are worth saying now. On X11 an occluded
+// window hands back whatever the server still holds for it, which is a limit
+// of the grabber rather than of this client — see docs/known-gaps.md.
 //
-// fallback is that same BitBlt having had to take the *screens* too, which is
-// the one of these worth calling a warning: it is the whole capture path
-// running slower than the machine can, and unlike the rest it can be fixed
-// from outside the client.
+// fallback is Windows having had to reach past Graphics Capture *and*
+// Desktop Duplication to GDI's BitBlt, which copies on the CPU and flickers
+// the pointer for everybody at the machine. It is the one worth calling a
+// warning: the whole capture path running slower than the machine can, and
+// unlike the rest it can be fixed from outside the client.
 func shareCaptureNote(fallback bool) string {
 	if fallback {
 		return "Screen capture fell back to GDI, which uses more CPU and flickers the " +
-			"mouse pointer. Desktop Duplication is the faster path and needs ffmpeg 6.0 " +
-			"or newer on a local session."
+			"mouse pointer. The faster paths need Windows 10 version 1903 or newer and " +
+			"a recent ffmpeg."
 	}
 
-	switch runtime.GOOS {
-	case "windows":
-		return "Sharing one window makes the mouse pointer flicker. Sharing a whole screen does not."
-	case "linux":
+	if runtime.GOOS == "linux" {
 		return "A window hidden behind another may capture as garbage without a compositor."
 	}
 
@@ -936,13 +939,21 @@ func evenDown(v int) int {
 // its size and frame rate earn, AV1's discount, then the Bandwidth setting's
 // cut — bounded in video so a 60 fps full-screen share does not try to fill
 // somebody's whole uplink.
-func shareBitrate(width, height, fps int, av1 bool, bandwidth string) int {
+//
+// A custom bandwidth is none of that: a number somebody typed is the answer, and
+// AV1's discount is not applied to it either — the codec is chosen after this and
+// a ceiling that moved with it would not be the ceiling that was asked for.
+func shareBitrate(width, height, fps int, av1 bool, settings config.Screenshare) int {
+	if settings.Bandwidth == config.ShareBandwidthCustom {
+		return settings.Bitrate * 1000
+	}
+
 	rate := float64(width) * float64(height) * float64(fps) * shareBitsPerPixel
 	if av1 {
 		rate *= shareAV1BitrateScale
 	}
 
-	switch bandwidth {
+	switch settings.Bandwidth {
 	case config.ShareBandwidthHalf:
 		rate *= 0.5
 	case config.ShareBandwidthQuarter:
@@ -1024,12 +1035,16 @@ func toShareSources(sources []video.CaptureSource) []ui.ShareSource {
 	return out
 }
 
-// shareSourceKey names one source across the two sides. A monitor has no id
-// of its own on either platform — it is a rectangle — so it is keyed by where
-// it is, which is also what the grabber is aimed with.
+// shareSourceKey names one source across the two sides, and across two runs:
+// it is what the last pick is remembered as. So it is deliberately *not*
+// `CaptureSource.ID` — that is a live handle on Windows and an X11 window id
+// on Linux, and neither means anything to the next enumeration, let alone the
+// next launch. A window is keyed by its title and a monitor by where it is,
+// both being what a reader would recognise it by. Two windows sharing a title
+// seed the picker with the first, which is a seed rather than a commitment.
 func shareSourceKey(source video.CaptureSource) string {
 	if source.Kind == video.CaptureWindow {
-		return "w:" + source.ID
+		return "w:" + source.Title
 	}
 
 	return fmt.Sprintf("m:%d,%d,%dx%d", source.X, source.Y, source.Width, source.Height)

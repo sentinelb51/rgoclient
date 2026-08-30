@@ -133,6 +133,11 @@ type ServerRoleEntry struct {
 	// than the hex the editor writes.
 	ColorText string
 
+	// IconURL is the role's picture, "" where it has none — which is most. The
+	// row leads with it in place of the colour dot, that being what a role wearing
+	// one is recognised by.
+	IconURL string
+
 	Allow domain.Permission
 	Deny  domain.Permission
 
@@ -1008,7 +1013,7 @@ func (p *ServerSettingsPage) channelGroups(overrides ServerChannelOverrides) []s
 // worth reading, and unlike a server's list the row cannot say *which* bits
 // moved — so the way in is the only way to find out.
 func (p *ServerSettingsPage) channelRoleRow(role ServerRoleEntry) fyne.CanvasObject {
-	return p.entryRow(roleDot(role), role.Name, overrideSummary(role),
+	return p.entryRow(p.roleDot(role), role.Name, overrideSummary(role),
 		editButton(func() { p.showChannelRole(role) }))
 }
 
@@ -1143,7 +1148,7 @@ func (p *ServerSettingsPage) roleRow(role ServerRoleEntry, ranked []ServerRoleEn
 		controls = append(controls, spaced(controls, editButton(func() { p.showRole(role) }))...)
 	}
 
-	return p.entryRow(roleDot(role), role.Name, roleSummary(role), controls...)
+	return p.entryRow(p.roleDot(role), role.Name, roleSummary(role), controls...)
 }
 
 // roleSummary is what a role does rather than what it is called: how much it
@@ -1168,7 +1173,25 @@ func roleSummary(role ServerRoleEntry) string {
 
 // roleDot is the colour a role paints a name in, or the neutral one a role
 // without a colour leaves that name in.
-func roleDot(role ServerRoleEntry) fyne.CanvasObject {
+func (p *ServerSettingsPage) roleDot(role ServerRoleEntry) fyne.CanvasObject {
+	if role.IconURL == "" || p.hooks.Deps.Images == nil {
+		return roleSwatch(role)
+	}
+
+	side := theme.Sizes.SettingsIconSize
+	box := fyne.NewSize(side, side)
+
+	// Square rather than circular: a role icon is a mark somebody drew to fill its
+	// own frame, and rounding one crops the corners it was drawn into.
+	slot := container.NewGridWrap(box)
+	p.hooks.Deps.Images.LoadIntoContainer(imageCacheID(role.IconURL), role.IconURL, box, slot, false, nil)
+
+	return container.NewCenter(slot)
+}
+
+// roleSwatch is the colour alone, which is what the colour row states and what a
+// role with no picture leads with.
+func roleSwatch(role ServerRoleEntry) fyne.CanvasObject {
 	fill := role.Color
 	if fill == nil {
 		fill = theme.Colors.CategoryText
@@ -1362,7 +1385,7 @@ func roleColorState(role ServerRoleEntry) fyne.CanvasObject {
 	}
 
 	return HBoxNoSpacing(
-		container.NewCenter(roleDot(role)),
+		container.NewCenter(roleSwatch(role)),
 		HorizontalSpacer(theme.Sizes.ChipDotGap),
 		vcenter(stateText(value)),
 	)

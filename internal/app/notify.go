@@ -45,6 +45,10 @@ func (a *App) notifyNotice(notice ui.Notice) {
 	}
 
 	a.notices.PushNotice(notice)
+
+	// The panel is a reading of the record, so it follows one made under it. Cheap
+	// and rare: it is only ever open while somebody is looking at it.
+	a.refreshNoticeHistory()
 }
 
 // notifyModal reports in the middle of the window instead of the corner, for a
@@ -305,6 +309,49 @@ func (a *App) reportAction(request func() error, what, failure, success, name st
 			a.notify(ui.ToneInfo, success, name)
 		}, false)
 	}()
+}
+
+/* What has already been said */
+
+// showNoticeHistory opens the panel over whatever is on screen. Everything it
+// draws is in memory already, so unlike the three message surfaces it fills in
+// one go and never says it is loading.
+func (a *App) showNoticeHistory() {
+	dialog := ui.NewNoticeHistoryDialog(a.deps(), a.clearNoticeHistory, a.closeOverlay)
+
+	a.showOverlay(dialog.Content)
+	a.noticeHistory = dialog // after showOverlay, which clears whatever was there
+
+	a.refreshNoticeHistory()
+}
+
+// closeNoticeHistory forgets the panel. Only closeOverlay calls it — the layer
+// holds one thing at a time, so anything else opening takes this one down.
+func (a *App) closeNoticeHistory() { a.noticeHistory = nil }
+
+// refreshNoticeHistory fills the panel from the stack. Call on the UI thread.
+func (a *App) refreshNoticeHistory() {
+	if a.noticeHistory == nil || a.notices == nil {
+		return
+	}
+
+	a.noticeHistory.SetRecords(a.notices.History())
+
+	// The card is centred and sized from its own minimum, which a row gained or
+	// lost changes; neither re-runs on its own.
+	a.repositionOverlay()
+}
+
+// clearNoticeHistory drops the record and redraws the panel over it, which is
+// what says the button did something — the panel stays up rather than closing on
+// an empty list.
+func (a *App) clearNoticeHistory() {
+	if a.notices == nil {
+		return
+	}
+
+	a.notices.ForgetHistory()
+	a.refreshNoticeHistory()
 }
 
 // confirmRemoveFriend asks before unfriending. Declining or withdrawing is not

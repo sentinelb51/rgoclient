@@ -209,7 +209,8 @@ func (w *ServerWidget) refreshAppearance() {
 	}
 	if w.iconWrapper.Layout != wrap {
 		w.iconWrapper.Layout = wrap
-		w.iconWrapper.Refresh()
+		// Only the layout moved; Refresh would re-upload the icon per hover.
+		Relayout(w.iconWrapper)
 	}
 }
 
@@ -249,6 +250,7 @@ type ChannelWidget struct {
 	mentionBadge       *MentionBadge   // the count at the trailing end, hidden at zero
 	typingMark         *TypingMark     // the trailing mark, hidden unless somebody is composing
 	leading            *fyne.Container // holds the type glyph, or a conversation's avatar
+	content            *fyne.Container // the row minus its background, for the layout pass SetState needs
 	label              *canvas.Text
 	labelBox           *fyne.Container // label fitted to its slot; see NewEllipsisText
 
@@ -347,7 +349,11 @@ func (w *ChannelWidget) SetState(selected, unread bool, mentions int) {
 	w.mentions = mentions
 	w.mentionBadge.SetCount(mentions)
 	w.refreshAppearance()
-	w.Refresh()
+
+	// A layout pass, not w.Refresh(): the four leaves that changed refreshed
+	// themselves above, and all the badge appearing or hiding still needs is its
+	// slot — the whole-row walk re-uploaded the leading avatar per state change.
+	Relayout(w.content)
 }
 
 // SetTyping marks the row as one somebody is composing in. Separate from SetState
@@ -390,7 +396,7 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// The count sits outside the typing mark, at the very end of the row: it is what
 	// the row still says once nobody is composing, where the mark comes and goes.
 	// Hidden it costs no width, so a row with neither is the row as it was.
-	content := container.NewBorder(nil, nil,
+	w.content = container.NewBorder(nil, nil,
 		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
 		HBoxNoSpacing(
 			container.NewCenter(w.typingMark),
@@ -404,7 +410,7 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	w.background.SetMinSize(fyne.NewSize(0, w.height))
 	w.refreshAppearance()
 
-	return widget.NewSimpleRenderer(container.NewStack(w.background, content))
+	return widget.NewSimpleRenderer(container.NewStack(w.background, w.content))
 }
 
 func (w *ChannelWidget) refreshAppearance() {
@@ -446,7 +452,15 @@ func (w *ChannelWidget) MouseIn(*desktop.MouseEvent) {
 	}
 }
 
-func (w *ChannelWidget) MouseOut() { w.refreshAppearance() }
+// MouseOut restores the background alone — the mirror of MouseIn, which touched
+// nothing else. refreshAppearance here re-refreshed the indicators and the
+// label for a sweep of the pointer down the sidebar.
+func (w *ChannelWidget) MouseOut() {
+	if !w.selected {
+		w.background.FillColor = color.Transparent
+		w.background.Refresh()
+	}
+}
 
 /* Voice participants */
 
@@ -984,14 +998,32 @@ func channelRowHeight(kind domain.ChannelKind) float32 {
 // channelLeading is what precedes a channel's name in its row: a conversation's
 // avatar, or the type glyph. Centred, the row being taller than either.
 func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
-	if !avatarLed(channel.Kind) {
-		return ChannelGlyph(channel.Kind)
+	if avatarLed(channel.Kind) {
+		side := theme.Sizes.ConversationAvatarSize
+		avatar := circularAvatar(deps.Images, channel.AvatarURL, fyne.NewSize(side, side))
+
+		return container.NewCenter(avatar)
 	}
 
-	side := theme.Sizes.ConversationAvatarSize
-	avatar := circularAvatar(deps.Images, channel.AvatarURL, fyne.NewSize(side, side))
+	if channel.AvatarURL != "" && deps.Images != nil {
+		return channelIcon(deps, channel.AvatarURL)
+	}
 
-	return container.NewCenter(avatar)
+	return ChannelGlyph(channel.Kind)
+}
+
+// channelIcon is a server channel's own picture standing where its glyph would.
+// Drawn in the glyph's square rather than an avatar's, and square rather than
+// circular: the row stays a line, its height being the kind's — promoting one to
+// a conversation card because somebody set an icon would move every row under it.
+func channelIcon(deps Deps, url string) fyne.CanvasObject {
+	side := theme.Sizes.HashtagIconSize
+	box := fyne.NewSize(side, side)
+
+	slot := container.NewGridWrap(box)
+	deps.Images.LoadIntoContainer(imageCacheID(url), url, box, slot, false, nil)
+
+	return container.NewCenter(slot)
 }
 
 // ChannelGlyph prefixes a channel's name in the sidebar row and the message
@@ -1111,6 +1143,8 @@ func (c *SessionCard) CreateRenderer() fyne.WidgetRenderer {
 	name := NewEllipsisText(newBoldText(c.username,
 		theme.Colors.TextPrimary, theme.Sizes.SessionCardNameSize))
 
+	remove := NewCloseButton(c.onRemove)
+
 	// Index 2 is the name: NewFillRow addresses the stretching child by position,
 	// and the spacer before it is index 1.
 	gap := theme.Sizes.SessionCardGap
@@ -1119,11 +1153,24 @@ func (c *SessionCard) CreateRenderer() fyne.WidgetRenderer {
 		HorizontalSpacer(gap),
 		name,
 		HorizontalSpacer(gap),
-		container.NewCenter(NewCloseButton(c.onRemove)),
+		container.NewCenter(remove),
 	)
 
 	padding := theme.Sizes.SessionCardPadding
 	tappable := NewTappableContainer(NewInset(row, padding, padding, padding, padding), c.onTap)
+
+	// The highlight wears the card's own corners, and survives the pointer
+	// crossing onto the close button — that hover is the button's, so without
+	// the report the tile would read as left while still under the pointer.
+	tappable.background.CornerRadius = theme.Sizes.SessionCardRadius
+	remove.reporting(func(over bool) {
+		fill := color.Color(color.Transparent)
+		if over {
+			fill = theme.Colors.TappableHoverBg
+		}
+		tappable.background.FillColor = fill
+		tappable.background.Refresh()
+	})
 
 	return widget.NewSimpleRenderer(container.NewStack(c.background, tappable))
 }

@@ -51,12 +51,14 @@ func (a *App) buildUI() fyne.CanvasObject {
 		a.buildMemberList(),
 	)
 
-	// The modal notice is the topmost of the six: it is what the client says when
-	// it matters most, and it is click-through, so covering a settings page costs
-	// that page nothing.
+	// The modal notice is the topmost: it is what the client says when it matters
+	// most, and it is click-through, so covering a settings page costs that page
+	// nothing. The tooltip layer sits over the settings pages for the same reason
+	// it sits over everything else — it is a label about whatever is under the
+	// pointer, and a settings page is opaque.
 	return container.NewStack(a.mainRow, a.callIslandLayer, a.notices.Layer,
-		a.tooltip.Layer, a.settings.Layer, a.serverSettings.Layer, a.groupSettings.Layer,
-		a.modal.Layer)
+		a.settings.Layer, a.serverSettings.Layer, a.groupSettings.Layer,
+		a.tooltip.Layer, a.modal.Layer)
 }
 
 /* Server sidebar */
@@ -68,12 +70,14 @@ func (a *App) buildUI() fyne.CanvasObject {
 // The inbox is here rather than in the message header because it is the one
 // surface about no channel in particular: the header's three buttons are all
 // about the one on screen, and the rail is where this client keeps what is about
-// the account.
+// the account. The notice history is here for the same reason and beside it —
+// what the client has already told the reader is about no channel either.
 func (a *App) buildServerList() fyne.CanvasObject {
 	background := canvas.NewRectangle(theme.Colors.ServerListBackground)
 
 	a.homeButton = ui.NewSidebarButton(fynetheme.HomeIcon(), a.selectHome)
 	a.inboxButton = ui.NewSidebarButton(assets.MentionIcon, a.showMentions)
+	noticeHistory := ui.NewSidebarButton(assets.NotifyIcon, a.showNoticeHistory)
 	settings := ui.NewSidebarButton(fynetheme.SettingsIcon(), a.openSettings)
 
 	// Bare, not wrapped in a Center, for the reason refreshServerList mounts a
@@ -85,6 +89,8 @@ func (a *App) buildServerList() fyne.CanvasObject {
 		a.homeButton,
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 		a.inboxButton,
+		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
+		noticeHistory,
 		ui.VerticalSpacer(theme.Sizes.CategorySpacing),
 		ui.NewSidebarSeparator(),
 	)
@@ -162,7 +168,9 @@ func (a *App) refreshServerList() {
 
 		w.SetServer(server)
 		w.SetSelected(serverID == a.currentServerID)
-		w.SetMentioned(a.serverMentioned(serverID))
+		// The mention mark is syncMentionMarks' below — every widget here is in
+		// the list it walks by then, so setting it per icon computed the same
+		// answer twice.
 
 		// Bare, not wrapped in a Center: ServerWidget centres its own icon, and
 		// keeping it at the top level lets syncServerSelection find it unwrapped.
@@ -269,7 +277,7 @@ func (a *App) refreshChannelList() {
 	// event about one of them reuses the rest rather than building a widget and
 	// re-asking the image cache for every conversation's picture. Taken before the
 	// release below, which only stops what those rows are running.
-	held := make(map[string]*ui.ChannelWidget)
+	held := make(map[string]*ui.ChannelWidget, len(a.channelList.Objects))
 	for w := range a.channelRows() {
 		held[w.Channel.ID] = w
 	}
@@ -633,6 +641,11 @@ func (a *App) channelMenu(channelID string) []*fyne.MenuItem {
 			fyne.NewMenuItemWithIcon("Edit channel", fynetheme.SettingsIcon(),
 				func() { a.editChannel(channelID) }),
 		)
+
+		// Beside the card rather than on it: the card is fields filled in and
+		// submitted together, and a picture is an upload that lands on its own —
+		// which is why a group's is on a page instead. Same route either way.
+		items = append(items, a.channelIconItems(channelID)...)
 	}
 
 	// Only a conversation can be closed: a server's channels are not the user's to
@@ -678,7 +691,8 @@ func (a *App) memberMenu(serverID, userID string) []*fyne.MenuItem {
 		}),
 	}
 
-	edits := append(a.memberNicknameItems(serverID, userID), a.memberRoleItems(serverID, userID)...)
+	edits := append(a.memberNicknameItems(serverID, userID), a.memberAvatarItems(serverID, userID)...)
+	edits = append(edits, a.memberRoleItems(serverID, userID)...)
 	if len(edits) > 0 {
 		items = append(items, fyne.NewMenuItemSeparator())
 		items = append(items, edits...)
@@ -930,7 +944,7 @@ func (a *App) selectChannel(channelID string) {
 	unread := a.unreadChannels[channelID] || a.mentionCount(channelID) > 0
 	channel, known := a.store.Channel(channelID)
 	permissions := a.store.Permissions(channelID)
-	viewable := known && a.canViewChannel(channel)
+	viewable := known && (channel.ServerID == "" || permissions.Has(domain.PermissionViewChannel))
 	a.currentChannelID = channelID
 
 	a.syncChannelKind()
@@ -1038,7 +1052,12 @@ func (a *App) syncChannelList() {
 		a.applyChannelState(w, animate)
 	}
 
-	a.syncFriendsRow(a.awaitingAnswer())
+	// Asked only where the row exists to paint: awaitingAnswer walks every
+	// cached user under State's read lock, which on a server with a fetched
+	// membership is a six-figure walk — for a SetState on nil in a server view.
+	if a.friendsRow != nil {
+		a.syncFriendsRow(a.awaitingAnswer())
+	}
 }
 
 // releaseChannelRows stops what the rows about to be dropped are still running.

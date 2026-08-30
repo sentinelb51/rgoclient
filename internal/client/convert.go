@@ -147,6 +147,8 @@ func toMessage(message *revoltgo.Message) *domain.Message {
 		out.System = &domain.SystemMessage{
 			Kind:   domain.SystemKind(message.System.Type),
 			Target: message.System.ID,
+			By:     message.System.By,
+			Name:   message.System.Name,
 		}
 	}
 	if message.Webhook != nil {

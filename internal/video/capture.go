@@ -46,9 +46,11 @@ const (
 )
 
 // CaptureSource is one thing this machine can share, as the platform names
-// it. ID is grabber-specific — an X11 window id, a window title on Windows —
-// and the geometry is where enumeration found it, which sizes the encode box
-// and, for a monitor, aims the grab.
+// it. ID is grabber-specific — an X11 window id, a Win32 handle — and lives
+// only as long as the enumeration that produced it, so it is what a grab is
+// aimed by and never what a choice is remembered by. The geometry is where
+// enumeration found it, which sizes the encode box and, for a monitor on the
+// oldest Windows path, aims the grab.
 type CaptureSource struct {
 	ID    string
 	Kind  CaptureKind
@@ -404,13 +406,12 @@ func (t Tools) familyEncoder(family CaptureCodec) (shareEncoder, bool) {
 	return shareEncoder{}, false
 }
 
-// ShareEncoding is how a share here would be encoded: the -c:v name, whether
-// the bytes are AV1 in IVF rather than H.264 Annex-B — which every consumer
-// of the stream keys off — and whether the encode leaves the CPU.
+// ShareEncoding is how a share here would be encoded: the -c:v name, and
+// whether the bytes are AV1 in IVF rather than H.264 Annex-B — which every
+// consumer of the stream keys off.
 type ShareEncoding struct {
-	Name     string
-	AV1      bool
-	Hardware bool
+	Name string
+	AV1  bool
 }
 
 // ShareEncoder names how a share at this codec preference would be encoded,
@@ -423,7 +424,7 @@ func (t Tools) ShareEncoder(codec CaptureCodec) (ShareEncoding, bool) {
 		return ShareEncoding{}, false
 	}
 
-	return ShareEncoding{Name: enc.name, AV1: enc.av1(), Hardware: enc.hardware()}, true
+	return ShareEncoding{Name: enc.name, AV1: enc.av1()}, true
 }
 
 // encoderWorks encodes a few synthetic frames to nowhere with the exact
@@ -456,9 +457,9 @@ func encoderWorks(tool string, enc shareEncoder) bool {
 
 // grab is how one platform gets at pixels. Most grabbers are input devices
 // and answer with args alone — everything up to and including the `-i`. Some
-// are *filter sources* instead (Windows' ddagrab), which have no input at
-// all: those answer with source, the filter the chain has to begin with, and
-// the args carry only what setting it up needs.
+// are *filter sources* instead (Windows' gfxcapture and ddagrab), which have
+// no input at all: those answer with source, the filter the chain has to begin
+// with, and the args carry only what setting it up needs.
 type grab struct {
 	args   []string
 	source string
@@ -540,10 +541,10 @@ func (t Tools) CaptureShare(cfg CaptureConfig) (*Stream, error) {
 
 // CaptureFallback reports whether sharing a screen here will go through a
 // path slower than the platform's own — today only Windows has one to fall
-// back from, when Desktop Duplication is unavailable and GDI's BitBlt has to
-// do the copying. It answers about the *set* because that is what a picker
-// warns about, and asking is what runs the probe behind it, so it belongs on
-// the worker the enumeration is already on.
+// back to, when neither Graphics Capture nor Desktop Duplication answers and
+// GDI's BitBlt has to do the copying. It answers about the *set* because that
+// is what a picker warns about, and asking is what runs the probes behind it,
+// so it belongs on the worker the enumeration is already on.
 func (t Tools) CaptureFallback(sources []CaptureSource) bool {
 	return captureFallback(t.FFmpeg, sources)
 }
@@ -568,13 +569,23 @@ func captureLaunch(tool string, args []string) (*Stream, error) {
 	cmd.Stderr = stderr
 	captureAttrs(cmd)
 
-	out, err := cmd.StdoutPipe()
+	// The pipe is this side's rather than exec's, as in launch: exec's Wait
+	// closes a StdoutPipe under whatever is still reading it, and reap closes
+	// out itself once the Wait is done. At the platform's own size, not
+	// pipeBytes — this stream is live and a few Mbps, so a big buffer could
+	// only hold latency, the LiveFrames argument from the other direction.
+	out, write, err := sizedPipe(0)
 	if err != nil {
 		return nil, fmt.Errorf("video: %w", err)
 	}
+	cmd.Stdout = write
+
 	if err := cmd.Start(); err != nil {
+		write.Close()
+		out.Close()
 		return nil, fmt.Errorf("video: %w", err)
 	}
+	write.Close()
 
 	release := hardenCapture(cmd)
 
@@ -628,8 +639,9 @@ type ShareTee struct {
 	keep   bool   // this frame is being copied, decided as it opens
 	broken bool   // not the stream this was promised; stop parsing
 
-	// mu guards the attachment, which is claimed on the UI thread and fed
-	// from whichever goroutine is draining the child.
+	// mu guards the attachment, which is claimed from the worker launching a
+	// preview (app.startSelfPreview), released on the UI thread, and fed from
+	// whichever goroutine is draining the child.
 	mu         sync.Mutex
 	sps        []byte // the latest parameter sets, replayed to a preview that
 	pps        []byte // attaches after the stream's own copies went past
@@ -1011,6 +1023,10 @@ func (t *ShareTee) emitIVFUnit() {
 // av1HasSequenceHeader hops a temporal unit's OBUs — every one the encoders
 // here write carries a size field — asking for a sequence header, which is
 // what marks the frame a decoder can enter at.
+//
+// A copy of voice.av1SequenceHeaderIn by construction: voice imports only
+// domain (the rvoice seam), so the walk cannot live in one place. A fix to
+// either must be carried to the other.
 func av1HasSequenceHeader(unit []byte) bool {
 	for i := 0; i < len(unit); {
 		header := unit[i]

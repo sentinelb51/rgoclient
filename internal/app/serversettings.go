@@ -251,17 +251,24 @@ func (a *App) setServerDescription(description string) {
 	)
 }
 
-// changeServerIcon and changeServerBanner each ask for a picture and hang it on
-// the server the page is open on. Both come back as a ServerUpdate, which is what
-// repaints the rail, the strip above the page's own rail and the row that offers
-// to remove one — so nothing is recorded here, exactly as this account's own
-// avatar does nothing on the way out.
+// changeServerIcon and changeServerBanner each ask for a picture, ask which part
+// of it to send, and hang the answer on the server the page is open on. Both come
+// back as a ServerUpdate, which is what repaints the rail, the strip above the
+// page's own rail and the row that offers to remove one — so nothing is recorded
+// here, exactly as this account's own avatar does nothing on the way out.
+//
+// The banner is the one picture Revolt draws standing up, behind a channel list,
+// which is why it is not the profile banner's shape.
 func (a *App) changeServerIcon() {
 	serverID := a.serverSettingsID
 
-	a.choosePicture("Choose a server icon", func(path, name string) {
+	a.choosePicture("Choose a server icon", squarePicture, func(pic picture) {
 		a.background(
-			func() error { return a.client.SetServerIcon(serverID, path, name) },
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetServerIcon(serverID, pic.path, pic.name)
+			},
 			a.notifyFailure("set icon on server "+serverID, "Could not change the icon. It may be too large."),
 		)
 	})
@@ -279,9 +286,13 @@ func (a *App) removeServerIcon() {
 func (a *App) changeServerBanner() {
 	serverID := a.serverSettingsID
 
-	a.choosePicture("Choose a server banner", func(path, name string) {
+	a.choosePicture("Choose a server banner", tallPicture, func(pic picture) {
 		a.background(
-			func() error { return a.client.SetServerBanner(serverID, path, name) },
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetServerBanner(serverID, pic.path, pic.name)
+			},
 			a.notifyFailure("set banner on server "+serverID, "Could not change the banner. It may be too large."),
 		)
 	})
@@ -430,6 +441,7 @@ func (a *App) channelOverrides(channelID string) (ui.ServerChannelOverrides, boo
 			Name:      role.Name,
 			Color:     role.Color,
 			ColorText: role.ColorText,
+			IconURL:   role.IconURL,
 			Allow:     override.Allow,
 			Deny:      override.Deny,
 			Hoist:     role.Hoist,
@@ -808,6 +820,7 @@ func (a *App) serverSettingsRoles() []ui.ServerRoleEntry {
 			Name:      role.Name,
 			Color:     role.Color,
 			ColorText: role.ColorText,
+			IconURL:   role.IconURL,
 			Allow:     role.Allow,
 			Deny:      role.Deny,
 			Hoist:     role.Hoist,

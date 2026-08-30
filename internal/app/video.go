@@ -186,9 +186,10 @@ func (a *App) OnVideoTapped(file *domain.File, card *ui.VideoCard) {
 	}
 
 	if !a.videoInline {
-		a.notifyTitled(ui.ToneWarning, "No video decoder",
-			"Inline playback needs ffmpeg, which was not found on this machine. "+
-				"\"Open in your player\" still works once one is installed for it to open with.")
+		a.notifyTitled(ui.ToneWarning, "ffmpeg not found",
+			"Inline playback needs ffmpeg, which is not installed. %s "+
+				"\"Open in your player\" still works with whatever the system already opens video with.",
+			ffmpegAdvice())
 		return
 	}
 	if reason, failed := a.videoFailed[id]; failed {

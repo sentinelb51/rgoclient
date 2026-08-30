@@ -92,7 +92,19 @@ func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 	return channel, ok
 }
 
-func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
+func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
+
+func (s *fakeStore) ChannelServerID(channelID string) string { return s.channels[channelID].ServerID }
+
+func (s *fakeStore) MemberIdentity(serverID, userID string) (string, string, bool) {
+	if member, ok := s.members[serverID+":"+userID]; ok {
+		return member.Name, member.AvatarURL, true
+	}
+
+	return "", "", false
+}
+
+func (s *fakeStore) VoiceChannelOf(serverID, userID string) (string, bool) { return "", false }
 
 // EmojiURL derives a URL from the ID the way the real store does. The host is
 // invented: nothing in a widget test fetches one.
@@ -160,7 +172,12 @@ func fakeAuthorMark(message *domain.Message, bot bool) domain.AuthorMark {
 }
 
 func (s *fakeStore) SystemTextParts(system *domain.SystemMessage) (name, rest string) {
-	return system.TextParts(s.UserName(system.Target))
+	var who string
+	if system.TargetsUser() {
+		who = s.UserName(system.Target)
+	}
+
+	return system.TextParts(who, s.UserName(system.By))
 }
 
 func (s *fakeStore) Permissions(string) domain.Permission       { return s.permissions }

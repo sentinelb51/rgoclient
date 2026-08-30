@@ -332,16 +332,20 @@ func (d *messageIsland) reset(reason string) {
 // say fills the well's own line, or hides it where the cards speak for
 // themselves.
 func (d *messageIsland) say(reason string) {
-	d.status.Text = reason
-	d.status.Refresh()
+	if d.status.Text != reason {
+		d.status.Text = reason
+		d.status.Refresh()
+	}
 
 	showIf(d.empty, reason != "")
 }
 
 // setCount labels the well.
 func (d *messageIsland) setCount(text string) {
-	d.count.Text = text
-	d.count.Refresh()
+	if d.count.Text != text {
+		d.count.Text = text
+		d.count.Refresh()
+	}
 
 	if d.countAlone {
 		showIf(d.countRow, text != "")

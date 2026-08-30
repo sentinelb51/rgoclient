@@ -28,8 +28,7 @@ import (
 const liveServerName = "Big up testers"
 
 type tone struct {
-	phase  float64
-	voiced bool
+	phase float64
 }
 
 // Read is a 440 Hz sine, so anybody listening hears something unambiguous.

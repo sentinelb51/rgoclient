@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -52,12 +53,17 @@ type Stream struct {
 	stderr  *tailBuffer
 	release func() // sandbox handles to drop once the child is gone
 
-	// reapOnce owns the one cmd.Wait: Wait closes the parent's pipe end, so
-	// it must run exactly once and only after reading is over — a second
-	// caller waits on done instead.
+	// reapOnce owns the one cmd.Wait and the close of out that follows it. The
+	// pipe is this side's rather than exec's (see launch), so nothing else will
+	// close it; it must run exactly once and only after reading is over — a
+	// second caller waits on done instead.
 	reapOnce sync.Once
 	done     chan struct{}
 	waitErr  error // written inside reapOnce, read after done closes
+
+	// pcm is ReadPCM's scratch, kept because the sound pump calls it on every
+	// speaker wake. Safe unguarded for the same reason out is: one reader.
+	pcm []byte
 }
 
 // FrameSize is the exact byte length of one frame on a Frames stream.
@@ -147,7 +153,12 @@ func (t Tools) LiveFrames(cfg LiveConfig) (*Stream, io.WriteCloser, error) {
 		"pipe:1",
 	)
 
-	return launch(t.FFmpeg, args, "", true)
+	// Both pipes are left at the platform's own small buffer, which is what the
+	// paragraph above rests on: a live stream must stall rather than queue. Out,
+	// a buffer under one frame is what turns a stalled reader into decoder
+	// backpressure instead of stale frames. In, a megabyte of a 1.4 Mbps
+	// bitstream is six seconds of latency nothing takes back out again.
+	return launch(t.FFmpeg, args, "", true, 0)
 }
 
 // liveScaleFilter fits the source into the asked-for box and pads the rest
@@ -236,7 +247,10 @@ func (s *Stream) ReadFrame(dst []byte) error {
 // the sound ending; a trailing odd byte is dropped, half a sample not being
 // one.
 func (s *Stream) ReadPCM(buf []int16) (int, error) {
-	raw := make([]byte, len(buf)*2)
+	if len(s.pcm) < len(buf)*2 {
+		s.pcm = make([]byte, len(buf)*2)
+	}
+	raw := s.pcm[:len(buf)*2]
 	n, err := io.ReadFull(s.out, raw)
 
 	samples := n / 2
@@ -277,6 +291,7 @@ func (s *Stream) Stop() {
 func (s *Stream) reap() {
 	s.reapOnce.Do(func() {
 		s.waitErr = s.cmd.Wait()
+		s.out.Close()
 		if s.release != nil {
 			s.release()
 		}
@@ -296,15 +311,36 @@ func (s *Stream) Stderr() string {
 // start launches one sandboxed child. media names the input file so the
 // sandbox can offer exactly that one path read-only.
 func start(tool string, args []string, media string) (*Stream, error) {
-	s, _, err := launch(tool, args, media, false)
+	s, _, err := launch(tool, args, media, false, pipeBytes)
 
 	return s, err
 }
 
+// pipeBytes is how much of a frame the kernel holds between a file-fed child's
+// write and this side's read. The platform's own default is a few kilobytes and
+// a 1080p frame is 8.3 MB, so a frame crosses in thousands of copies, each one a
+// writer blocked and a reader woken.
+//
+// Measured on Windows against a child writing 256 MiB: the default buffer runs
+// at 3.5-4.0 GB/s, 64 KiB at ~5.3 and a megabyte at ~6.0, which is where it
+// flattens. The cost is that megabyte per file-fed child, and the one-playback
+// rule means there is rarely more than one.
+//
+// Only a file-fed child takes it; a live stream wants the small buffer, and
+// LiveFrames says why.
+const pipeBytes = 1 << 20
+
 // launch is the one place a child is spawned. stdin asks for the write end
 // of the child's stdin, for a live stream fed by the caller; a file-fed
-// child takes none.
-func launch(tool string, args []string, media string, stdin bool) (*Stream, io.WriteCloser, error) {
+// child takes none. buffer is how much each pipe holds, zero being the
+// platform's own default.
+//
+// The pipes are made here rather than taken from exec.Cmd, which offers no say
+// in that. What it costs is the bookkeeping exec would have done: the ends the
+// child holds are closed here once it is running — one left open is an EOF the
+// reader never sees — and the end this side reads from is closed by reap rather
+// than by Wait.
+func launch(tool string, args []string, media string, stdin bool, buffer int) (*Stream, io.WriteCloser, error) {
 	argv := sandboxArgv(tool, args, media)
 
 	cmd := exec.Command(argv[0], argv[1:]...)
@@ -312,19 +348,38 @@ func launch(tool string, args []string, media string, stdin bool) (*Stream, io.W
 	cmd.Stderr = stderr
 	platformAttrs(cmd)
 
+	var childEnds []*os.File
+	defer func() {
+		for _, end := range childEnds {
+			end.Close()
+		}
+	}()
+
 	var in io.WriteCloser
 	if stdin {
-		var err error
-		if in, err = cmd.StdinPipe(); err != nil {
+		read, write, err := sizedPipe(buffer)
+		if err != nil {
 			return nil, nil, fmt.Errorf("video: %w", err)
 		}
+		cmd.Stdin, in = read, write
+		childEnds = append(childEnds, read)
 	}
 
-	out, err := cmd.StdoutPipe()
+	out, write, err := sizedPipe(buffer)
 	if err != nil {
+		if in != nil {
+			in.Close()
+		}
 		return nil, nil, fmt.Errorf("video: %w", err)
 	}
+	cmd.Stdout = write
+	childEnds = append(childEnds, write)
+
 	if err := cmd.Start(); err != nil {
+		out.Close()
+		if in != nil {
+			in.Close()
+		}
 		return nil, nil, fmt.Errorf("video: %w", err)
 	}
 

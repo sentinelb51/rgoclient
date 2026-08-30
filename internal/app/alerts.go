@@ -143,11 +143,11 @@ func soundOf(key string) (soundEntry, bool) {
 // its own goroutine, hence the atomic. It is the only part of App that is not
 // UI-thread confined.
 func (a *App) startAlerts() {
-	a.focused.Store(true) // the window is about to be shown; a first ping must not be swallowed
-
-	// The frame rate follows the focus (config.Performance.BackgroundFrameRate),
-	// so the hooks re-apply it. Fyne keeps one callback per hook: anything else
-	// that needs to follow focus joins these closures rather than registering.
+	// The frame rate follows the focus (config.Performance.BackgroundFrameRate)
+	// and so does what the OS is asked to spend on the process, so the hooks
+	// re-apply it. Fyne keeps one callback per hook: anything else that needs to
+	// follow focus joins these closures rather than registering. a.focused itself
+	// starts true in Run, ahead of the first thing to read it.
 	lifecycle := a.fyne.Lifecycle()
 	lifecycle.SetOnEnteredForeground(func() { a.focused.Store(true); a.applyFrameRate() })
 	lifecycle.SetOnExitedForeground(func() { a.focused.Store(false); a.applyFrameRate() })

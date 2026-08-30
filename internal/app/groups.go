@@ -468,9 +468,13 @@ func (a *App) groupPageOn(channelID string) bool {
 func (a *App) changeGroupIcon() {
 	channelID := a.groupSettingsID
 
-	a.choosePicture("Choose a group icon", func(path, name string) {
+	a.choosePicture("Choose a group icon", squarePicture, func(pic picture) {
 		a.background(
-			func() error { return a.client.SetGroupIcon(channelID, path, name) },
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetChannelIcon(channelID, pic.path, pic.name)
+			},
 			a.notifyFailure("set icon on group "+channelID, "Could not change the icon. It may be too large."),
 		)
 	})
@@ -480,7 +484,7 @@ func (a *App) removeGroupIcon() {
 	channelID := a.groupSettingsID
 
 	a.background(
-		func() error { return a.client.RemoveGroupIcon(channelID) },
+		func() error { return a.client.RemoveChannelIcon(channelID) },
 		a.notifyFailure("remove icon from group "+channelID, "Could not remove the icon."),
 	)
 }

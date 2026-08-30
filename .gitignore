@@ -6,3 +6,6 @@ dist/
 # Dev-only: points the fyne replace at a local rgoclient-fyne checkout.
 go.work
 go.work.sum
+
+# Throwaway probes; one has read the saved session token before.
+tmpprobe/

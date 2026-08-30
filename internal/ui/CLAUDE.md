@@ -6,6 +6,18 @@ naming and the test policy.
 
 ## Fyne footguns
 
+- **What a `Refresh()` actually costs, and what `Relayout` doesn't.**
+  `Container.Refresh` recurses into every child, so each descendant is queued
+  and its per-object texture freed — every `canvas.Image` under it re-uploads.
+  `ui.Relayout` queues only the container: the walk that frees still descends,
+  but skips images, and a `canvas.Text`'s glyph texture is **content-keyed**
+  (`cache.GetTextTexture`), so no refresh of any ancestor frees it — only the
+  text itself changing does. Consequences: prefer `Relayout` after writing
+  `Objects` or flipping a child's visibility (the emoji picker, the mention
+  picker, `ChannelWidget.SetState` are the worked examples); guard leaf
+  refreshes on the value they are about to write (`setHighlighted`,
+  `searchChip.paint`); and never follow `widget.Entry`'s own typing methods
+  with a second refresh (`MessageInput` and `EditEntry` both say why).
 - **Innermost object wins.** Fyne delivers hover and pointer events to the
   deepest object that accepts them. Do *not* implement `desktop.Hoverable` with
   no-op methods — an inner widget that accepts hover steals it from its parent
@@ -556,6 +568,31 @@ naming and the test policy.
   Hence `ui.ShiftHeld`, a Win32 `GetAsyncKeyState` asked at the moment of the
   click, with a `!windows` half answering false and `shiftSkippable` telling the
   confirmation card whether to name the key.
+- **A setting this machine cannot apply is greyed, not dropped.**
+  `SettingsPage.locked(row, reason)` stacks a `lockedScrim` over the row:
+  `FindObjectAtPositionMatching` keeps the **last** match in painting order, so
+  one object over the row takes every tap *and* every hover inside it — which is
+  what makes the reason the only thing a locked row answers with, and why the
+  controls under it need no disabled state of their own. The wash is
+  `SettingsLockedScrim`, the card's own fill at part strength, laid over the row
+  rather than a dimmed palette per object, a row being a dozen of them. The index
+  pass takes the row bare, a name being what it is walked for. Two consequences
+  outside this file: the tooltip layer is stacked **over** the settings pages in
+  `app.buildUI` — a label about what is under the pointer is no use beneath an
+  opaque page — and `SettingsPage.Close` hides the tooltip, a locked row under the
+  pointer as the page goes never reporting the pointer leaving. The older rule
+  still stands for a *group* with nothing to say on this platform: the
+  taskbar-flash group is dropped, not greyed, there being no setting there that
+  another machine would carry differently.
+- **Whether the desktop draws a notification area has no toolkit answer.**
+  `ui.TrayAvailable` is the probe, split by platform the way `FlashTaskbar` is
+  and memoised with `sync.OnceValue` — the settings search builds every section
+  twice, and on XDG the answer costs a bus call. Windows and macOS answer true;
+  the XDG half asks the session bus whether `org.kde.StatusNotifierWatcher` has
+  an owner, Fyne's tray being a StatusNotifierItem, which without a host
+  registers and is drawn by nobody (GNOME without the AppIndicator extension is
+  the common one). `app` reads it to decide whether to mount a tray at all, and
+  the System section to decide whether its rows are greyed.
 - **A window cannot ask for attention through Fyne.** There is no API for it, so
   `ui.FlashTaskbar` is a Win32 `FlashWindowEx` on the HWND `driver.NativeWindow`
   hands back — the same route `StyleTitlebar` takes — with a `!windows` half
@@ -857,9 +894,10 @@ naming and the test policy.
   three fills in the same precedence, the same `pickMark` at the end — and the
   only difference is that picking one *unpicks* the rest, which the dialog
   enforces rather than the row. Its two option runs are `searchChip`s carrying
-  the number they stand for (`shareOptionChip`): a filter chip is a bit where
-  one of these is a member of a set, so `markShareChips` is what a tap runs and
-  the chip itself stays the same widget. The list is `cappedHeightLayout` +
+  the number they stand for (`pickChip`, in `search.go` beside the chip it
+  extends, shared with the crop card): a filter chip is a bit where one of these
+  is a member of a set, so `markPickChips` is what a tap runs and the chip itself
+  stays the same widget. The list is `cappedHeightLayout` +
   `NewPlainVScroll`, `panels.go`'s arrangement, because a machine with thirty
   windows would otherwise open a card taller than the screen it is offering to
   share.
@@ -1038,6 +1076,12 @@ naming and the test policy.
     through `Tooltip.ShowBelow`, not `ShowAbove`: the card is at the top of the
     window, so there *is* room above it and `ShowAbove` would never fall through to
     its second placement — it would label the card by covering it.
+  - **The bar's colour is a grade the controller hands over**, `ui.CallQuality`,
+    the way a device list arrives as `ui.AudioDevice`: three answers, three
+    colours, and no opinion here about what a bad call is. What the tooltip says
+    is the controller's too — `SetState` takes the word the bar stands for, and
+    the numbers behind it are appended where the tooltip is actually shown, so a
+    measurement arriving every couple of seconds costs the card no relayout.
   - **The bar belongs to the live half, not to the card.** It is the last child of
     that half's own column, so it ends where the half does — a gap short of the
     rule, the margin it starts at on the other side — and goes down with it rather
@@ -1124,3 +1168,28 @@ naming and the test policy.
     and seeds the unfurl's own poster so the box is filled before any decode
     has run. `VideoCard.Loop` is the GIF mark: a fact set at build, read as
     policy by the controller.
+
+- **The crop card is one card for every picture the client uploads**
+  (`ui/crop.go`). It takes an `image.Image` and answers with an
+  `image.Rectangle` in the source's own pixels — no file, no format, no Autumn —
+  so the five things that upload one share it the way they share a file picker.
+  Its shapes arrive as `CropAspect`s the controller chose, the `ui.ShareSource`
+  seam again: which frames a *server banner* is worth offering is a fact about
+  Revolt.
+  - **The frame is held in source pixels, not screen units.** The answer is in
+    pixels and the card can be re-laid out under the reader, so `cropStage`
+    keeps a `cropBox` of float64s and the layout is the only thing that knows
+    the scale. Floats because a drag is a screen distance divided by that scale:
+    rounding per event rather than per gesture is a frame that lags the pointer.
+  - **A wash with a hole in it is not a shape Fyne draws**, so what is dropped is
+    four `canvas.Rectangle` bands laid around the frame, re-placed with it. The
+    frame itself is a stroked rectangle with no fill, and `Round` adds the circle
+    an avatar is actually seen through inscribed in it.
+  - **What a gesture is doing is decided once, on its first `Dragged`**
+    (`grabAt`): a corner within a handle's reach resizes, anything else moves. A
+    corner dragged past the opposite one goes on resizing rather than turning
+    into a move under the pointer — and `DragEnd` is what resets it, as well as
+    being what makes the driver deliver `Dragged` at all.
+  - **The stage is handed a preview, not the file.** `CropRequest.Size` is the
+    true pixel size the answer is in, and `Picture` is whatever the controller
+    thought worth uploading to a texture — see `app/pictures.go`.

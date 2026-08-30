@@ -6,6 +6,7 @@ package client
 // decides when to leave it.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -15,7 +16,6 @@ import (
 	"net/url"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -899,11 +899,6 @@ func (c *Client) ResolveMessages(targets []MessageRef) (resolved []*domain.Messa
 
 // answeredGone reports whether an error is the server saying the thing is not
 // there — 404, or a 403 for a channel the account may no longer read.
-//
-// revoltgo returns every non-2xx as a formatted string with neither a type nor a
-// code on it ("bad status code %d: %s"), so the number is read back out of the
-// text. A wording it stops using reads as no status at all, which is the safe
-// answer: a caller that forgets what is gone forgets nothing instead.
 func answeredGone(err error) bool {
 	status, ok := statusOf(err)
 
@@ -914,19 +909,50 @@ func answeredGone(err error) bool {
 // the error is not one of those at all — a dial, a timeout, a reset — which is
 // what tells a network failure from an answer.
 func statusOf(err error) (int, bool) {
-	rest, ok := strings.CutPrefix(err.Error(), "bad status code ")
+	answer, ok := apiError(err)
 	if !ok {
 		return 0, false
 	}
 
-	code, _, _ := strings.Cut(rest, ":")
+	return answer.StatusCode, true
+}
 
-	status, convErr := strconv.Atoi(code)
-	if convErr != nil {
+// apiError is the answer behind an error, where the error is one. revoltgo used
+// to report every non-2xx as a formatted string and the status had to be read
+// back out of the text; *revoltgo.APIError carries the status, the route and the
+// body, so nothing here parses a sentence any more.
+func apiError(err error) (*revoltgo.APIError, bool) {
+	var answer *revoltgo.APIError
+
+	return answer, errors.As(err, &answer)
+}
+
+// SlowmodeRetry is how long a channel's cooldown has left, from the rejection
+// that named it. Revolt answers a refused send with {"type":"InSlowmode",
+// "retry_after":n} where n is a whole number of seconds — the TTL left on its
+// own key — which is the only authoritative answer there is: a cooldown started
+// from another client is one this client never saw begin.
+//
+// ok is false for every other refusal, and for a body that does not decode: a
+// caller that cannot be told falls back to its own clock.
+func SlowmodeRetry(err error) (time.Duration, bool) {
+	answer, ok := apiError(err)
+	if !ok {
 		return 0, false
 	}
 
-	return status, true
+	var body struct {
+		Type       string `json:"type"`
+		RetryAfter uint64 `json:"retry_after"`
+	}
+
+	if json.Unmarshal(answer.Body, &body) != nil || body.Type != "InSlowmode" {
+		return 0, false
+	}
+
+	// Bounded by what a channel can be set to: the field is a uint64 off the
+	// wire, and a duration is nanoseconds.
+	return min(time.Duration(body.RetryAfter)*time.Second, MaxChannelSlowmode), true
 }
 
 // Transient reports whether an error is worth trying the same request again.
@@ -1233,14 +1259,18 @@ func (c *Client) EditChannel(channelID string, edit ChannelEdit) error {
 	return err
 }
 
-// SetGroupIcon uploads a picture and hands the ID to the same channel edit every
-// other field goes through. The bucket is `icons`, which is half of what
+// SetChannelIcon uploads a picture and hands the ID to the same channel edit
+// every other field goes through. The bucket is `icons`, which is half of what
 // identifies a file to Revolt — an attachment's ID offered here is a file that
 // does not exist — and is the server's bucket too: an icon is an icon.
 //
+// A group and a server channel are one route here: Revolt gives both the same
+// field under the same permission, and the two differ only in which surface
+// offers it.
+//
 // Nothing is recorded. The picture returns as a ChannelUpdate the store answers
 // for, exactly as a rename does.
-func (c *Client) SetGroupIcon(channelID, path, name string) error {
+func (c *Client) SetChannelIcon(channelID, path, name string) error {
 	session := c.session.Load()
 	if session == nil {
 		return ErrNoSession
@@ -1256,9 +1286,9 @@ func (c *Client) SetGroupIcon(channelID, path, name string) error {
 	return err
 }
 
-// RemoveGroupIcon takes the picture off. A cleared field is a name in `remove`
+// RemoveChannelIcon takes the picture off. A cleared field is a name in `remove`
 // and never a blank, every string on the params being omitzero.
-func (c *Client) RemoveGroupIcon(channelID string) error {
+func (c *Client) RemoveChannelIcon(channelID string) error {
 	session := c.session.Load()
 	if session == nil {
 		return ErrNoSession
@@ -2107,6 +2137,36 @@ func (c *Client) SetMemberRoles(serverID, userID string, roleIDs []string) error
 	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{Roles: roleIDs})
 }
 
+// SetMemberAvatar gives this account a picture in one server, uploaded into the
+// same bucket an account avatar goes to — an avatar is an avatar.
+//
+// Only ever this account's own: member_edit.rs takes ChangeAvatar for the caller
+// and refuses `avatar` for anybody else outright (InvalidOperation), the
+// permission to touch somebody else's covering removal alone. The caller is what
+// established that; this only sends it.
+func (c *Client) SetMemberAvatar(serverID, userID, path, name string) error {
+	session := c.session.Load()
+	if session == nil {
+		return ErrNoSession
+	}
+
+	id, err := uploadFile(session, revoltgo.FileTagAvatars, path, name)
+	if err != nil {
+		return err
+	}
+
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{Avatar: id})
+}
+
+// RemoveMemberAvatar takes a per-server picture off, leaving the account's own
+// showing through. This account's own under ChangeAvatar, anybody else's under
+// RemoveAvatars — again the caller's to have established.
+func (c *Client) RemoveMemberAvatar(serverID, userID string) error {
+	return c.editMember(serverID, userID, revoltgo.ServerMemberEditParams{
+		Remove: []revoltgo.ServerMemberClearType{revoltgo.ServerMemberClearAvatar},
+	})
+}
+
 // editMember is the one request behind the four above. The member that comes back
 // is dropped: the change returns as ServerMemberUpdate, which revoltgo files into
 // State before the handler here sees it.
@@ -2824,10 +2884,6 @@ func (c *Client) UserProfile(userID string) (domain.UserProfile, error) {
 
 // Mutual fetches the servers, friends and groups this account has in common
 // with somebody, a request of its own made once the dialog is up.
-//
-// Session.UserMutual decodes one object into a *slice* of them, a shape the
-// response can never take, so the call could only ever fail — hence sending it
-// by hand.
 func (c *Client) Mutual(userID string) (domain.Mutual, error) {
 	session := c.session.Load()
 	if session == nil {

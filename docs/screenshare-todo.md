@@ -187,8 +187,34 @@ what stands, and what the build turned up:
   Annex-B on stdout, which is exactly what `NewLocalReaderTrack` eats. The pad half
   of the filter keeps the declared size true through a window resized
   mid-share.
-- **A Windows monitor is grabbed with `ddagrab`, not `gdigrab`**, and this is
-  a fix rather than a preference. gdigrab's `BitBlt` carries `CAPTUREBLT`,
+- **Windows capture is a three-rung ladder and the top rung is Graphics
+  Capture** (`gfxcapture`, ffmpeg's WGC filter source), for a window and a
+  monitor alike. It takes the `HWND` or `HMONITOR` *itself*, so a window whose
+  title changes between enumeration and start is still the one that was
+  picked, and it is the only grabber here that **scales before handing the
+  frame over** — so the readback is the encode box rather than the whole
+  screen, and swscale is left with a format conversion instead of a resize.
+  Measured on an RTX 4070 Laptop, 2560×1600 monitor into a 1280×720 share at
+  30 fps: **0.23 s of process CPU over fifteen seconds becomes 0.05 s**, same
+  450 frames out. Bicubic, the resampling being the GPU's either way. It fits
+  rather than fills and pads to the *top-left*, so the chain's own centred pad
+  stays — which is also what holds the declared size true through a window
+  resized mid-share. Its own device is opened by the filter, so unlike ddagrab
+  there is no `-init_hw_device` to become every other filter's default. One
+  probe per run answers whether the machine has it at all (the API is Windows
+  10 1803+, the filter newer again, and an ffmpeg found on PATH may predate
+  it); WGC also has no exclusivity, so several clients may capture one output,
+  and it captures a window that is covered.
+- **`ddagrab` is the middle rung**, monitors only, and was the top one until
+  Graphics Capture arrived. Desktop Duplication hands back a GPU surface too,
+  but full-size — there is no way to ask it for less — so the readback is the
+  whole screen. It is also **refusable at runtime**: `Desktop duplication
+  access denied` was reproduced on the development laptop with nothing else
+  capturing, where `gfxcapture` on the same output worked, which is on its own
+  a reason not to have it first. Kept because it answers on Windows and
+  ffmpeg versions predating the WGC filter.
+- **`gdigrab` is the floor**, and the reason the ladder exists.
+  gdigrab's `BitBlt` carries `CAPTUREBLT`,
   which redraws the mouse pointer once per captured frame — *on the machine*,
   for everybody at it, not only inside the stream. Measured here: no flicker
   with ddagrab at 5 fps, obvious flicker with gdigrab at the same rate, and at
@@ -203,7 +229,11 @@ what stands, and what the build turned up:
   hand-rolled COM walk of `IDXGIFactory`→adapters→outputs, keyed by the
   `HMONITOR` each output reports, which is the one key `EnumDisplayMonitors`
   also hands out. Matching on that rather than trusting two enumerations to
-  agree in order is the whole point. **`IID_IDXGIFactory1` is not
+  agree in order is the whole point. It is walked **where ddagrab is what will
+  be used** rather than at enumeration: a source carries the bare `HMONITOR`,
+  the same shape a window carries its `HWND`, so a machine with Graphics
+  Capture never pays a COM walk per opening of the picker for an answer
+  nothing reads. **`IID_IDXGIFactory1` is not
   `770aae78-…`** whatever the memory says — `CreateDXGIFactory1` answers
   `E_NOINTERFACE` for it; the plain `IID_IDXGIFactory` (`7b7166ec-…`) through
   `CreateDXGIFactory` works and carries `EnumAdapters` at the same slot.
@@ -216,9 +246,9 @@ what stands, and what the build turned up:
   would cost a live track that publishes nothing. `Tools.CaptureFallback` asks
   the same probes about the whole enumerated set, which is what lets the picker
   **warn** that a share will run on the slower path — the one limit here that
-  can be fixed from outside the client. `docs/performance.md` carries why the
-  path matters beyond the flicker. **Windows still have no non-flickering grabber** — WGC is WinRT
-  with no ffmpeg input — so the picker says so.
+  can be fixed from outside the client. Graphics Capture takes both kinds of
+  source, so one answer now settles the set: with it, nothing warns.
+  `docs/performance.md` carries why the path matters beyond the flicker.
 - **Self-preview is a tee, not a subscription.** LiveKit never sends a
   publisher their own track back, so the bytes only exist twice if this side
   makes them: `video.ShareTee` wraps the capture child's stdout, hands the
@@ -274,8 +304,7 @@ what stands, and what the build turned up:
   encoder dying (the captured window closed — `OnWriteComplete` → unpublish →
   `ShareStopped`), `dropCall`, and logging out.
 - Still open on send: **share audio** (a second Opus track from a WASAPI
-  loopback or a Pulse monitor), **the bitrate override** (auto is 0.1 bit per
-  pixel per frame and there is no row to change it), **Windows window capture
+  loopback or a Pulse monitor), **Windows window capture
   without the pointer flicker** (WGC, which is WinRT and has no ffmpeg input),
   **macOS** (avfoundation screens plus the consent prompt), and **Wayland**,
   which has no grabber in stock ffmpeg — the portal is its own project, so a
@@ -290,15 +319,15 @@ mid-share. What the picker was last answered with is remembered in
 client was told rather than what was chosen), so the same monitor at the same
 rate is one press next time.
 
-Source, resolution and framerate are built; the rest of the table is still the
-plan.
+Source, resolution, framerate and the bitrate override are built; the rest of the
+table is still the plan.
 
 | Option | Values | Where it lands |
 | --- | --- | --- |
 | Source | monitors, windows (X11/Windows) | grabber input args |
 | Resolution | Source / 1080p / 720p / 480p | `scale` (+`pad` never needed on send: the source aspect is known) |
 | Framerate | 5 / 15 / 30 / 60 | grabber `-framerate` (+`fps` filter where the grabber rounds) |
-| Quality | Auto / bitrate override | `-b:v/-maxrate/-bufsize`; auto ≈ 0.1 bit per pixel per frame (720p30 ≈ 2.5 Mbps, 1080p30 ≈ 4.5, 1080p60 ≈ 8) |
+| Quality | Auto / bitrate override | **built** — `-b:v/-maxrate/-bufsize`; auto ≈ 0.1 bit per pixel per frame (720p30 ≈ 2.5 Mbps, 1080p30 ≈ 4.5, 1080p60 ≈ 8). The override is Bandwidth's fourth value (Custom) plus `Screenshare.Bitrate` in kbit/s, bounded by what the encoder clamps to |
 | Audio | on / off | the loopback capture + second track; greyed on macOS |
 | Codec | Auto (AV1 where the GPU encodes it) / H.264 | AV1 hardware-only, ~0.7× the bitrate for the same picture; H.264 the floor, libx264 at the last; VP8/VP9 remain receive-only, for senders that are browsers |
 | Bandwidth | Auto / Half / Quarter | a scale on the automatic bitrate budget, the slow-uplink dial |
@@ -317,9 +346,10 @@ which is the decoder's W×H and free to differ from the sender's.
 2. ~~Receive~~ **done** — see "Receiving" above for what stayed open.
 3. ~~Send, monitors, X11 + Windows~~ **done** — and windows with them, the
    enumeration being the same walk. See "Sending" above.
-4. **Options still owed**: the bitrate override, audio share (WASAPI
-   loopback, pulse monitor) — and the receive-side watch resolution beside
-   them.
+4. **Options still owed**: ~~the bitrate override~~ **done** (Bandwidth's
+   Custom value plus `Screenshare.Bitrate`, read at share start like every
+   other option); audio share (WASAPI loopback, pulse monitor) — and the
+   receive-side watch resolution beside them.
 5. **Polish**: ~~self-preview tee~~ **done**; ~~ddagrab~~ **done**;
    ~~hw-encoder probe~~ **done** (and the codec moved to H.264 outright — the
    probe order, flags and the one-slice contract live in

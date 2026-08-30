@@ -44,6 +44,21 @@ type Store interface {
 	// nothing where Channel would resolve a picture and slowmode nobody asked for.
 	ChannelName(channelID string) string
 
+	// ChannelServerID is the server a channel belongs to, "" for a conversation —
+	// one field where Channel resolves the whole thing, because it is asked per
+	// mounted row (app.onMessageMounted) and per mention-set update.
+	ChannelServerID(channelID string) string
+
+	// MemberIdentity is how a membership is named and drawn — nickname or display
+	// name, per-server picture — without the roles Member converts to say the
+	// same. For the typing line, which asks per typist per repaint.
+	MemberIdentity(serverID, userID string) (name, avatarURL string, ok bool)
+
+	// VoiceChannelOf finds the voice channel of a server somebody is connected
+	// to, by field reads alone — VoiceParticipants resolves and sorts the whole
+	// call, and this is asked on every membership change in the open server.
+	VoiceChannelOf(serverID, userID string) (channelID string, ok bool)
+
 	// EmojiURL is where a custom emoji's picture is served from, or "" for an
 	// empty ID. Derived from the ID rather than looked up — hence no ok: a message
 	// can carry an emoji from a server the account is not in, and the CDN serves

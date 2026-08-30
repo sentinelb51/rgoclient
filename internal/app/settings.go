@@ -16,6 +16,7 @@ import (
 	"log"
 	"net/url"
 	"path/filepath"
+	"time"
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/dialog"
@@ -28,6 +29,7 @@ import (
 	"RGOClient/internal/config"
 	"RGOClient/internal/cpu"
 	"RGOClient/internal/domain"
+	"RGOClient/internal/power"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
 	"RGOClient/internal/util"
@@ -186,6 +188,36 @@ func (a *App) applyFrameRate() {
 	}
 
 	fyne.SetFrameRate(rate)
+	a.applyPower()
+}
+
+// applyPower asks the OS for the two things the frame rate cannot ask for
+// itself. Called wherever either of its inputs moves: beside applyFrameRate on
+// every focus change, and from installCall and dropCall.
+//
+// The precision is the frame deadline the rate just set, because that deadline
+// is a timed wait — the driver parks in the OS event queue for whatever is left
+// of it, and a platform that rounds a wait up to its own tick caps the client
+// below the rate it was told to draw at. Behind, nothing is asked for: what a
+// background window draws is paced by BackgroundFrameRate, which is coarse on
+// purpose.
+//
+// Throttling is the same trade taken further, and the call is why it is not
+// simply the focus inverted. It reaches every thread, miniaudio registers no
+// MMCSS task for the one it renders on (ma_wasapi_usage_default names none) and
+// mixer.render has ten milliseconds to finish in. A dropout is not a dropped
+// frame, so a live call outranks the saving. Reads a.focused and a.callLive
+// rather than a.call: the foreground hooks are not on the UI thread.
+func (a *App) applyPower() {
+	front := a.focused.Load()
+
+	var precision time.Duration
+	if rate := fyne.FrameRate(); front && rate > 0 {
+		precision = time.Second / time.Duration(rate)
+	}
+
+	power.Precise(precision)
+	power.Throttle(!front && !a.callLive.Load())
 }
 
 // applyAffinity restricts the process to the cores the setting names.
@@ -387,6 +419,9 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		SetInputEcho:      a.setInputEcho,
 		GateRatio:         audio.GateRatio,
 
+		FFmpeg:        a.ffmpegState,
+		InstallFFmpeg: a.installFFmpeg,
+
 		Sessions:         settingsSessions,
 		ForgetSession:    a.forgetSession,
 		LogOut:           a.logOut,
@@ -561,13 +596,18 @@ func (a *App) setDisplayName(name string) {
 
 /* This account's picture, profile and username */
 
-// changeAvatar and changeBanner each ask for a picture and hang it on the
-// account. The avatar comes back as a user update and repaints everything drawing
-// it; the banner is announced by nothing, so it takes the profile path below.
+// changeAvatar and changeBanner each ask for a picture, ask which part of it to
+// send, and hang the answer on the account. The avatar comes back as a user
+// update and repaints everything drawing it; the banner is announced by nothing,
+// so it takes the profile path below.
 func (a *App) changeAvatar() {
-	a.choosePicture("Choose a profile picture", func(path, name string) {
+	a.choosePicture("Choose a profile picture", squarePicture, func(pic picture) {
 		a.background(
-			func() error { return a.client.SetAvatar(path, name) },
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetAvatar(pic.path, pic.name)
+			},
 			a.notifyFailure("set avatar", "Could not change your picture. It may be too large."),
 		)
 	})
@@ -578,9 +618,13 @@ func (a *App) removeAvatar() {
 }
 
 func (a *App) changeBanner() {
-	a.choosePicture("Choose a profile banner", func(path, name string) {
+	a.choosePicture("Choose a profile banner", widePicture, func(pic picture) {
 		a.editProfile("set banner", "Could not change your banner. It may be too large.",
-			func() error { return a.client.SetBanner(path, name) })
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetBanner(pic.path, pic.name)
+			})
 	})
 }
 
@@ -739,11 +783,6 @@ func usernameFailure(err error) string {
 	return "Could not change it. Check your password, and try another name."
 }
 
-// choosePicture asks for an image file and reports what was picked, or nothing.
-func (a *App) choosePicture(title string, onPicked func(path, name string)) {
-	a.chooseFile(title, pictureFilter, onPicked)
-}
-
 // chooseFile asks for a file of the given kinds and reports what was picked, or
 // nothing. The OS picker is the one worth showing — it is the dialog the reader
 // already knows, and it is a window of its own rather than something drawn over
@@ -755,6 +794,7 @@ func (a *App) chooseFile(title string, filter ui.FileFilter, onPicked func(path,
 	}
 
 	if ui.PickFile(a.window, title, filter, func(path string, err error) {
+		log.Printf("PROBE: PickFile answered path=%q err=%v", path, err)
 		switch {
 		case err != nil:
 			failed(err)
@@ -792,13 +832,6 @@ func (a *App) chooseFile(title string, filter ui.FileFilter, onPicked func(path,
 	}
 	picker.SetTitleText(title)
 	picker.Show()
-}
-
-// pictureFilter is what Revolt serves back as a picture. The filter is a
-// courtesy — the server decides what it will take — so it stays generous.
-var pictureFilter = ui.FileFilter{
-	Label:      "Pictures",
-	Extensions: []string{".png", ".jpg", ".jpeg", ".gif", ".webp"},
 }
 
 // chooseCacheDir asks for a directory to keep cached images in; cancelling

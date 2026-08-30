@@ -205,6 +205,11 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 	a.call = call
 	a.capture = capture
 	a.muted, a.deafened = call.Muted(), call.Deafened()
+
+	// A call joined from behind another window has to lift the throttle the blur
+	// put on: the mixer's period is the one deadline this client cannot miss.
+	a.callLive.Store(true)
+	a.applyPower()
 	a.syncCall()
 	a.refreshSelfVoiceMarks()
 	a.armPushToTalk()
@@ -243,6 +248,11 @@ func (a *App) dropCall() {
 		a.call.Close() // there is no leave route: leaving *is* disconnecting
 		a.call = nil
 	}
+
+	// Unconditional, like callGen above: a join that never reached installCall
+	// still has to leave the flag where it found it.
+	a.callLive.Store(false)
+	a.applyPower()
 	if a.capture != nil {
 		a.capture.Close()
 		a.capture = nil
@@ -257,6 +267,11 @@ func (a *App) dropCall() {
 	a.speaking = nil
 	a.callMuted = nil
 	a.muted, a.deafened = false, false
+
+	// The next call measures its own connection. Left standing, the last one's
+	// numbers would be read as this one's for the two seconds before its first
+	// sample lands.
+	a.callState, a.callStats = voice.Connecting, voice.Stats{}
 
 	// Every mark the media session was the source of goes with it: what is left is
 	// the moderation, which the store still answers for.
@@ -356,6 +371,8 @@ func (a *App) onCallEvent(call *voice.Call, event voice.Event) {
 		a.onShareStopped()
 	case voice.ConnectionChanged:
 		a.onCallConnection(e)
+	case voice.StatsChanged:
+		a.onCallStats(e)
 	case voice.CallEnded:
 		a.onCallEnded(e)
 	}
@@ -425,7 +442,16 @@ func (a *App) onCallConnection(e voice.ConnectionChanged) {
 		a.cancelRejoin()
 	}
 
-	a.setCallState(e.State.String(), e.State == voice.Connected)
+	a.setCallState(e.State)
+}
+
+// onCallStats takes the call's own measurement of itself, which moves the bar
+// only where it moves the *grade*: the number behind the colour is read by
+// pointing at it, and a call that was fine two seconds ago and is fine now has
+// nothing to redraw.
+func (a *App) onCallStats(e voice.StatsChanged) {
+	a.callStats = e.Stats
+	a.paintCallState()
 }
 
 // onCallEnded tears the call down from the far end's side. The microphone is
@@ -542,7 +568,7 @@ func (a *App) scheduleRejoin(channelID string, err error) {
 	// right for a join that has not landed, and overwritten for one that had.
 	a.syncCallIsland()
 	if a.callRetryAfterDrop {
-		a.setCallState("Reconnecting", false)
+		a.setCallState(voice.Reconnecting)
 	}
 
 	epoch := a.epoch
@@ -594,6 +620,13 @@ func (a *App) syncCallIsland() {
 
 	if a.callChannelID == "" {
 		a.callIsland.ClearCall()
+
+		// The bar the tooltip was labelling has gone down with the half it belongs
+		// to, and the pointer is over whatever the card was covering.
+		if a.callStateOver != nil {
+			a.callStateOver = nil
+			a.tooltip.Hide()
+		}
 	} else {
 		a.callIsland.SetCall(a.voiceWhere(a.callChannelID))
 		a.callIsland.SetMuted(a.muted)
@@ -604,11 +637,10 @@ func (a *App) syncCallIsland() {
 		// guessed at from the channel.
 		a.callIsland.SetSharing(a.sending != nil, a.call != nil && a.call.CanShare())
 
-		// The bar is otherwise whatever the last ConnectionChanged painted it, which
-		// for a call that has not landed yet is nothing at all.
-		if a.call == nil {
-			a.callIsland.SetState("Connecting", false)
-		}
+		// Painted from what the call last said and last measured, so a card rebuilt
+		// under a running one comes back at the grade it had rather than at a fresh
+		// bar's green — and a join that has not landed gets the word for that.
+		a.paintCallState()
 	}
 
 	channelID := a.currentChannelID
@@ -634,30 +666,103 @@ func (a *App) settleCallIsland() {
 	a.callIslandLayer.Refresh()
 }
 
-// setCallState paints the island's state bar. It settles after for the case the
-// bar was not drawn at all a moment ago — a call that has only just been asked
-// for is a card without one.
-func (a *App) setCallState(text string, good bool) {
+// setCallState records how the call is doing and paints the island's state bar
+// for it. It settles after for the case the bar was not drawn at all a moment
+// ago — a call that has only just been asked for is a card without one.
+func (a *App) setCallState(state voice.ConnectionState) {
+	a.callState = state
+
 	if a.callIsland == nil {
 		return
 	}
 
-	a.callIsland.SetState(text, good)
+	a.paintCallState()
 	a.settleCallIsland()
 }
 
-// showCallState is the island's one hover: the state bar carries the connection
-// as a colour, and the word it stands for is read by pointing at it.
-func (a *App) showCallState(text string, over fyne.CanvasObject, hovering bool) {
-	if !hovering {
-		a.tooltip.Hide()
+// paintCallState is the bar alone: its colour, and a tooltip standing open under
+// it. Nothing here can change the card's size, so unlike setCallState it settles
+// nothing — which is what makes it cheap enough to run on every sample.
+func (a *App) paintCallState() {
+	if a.callIsland == nil {
 		return
 	}
+
+	word := a.callState.String()
+	a.callIsland.SetState(word, a.callQuality())
+
+	// Somebody holding the pointer on the bar is watching the number, not reading
+	// it once.
+	if a.callStateOver != nil {
+		a.tooltip.ShowBelow(a.callStateTooltip(word), a.callStateOver)
+	}
+}
+
+// What the bar's colour stands for. A call is graded on the round trip and on
+// what it is losing, at whichever is worse: either alone is enough to make a
+// conversation hard work, and there is one bar to say so with.
+const (
+	callRTTFair  = 150 * time.Millisecond
+	callRTTPoor  = 300 * time.Millisecond
+	callLossFair = 3 // percent
+	callLossPoor = 10
+)
+
+// callQuality grades the connection. Anything short of connected is fair rather
+// than poor: a call that has not landed yet is worth seeing without wearing the
+// colour of one that is up and unusable.
+func (a *App) callQuality() ui.CallQuality {
+	if a.callState != voice.Connected {
+		return ui.CallQualityFair
+	}
+
+	stats := a.callStats
+
+	switch {
+	case stats.RTT >= callRTTPoor, stats.Loss >= callLossPoor:
+		return ui.CallQualityPoor
+	case stats.RTT >= callRTTFair, stats.Loss >= callLossFair:
+		return ui.CallQualityFair
+	}
+
+	return ui.CallQualityGood
+}
+
+// callStateTooltip is the word the bar's colour stands for, and the numbers
+// behind it. Each is left out until there is one: a call still connecting has no
+// round trip, and a room nobody has spoken enough in has measured no loss —
+// where a nought would claim it had.
+func (a *App) callStateTooltip(word string) string {
+	if a.callState != voice.Connected {
+		return word
+	}
+
+	if rtt := a.callStats.RTT; rtt > 0 {
+		word += fmt.Sprintf(" · %d ms", rtt.Milliseconds())
+	}
+	if loss := a.callStats.Loss; loss > 0 {
+		word += fmt.Sprintf(" · %d%% loss", loss)
+	}
+
+	return word
+}
+
+// showCallState is the island's one hover: the state bar carries the connection
+// as a colour, and what the colour is standing for is read by pointing at it.
+func (a *App) showCallState(text string, over fyne.CanvasObject, hovering bool) {
+	if !hovering {
+		a.callStateOver = nil
+		a.tooltip.Hide()
+
+		return
+	}
+
+	a.callStateOver = over
 
 	// Below rather than beside: the bar runs the card's whole width, so a label off
 	// its right edge would be nowhere near the pointer — and the bar is the card's
 	// bottom edge, so under it is the one side with nothing of the card on it.
-	a.tooltip.ShowBelow(text, over)
+	a.tooltip.ShowBelow(a.callStateTooltip(text), over)
 }
 
 // syncCall is the whole of what a call starting or ending changes on screen.

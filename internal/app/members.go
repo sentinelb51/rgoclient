@@ -57,9 +57,12 @@ func (a *App) ensureAuthor(serverID, userID string) {
 
 	needUser := !a.store.HasUser(userID)
 	needMember := serverID != "" && !a.store.HasMember(serverID, userID)
+	if !needUser && !needMember {
+		return
+	}
 
 	key := authorKey(serverID, userID)
-	if (!needUser && !needMember) || a.fetchedAuthors[key] {
+	if a.fetchedAuthors[key] {
 		return
 	}
 
@@ -133,9 +136,9 @@ func (a *App) refreshAuthorMessages(userIDs ...string) {
 	}
 
 	a.messages.EachMounted(func(w *ui.MessageWidget) {
-		// A system message that targets nobody has no author, and an empty ID in the
-		// batch would otherwise match every one of them.
-		if author := w.Author(); author != "" && slices.Contains(userIDs, author) {
+		// A system line can name two people, so which rows a batch touches is the
+		// widget's question rather than a compare against one ID.
+		if w.NamesAny(userIDs) {
 			w.RefreshAuthor()
 		}
 	})
@@ -909,6 +912,77 @@ func (a *App) setMemberNickname(serverID, userID, nickname string) {
 	)
 }
 
+// memberAvatarItems is the per-server picture: a change this account may only
+// ever make to its own, and a removal it may make to anybody's it outranks by
+// permission.
+//
+// Revolt splits the two: member_edit.rs takes ChangeAvatar for the caller's own
+// membership and refuses `avatar` for anybody else's outright, while taking it
+// off is RemoveAvatars. So a moderator is offered a removal and never a change,
+// which is exactly what the route will accept.
+func (a *App) memberAvatarItems(serverID, userID string) []*fyne.MenuItem {
+	if serverID == "" || userID == "" {
+		return nil
+	}
+
+	var items []*fyne.MenuItem
+
+	own := userID == a.store.SelfID()
+	change := own && a.store.ServerPermissions(serverID).Has(domain.PermissionChangeAvatar)
+
+	if change {
+		items = append(items, fyne.NewMenuItem("Change server picture", func() {
+			a.changeMemberAvatar(serverID, userID)
+		}))
+	}
+
+	// Offered only where there is one to take off. A membership with none draws
+	// the account's picture, which this route cannot touch.
+	member, ok := a.store.Member(serverID, userID)
+	if !ok || !member.ServerAvatar {
+		return items
+	}
+
+	remove := change
+	if !own {
+		remove = a.store.ServerPermissions(serverID).Has(domain.PermissionRemoveAvatars)
+	}
+	if remove {
+		items = append(items, fyne.NewMenuItem("Remove server picture", func() {
+			a.removeMemberAvatar(serverID, userID)
+		}))
+	}
+
+	return items
+}
+
+// changeMemberAvatar asks for a picture and hangs it on this account's membership.
+// What took is drawn by the ServerMemberUpdate that follows.
+func (a *App) changeMemberAvatar(serverID, userID string) {
+	a.choosePicture("Choose a server picture", squarePicture, func(pic picture) {
+		a.background(
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetMemberAvatar(serverID, userID, pic.path, pic.name)
+			},
+			a.notifyFailure("set member avatar", "Could not change your picture here. It may be too large."),
+		)
+	})
+}
+
+// removeMemberAvatar takes a per-server picture off, leaving the account's own
+// showing through.
+func (a *App) removeMemberAvatar(serverID, userID string) {
+	name := a.memberName(serverID, userID)
+
+	a.reportAction(
+		func() error { return a.client.RemoveMemberAvatar(serverID, userID) },
+		"remove member avatar "+userID+" in server "+serverID,
+		"Could not remove %s's picture here.", "%s's picture here was removed.", name,
+	)
+}
+
 // memberRoleItems is the roles this account may give and take, each marked with
 // whether the member already holds it. A role at or above this account's own rank
 // is left out rather than offered to be refused.
@@ -1119,29 +1193,11 @@ func holdLabel(set, lift string, held bool) string {
 }
 
 // voiceChannelOf finds the call a member is in, so the menu can be built around
-// what is actually true. The store answers per channel rather than per member —
-// Revolt files a call on the channel — so this is a walk of the server's voice
-// channels, of which there are a handful.
+// what is actually true. The store's field read — the caller includes every
+// MemberUpdated in the open server, where resolving and sorting each call's
+// participants answered one membership test.
 func (a *App) voiceChannelOf(serverID, userID string) (channelID string, ok bool) {
-	server, found := a.store.Server(serverID)
-	if !found {
-		return "", false
-	}
-
-	for _, id := range server.Channels {
-		channel, found := a.store.Channel(id)
-		if !found || channel.Kind != domain.ChannelVoice {
-			continue
-		}
-
-		for _, participant := range a.store.VoiceParticipants(id) {
-			if participant.UserID == userID {
-				return id, true
-			}
-		}
-	}
-
-	return "", false
+	return a.store.VoiceChannelOf(serverID, userID)
 }
 
 // memberMoveItems is the submenu of voice channels somebody may be dragged into,

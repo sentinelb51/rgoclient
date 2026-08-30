@@ -78,6 +78,7 @@ func (a *App) closeOverlay() {
 	a.closePins()
 	a.closeSearch()
 	a.closeMentions()
+	a.closeNoticeHistory()
 	a.bindKeys()
 
 	// The settings page has its own focus to keep; only the client underneath
@@ -338,6 +339,53 @@ func (a *App) canEditChannel(channelID string) bool {
 	}
 
 	return a.store.Permissions(channelID).Has(domain.PermissionManageChannel)
+}
+
+// channelIconItems is a server channel's own picture, under the one permission
+// the whole edit is gated on. A group's is left out: it has a settings page of
+// its own and that page is where its picture is set, the two never being offered
+// together.
+func (a *App) channelIconItems(channelID string) []*fyne.MenuItem {
+	channel, ok := a.store.Channel(channelID)
+	if !ok || channel.Kind.IsConversation() {
+		return nil
+	}
+
+	items := []*fyne.MenuItem{
+		fyne.NewMenuItem("Change icon", func() { a.changeChannelIcon(channelID) }),
+	}
+
+	// Only where there is one to take off. A server channel with none is led by
+	// its kind's glyph, and removing that is not a thing.
+	if channel.AvatarURL != "" {
+		items = append(items, fyne.NewMenuItem("Remove icon", func() {
+			a.removeChannelIcon(channelID)
+		}))
+	}
+
+	return items
+}
+
+// changeChannelIcon and removeChannelIcon are that picture. Both come back as a
+// ChannelUpdate, which redraws the sidebar row, so nothing is recorded here.
+func (a *App) changeChannelIcon(channelID string) {
+	a.choosePicture("Choose a channel icon", squarePicture, func(pic picture) {
+		a.background(
+			func() error {
+				defer pic.Close()
+
+				return a.client.SetChannelIcon(channelID, pic.path, pic.name)
+			},
+			a.notifyFailure("set icon on channel "+channelID, "Could not change the icon. It may be too large."),
+		)
+	})
+}
+
+func (a *App) removeChannelIcon(channelID string) {
+	a.background(
+		func() error { return a.client.RemoveChannelIcon(channelID) },
+		a.notifyFailure("remove icon from channel "+channelID, "Could not remove the icon."),
+	)
 }
 
 // editChannel raises the card that changes what a channel is, on what the channel

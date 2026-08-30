@@ -1928,7 +1928,7 @@ type MentionPicker struct {
 	rows      []*mentionRow
 	footer    *canvas.Text
 	footerRow *fyne.Container // the footer's padded wrapper, shown/hidden as a unit
-	content   fyne.CanvasObject
+	content   *fyne.Container
 }
 
 var _ fyne.Widget = (*MentionPicker)(nil)
@@ -2038,7 +2038,11 @@ func (p *MentionPicker) Update(kind MentionKind, query string) bool {
 		p.footerRow.Hide()
 	}
 
-	p.Refresh()
+	// Relayout, not Refresh: each row that changed refreshed its own leaves in
+	// set, and what is left is the layout pass the Show/Hide calls above do not
+	// run. The widget-wide refresh walked every row again — re-uploading each
+	// avatar — per keystroke while the picker is open.
+	Relayout(p.content)
 
 	return true
 }

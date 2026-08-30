@@ -148,6 +148,14 @@ func (a *App) resetSessionState() {
 	}
 	a.slowmodeUntil = make(map[string]time.Time)
 
+	// Left armed, the stale timer holds armTimeSpans off — the new session's
+	// first mounted row finds the field set and arms nothing, and the marks wait
+	// on a wake made for the old column.
+	if a.timeSpanTimer != nil {
+		a.timeSpanTimer.Stop()
+		a.timeSpanTimer = nil
+	}
+
 	// Nobody the previous account could see is typing as far as this one is
 	// concerned, and an announcement of our own has no socket left to take back.
 	a.resetTyping()

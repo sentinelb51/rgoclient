@@ -189,8 +189,15 @@ func fetchTextPreview(texts *cache.TextCache, url string, preview *widget.RichTe
 	text := string(runes)
 	texts.Set(url, text)
 
-	// ParseMarkdown refreshes for itself.
-	DoOnUI(func() { preview.ParseMarkdown(textPreviewBlock(text)) })
+	// ParseMarkdown refreshes for itself. The mount check is the liveness guard:
+	// a row rebuilt while the fetch was out holds a *new* preview whose build hit
+	// the cache just written, and parsing into the old one would spend a markdown
+	// parse on a widget no canvas holds — the gifAnimator's own guard, reused.
+	DoOnUI(func() {
+		if fyne.CurrentApp().Driver().CanvasForObject(preview) != nil {
+			preview.ParseMarkdown(textPreviewBlock(text))
+		}
+	})
 }
 
 // fetchText downloads at most limit bytes of a text file — the cap is what keeps

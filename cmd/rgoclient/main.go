@@ -24,10 +24,6 @@ import (
 	"fyne.io/fyne/v2/theme"
 )
 
-/*
-	TODO: Login screen, hovering over an active session; highlight is partial, should highlight the whole tile
-*/
-
 // appID identifies the client to Fyne's preferences and storage APIs. Without it
 // Fyne invents a throwaway ID per launch and logs an error.
 const appID = "com.sentinelb51.rgoclient"

@@ -292,8 +292,8 @@ func (a *App) resolveTypists(channelID string, limit int, wantAvatars bool) (nam
 // typistIdentity is how somebody is named in the open channel — their nickname
 // and per-server picture where there is one — or "" when they are not yet known.
 func (a *App) typistIdentity(userID string) (name, avatarURL string) {
-	if member, ok := a.store.Member(a.currentServerID, userID); ok {
-		return member.Name, member.AvatarURL
+	if name, avatarURL, ok := a.store.MemberIdentity(a.currentServerID, userID); ok {
+		return name, avatarURL
 	}
 	if user, ok := a.store.User(userID); ok {
 		return user.Name, user.AvatarURL

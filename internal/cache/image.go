@@ -742,9 +742,11 @@ func (c *ImageCache) cachedVariant(id string, circular bool) image.Image {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	img := c.memory[id]
+	var img image.Image
 	if circular {
 		img = c.circular[id]
+	} else {
+		img = c.memory[id]
 	}
 	if img != nil {
 		c.touchLocked(id)

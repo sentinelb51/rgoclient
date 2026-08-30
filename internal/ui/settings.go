@@ -34,6 +34,7 @@ const (
 	SectionScreenshare
 	SectionCache
 	SectionPerformance
+	SectionSystem
 	SectionUpdates
 	SectionAdvanced
 	SectionAbout
@@ -50,6 +51,7 @@ var railEntries = []railEntry{
 	{int(SectionScreenshare), "Screenshare", assets.ScreenshareIcon},
 	{int(SectionCache), "Cache", assets.CacheIcon},
 	{int(SectionPerformance), "Performance", assets.PerformanceIcon},
+	{int(SectionSystem), "System", assets.SystemIcon},
 	{int(SectionUpdates), "Updates", assets.UpdatesIcon},
 	{int(SectionAdvanced), "Advanced", assets.AdvancedIcon},
 	{int(SectionAbout), "About", assets.AboutIcon},
@@ -117,6 +119,19 @@ type SettingsHooks struct {
 	// package, which ui does not import, so it crosses as a plain ratio like the
 	// level itself.
 	GateRatio func(db int) float32
+
+	/* Screenshare */
+
+	// FFmpeg reports which copy of ffmpeg the client resolved and whether one can
+	// be downloaded. A plain read of what was decided at startup — never a
+	// request and never a stat, so the index pass may call it.
+	FFmpeg func() FFmpegState
+
+	// InstallFFmpeg downloads the pinned build. redraw is called on the UI thread
+	// whenever the row has something new to say, the controller single-flighting
+	// the download the way it does the update check. Stubbed out for the index
+	// pass with the device hooks: an index build must not start a download.
+	InstallFFmpeg func(redraw func())
 
 	/* Account */
 
@@ -456,6 +471,13 @@ func (p *SettingsPage) OpenAt(section SettingsSection) {
 func (p *SettingsPage) Close() {
 	p.stopMeter()
 	p.resetShell()
+
+	// A locked row under the pointer as the page goes will never report the pointer
+	// leaving, and its reason would be left floating over the client.
+	if p.hooks.Deps.Tooltip != nil {
+		p.hooks.Deps.Tooltip.Hide()
+	}
+
 	p.previews = nil
 	p.account = accountRows{}
 	p.query = ""
@@ -630,6 +652,8 @@ func (p *SettingsPage) sectionGroups(section SettingsSection) []settingsGroup {
 		return p.cacheSection()
 	case SectionPerformance:
 		return p.performanceSection()
+	case SectionSystem:
+		return p.systemSection()
 	case SectionUpdates:
 		return p.updatesSection()
 	case SectionAdvanced:
@@ -696,6 +720,21 @@ func (p *SettingsPage) adv(row fyne.CanvasObject) fyne.CanvasObject {
 	}
 
 	return row
+}
+
+// locked greys a row and names why under the pointer, for a setting this machine
+// cannot apply — the desktop has no notification area, another setting it needs
+// is off. An empty reason leaves the row as it is.
+//
+// Greyed rather than dropped: a row that is missing reads as a client that never
+// had the setting, and the reader is left looking for it. The index pass takes
+// the row bare, a name being the whole of what it is walked for.
+func (p *SettingsPage) locked(row fyne.CanvasObject, reason string) fyne.CanvasObject {
+	if reason == "" || row == nil || p.indexing {
+		return row
+	}
+
+	return container.NewStack(row, newLockedScrim(reason, p.hooks.Deps.Tooltip))
 }
 
 /* Controls */

@@ -7,7 +7,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/url"
 	"runtime"
 	"runtime/pprof"
@@ -24,6 +23,7 @@ import (
 	"RGOClient/internal/cache"
 	"RGOClient/internal/client"
 	"RGOClient/internal/config"
+	"RGOClient/internal/deps"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
 	"RGOClient/internal/ui/theme"
@@ -73,9 +73,21 @@ type App struct {
 
 	// videoTools is the discovered ffmpeg/ffprobe pair; videoInline is whether
 	// both were found, decided once — the card offers inline play only then.
-	videoTools  video.Tools
-	videoInline bool
-	videoMedia  *cache.MediaCache
+	videoTools   video.Tools
+	videoInline  bool
+	videoManaged bool
+	videoMedia   *cache.MediaCache
+
+	// toolsDir is where a downloaded ffmpeg lives; installingFFmpeg single-flights
+	// the download, a hundred megabytes being worth fetching at most once.
+	toolsDir         string
+	installingFFmpeg bool
+
+	// ffmpegDone and ffmpegTotal are the download's progress as the settings row
+	// draws it. Total is zero where the server declined to say how long the body
+	// would be, which the row has to survive rather than divide by.
+	ffmpegDone  int64
+	ffmpegTotal int64
 
 	video       *videoPlayback           // the one running playback, or nil
 	videoInfo   map[string]video.Info    // probed shape by cache id
@@ -95,6 +107,12 @@ type App struct {
 	// reconnected marks a session that follows one this run already lost, which is
 	// the difference between the connection coming back and the client starting.
 	reconnected bool
+
+	/* The machine, see system.go */
+
+	// trayReady says the notification-area icon is up, which is the whole of
+	// whether the window may be hidden: the icon is the only way back to it.
+	trayReady bool
 
 	/* View state */
 
@@ -244,6 +262,11 @@ type App struct {
 	inboxMore   bool
 	inboxPaging bool
 
+	// noticeHistory is the panel listing what the notice layer has already said,
+	// if it is up. The record itself lives on the stack rather than here — the
+	// stack is what every notice passes through, and the panel is a reading of it.
+	noticeHistory *ui.NoticeHistoryDialog
+
 	/* Channel search, see search.go */
 
 	// search is the island on the modal layer, if any, and searchQuery the whole
@@ -368,6 +391,12 @@ type App struct {
 	capture       *audio.Capture
 	callChannelID string
 
+	// callLive tracks call for the one reader that is not on the UI thread:
+	// applyPower, which the driver's foreground hooks reach. A call is the reason
+	// the process is not handed to the OS to run cheaply, and the window going
+	// behind is exactly when a call is most likely to be up.
+	callLive atomic.Bool
+
 	// callJoining single-flights the join. A plain bool rather than a sync.Once:
 	// the point is "not again *yet*", and a second tap must not open a second
 	// microphone.
@@ -416,6 +445,22 @@ type App struct {
 	callRetryFor       string
 	callRetryAfterDrop bool
 	callRetryTimer     *time.Timer
+
+	// callState is the last thing the call said about how it is doing and
+	// callStats the last thing it measured about itself. Both are held because
+	// either paints the island's state bar and neither carries the other: a
+	// sample is not a state change, and a state change measures nothing.
+	//
+	// A zeroed callStats reads as nothing measured — the loss it carries is only
+	// ever drawn or graded where it is positive, so an unmeasured window and a
+	// clean one need no telling apart here.
+	callState voice.ConnectionState
+	callStats voice.Stats
+
+	// callStateOver is the state bar while the pointer is on it, nil otherwise.
+	// The tooltip is a layer the island cannot reach, so a number that moves
+	// under a held pointer is re-shown from here rather than by the widget.
+	callStateOver fyne.CanvasObject
 
 	// speaking is who the voice server last said was talking, so a sidebar rebuilt
 	// mid-call can re-mark its new rows. muted and deafened mirror the call's own,
@@ -577,7 +622,8 @@ func New(fyneApp fyne.App, info Info) *App {
 		videoBusy:           make(map[string]bool),
 		videoFailed:         make(map[string]string),
 	}
-	a.videoTools, a.videoInline = video.Discover()
+	a.toolsDir = deps.Root(config.Current().Tools.Dir)
+	a.resolveVideoTools()
 
 	// Built here rather than on first open, so the layer is a fixed object buildUI
 	// can stack: both pages have to survive the rebuild a style change asks for.
@@ -591,6 +637,13 @@ func New(fyneApp fyne.App, info Info) *App {
 // Run shows the login window, starts the event pump, and enters the Fyne event
 // loop.
 func (a *App) Run() {
+	// Before applyPacing, which reads it: the window is about to be shown, and a
+	// client that started up believing itself to be behind would spend its
+	// heaviest moment at the background frame rate and under the OS throttle. The
+	// foreground hooks correct it either way a moment later; this is what stops
+	// startup being the moment they are wrong about.
+	a.focused.Store(true)
+
 	a.applyPacing()
 	applyAffinity()
 
@@ -598,6 +651,8 @@ func (a *App) Run() {
 
 	a.startAlerts()
 	a.showLogin()
+	a.startSystem()
+	a.fyne.Lifecycle().SetOnStopped(a.shutdown)
 	a.styleNativeChrome(a.window)
 	a.window.ShowAndRun()
 }
@@ -674,23 +729,16 @@ func (a *App) deps() ui.Deps {
 	}
 }
 
-// showMainUI swaps the window to the main layout and wires up shutdown.
+// showMainUI swaps the window to the main layout. Shutdown is not wired here:
+// it hangs off the toolkit's stopped hook, in system.go, so that quitting from
+// the notification area — or before ever signing in — flushes what closing the
+// window does.
 func (a *App) showMainUI() {
 	a.window.SetPadded(false) // sections sit flush against the window chrome
 	a.window.SetContent(a.buildUI())
 	a.bindKeys() // the message column answers Escape once there is one
 	a.window.Resize(fyne.NewSize(theme.Sizes.WindowDefaultWidth, theme.Sizes.WindowDefaultHeight))
 
-	a.window.SetOnClosed(func() {
-		if err := config.Save(); err != nil {
-			log.Printf("save settings: %v", err)
-		}
-
-		a.images.Shutdown()
-		a.emojis.Shutdown()
-		a.sounds.Close()
-		a.client.Shutdown()
-	})
 }
 
 // styleNativeChrome recolours a window's native title bar to match the palette.
@@ -728,13 +776,10 @@ func (a *App) currentChannel() (domain.Channel, bool) {
 }
 
 // channelServerID returns the server a channel belongs to, or "" for a
-// conversation.
+// conversation. The store's field read, not a resolution — this is asked per
+// mounted row.
 func (a *App) channelServerID(channelID string) string {
-	if channel, ok := a.store.Channel(channelID); ok {
-		return channel.ServerID
-	}
-
-	return ""
+	return a.store.ChannelServerID(channelID)
 }
 
 // focusInput returns keyboard focus to the composer.

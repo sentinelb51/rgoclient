@@ -274,7 +274,7 @@ func (a *App) syncComposer() {
 	switch {
 	case !known || permissions.Has(domain.PermissionSendMessage):
 		a.input.SetPlaceHolder(composerPlaceholder)
-	case !a.canViewChannel(channel):
+	case channel.ServerID != "" && !permissions.Has(domain.PermissionViewChannel):
 		reason = composerNoAccess
 	default:
 		reason = composerNoSending
@@ -607,6 +607,18 @@ func (a *App) handleSubmit(text string) {
 	a.background(
 		func() error { return a.client.SendMessage(channelID, text, attachments, replies) },
 		func(err error) {
+			// A refusal that names the cooldown is the one authoritative answer
+			// about it: the wait began where this client could not see it — another
+			// client of the same account — so the badge is set from what the server
+			// said rather than given back. Said out loud, unlike the send this
+			// client already knew to refuse: nothing on screen had explained it.
+			if remaining, ok := client.SlowmodeRetry(err); ok {
+				a.holdSlowmode(channelID, remaining)
+				a.notify(ui.ToneWarning, "Slow mode — you can send again in %s.", util.ShortDuration(remaining))
+
+				return
+			}
+
 			a.clearSlowmode(channelID)
 			onFail(err)
 		},
@@ -657,6 +669,15 @@ func (a *App) startSlowmode(channelID string) {
 	a.refreshSlowmode()
 }
 
+// holdSlowmode sets a channel's cooldown to what the server says is left of it.
+// Unlike startSlowmode this *does* extend a wait already running: a rejection
+// carrying retry_after is the only authoritative answer there is, and it arrives
+// exactly when the local clock was wrong. Call on the UI thread.
+func (a *App) holdSlowmode(channelID string, remaining time.Duration) {
+	a.slowmodeUntil[channelID] = time.Now().Add(remaining)
+	a.refreshSlowmode()
+}
+
 // clearSlowmode gives a cooldown back, for a send that never landed. Call on the
 // UI thread.
 func (a *App) clearSlowmode(channelID string) {
@@ -678,10 +699,15 @@ func (a *App) refreshSlowmode() {
 	}
 
 	channelID := a.currentChannelID
-	remaining := a.slowmodeRemaining(channelID)
+	slowmode := a.slowmodeOf(channelID)
+
+	var remaining time.Duration
+	if slowmode > 0 {
+		remaining = max(time.Until(a.slowmodeUntil[channelID]), 0)
+	}
 
 	shown := a.slowmodeBadge.Visible()
-	a.slowmodeBadge.Set(a.slowmodeOf(channelID), remaining)
+	a.slowmodeBadge.Set(slowmode, remaining)
 	if a.slowmodeBadge.Visible() != shown {
 		a.resizeDock()
 	}
@@ -720,16 +746,17 @@ func toReplies(pending []ui.Reply) []domain.Reply {
 // user, so it costs two map lookups per row in the common case.
 //
 // A system event names whoever it is about rather than an author, so it is the
-// *target* that gets chased, and ui.MessageWidget.Author answers with it — which
-// lets one refresh pass cover both. Only where the target is somebody: see
-// domain.SystemMessage.TargetsUser. A grouped continuation draws no quotes, so
-// nothing is queued for one; an edited row needs the clock that rewrites its mark.
+// *subject* that gets chased, and ui.MessageWidget.Author answers with it — which
+// lets one refresh pass cover both. Its actor is chased beside it: a line reading
+// "X added to group by Y" names two people, and only the first of them is what
+// the row is filed under. A grouped continuation draws no quotes, so nothing is
+// queued for one; an edited row needs the clock that rewrites its mark.
 func (a *App) onMessageMounted(message *domain.Message, grouped bool) {
 	switch {
 	case message.System != nil:
-		if message.System.TargetsUser() {
-			a.ensureAuthor(a.channelServerID(message.ChannelID), message.System.Target)
-		}
+		serverID := a.channelServerID(message.ChannelID)
+		a.ensureAuthor(serverID, message.System.Subject())
+		a.ensureAuthor(serverID, message.System.By)
 	case message.Webhook == nil:
 		a.ensureAuthor(a.channelServerID(message.ChannelID), message.AuthorID)
 	}

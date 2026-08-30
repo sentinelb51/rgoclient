@@ -358,6 +358,11 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	// nothing until there is a lane to fill.
 	go c.playLanes()
 
+	// The other clock: how the connection itself is doing, which nothing on the
+	// receive path is placed to notice — a call can be losing a fifth of its
+	// packets and still fill every lane on time.
+	go c.sampleStats()
+
 	c.emit(ConnectionChanged{State: Connected})
 
 	return c, nil

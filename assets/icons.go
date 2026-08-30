@@ -86,7 +86,7 @@ var appIconPNG []byte
 // them, and the few it does have are filled where these are stroked, so the rail
 // would read as two icon sets sitting together.
 //
-//go:embed account.svg security.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg updates.svg advanced.svg about.svg
+//go:embed account.svg security.svg interface.svg styles.svg behaviour.svg notify.svg cache.svg performance.svg system.svg updates.svg advanced.svg about.svg
 //go:embed server-overview.svg server-channels.svg server-roles.svg server-invites.svg server-bans.svg
 var settingsIcons embed.FS
 
@@ -228,9 +228,14 @@ var (
 	NotifyIcon      = settingsIcon("notify.svg")
 	CacheIcon       = settingsIcon("cache.svg")
 	PerformanceIcon = settingsIcon("performance.svg")
-	UpdatesIcon     = settingsIcon("updates.svg")
-	AdvancedIcon    = settingsIcon("advanced.svg")
-	AboutIcon       = settingsIcon("about.svg")
+
+	// SystemIcon is a power mark: the System section is about the client running
+	// rather than about what it draws, which is what closing the window decides.
+	SystemIcon = settingsIcon("system.svg")
+
+	UpdatesIcon  = settingsIcon("updates.svg")
+	AdvancedIcon = settingsIcon("advanced.svg")
+	AboutIcon    = settingsIcon("about.svg")
 )
 
 // The server settings sections, in rail order. The same set as the client's own

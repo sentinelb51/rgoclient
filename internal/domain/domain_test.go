@@ -31,27 +31,46 @@ func TestFileKindOf(t *testing.T) {
 }
 
 // The name comes back apart from the sentence because the client draws it as a
-// mention, so what matters is both that the two halves read as one line and that
-// an event naming nobody yields no name to make tappable.
+// mention, so what matters is that the two halves read as one line, that an event
+// naming nobody yields no name to make tappable, and that an actor Revolt did not
+// send leaves the sentence impersonal rather than blaming Someone.
 func TestSystemMessageTextParts(t *testing.T) {
 	cases := []struct {
-		kind SystemKind
-		who  string
-		name string
-		rest string
+		kind   SystemKind
+		who    string
+		by     string
+		byID   string
+		rename string
+		name   string
+		rest   string
 	}{
-		{SystemUserJoined, "Elynn", "Elynn", " joined"},
-		{SystemUserKicked, "Saren", "Saren", " was kicked"},
-		{SystemUserLeft, "", "Someone", " left"},           // unresolved target
-		{SystemChannelRenamed, "", "", "Channel renamed"},  // about the channel, nobody to name
-		{SystemKind("teleported"), "", "", "System event"}, // a kind added after this client
+		{kind: SystemUserJoined, who: "Elynn", name: "Elynn", rest: " joined"},
+		{kind: SystemUserKicked, who: "Saren", name: "Saren", rest: " was kicked"},
+		{kind: SystemUserLeft, name: "Someone", rest: " left"}, // unresolved target
+
+		// Revolt sends no actor for a kick or a ban, so neither can name one.
+		{kind: SystemUserKicked, who: "Saren", by: "Elynn", name: "Saren", rest: " was kicked"},
+
+		// An actor at the end of a sentence its subject leads.
+		{kind: SystemUserAdded, who: "Saren", by: "Elynn", byID: "01BY", name: "Saren", rest: " added to group by Elynn"},
+		{kind: SystemUserAdded, who: "Saren", byID: "01BY", name: "Saren", rest: " added to group by Someone"},
+		{kind: SystemUserAdded, who: "Saren", name: "Saren", rest: " added to group"},
+
+		// An actor leading one of its own, with and without the new name.
+		{kind: SystemChannelRenamed, by: "Elynn", byID: "01BY", rename: "general", name: "Elynn", rest: " renamed the channel to general"},
+		{kind: SystemChannelRenamed, by: "Elynn", byID: "01BY", name: "Elynn", rest: " renamed the channel"},
+		{kind: SystemChannelRenamed, rename: "general", rest: "Channel renamed to general"}, // no actor sent
+		{kind: SystemMessagePinned, by: "Elynn", byID: "01BY", name: "Elynn", rest: " pinned a message"},
+
+		{kind: SystemKind("teleported"), rest: "System event"}, // a kind added after this client
 	}
 
 	for _, tc := range cases {
-		system := &SystemMessage{Kind: tc.kind, Target: "01USER"}
-		name, rest := system.TextParts(tc.who)
+		system := &SystemMessage{Kind: tc.kind, Target: "01USER", By: tc.byID, Name: tc.rename}
+		name, rest := system.TextParts(tc.who, tc.by)
 		if name != tc.name || rest != tc.rest {
-			t.Errorf("%q.TextParts(%q) = %q + %q, want %q + %q", tc.kind, tc.who, name, rest, tc.name, tc.rest)
+			t.Errorf("%q.TextParts(%q, %q) = %q + %q, want %q + %q",
+				tc.kind, tc.who, tc.by, name, rest, tc.name, tc.rest)
 		}
 	}
 }

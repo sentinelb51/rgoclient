@@ -397,9 +397,7 @@ func (l *lane) applyDeepPLC(on bool) {
 }
 
 // reportLoss tells the encoder what the worst path into this client is losing,
-// which is what decides how much redundancy in-band FEC carries. The worst
-// rather than the last: one participant on a bad connection is the reason to
-// send more, and averaging them hides it.
+// which is what decides how much redundancy in-band FEC carries.
 func (c *Call) reportLoss() {
 	p := c.publisher.Load()
 	if p == nil {
@@ -409,15 +407,32 @@ func (c *Call) reportLoss() {
 	// Negative is a window not yet measured, and a room with no lanes measures
 	// nothing: either way the encoder keeps what it has — the initial seed at the
 	// start, which exists precisely to cover the window before a measurement.
-	worst := -1
-	for _, p := range c.laneSnapshot() {
-		worst = max(worst, p.lane.buffer.Loss())
-	}
+	worst := c.worstLoss()
 	if worst < 0 {
 		return
 	}
 
 	p.setLoss(worst)
+}
+
+// worstLoss is what the worst path into this client is losing, negative where
+// nothing has completed a window. The worst rather than the mean: one
+// participant on a bad connection is the reason to buy more redundancy, and
+// averaging them hides it — it is also the one a reader actually hears, which is
+// why the state bar is graded on the same number.
+//
+// A walk of its own rather than the filler's snapshot, which only playLanes may
+// take.
+func (c *Call) worstLoss() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	worst := -1
+	for _, l := range c.lanes {
+		worst = max(worst, l.buffer.Loss())
+	}
+
+	return worst
 }
 
 // lanePair is one entry of the filler's snapshot: who a lane belongs to, and the

@@ -527,11 +527,15 @@ func (p *emojiPicker) fill(query string) {
 		icons = append(icons, button)
 	}
 
+	// Relayout, not Refresh: a container re-lays out only when told its children
+	// moved, and Refresh would walk every memoised cell — re-uploading each one's
+	// picture — where the cells themselves are unchanged. MessageList does the
+	// same after writing content.Objects.
 	p.list.Objects = rows
-	p.list.Refresh()
+	Relayout(p.list)
 
 	p.rail.Objects = icons
-	p.rail.Refresh() // a container re-lays out only when it is told its children moved
+	Relayout(p.rail)
 
 	// The top of the grid is what a fill leaves the reader at, so the first icon is
 	// marked and every other reused one put back — each a no-op where it was already

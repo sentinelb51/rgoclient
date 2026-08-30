@@ -39,6 +39,8 @@ type Settings struct {
 	Notifications Notifications `json:"notifications"`
 	Voice         Voice         `json:"voice"`
 	Screenshare   Screenshare   `json:"screenshare"`
+	System        System        `json:"system"`
+	Tools         Tools         `json:"tools"`
 	Cache         Cache         `json:"cache"`
 	Performance   Performance   `json:"performance"`
 	Updates       Updates       `json:"updates"`
@@ -610,7 +612,15 @@ type Screenshare struct {
 	// Bandwidth cuts the automatic bitrate budget a share's size and frame
 	// rate earn: all of it, half, or a quarter. The dial for a slow uplink —
 	// fewer bits soften what moves rather than shrinking the picture.
+	// ShareBandwidthCustom hands the budget over to Bitrate instead.
 	Bandwidth string `json:"bandwidth"`
+
+	// Bitrate is the ceiling in kbit/s, read only where Bandwidth is
+	// ShareBandwidthCustom — a number and a cut of a number are two answers to
+	// one question, so only one of them is ever in force. Bounded by what the
+	// encoder will take (video.captureMinBitrate/captureMaxBitrate), which is
+	// what the row's own range is drawn from.
+	Bitrate int `json:"bitrate"`
 
 	// Keyframes is how often the whole picture is resent rather than only
 	// what changed. Frequent recovers fastest from loss and shows a joining
@@ -618,6 +628,37 @@ type Screenshare struct {
 	// capped VBR the bandwidth between them is small — see
 	// app.shareKeyframeSeconds for what it was measured at.
 	Keyframes string `json:"keyframes"`
+}
+
+// System is what the client does with the machine rather than with Revolt:
+// whether closing the window ends the process, or leaves it behind an icon.
+//
+// Inert where the desktop has no notification area — the icon is the only way
+// back to a hidden window, so a client that hid itself without one would be
+// running with nowhere to reach it. ui.TrayAvailable is what says so, and the
+// row is greyed rather than dropped: the setting is real, this desktop is what
+// cannot carry it.
+//
+// The client always *opens* onto the screen. Starting into the tray was built
+// and taken out: a window nobody asked for is a nuisance, and a client that
+// never draws one is a process somebody has to be told about — see
+// docs/known-gaps.md.
+type System struct {
+	// CloseToTray keeps the client running when the window is closed, reachable
+	// from the icon beside the clock. Off, closing the window ends the process.
+	CloseToTray bool `json:"close_to_tray"`
+}
+
+// Tools configures where the client keeps programs it downloaded for itself,
+// which is ffmpeg and nothing else. Its own section rather than a field under
+// Cache: a cache holds what can be fetched again on demand and is trimmed to a
+// budget, and evicting this one would take screen sharing and video playback
+// down with it.
+type Tools struct {
+	// Dir is the root the downloaded copies are kept under, one folder per
+	// program per version. Empty is the platform's own directory for data an
+	// application installed — see deps.Root, which is the only reader.
+	Dir string `json:"dir,omitempty"`
 }
 
 // What a voice gain may be set to, in decibels. Decibels rather than a
@@ -702,11 +743,22 @@ const (
 	ShareCodecH264 = "h264"
 )
 
-// How much of the automatic bitrate budget a share may spend.
+// How much of the automatic bitrate budget a share may spend. Custom is the one
+// that does not scale the budget: it replaces it with Screenshare.Bitrate.
 const (
 	ShareBandwidthAuto    = "auto"
 	ShareBandwidthHalf    = "half"
 	ShareBandwidthQuarter = "quarter"
+	ShareBandwidthCustom  = "custom"
+)
+
+// What Screenshare.Bitrate may be set to, in kbit/s. The same bounds the encoder
+// clamps to (internal/video's captureMinBitrate/captureMaxBitrate) in the units
+// the setting is written in: below the floor H.264 stops resolving text, and
+// above the ceiling a share is filling an uplink rather than using one.
+const (
+	ShareBitrateMin = 200
+	ShareBitrateMax = 10_000
 )
 
 // How often a share resends the whole picture.
@@ -864,7 +916,8 @@ func Default() Settings {
 		// Lowest latency because a share is usually pointed at, talked over
 		// and reacted to; the buffered mode is for showing rather than telling.
 		Screenshare: Screenshare{EncoderSpeed: ShareSpeedQuality, Latency: ShareLatencyLowest,
-			Codec: ShareCodecAuto, Bandwidth: ShareBandwidthAuto, Keyframes: ShareKeyframesStandard},
+			Codec: ShareCodecAuto, Bandwidth: ShareBandwidthAuto, Bitrate: 4000,
+			Keyframes: ShareKeyframesStandard},
 
 		Cache: Cache{
 			ImageDiskMiB:       512,
@@ -886,6 +939,12 @@ func Default() Settings {
 			// On: one request per run, and a client nobody updates is one running
 			// against a backend that has moved on.
 			Check: true,
+		},
+		System: System{
+			// On: a chat client closed by mistake is one that stops answering, and
+			// the icon beside the clock is where the machine already keeps the
+			// programs that outlive their windows.
+			CloseToTray: true,
 		},
 	}
 }
@@ -1101,10 +1160,11 @@ func (s *Settings) sanitise() {
 		s.Screenshare.Codec = ShareCodecAuto
 	}
 	switch s.Screenshare.Bandwidth {
-	case ShareBandwidthAuto, ShareBandwidthHalf, ShareBandwidthQuarter:
+	case ShareBandwidthAuto, ShareBandwidthHalf, ShareBandwidthQuarter, ShareBandwidthCustom:
 	default:
 		s.Screenshare.Bandwidth = ShareBandwidthAuto
 	}
+	s.Screenshare.Bitrate = clamp(s.Screenshare.Bitrate, ShareBitrateMin, ShareBitrateMax)
 	switch s.Screenshare.Keyframes {
 	case ShareKeyframesFrequent, ShareKeyframesStandard, ShareKeyframesSparse:
 	default:

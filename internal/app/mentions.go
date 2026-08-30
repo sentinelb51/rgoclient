@@ -189,52 +189,49 @@ func (a *App) forgetLeftServer(serverID string) {
 // mentionCount is how many messages in a channel name the account.
 func (a *App) mentionCount(channelID string) int { return len(a.mentions[channelID]) }
 
-// serverMentioned reports whether any of a server's channels holds one. The rail
-// says only that, the count being the channel sidebar's to give.
-func (a *App) serverMentioned(serverID string) bool {
-	server, ok := a.store.Server(serverID)
-	if !ok {
-		return false
-	}
-
-	return slices.ContainsFunc(server.Channels, func(channelID string) bool {
-		return len(a.mentions[channelID]) > 0
-	})
-}
-
-// homeMentioned reports whether a conversation holds one. The home button wears
+// mentionedServers files the mention set by where each channel lives: which
+// servers hold one, and whether a conversation does — the home button wearing
 // the same bar a server icon does, so a mention in a direct message is visible
-// from inside a server.
+// from inside a server. One walk of the set, which is a handful of channels,
+// where asking per icon resolved every server on every rail repaint.
 //
 // Asked of the store rather than of App.dmChannels: that list is a request the
 // home view makes when it is first opened, so a client that started in a server
 // has none, and the one mention the button exists for would be the one it could
 // not see. Every channel Ready carries is in the store, and one with no server is
 // in the home view by definition.
-func (a *App) homeMentioned() bool {
+func (a *App) mentionedServers() (marked map[string]bool, home bool) {
+	marked = make(map[string]bool, len(a.mentions))
 	for channelID := range a.mentions {
-		if channel, ok := a.store.Channel(channelID); ok && channel.ServerID == "" {
-			return true
+		if len(a.mentions[channelID]) == 0 {
+			continue
+		}
+		if serverID := a.store.ChannelServerID(channelID); serverID != "" {
+			marked[serverID] = true
+		} else {
+			home = true
 		}
 	}
 
-	return false
+	return marked, home
 }
 
 // syncMentionMarks repaints the rail: every server icon, the home button and the
 // inbox button. One walk, because a single mention moves at most one server's
 // mark and always the inbox's. Call on the UI thread.
 func (a *App) syncMentionMarks() {
+	marked, home := a.mentionedServers()
+
 	if a.inboxButton != nil {
 		a.inboxButton.SetMentioned(len(a.mentions) > 0)
 	}
 	if a.homeButton != nil {
-		a.homeButton.SetMentioned(a.homeMentioned())
+		a.homeButton.SetMentioned(home)
 	}
 
 	for _, obj := range a.serverList.Objects {
 		if w, ok := obj.(*ui.ServerWidget); ok {
-			w.SetMentioned(a.serverMentioned(w.Server.ID))
+			w.SetMentioned(marked[w.Server.ID])
 		}
 	}
 }

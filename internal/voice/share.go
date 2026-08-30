@@ -603,6 +603,10 @@ func vp8KeyframeStarts(frame []byte) bool {
 // header — the OBU a decoder cannot enter the stream without. The
 // depacketizer writes a size field onto every OBU it emits, so the walk can
 // always hop.
+//
+// A copy of video.av1HasSequenceHeader by construction: voice imports only
+// domain (the rvoice seam), so the walk cannot live in one place. A fix to
+// either must be carried to the other.
 func av1SequenceHeaderIn(unit []byte) bool {
 	for i := 0; i < len(unit); {
 		header := unit[i]
@@ -800,14 +804,15 @@ func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height
 
 	c.mu.Lock()
 	out.track, out.pub = track, pub
-	settled := out.settled
+	settled, stopped := out.settled, out.stopped
 	c.mu.Unlock()
 
 	// The stream can end inside the negotiation window — a capture child that
-	// died at its first frame. The completion callback found no publication to
-	// retire, so the track published a moment later is retired here, and the
-	// error is the report where the event would have been.
-	if settled {
+	// died at its first frame, or a StopShare that beat the publish. Either
+	// found no publication to retire, so the track published a moment later is
+	// retired here, and the error is the report where the event would have
+	// been.
+	if settled || stopped {
 		_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
 		return errors.New("the stream ended as it was being published")
 	}
@@ -819,11 +824,18 @@ func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height
 // source closed so the encoder behind it learns now rather than at its next
 // frame. No event follows — the caller asked. Safe with nothing running.
 func (c *Call) StopShare() {
+	// pub is read under the lock: StartShare writes it from another goroutine
+	// once the publish answers, and a stop inside that window must not race the
+	// write — StartShare sees stopped and retires the track itself.
 	c.mu.Lock()
 	out := c.outShare
+	var sid string
 	if out != nil {
 		out.stopped = true
 		c.outShare = nil
+		if out.pub != nil {
+			sid = out.pub.SID()
+		}
 	}
 	c.mu.Unlock()
 
@@ -831,8 +843,8 @@ func (c *Call) StopShare() {
 		return
 	}
 
-	if out.pub != nil {
-		_ = c.room.LocalParticipant.UnpublishTrack(out.pub.SID())
+	if sid != "" {
+		_ = c.room.LocalParticipant.UnpublishTrack(sid)
 	}
 	_ = out.src.Close()
 }

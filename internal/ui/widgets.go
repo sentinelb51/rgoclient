@@ -607,11 +607,6 @@ type Button struct {
 
 	weight ButtonWeight
 
-	// tint is the colour an outlined button wears in its hairline and its label,
-	// where a weighted one wears its tone as a fill. Nil is a button drawn from its
-	// weight alone, which is every one of these but the call island's.
-	tint color.Color
-
 	hovered  bool
 	focused  bool
 	disabled bool
@@ -775,23 +770,7 @@ func (b *Button) setFocused(on bool) {
 // outranks everything, tone outranks hover: a filled button lifts its own colour
 // rather than taking the plain one's hover, there being no palette entry for a
 // tone one step up.
-// outlined drops the fill and puts the button's whole colour into its hairline
-// and its label, the way an OutlinedIconButton carries its tint — for a surface
-// whose every other control is one of those, and where a filled block would be
-// the loudest thing on it.
-func (b *Button) outlined(tint color.Color) *Button {
-	b.tint = tint
-	b.refreshAppearance()
-
-	return b
-}
-
 func (b *Button) refreshAppearance() {
-	if b.tint != nil {
-		b.refreshOutlined()
-		return
-	}
-
 	tone, tinted := b.weight.fill()
 	tinted = tinted && !b.disabled // a disabled button offers nothing, so it says nothing
 
@@ -822,31 +801,6 @@ func (b *Button) refreshAppearance() {
 	// The two objects rather than the widget: nothing here moves, and a widget-wide
 	// Refresh would build the renderer at construction, before anything is mounted.
 	b.label.Color = solidColor(text)
-	b.label.Refresh()
-}
-
-// refreshOutlined is the same for a button carrying a tint. Disabled greys both
-// the edge and the word rather than reddening them: the action is unavailable,
-// not dangerous, and red is what this client reserves for what cannot be undone.
-// It keeps a faint fill, which is what says the button is still there.
-func (b *Button) refreshOutlined() {
-	tint := b.tint
-
-	var fill color.Color = color.Transparent
-	switch {
-	case b.disabled:
-		tint, fill = theme.Colors.ButtonDisabledText, theme.Colors.ButtonDisabledBg
-	case b.hovered:
-		fill = theme.Colors.ButtonHoverBg
-	}
-
-	b.background.FillColor = fill
-	b.background.StrokeColor = tint
-	b.background.StrokeWidth = theme.Sizes.OutlineWidth
-	b.focusRing()
-	b.background.Refresh()
-
-	b.label.Color = solidColor(tint)
 	b.label.Refresh()
 }
 
@@ -1029,15 +983,6 @@ func NewOutlinedIconButton(res fyne.Resource, tint color.Color, onTap func()) *O
 // reaching for the button.
 func (b *OutlinedIconButton) reporting(onHover func(bool)) *OutlinedIconButton {
 	b.onHover = onHover
-
-	return b
-}
-
-// round makes the button a circle rather than a rounded square, for the same
-// reason Button.pill exists: a rounded rectangle inside a capsule reads as a form
-// control that landed in the wrong place. Half the square MinSize already fixes.
-func (b *OutlinedIconButton) round() *OutlinedIconButton {
-	b.background.CornerRadius = theme.Sizes.IconButtonSize / 2
 
 	return b
 }
@@ -1231,6 +1176,8 @@ type GlyphButton struct {
 	// that needs no explaining.
 	tooltip *Tooltip
 	tip     string
+
+	onHover func(bool)
 }
 
 var (
@@ -1272,9 +1219,20 @@ func (b *GlyphButton) saying(tooltip *Tooltip, tip string) *GlyphButton {
 	return b
 }
 
+// reporting hands the hover upward as well — OutlinedIconButton's shape. Fyne
+// gives a hover to the deepest widget that takes one, so a surface holding this
+// button loses its own MouseIn while the pointer is here; the report is what
+// lets it keep its highlight.
+func (b *GlyphButton) reporting(onHover func(bool)) *GlyphButton {
+	b.onHover = onHover
+
+	return b
+}
+
 func (b *GlyphButton) MouseIn(*desktop.MouseEvent) {
 	b.background.FillColor = theme.Colors.SwiftActionHoverBg
 	b.background.Refresh()
+	reportHover(b.onHover, true)
 
 	// Above rather than beside: the button is chrome at a card's right edge, where
 	// a label past it would hang off the card.
@@ -1286,6 +1244,7 @@ func (b *GlyphButton) MouseIn(*desktop.MouseEvent) {
 func (b *GlyphButton) MouseOut() {
 	b.background.FillColor = color.Transparent
 	b.background.Refresh()
+	reportHover(b.onHover, false)
 
 	if b.tip != "" {
 		b.tooltip.Hide()

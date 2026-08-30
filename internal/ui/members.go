@@ -53,6 +53,11 @@ type MemberEntry struct {
 
 	Title  string         // section only, e.g. "Moderators — 12"
 	Member *domain.Member // row only
+
+	// IconURL is the hoisted role's picture, "" for a role without one and for
+	// the two sections that are not roles. A URL rather than an image keeps the
+	// model theme-free and buildable off the UI thread.
+	IconURL string
 }
 
 // MemberListOptions is what the settings decide about the shape of the list.
@@ -129,15 +134,15 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 		return entries, others
 	}
 
-	titles, index := memberSections(hoisted, opts)
-	online, offline := len(titles)-2, len(titles)-1
+	heads, index := memberSections(hoisted, opts)
+	online, offline := len(heads)-2, len(heads)-1
 
 	// Counted first, then written straight into the finished slice. The buckets are
 	// never materialised: a member is 128 bytes and a large server holds thousands,
 	// so filing each into a slice of its own and copying it out again is a megabyte
 	// of churn per presence change — which is the event this runs on.
 	filed := make([]int, len(members))
-	counts := make([]int, len(titles))
+	counts := make([]int, len(heads))
 	size := 0
 
 	for i := range members {
@@ -181,7 +186,7 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 	// member without knowing what is filed either side of it. Walking members in
 	// their given order is what keeps Store.Members' ordering inside a bucket.
 	entries := make([]MemberEntry, size)
-	cursors := make([]int, len(titles))
+	cursors := make([]int, len(heads))
 	at := 0
 
 	if self >= 0 {
@@ -196,8 +201,9 @@ func memberModel(members []domain.Member, hoisted []domain.Role, opts MemberList
 		}
 
 		entries[at] = MemberEntry{
-			Kind:  MemberEntrySection,
-			Title: titles[i] + " — " + strconv.Itoa(count),
+			Kind:    MemberEntrySection,
+			Title:   heads[i].Title + " — " + strconv.Itoa(count),
+			IconURL: heads[i].IconURL,
 		}
 		at++
 		cursors[i] = at
@@ -251,11 +257,19 @@ func (o MemberListOptions) hides(member domain.Member) bool {
 	return o.HideRoleless && !member.HasRoles
 }
 
+// sectionHead is what a bucket is headed by: its name, and the hoisted role's
+// picture where it has one. Online and Offline are roles of nobody's and carry
+// neither.
+type sectionHead struct {
+	Title   string
+	IconURL string
+}
+
 // memberSections names the buckets in order and maps a hoisted role ID onto its
 // own. Online and Offline are always the last two, so their indices are derived
 // from the length rather than carried around.
-func memberSections(hoisted []domain.Role, opts MemberListOptions) ([]string, map[string]int) {
-	titles := make([]string, 0, len(hoisted)+2)
+func memberSections(hoisted []domain.Role, opts MemberListOptions) ([]sectionHead, map[string]int) {
+	heads := make([]sectionHead, 0, len(hoisted)+2)
 	index := make(map[string]int, len(hoisted))
 
 	if opts.HoistRoles {
@@ -264,12 +278,12 @@ func memberSections(hoisted []domain.Role, opts MemberListOptions) ([]string, ma
 			if _, seen := index[role.ID]; seen || role.ID == "" {
 				continue
 			}
-			index[role.ID] = len(titles)
-			titles = append(titles, role.Name)
+			index[role.ID] = len(heads)
+			heads = append(heads, sectionHead{Title: role.Name, IconURL: role.IconURL})
 		}
 	}
 
-	return append(titles, "Online", "Offline"), index
+	return append(heads, sectionHead{Title: "Online"}, sectionHead{Title: "Offline"}), index
 }
 
 /* Geometry */
@@ -485,7 +499,7 @@ func (w *MemberList) acquire(i int) fyne.CanvasObject {
 			}
 		case *MemberSectionRow:
 			if entry.Kind == MemberEntrySection {
-				drawn.SetTitle(entry.Title)
+				drawn.SetSection(entry.Title, entry.IconURL)
 				return drawn
 			}
 		}
@@ -496,7 +510,7 @@ func (w *MemberList) acquire(i int) fyne.CanvasObject {
 
 	if entry.Kind == MemberEntrySection {
 		section := w.takeSection()
-		section.SetTitle(entry.Title)
+		section.SetSection(entry.Title, entry.IconURL)
 		w.mounted[i] = section
 
 		return section
@@ -552,7 +566,7 @@ func (w *MemberList) takeRow() *MemberRow {
 }
 
 func (w *MemberList) takeSection() *MemberSectionRow {
-	return takePooled(&w.sectionPool, newMemberSectionRow)
+	return takePooled(&w.sectionPool, func() *MemberSectionRow { return newMemberSectionRow(w.deps) })
 }
 
 // takePooled pops a recycled widget, building one only when the pool is empty.
@@ -774,8 +788,7 @@ func newMemberRow(deps Deps, onMenu func(userID string) []*fyne.MenuItem) *Membe
 
 	leading := HBoxNoSpacing(
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		container.NewCenter(container.New(
-			&memberRingLayout{band: theme.Sizes.MemberPresenceRing}, w.ring, w.avatar)),
+		container.New(&memberRingLayout{band: theme.Sizes.MemberPresenceRing}, w.ring, w.avatar),
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
 	)
 
@@ -961,18 +974,22 @@ func memberNameColor(member *domain.Member) color.Color {
 	return theme.Colors.TextPrimary
 }
 
-// memberRingLayout draws the band at full size with the avatar centred on it, so
-// the ring is what the picture is inset from. Placed rather than stacked: a Stack
-// stretches every child, and a stretched circle is an ellipse.
+// memberRingLayout draws the band around the avatar with both centred in
+// whatever it is given, so the ring is what the picture is inset from. Placed
+// rather than stacked: a Stack stretches every child, and a stretched circle is
+// an ellipse. Centring its own content is what lets the row mount it bare — the
+// HBox stretches children to row height, and a Center wrapper was one more
+// object on every recycled row.
 type memberRingLayout struct{ band float32 }
 
 func (l *memberRingLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 	ring, avatar := objects[0], objects[1]
 
-	ring.Resize(size)
-	ring.Move(fyne.Position{})
-
 	inner := avatar.MinSize()
+	outer := fyne.NewSize(inner.Width+2*l.band, inner.Height+2*l.band)
+	ring.Resize(outer)
+	ring.Move(fyne.NewPos((size.Width-outer.Width)/2, (size.Height-outer.Height)/2))
+
 	avatar.Resize(inner)
 	avatar.Move(fyne.NewPos((size.Width-inner.Width)/2, (size.Height-inner.Height)/2))
 }
@@ -991,32 +1008,82 @@ func (l *memberRingLayout) MinSize(objects []fyne.CanvasObject) fyne.Size {
 type MemberSectionRow struct {
 	widget.BaseWidget
 
-	label *canvas.Text
-	title string
+	deps Deps
+
+	icon    *fyne.Container
+	iconBox *fyne.Container // the slot and the gap after it, hidden together
+	label   *canvas.Text
+	row     *fyne.Container
+
+	title   string
+	iconURL string
 }
 
-func newMemberSectionRow() *MemberSectionRow {
+func newMemberSectionRow(deps Deps) *MemberSectionRow {
 	label := newBoldText("", theme.Colors.MemberSectionText, theme.Sizes.MemberSectionTextSize)
 
-	w := &MemberSectionRow{label: label}
+	side := theme.Sizes.MemberSectionIconSize
+	icon := container.NewGridWrap(fyne.NewSize(side, side))
+
+	w := &MemberSectionRow{
+		deps:    deps,
+		icon:    icon,
+		iconBox: HBoxNoSpacing(vcenter(icon), HorizontalSpacer(theme.Sizes.MemberSectionIconGap)),
+		label:   label,
+	}
+	w.iconBox.Hide()
+
+	// Built here rather than in CreateRenderer: SetSection relayouts it when the
+	// slot appears or goes, and a renderer may be made more than once.
+	w.row = HBoxNoSpacing(w.iconBox, w.label)
 	w.ExtendBaseWidget(w)
 
 	return w
 }
 
-// SetTitle re-labels the header, no-op on an unchanged one.
-func (w *MemberSectionRow) SetTitle(title string) {
-	if w.title == title {
+// SetSection re-labels the header and re-points its picture, no-op on an
+// unchanged one. The rows are recycled, so an icon is dropped whole rather than
+// re-pointed: a picture already on its way lands in the container it was handed,
+// which by then heads a different role.
+func (w *MemberSectionRow) SetSection(title, iconURL string) {
+	if w.title == title && w.iconURL == iconURL {
 		return
 	}
 
-	w.title, w.label.Text = title, title
-	w.label.Refresh()
+	if w.title != title {
+		w.title, w.label.Text = title, title
+		w.label.Refresh()
+	}
+	if w.iconURL == iconURL {
+		return
+	}
+
+	w.iconURL = iconURL
+	w.icon.Objects = nil
+
+	if iconURL == "" {
+		w.icon.Refresh()
+		w.iconBox.Hide()
+		Relayout(w.row)
+
+		return
+	}
+
+	if images := w.deps.Images; images != nil {
+		side := theme.Sizes.MemberSectionIconSize
+		box := fyne.NewSize(side, side)
+
+		// Square, for the reason ServerSettingsPage.roleDot is: a role icon fills
+		// its own frame and rounding one crops what was drawn into the corners.
+		images.LoadIntoContainer(imageCacheID(iconURL), iconURL, box, w.icon, false, nil)
+	}
+	w.iconBox.Show()
+	Relayout(w.row)
 }
 
 func (w *MemberSectionRow) CreateRenderer() fyne.WidgetRenderer {
 	// The top padding is inside the section's own height rather than a spacer beside
 	// it, so the list still has exactly two heights to add up.
 	return widget.NewSimpleRenderer(
-		NewInset(w.label, theme.Sizes.MemberSectionTopPad, 0, theme.Sizes.ChannelLeftPadding, 0))
+		NewInset(w.row, theme.Sizes.MemberSectionTopPad, 0, theme.Sizes.ChannelLeftPadding, 0))
 }

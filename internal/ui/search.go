@@ -1098,12 +1098,41 @@ func (c *searchChip) paint() {
 		fill = theme.Colors.IslandChipHoverBg
 	}
 
-	c.background.FillColor = fill
-	c.background.Refresh()
+	if c.background.FillColor != fill {
+		c.background.FillColor = fill
+		c.background.Refresh()
+	}
 
-	c.icon.Resource = tintedIcon(c.resource, text)
-	c.icon.Refresh()
+	// The tint follows on, not hover, so a pointer sweeping the run repaints
+	// backgrounds alone rather than re-tinting an icon per crossing.
+	tinted := solidColor(text)
+	if c.label.Color != tinted {
+		c.icon.Resource = tintedIcon(c.resource, text)
+		c.icon.Refresh()
 
-	c.label.Color = solidColor(text)
-	c.label.Refresh()
+		c.label.Color = tinted
+		c.label.Refresh()
+	}
+}
+
+// pickChip is that chip carrying the number it stands for, for a run where one
+// is the answer rather than each being a bit of its own. A filter chip is a
+// condition; this is one of a set, which is the whole difference — and the tap
+// is what enforces it, not the chip. The screenshare picker and the crop card
+// are both made of these.
+type pickChip struct {
+	*searchChip
+
+	value int
+}
+
+func newPickChip(res fyne.Resource, label string, value int) *pickChip {
+	return &pickChip{searchChip: newSearchChip(res, label, nil), value: value}
+}
+
+// markPickChips lights the one chip standing for value and puts out the rest.
+func markPickChips(chips []*pickChip, value int) {
+	for _, chip := range chips {
+		chip.Set(chip.value == value)
+	}
 }

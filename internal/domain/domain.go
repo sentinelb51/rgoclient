@@ -313,10 +313,16 @@ const (
 )
 
 // SystemMessage is a server-generated event. Target is what it is about — see
-// TargetsUser, since that is not always somebody.
+// TargetsUser, since that is not always somebody — and By is whoever did it,
+// which Revolt sends for some kinds and not others: a kick and a ban carry no
+// actor at all, so those two lines can still only say what happened.
 type SystemMessage struct {
 	Kind   SystemKind
 	Target string
+	By     string
+
+	// Name is the channel's new name, carried by SystemChannelRenamed alone.
+	Name string
 }
 
 // isPin reports whether the event's subject is a message rather than a user.
@@ -334,46 +340,111 @@ func (s *SystemMessage) TargetsUser() bool {
 	return s.Target != "" && !s.isPin()
 }
 
+// Subject is the account the line's one name stands for, and whose profile a tap
+// on it opens: whoever the event is about where Revolt names somebody, and
+// whoever did it otherwise — a rename is about the channel, so the only person
+// worth drawing is the one who made it.
+func (s *SystemMessage) Subject() string {
+	if s.TargetsUser() {
+		return s.Target
+	}
+
+	return s.By
+}
+
 // TextParts renders the event in the two pieces the client draws it in: the name
 // it opens with, kept apart because it is tappable like a mention, and the rest
-// of the sentence. who is Target's display name, resolved by the caller
-// (Store.SystemTextParts) so the wording stays testable without one; an event
-// about the channel names nobody and is all rest.
-func (s *SystemMessage) TextParts(who string) (name, rest string) {
-	if who == "" {
-		who = "Someone"
+// of the sentence. who is Target's display name and by is By's, both resolved by
+// the caller (Store.SystemTextParts) so the wording stays testable without one.
+//
+// Only one of the two is ever the name: the line draws a single mention, and an
+// event somebody else leads carries its actor as plain text at the end.
+func (s *SystemMessage) TextParts(who, by string) (name, rest string) {
+	subject := who
+	if subject == "" {
+		subject = "Someone"
 	}
 
 	switch s.Kind {
 	case SystemUserAdded:
-		return who, " added to group"
+		return subject, " added to group" + s.byClause(by)
 	case SystemUserRemove:
-		return who, " removed from group"
+		return subject, " removed from group" + s.byClause(by)
 	case SystemUserJoined:
-		return who, " joined"
+		return subject, " joined"
 	case SystemUserLeft:
-		return who, " left"
+		return subject, " left"
 	case SystemUserKicked:
-		return who, " was kicked"
+		return subject, " was kicked"
 	case SystemUserBanned:
-		return who, " banned"
+		return subject, " banned"
 	case SystemChannelRenamed:
-		return "", "Channel renamed"
+		return s.byLine(by, "renamed the channel"+renamedTo(s.Name), "Channel renamed"+renamedTo(s.Name))
 	case SystemChannelDescriptionChanged:
-		return "", "Channel description changed"
+		return s.byLine(by, "changed the channel description", "Channel description changed")
 	case SystemChannelIconChanged:
-		return "", "Channel icon changed"
+		return s.byLine(by, "changed the channel icon", "Channel icon changed")
 	case SystemChannelOwnershipChanged:
 		return "", "Channel ownership changed"
 	case SystemMessagePinned:
-		return "", "Message pinned"
+		return s.byLine(by, "pinned a message", "Message pinned")
 	case SystemMessageUnpinned:
-		return "", "Message unpinned"
+		return s.byLine(by, "unpinned a message", "Message unpinned")
 	case SystemCallStarted:
-		return "", "Call started"
+		return s.byLine(by, "started a call", "Call started")
 	default:
 		return "", "System event"
 	}
+}
+
+// byLine is an event its actor leads, in the two spellings it needs: their name
+// and what they did, or the impersonal sentence where Revolt sent no actor. Both
+// are written out rather than one derived from the other — "changed the channel
+// icon" and "Channel icon changed" are not the same sentence with a name on the
+// front of it.
+func (s *SystemMessage) byLine(by, did, impersonal string) (name, rest string) {
+	actor := s.actor(by)
+	if actor == "" {
+		return "", impersonal
+	}
+
+	return actor, " " + did
+}
+
+// byClause names who did it at the end of a sentence somebody else leads. Plain
+// text rather than a second mention: the line has one tappable name and the
+// subject has it.
+func (s *SystemMessage) byClause(by string) string {
+	actor := s.actor(by)
+	if actor == "" {
+		return ""
+	}
+
+	return " by " + actor
+}
+
+// actor is the display name to write the actor as, and "" where Revolt sent no
+// actor at all — which is what keeps an impersonal event impersonal instead of
+// attributing it to Someone.
+func (s *SystemMessage) actor(by string) string {
+	if s.By == "" {
+		return ""
+	}
+	if by == "" {
+		return "Someone"
+	}
+
+	return by
+}
+
+// renamedTo appends the channel's new name where the event carried one. Revolt
+// requires the field, so the empty case is a message minted before it did.
+func renamedTo(name string) string {
+	if name == "" {
+		return ""
+	}
+
+	return " to " + name
 }
 
 /* Embeds */
@@ -580,7 +651,7 @@ type Channel struct {
 	Kind     ChannelKind
 
 	Name      string
-	AvatarURL string // the conversation's picture; "" for a server channel
+	AvatarURL string // the picture: a conversation's, or a channel's own icon
 
 	// Description is the channel's topic, drawn beside its name in the header.
 	Description string
@@ -886,6 +957,12 @@ type Member struct {
 	AvatarURL string
 	Color     color.Color // most-senior coloured role; nil when none applies
 
+	// ServerAvatar says AvatarURL is the membership's own picture rather than the
+	// account's, the two being indistinguishable once one has fallen back to the
+	// other. What reads it is the menu offering to take one off: nothing else
+	// cares which of the two it drew.
+	ServerAvatar bool
+
 	// HoistRoleID is the most senior *hoisted* role held, or "" — the section the
 	// member sidebar files them under. One ID rather than the roles for the reason
 	// above: the sidebar needs a bucket per member, not a slice per row.
@@ -928,6 +1005,10 @@ type Role struct {
 	// ColorText is the colour as Revolt holds it, which is any CSS colour — a
 	// gradient included — rather than the hex Color was parsed out of.
 	ColorText string
+
+	// IconURL is the role's picture, "" where it has none. Read but never set:
+	// uploading one is an Autumn round trip with no surface here.
+	IconURL string
 
 	Allow Permission
 	Deny  Permission

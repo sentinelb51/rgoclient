@@ -48,8 +48,26 @@ func (p *SettingsPage) voiceSection() []settingsGroup {
 				"Everybody else in the call. 0 dB is unchanged, -40 dB is off.",
 				settings.OutputGainDB, config.VoiceGainOffDB, config.VoiceGainMaxDB, "dB",
 				func(s *config.Settings, v int) { s.Voice.OutputGainDB = v }),
+			p.toggleRow("Even out voice levels",
+				"Brings quiet people up and loud people down, so everybody arrives "+
+					"at about the same volume. Per-person volumes still apply on top.",
+				settings.Levelling,
+				func(s *config.Settings, on bool) { s.Voice.Levelling = on }),
+			p.toggleRow("Spread people out",
+				"Places each person at a slightly different point between your ears, "+
+					"which makes two people talking at once easier to follow. Needs "+
+					"headphones or stereo speakers.",
+				settings.Placement,
+				func(s *config.Settings, on bool) { s.Voice.Placement = on }),
+			p.optionRow("Buffering",
+				"How long to wait for audio that arrives late. Less waiting is a "+
+					"faster conversation and more breaking up; more waiting is the "+
+					"other way round.",
+				settings.Buffering, bufferingProfiles,
+				func(s *config.Settings, v string) { s.Voice.Buffering = v }),
 			p.toggleRow("Repair dropped audio",
-				"Rebuilds lost packets as speech instead of fading them out.",
+				"Rebuilds lost packets as speech instead of fading them out, and "+
+					"smooths the roughness a low bitrate leaves on a voice.",
 				settings.DeepPLC,
 				func(s *config.Settings, on bool) { s.Voice.DeepPLC = on }),
 		),
@@ -180,6 +198,11 @@ func (p *SettingsPage) suppressionRows(settings config.Voice) []fyne.CanvasObjec
 	return []fyne.CanvasObject{
 		p.toggleRow("Remove background noise", "", settings.NoiseSuppression,
 			func(s *config.Settings, on bool) { s.Voice.NoiseSuppression = on }),
+		p.optionRow("Model",
+			"RNNoise delays the microphone by 10 ms. GTCRN removes more and "+
+				"delays it by about 30 ms.",
+			settings.NoiseModel, noiseModels,
+			func(s *config.Settings, v string) { s.Voice.NoiseModel = v }),
 		p.numberRow("Strength",
 			"The most it may take out. Full strength can hollow a voice out; lower keeps some of the room.",
 			settings.NoiseSuppressionDB, 0, config.VoiceSuppressionMaxDB, "dB",
@@ -198,7 +221,8 @@ func (p *SettingsPage) detectionRows(settings config.Voice) []fyne.CanvasObject 
 	rows := []fyne.CanvasObject{
 		p.numberRow("Threshold",
 			"How sure the model has to be before loudness may open the microphone. "+
-				"0% leaves it to sensitivity alone.",
+				"0% leaves it to sensitivity alone. GTCRN has no detector of its own, so "+
+				"for it this is how much of the sound it kept.",
 			settings.VADThreshold, 0, 100, "%",
 			func(s *config.Settings, v int) {
 				s.Voice.VADThreshold = v
@@ -210,6 +234,21 @@ func (p *SettingsPage) detectionRows(settings config.Voice) []fyne.CanvasObject 
 	}
 
 	return rows
+}
+
+// bufferingProfiles is how long the client waits for late audio. Named for the
+// conversation rather than for the buffer: what a reader is choosing between is
+// a call that feels quick and a call that holds together.
+var bufferingProfiles = []settingsOption{
+	{Label: "Responsive", Value: config.BufferingResponsive},
+	{Label: "Balanced", Value: config.BufferingBalanced},
+	{Label: "Smooth", Value: config.BufferingSmooth},
+}
+
+// noiseModels is which network cleans the microphone.
+var noiseModels = []settingsOption{
+	{Label: "RNNoise", Value: config.NoiseModelRNNoise},
+	{Label: "GTCRN", Value: config.NoiseModelGTCRN},
 }
 
 // voiceModes is how the microphone decides it is being spoken into.

@@ -512,11 +512,16 @@ type Voice struct {
 	// way — it is what SensitivityDB means.
 	HighPass bool `json:"high_pass"`
 
-	// NoiseSuppression runs RNNoise between that filter and the gate, which is
-	// what removes noise *inside* the voice range while somebody is talking —
-	// hiss, fans, keyboard — where the gate can only silence the gaps between
-	// words.
+	// NoiseSuppression runs a noise model between that filter and the gate,
+	// which is what removes noise *inside* the voice range while somebody is
+	// talking — hiss, fans, keyboard — where the gate can only silence the gaps
+	// between words.
 	NoiseSuppression bool `json:"noise_suppression"`
+
+	// NoiseModel is which: NoiseModelRNNoise, 10 ms of delay, or
+	// NoiseModelGTCRN, deeper suppression and about 30 ms. sanitise reads
+	// anything else as RNNoise.
+	NoiseModel string `json:"noise_model"`
 
 	// NoiseSuppressionDB is how much of it, 0 to VoiceSuppressionMaxDB: the most
 	// the suppressor may take out of the signal. The top of the range is the
@@ -552,6 +557,24 @@ type Voice struct {
 	// moved, and somebody set back to normal leaves no record behind.
 	UserGainsDB map[string]int `json:"user_gains_db"`
 
+	// Levelling brings every participant to one loudness, so what a person's own
+	// microphone and distance from it add up to stops being the reader's problem.
+	// It decides what unity means; UserGainsDB still applies on top of it.
+	Levelling bool `json:"levelling"`
+
+	// Buffering is how much of the network's own lateness the receive buffer
+	// holds delay to cover: BufferingResponsive, BufferingBalanced or
+	// BufferingSmooth. It is most of the delay between somebody speaking and
+	// being heard, and the only setting here that trades one fault for the
+	// other — less delay is more dropouts, on the same connection.
+	Buffering string `json:"buffering"`
+
+	// Placement spreads participants a few degrees apart across the stereo image,
+	// which is what lets the ear pull two people talking at once apart. Wants two
+	// channels to reach the listener as two — headphones, or speakers with the
+	// reader between them.
+	Placement bool `json:"placement"`
+
 	// SpeakingRing draws a ring round whoever is talking, on their row under the
 	// voice channel in the sidebar. It is the one thing here worth being able to
 	// turn off: Fyne's dirty flag is one bool for the whole canvas, so every
@@ -560,18 +583,25 @@ type Voice struct {
 	// the call — only the ring stops moving.
 	SpeakingRing bool `json:"speaking_ring"`
 
-	// DeepPLC reconstructs a lost packet with libopus's neural model instead of
-	// extrapolating the last pitch period. It costs nothing on a clean stream —
-	// the work happens only while something is actually being concealed — so it is
-	// on by default, and it is a setting because it is the reader's machine.
+	// DeepPLC is every neural extension libopus offers a receiver, on one switch:
+	// a lost packet reconstructed as speech rather than extrapolated from the last
+	// pitch period, LACE smoothing the coding artefacts off each frame that does
+	// arrive, and the bandwidth extension filling in the octave a concealed frame
+	// has no data for.
+	//
+	// The first of those is free until something is actually lost; the second is
+	// not, being a filter over every frame, and so costs about half a decode again
+	// per talker — which is why the name is still the concealer's and why this is
+	// a setting rather than an assumption about the reader's machine.
 	DeepPLC bool `json:"deep_plc"`
 
 	/* Both directions */
 
 	// SoftClip rounds a peak that overshoots the ceiling instead of slicing it
-	// flat, on the microphone and on the call's playback alike. Without it the top
-	// of the gain range is distortion rather than loudness, which is the whole
-	// reason the range can go as high as it does.
+	// flat, on the microphone and on the call's playback alike. A single source
+	// is held under the ceiling by a limiter before it gets here, gain or no
+	// gain; what this decides is how the *sum* — several participants and a
+	// notification sound together — meets it.
 	SoftClip bool `json:"soft_clip"`
 
 	/* On joining */
@@ -621,6 +651,13 @@ type Screenshare struct {
 	// encoder will take (video.captureMinBitrate/captureMaxBitrate), which is
 	// what the row's own range is drawn from.
 	Bitrate int `json:"bitrate"`
+
+	// RateControl is how the ceiling above is spent. ShareRateVariable spends
+	// bits on what moves and almost none on a still screen; ShareRateConstant
+	// sends the ceiling at all times, padding what does not need it, which is
+	// what a fixed uplink and a receiver measuring the connection are steadiest
+	// on — see video.CaptureRate.
+	RateControl string `json:"rate_control"`
 
 	// Keyframes is how often the whole picture is resent rather than only
 	// what changed. Frequent recovers fastest from loss and shows a joining
@@ -674,6 +711,12 @@ const (
 	VoiceGainMaxDB = 20
 )
 
+// The noise models NoiseModel names.
+const (
+	NoiseModelRNNoise = "rnnoise"
+	NoiseModelGTCRN   = "gtcrn"
+)
+
 // VoiceSuppressionMaxDB is the top of the noise suppression strength range and
 // means uncapped — RNNoise measures −33 to −36 dB on the noises it is for, so
 // a cap at the ceiling never binds and the top of the dial is the stock model.
@@ -718,6 +761,16 @@ const (
 	VoiceModePush     = "push"
 )
 
+// How much lateness the receive buffer holds delay to cover. Three rather than
+// a slider because what a reader can actually answer is which fault they would
+// rather have, and the number under it — a percentile of the measured arrival
+// spread — is not one anybody could set from listening.
+const (
+	BufferingResponsive = "responsive"
+	BufferingBalanced   = "balanced"
+	BufferingSmooth     = "smooth"
+)
+
 // What a screenshare's encoder may spend on a frame. Three rather than a range
 // because the levels are presets on every encoder here — nvenc's p1/p3/p4,
 // x264's ultrafast/superfast/veryfast — and the travel between two of them is
@@ -759,6 +812,12 @@ const (
 const (
 	ShareBitrateMin = 200
 	ShareBitrateMax = 10_000
+)
+
+// Whether a share is allowed to spend under its ceiling.
+const (
+	ShareRateVariable = "variable"
+	ShareRateConstant = "constant"
 )
 
 // How often a share resends the whole picture.
@@ -883,6 +942,7 @@ func Default() Settings {
 			// microphone that does not want it — a studio interface in a treated
 			// room — is the rare one.
 			NoiseSuppression:   true,
+			NoiseModel:         NoiseModelRNNoise,
 			NoiseSuppressionDB: VoiceSuppressionMaxDB,
 
 			// The model reads a keyboard or a door well under half, so a veto
@@ -894,6 +954,20 @@ func Default() Settings {
 
 			InputGainDB:  0,
 			OutputGainDB: 0,
+
+			// Both on. Levelling costs a squared sample per lane per block and moves
+			// a gain that is bounded either way, so the worst it can do is fail to
+			// correct somebody; placement costs two multiplies a sample and is what
+			// makes a room of five followable. Neither has a failure mode worth
+			// defaulting around, and a reader on one earbud has the switch.
+			Levelling: true,
+			Placement: true,
+
+			// Balanced: the arrival distribution on an ordinary connection has a long
+			// thin tail, so the last percent of it costs far more delay than it saves
+			// dropouts. The two either side are for a reader who can hear which fault
+			// they are getting.
+			Buffering: BufferingBalanced,
 
 			// On: it costs a branch a sample on everything below the knee, and it is
 			// what makes a gain past a few decibels sound like a louder voice rather
@@ -917,7 +991,7 @@ func Default() Settings {
 		// and reacted to; the buffered mode is for showing rather than telling.
 		Screenshare: Screenshare{EncoderSpeed: ShareSpeedQuality, Latency: ShareLatencyLowest,
 			Codec: ShareCodecAuto, Bandwidth: ShareBandwidthAuto, Bitrate: 4000,
-			Keyframes: ShareKeyframesStandard},
+			RateControl: ShareRateVariable, Keyframes: ShareKeyframesStandard},
 
 		Cache: Cache{
 			ImageDiskMiB:       512,
@@ -1165,6 +1239,11 @@ func (s *Settings) sanitise() {
 		s.Screenshare.Bandwidth = ShareBandwidthAuto
 	}
 	s.Screenshare.Bitrate = clamp(s.Screenshare.Bitrate, ShareBitrateMin, ShareBitrateMax)
+	switch s.Screenshare.RateControl {
+	case ShareRateVariable, ShareRateConstant:
+	default:
+		s.Screenshare.RateControl = ShareRateVariable
+	}
 	switch s.Screenshare.Keyframes {
 	case ShareKeyframesFrequent, ShareKeyframesStandard, ShareKeyframesSparse:
 	default:
@@ -1179,6 +1258,20 @@ func (s *Settings) sanitise() {
 	// would be silence reported as a number.
 	s.Notifications.SoundVolume = clamp(s.Notifications.SoundVolume, 0, 100)
 	s.Notifications.TypingVolume = clamp(s.Notifications.TypingVolume, 0, 100)
+
+	// An unknown profile — hand-edited, or a file written before the setting
+	// existed — is the default, which is also what an empty string means and is
+	// why this is not left to the buffer to fall back on.
+	switch s.Voice.Buffering {
+	case BufferingResponsive, BufferingBalanced, BufferingSmooth:
+	default:
+		s.Voice.Buffering = BufferingBalanced
+	}
+	switch s.Voice.NoiseModel {
+	case NoiseModelRNNoise, NoiseModelGTCRN:
+	default:
+		s.Voice.NoiseModel = NoiseModelRNNoise
+	}
 
 	// The gate's threshold moved from an arbitrary 0-100 to the decibels it
 	// always mapped onto, so a file written before that carries the old key and

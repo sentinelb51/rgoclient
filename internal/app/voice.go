@@ -99,6 +99,8 @@ func (a *App) joinCall(channelID string) {
 			a.sounds.StartOutput()
 			a.sounds.SetCallVolume(float64(audio.GainFromDB(settings.OutputGainDB, config.VoiceGainOffDB)))
 			a.sounds.SetSoftClip(settings.SoftClip)
+			a.sounds.SetLevelling(settings.Levelling)
+			a.sounds.SetPlacement(settings.Placement)
 
 			// The per-person volumes are the sink's own and outlive a call, but on the
 			// first join after a restart it has never heard of anybody: they are seeded
@@ -137,6 +139,7 @@ func (a *App) joinCall(channelID string) {
 			Muted:    settings.JoinMuted,
 			Deafened: settings.JoinDeafened,
 			DeepPLC:  settings.DeepPLC,
+			Jitter:   jitterProfile(settings.Buffering),
 			SelfID:   a.store.SelfID(),
 		})
 		if err != nil {
@@ -165,9 +168,20 @@ func inputConfig(settings config.Voice) audio.InputConfig {
 		SoftClip:         settings.SoftClip,
 		HighPass:         settings.HighPass,
 		NoiseSuppression: settings.NoiseSuppression,
+		NoiseModel:       noiseModel(settings.NoiseModel),
 		SuppressionFloor: audio.SuppressionFloor(settings.NoiseSuppressionDB, config.VoiceSuppressionMaxDB),
 		VADThreshold:     settings.VADThreshold,
 	}
+}
+
+// noiseModel is the setting's name for a network as audio knows it. Anything
+// unknown is RNNoise, which is also what sanitise already made of it.
+func noiseModel(name string) audio.NoiseModel {
+	if name == config.NoiseModelGTCRN {
+		return audio.NoiseGTCRN
+	}
+
+	return audio.NoiseRNNoise
 }
 
 // openedInput carries the microphone back from the goroutine that opened it
@@ -205,6 +219,7 @@ func (a *App) installCall(channelID string, epoch, gen uint64, call *voice.Call,
 	a.call = call
 	a.capture = capture
 	a.muted, a.deafened = call.Muted(), call.Deafened()
+	a.applyCaptureIdle()
 
 	// A call joined from behind another window has to lift the throttle the blur
 	// put on: the mixer's period is the one deadline this client cannot miss.
@@ -718,10 +733,16 @@ func (a *App) callQuality() ui.CallQuality {
 
 	stats := a.callStats
 
+	// Either direction, at the worse of the two: a reader whose upload is the
+	// broken half hears everybody perfectly and is the one nobody can hear, which
+	// used to be the one fault this bar drew green. Both are negative until
+	// measured, so an unmeasured pair grades on the round trip alone.
+	loss := max(stats.Loss, stats.SendLoss)
+
 	switch {
-	case stats.RTT >= callRTTPoor, stats.Loss >= callLossPoor:
+	case stats.RTT >= callRTTPoor, loss >= callLossPoor:
 		return ui.CallQualityPoor
-	case stats.RTT >= callRTTFair, stats.Loss >= callLossFair:
+	case stats.RTT >= callRTTFair, loss >= callLossFair:
 		return ui.CallQualityFair
 	}
 
@@ -740,8 +761,14 @@ func (a *App) callStateTooltip(word string) string {
 	if rtt := a.callStats.RTT; rtt > 0 {
 		word += fmt.Sprintf(" · %d ms", rtt.Milliseconds())
 	}
+	// Named by direction now that there are two of them: which half is broken is
+	// the whole of what a reader can act on, and one of the two is about people
+	// who cannot tell them.
 	if loss := a.callStats.Loss; loss > 0 {
-		word += fmt.Sprintf(" · %d%% loss", loss)
+		word += fmt.Sprintf(" · %d%% loss in", loss)
+	}
+	if loss := a.callStats.SendLoss; loss > 0 {
+		word += fmt.Sprintf(" · %d%% loss out", loss)
 	}
 
 	return word
@@ -876,6 +903,7 @@ func (a *App) toggleMute() {
 
 	a.call.SetMuted(!a.call.Muted())
 	a.muted = a.call.Muted()
+	a.applyCaptureIdle()
 	a.syncCallIsland()
 	a.refreshSelfVoiceMarks()
 }
@@ -887,6 +915,7 @@ func (a *App) toggleDeafen() {
 
 	a.call.SetDeafened(!a.call.Deafened())
 	a.muted, a.deafened = a.call.Muted(), a.call.Deafened()
+	a.applyCaptureIdle()
 	a.syncCallIsland()
 	a.refreshSelfVoiceMarks()
 }
@@ -1324,6 +1353,10 @@ func (a *App) startInputMonitor(report func(m ui.InputMeter)) {
 	done := make(chan struct{})
 	a.monitor, a.monitorOwned, a.monitorDone, a.monitorReport = capture, owned, done, report
 
+	// A meter that has borrowed the call's capture is a reason to keep the chain
+	// running that muting alone cannot see.
+	a.applyCaptureIdle()
+
 	// An owned capture has no publisher behind it, and Level is stored by Read
 	// and nowhere else — without a reader the bar never moves. The loop is paced
 	// by the device (Read blocks a frame at a time) and ends when stopInputMonitor
@@ -1414,6 +1447,7 @@ func (a *App) stopInputMonitor() {
 	}
 
 	a.monitor, a.monitorOwned = nil, false
+	a.applyCaptureIdle()
 }
 
 // forgetInputMonitor is stopInputMonitor plus the bar itself, for the page
@@ -1540,6 +1574,21 @@ func (a *App) disarmPushToTalk() {
 
 /* Settings, applied to a call already running */
 
+// jitterProfile is the setting's name turned into what the buffer is aiming at.
+// The seam `voice` is written to: it names the three trades and knows nothing of
+// config, the way `cpu` reports core kinds and `app.resolveCores` decides which
+// of them a default wants.
+func jitterProfile(buffering string) voice.JitterProfile {
+	switch buffering {
+	case config.BufferingResponsive:
+		return voice.JitterResponsive
+	case config.BufferingSmooth:
+		return voice.JitterSmooth
+	default:
+		return voice.JitterBalanced
+	}
+}
+
 // applyVoiceSettings pushes what changed onto whatever is open. Without it every
 // one of these reads once — at join, or at startup — and a slider dragged during
 // a call does nothing until the next one, which reads as a broken setting rather
@@ -1557,6 +1606,8 @@ func (a *App) applyVoiceSettings() {
 	a.sounds.UseOutput(settings.OutputDevice)
 	a.sounds.SetCallVolume(float64(audio.GainFromDB(settings.OutputGainDB, config.VoiceGainOffDB)))
 	a.sounds.SetSoftClip(settings.SoftClip)
+	a.sounds.SetLevelling(settings.Levelling)
+	a.sounds.SetPlacement(settings.Placement)
 
 	if a.capture != nil {
 		applyCaptureSettings(a.capture, settings)
@@ -1577,8 +1628,25 @@ func (a *App) applyVoiceSettings() {
 	// it is idempotent and stops whatever was running first.
 	if a.call != nil {
 		a.call.SetDeepPLC(settings.DeepPLC)
+		a.call.SetJitterProfile(jitterProfile(settings.Buffering))
 		a.armPushToTalk()
 	}
+}
+
+// applyCaptureIdle tells the call's microphone whether anything is listening to
+// what it answers with. Muted is the whole of it — the publisher still reads to
+// keep its cadence and then throws the frame away — except where the settings
+// meter has borrowed this same capture, which is somebody tuning the chain and
+// needs it running.
+//
+// The one producer of that flag, so the two facts cannot be applied out of step.
+// Call on the UI thread, from wherever either of them moves.
+func (a *App) applyCaptureIdle() {
+	if a.capture == nil {
+		return
+	}
+
+	a.capture.SetIdle(a.muted && a.monitor != a.capture)
 }
 
 // applyCaptureSettings pushes every chain setting onto one open capture, the
@@ -1591,6 +1659,7 @@ func applyCaptureSettings(c *audio.Capture, settings config.Voice) {
 	c.SetSoftClip(settings.SoftClip)
 	c.SetHighPass(settings.HighPass)
 	c.SetNoiseSuppression(settings.NoiseSuppression)
+	c.SetNoiseModel(noiseModel(settings.NoiseModel))
 	c.SetSuppressionFloor(audio.SuppressionFloor(settings.NoiseSuppressionDB, config.VoiceSuppressionMaxDB))
 	c.SetVADThreshold(settings.VADThreshold)
 	c.SetDevice(settings.InputDevice)

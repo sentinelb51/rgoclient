@@ -328,6 +328,17 @@ func (e *Engine) SetCallVolume(volume float64) { e.mix.setMaster(float32(volume)
 // clipped rather than each source.
 func (e *Engine) SetSoftClip(on bool) { e.mix.setSoftClip(on) }
 
+// SetLevelling says whether each participant is brought to one loudness, so a
+// whisper and a shout arrive the same size. It moves a gain over about a second
+// and is bounded either way, so what it corrects is a microphone rather than a
+// sentence. Per-person volumes still apply on top: this decides what unity means.
+func (e *Engine) SetLevelling(on bool) { e.mix.setLevelling(on) }
+
+// SetPlacement says whether participants are spread a few degrees apart across
+// the stereo image, which is what lets the ear separate two of them talking at
+// once. The microphone test and the video player stay at centre.
+func (e *Engine) SetPlacement(on bool) { e.mix.setPlacement(on) }
+
 // send hands a request to the engine goroutine. wait is for the ones that must
 // not be lost — installing a sound, changing device — where dropping would leave
 // the client silently on the previous state with nothing saying so.

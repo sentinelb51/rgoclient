@@ -66,6 +66,23 @@ type lane struct {
 
 	active atomic.Bool
 	gain   atomic.Uint32 // float32 bits
+
+	// lim holds the gained lane under the ceiling. The callback's own: a
+	// participant boosted past full scale is turned down for the syllable
+	// rather than clipped on every cycle of it.
+	lim limiter
+
+	// level brings this participant to the same loudness as the rest. Also the
+	// callback's own, and ahead of lim rather than after it: what it does is move
+	// a gain, so what it produces is what the ceiling is then held by.
+	level leveller
+
+	// person is whether this lane is somebody in the call rather than the
+	// microphone test or the video player. Both receive-side treatments are about
+	// a room of people talking over each other and neither belongs on a lane that
+	// is one known thing: the echo test exists to report what is being sent, and a
+	// video's own mix is not this client's to normalise or to move.
+	person bool
 }
 
 // How much a lane holds. laneTarget is the depth the writer is asked to keep it
@@ -101,6 +118,13 @@ type mixer struct {
 	// chunks and never inside one.
 	soft atomic.Bool
 
+	// levelled and placed are the two receive-side treatments, read the same way
+	// and for the same reason. Neither is reset when it goes off: levelling walks
+	// its gain back to unity on the slope it is already on, so the switch is heard
+	// as the correction coming off rather than as a step.
+	levelled atomic.Bool
+	placed   atomic.Bool
+
 	lanes [maxLanes]lane
 
 	// wake is how the speakers ask for more. The callback sends into it without
@@ -135,6 +159,8 @@ func newMixer() *mixer {
 	for i := range m.lanes {
 		m.lanes[i].pcm = newRing[int16](laneDepth)
 		m.lanes[i].gain.Store(floatBits(1))
+		m.lanes[i].lim = newLimiter(float32(softKneeSample))
+		m.lanes[i].level = newLeveller()
 	}
 
 	return m
@@ -149,6 +175,12 @@ func (m *mixer) setMaster(gain float32) { m.master.Store(floatBits(clampGain(gai
 
 // setSoftClip picks how the sum meets the ceiling: rounded, or sliced flat.
 func (m *mixer) setSoftClip(on bool) { m.soft.Store(on) }
+
+// setLevelling says whether every participant is brought to one loudness.
+func (m *mixer) setLevelling(on bool) { m.levelled.Store(on) }
+
+// setPlacement says whether participants are spread across the stereo image.
+func (m *mixer) setPlacement(on bool) { m.placed.Store(on) }
 
 /* Rendering */
 
@@ -295,12 +327,15 @@ func (m *mixer) mixVoices(acc []int32) {
 }
 
 // mixLanes adds every remote participant. A lane is mono and the device is
-// stereo, so one sample lands in both ears.
+// stereo, so one sample lands in both ears — either ear at the same size, or at
+// the pair of sizes that puts the lane somewhere between them.
 //
 // A lane with nothing waiting contributes silence rather than stretching what it
 // had: a call whose sender has stopped should go quiet, not buzz.
 func (m *mixer) mixLanes(acc []int32, frames int) {
 	master := bitsFloat(m.master.Load())
+	levelling := m.levelled.Load()
+	placement := m.placed.Load()
 
 	for i := range m.lanes {
 		l := &m.lanes[i]
@@ -324,11 +359,26 @@ func (m *mixer) mixLanes(acc []int32, frames int) {
 			continue
 		}
 
+		// Where the lane sits. Unity into both ears is what an unplaced lane has
+		// always summed to, and is what the pair collapses to at centre.
+		left, right := float32(1), float32(1)
+		if placement && l.person {
+			left, right = panLeft[i], panRight[i]
+		}
+
+		// Once a block rather than once a sample: the aim is what the block is loud
+		// enough to justify, and next() is what walks the gain to it.
+		l.level.retarget(levelling && l.person, m.pull[:n])
+
 		gain := bitsFloat(l.gain.Load()) * master
 		for j := range n {
-			sample := int32(float32(m.pull[j]) * gain)
-			acc[j*channelCount] += sample
-			acc[j*channelCount+1] += sample
+			v := float32(m.pull[j]) * l.level.next() * gain
+			if g := l.lim.gain(v); g != 1 {
+				v *= g
+			}
+
+			acc[j*channelCount] += int32(v * left)
+			acc[j*channelCount+1] += int32(v * right)
 		}
 	}
 }
@@ -358,6 +408,231 @@ func clampSample(v int32) int16 {
 func clampGain(gain float32) float32 { return min(max(gain, 0), maxGain) }
 
 const maxGain = 10
+
+/* The limiter */
+
+// limiter holds a peak under a ceiling by turning the gain down rather than by
+// bending the wave. A boost that takes a loud voice past full scale is
+// otherwise clipped on every cycle, and a clipped wave is harmonics the voice
+// never had — the buzz on a participant turned up to +20 dB. Turning the gain
+// down for the length of a syllable instead leaves the wave its shape, and
+// costs a compare a sample and, over the ceiling, a divide.
+//
+// The attack is instant — the envelope jumps to a peak the moment it arrives —
+// so nothing gets past the ceiling. The release is what makes it a limiter
+// rather than a clipper: the gain recovers over limiterRelease, so a wave's
+// cycles are scaled alike instead of each one being flattened.
+//
+// Its ceiling is the soft clip's knee, in whichever units the caller counts
+// in. Below the knee the curve is the identity, so a single limited source
+// never meets it; what the clip is then for is the sum, which two lanes and a
+// notification sound can still take over the top.
+type limiter struct {
+	env     float32 // the peak being tracked, in the caller's units
+	ceiling float32
+}
+
+func newLimiter(ceiling float32) limiter { return limiter{ceiling: ceiling} }
+
+// limiterRelease is how long a turned-down gain takes to come back, as the
+// per-sample factor the envelope decays by: a time constant of 100 ms.
+const limiterRelease = 0.99979171 // exp(-1 / (0.1 s × 48 kHz))
+
+// gain answers what to scale one sample by, given the sample. 1 nearly
+// always — the envelope is only decayed while it is over the ceiling, so a
+// source under it pays the compare and nothing else.
+func (l *limiter) gain(v float32) float32 {
+	if v < 0 {
+		v = -v
+	}
+
+	if v > l.env {
+		l.env = v
+	} else if l.env > l.ceiling {
+		l.env *= limiterRelease
+	}
+
+	if l.env <= l.ceiling {
+		return 1
+	}
+
+	return l.ceiling / l.env
+}
+
+// apply limits a frame in place.
+func (l *limiter) apply(frame []float32) {
+	for i, v := range frame {
+		if g := l.gain(v); g != 1 {
+			frame[i] = v * g
+		}
+	}
+}
+
+/* The leveller */
+
+// leveller brings one participant to the same loudness as the rest by moving a
+// gain slowly against how loud they have been. Everybody arrives at whatever
+// their own microphone, distance and voice add up to, and a call spent reaching
+// for the volume is what this removes.
+//
+// Slow is the whole of what makes it a leveller rather than a compressor: the
+// gain settles over a sentence, so it evens out who is talking and not the shape
+// of what they said. The limiter beside it is what catches a peak, on a
+// timescale three orders shorter.
+//
+// Nothing here is reset when the setting goes off. target returns to unity and
+// the same slope carries the gain back, so the switch moves the level over a
+// second rather than stepping it.
+type leveller struct {
+	// target is the gain the block just measured justifies, and gain is what is
+	// actually being applied — the one walked toward the other a sample at a time.
+	// step is which slope that walk is on, chosen once a block so the sample loop
+	// carries no branch.
+	target float32
+	gain   float32
+	step   float32
+
+	// blocks is how much speech this lane has been heard to make, counted only
+	// while it is loud enough to learn from and stopped at levelGrabBlocks. It is
+	// the whole of what says a lane is still finding its level rather than holding
+	// one.
+	blocks int
+}
+
+func newLeveller() leveller { return leveller{target: 1, gain: 1} }
+
+// What the follower aims at and how fast it gets there.
+const (
+	// levelTarget is the RMS a voice is brought to, in whole samples: -23 dBFS,
+	// which leaves speech's own crest factor room to peak below full scale instead
+	// of into the limiter.
+	levelTarget = 2320
+
+	// levelFloor is the quietest block worth learning from, -55 dBFS. Below it the
+	// aim is held rather than recomputed, which is what stops the gap between two
+	// words — or a sender whose own suppressor has gated the room out — winding the
+	// gain up to the ceiling and handing it back as a roar on the next syllable.
+	// Well under any real voice and well over what a silent lane carries.
+	levelFloor = 58
+
+	// How far the gain may move either way, ±12 dB. A ceiling because the correction
+	// is worth having and the belief behind it is not: a lane this far out is a
+	// microphone problem, and going further only amplifies its noise floor.
+	levelMin = 0.25
+	levelMax = 4
+
+	// The per-sample one-pole steps, 1 - exp(-1 / (t × 48 kHz)). Down over 300 ms
+	// and up over 2 s: a voice that has got louder has to stop being loud within a
+	// syllable, where one that has gone quiet can be brought up across a sentence
+	// without the room audibly coming up with it.
+	levelAttackStep  = 0.00006944
+	levelReleaseStep = 0.00001042
+
+	// The slope a lane that has not found its level yet is walked at, and how much
+	// speech it takes to have found one — 150 ms, over the first half-second.
+	//
+	// Somebody who has just joined sits at unity because nothing has been measured
+	// yet, not because unity suits them, and on the ordinary slopes a quiet talker
+	// stays quiet for their whole first turn: the release is two seconds of *speech*,
+	// which is most of a minute of conversation. Half a second averages a syllable
+	// or two rather than snapping to one block, which at this length is a swell
+	// nobody hears as an edge.
+	levelGrabStep   = 0.00013888
+	levelGrabBlocks = 25
+)
+
+// retarget picks what the lane is aiming at from the block about to be played,
+// and which slope to approach it on. Once a block; next is what walks it.
+func (lv *leveller) retarget(on bool, block []int16) {
+	if !on {
+		lv.target = 1
+	} else if rms := blockRMS(block); rms > levelFloor {
+		lv.target = min(max(levelTarget/rms, levelMin), levelMax)
+
+		if lv.blocks < levelGrabBlocks {
+			lv.blocks++
+		}
+	}
+
+	switch {
+	case lv.blocks < levelGrabBlocks:
+		lv.step = levelGrabStep
+	case lv.target < lv.gain:
+		lv.step = levelAttackStep
+	default:
+		lv.step = levelReleaseStep
+	}
+}
+
+// next advances the gain one sample and answers with it. The only smoothing in
+// the whole arrangement, which is why the aim itself needs none: a block's raw
+// RMS is noisy and this is what a 300 ms slope does to noise.
+func (lv *leveller) next() float32 {
+	lv.gain += (lv.target - lv.gain) * lv.step
+
+	return lv.gain
+}
+
+// blockRMS is how loud one block was. Summed as int64 rather than as float32,
+// which a thousand squared samples would overflow the mantissa of long before
+// the end of the block.
+func blockRMS(block []int16) float32 {
+	var sum int64
+	for _, s := range block {
+		sum += int64(s) * int64(s)
+	}
+
+	return float32(math.Sqrt(float64(sum) / float64(len(block))))
+}
+
+/* Placement */
+
+// panLeft and panRight are what one lane's mono sample is scaled by into each
+// ear. Written once at init and read-only after, the arc being the same for
+// every call this process ever mixes.
+//
+// Constant power: the pair squares to 2 wherever a lane sits, which is what an
+// unmoved lane — unity into both — already summed to. A linear pan would leave
+// whoever is at centre about 3 dB down on whoever is at the edge, so moving
+// somebody would be a change in how loud they are as well as where.
+var panLeft, panRight [maxLanes]float32
+
+// Where each lane sits, as an offset from centre in radians. Lanes take these in
+// the order the sink hands slots out, alternating either side so the first person
+// in front of the reader and the next two one step out on each side.
+//
+// panSpread is the arc's half-width, about 14°. Wide enough for the ear to pull
+// two simultaneous talkers apart — which is the whole win, the brain separating
+// voices by the level difference between the ears — and narrow enough that nobody
+// sounds like they are in the next room. Seven distinct places, then the ends
+// repeat: past that a call is beyond what anybody localises anyway.
+//
+// It is bounded from the other side too. The pan is applied *after* the limiter,
+// so the loud ear of a limited lane lands at the ceiling times the widest scale
+// here — ×1.216 of the 70 % knee, which is 85 % of full scale. Widening this past
+// ×1.43 would put a limited lane over the top and leave softClip holding what the
+// limiter was there to prevent.
+const (
+	panSpread = 0.25
+	panStep   = panSpread / 3
+)
+
+func init() {
+	for i := range maxLanes {
+		steps := (i + 1) / 2
+		if i%2 == 0 {
+			steps = -steps
+		}
+
+		offset := min(max(float64(steps)*panStep, -panSpread), panSpread)
+
+		// π/4 is centre, where cos and sin are equal and √2 × either is exactly 1.
+		angle := math.Pi/4 + offset
+
+		panLeft[i] = float32(math.Sqrt2 * math.Cos(angle))
+		panRight[i] = float32(math.Sqrt2 * math.Sin(angle))
+	}
+}
 
 // Where soft clipping starts, as a percentage of full scale. Below the knee a
 // sample is untouched, which is nearly all of them: the branch is what keeps the

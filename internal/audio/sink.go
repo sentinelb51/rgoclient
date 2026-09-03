@@ -250,9 +250,16 @@ func (s *Sink) lane(userID string) *lane {
 		// The ring is emptied before the callback is told to read it, or the first
 		// thing this participant says is whatever the last one left behind. The
 		// gain is this participant's rather than unity, or somebody turned down
-		// would come back at full volume the moment they rejoined.
+		// would come back at full volume the moment they rejoined. The limiter
+		// starts released, or the last occupant's loudest moment would hold the
+		// new one down for its first hundred milliseconds, and the leveller starts
+		// at unity for the same reason — an aim inherited from whoever had the slot
+		// is a correction for a microphone that has left.
 		l.pcm.Discard(l.pcm.Cap())
 		l.gain.Store(floatBits(s.gain(userID)))
+		l.lim.env = 0
+		l.level = newLeveller()
+		l.person = userID != echoLane && userID != videoLane
 		l.active.Store(true)
 
 		s.byOne[userID] = i

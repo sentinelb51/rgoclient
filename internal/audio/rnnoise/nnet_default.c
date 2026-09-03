@@ -1,4 +1,5 @@
-/* Copyright (c) 2017 Jean-Marc Valin */
+/* Copyright (c) 2018-2019 Mozilla
+                 2023 Amazon */
 /*
    Redistribution and use in source and binary forms, with or without
    modification, are permitted provided that the following conditions
@@ -24,26 +25,11 @@
    SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
-#ifndef RNN_H_
-#define RNN_H_
-
-#include "rnnoise.h"
-#include "rnnoise_data.h"
-
-#include "opus_types.h"
-
-#define WEIGHTS_SCALE (1.f/256)
-
-#define MAX_NEURONS 1024
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
 
 
-typedef struct {
-  float conv1_state[CONV1_STATE_SIZE];
-  float conv2_state[CONV2_STATE_SIZE];
-  float gru1_state[GRU1_STATE_SIZE];
-  float gru2_state[GRU2_STATE_SIZE];
-  float gru3_state[GRU3_STATE_SIZE];
-} RNNState;
-void compute_rnn(const RNNoise *model, RNNState *rnn, float *gains, float *vad, const float *input, int arch);
+#define RTCD_ARCH c
 
-#endif /* RNN_H_ */
+#include "nnet_arch.h"

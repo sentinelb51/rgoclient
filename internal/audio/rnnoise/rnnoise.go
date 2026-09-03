@@ -3,33 +3,57 @@
 // voice — hiss, fans, hum, keyboard — where a gate can only silence the frames
 // between words.
 //
-// The sources are xiph/rnnoise v0.1.1 (commit 6cbfd53) plus one marked patch —
+// The sources are xiph/rnnoise main at 70f1d256 (2025-02-22, the newest commit
+// on either the GitLab original or the GitHub mirror) plus one marked patch —
 // a gain floor under the band gains (rnnoise_set_gain_floor), which is what a
 // suppression-strength dial is; every change carries an "rgoclient" comment so
-// a future re-vendor knows what to carry. That release is the last
-// release whose model ships inside the tree: rnn_data.c carries the ~85 KB of
-// trained weights, so a fresh clone builds with nothing downloaded. Later
-// releases fetch a 30-78 MB model at build time, which is why this is not a
-// newer one. That release also prefixed every non-API symbol with rnn_, so the
-// CELT-derived FFT and pitch code in here cannot collide with the libopus that
-// gopus links into the same binary. License: BSD-3 (COPYING).
+// a future re-vendor knows what to carry. Re-vendor with
+// scripts/update-rnnoise.sh. License: BSD-3 (COPYING).
+//
+// The weights are rnnoise_data.bin rather than C literals, because upstream
+// emits them as a 74 MB source file that USE_WEIGHTS_FILE excludes from the
+// build anyway. Embedded, so a fresh clone still builds with nothing
+// downloaded.
+//
+// Two things a caller has to know. It costs **10 ms of delay**: from v0.2 on,
+// the model gets a frame of lookahead and rnnoise_process_frame answers with
+// the previous frame's audio, so a live path pays that on top of its own
+// buffering — only while suppression is on, the stage being bypassed
+// otherwise. And it needs AVX2 on amd64 to be cheap: see march_amd64.go, which
+// asks for the same x86-64-v3 floor gopus already puts under this binary.
 package rnnoise
 
 /*
-#cgo CFLAGS: -O2
+#cgo CFLAGS: -O3 -DUSE_WEIGHTS_FILE
 #cgo !windows LDFLAGS: -lm
+#include <stdlib.h>
 #include "rnnoise.h"
 */
 import "C"
 
 import (
+	_ "embed"
+	"log"
 	"runtime"
+	"sync"
 	"unsafe"
 )
 
 // FrameSize is how many samples one Process call rewrites: 10 ms at the 48 kHz
 // the model is trained for, which is exactly half the 20 ms capture frame.
 const FrameSize = 480
+
+//go:embed rnnoise_data.bin
+var weights []byte
+
+// model is the trained weights, shared by every Denoiser. The bytes are copied
+// into C memory rather than passed in place because rnnoise keeps pointers into
+// the blob for as long as a state built from it lives, which cgo does not allow
+// of Go memory; neither the copy nor the model is ever freed, both outliving
+// every caller by construction.
+var model = sync.OnceValue(func() *C.RNNModel {
+	return C.rnnoise_model_from_buffer(C.CBytes(weights), C.int(len(weights)))
+})
 
 // Denoiser is one denoising stream. State is per stream and per goroutine:
 // nothing here locks, so a Denoiser must only ever be driven by one goroutine —
@@ -45,9 +69,16 @@ type Denoiser struct {
 
 // New returns a Denoiser on the built-in model. The C state is freed when the
 // Denoiser is collected — a cleanup rather than a Close, so no caller has to
-// prove no Process is in flight first.
+// prove no Process is in flight first. A Denoiser whose model would not load
+// passes audio through untouched rather than reporting: suppression is a stage
+// the chain can do without, and the alternative is a capture that fails to open.
 func New() *Denoiser {
-	d := &Denoiser{st: C.rnnoise_create(nil)}
+	d := &Denoiser{st: C.rnnoise_create(model())}
+	if d.st == nil {
+		log.Printf("rnnoise: built-in model did not load, suppression is off")
+
+		return d
+	}
 	runtime.AddCleanup(d, func(st *C.DenoiseState) { C.rnnoise_destroy(st) }, d.st)
 
 	return d
@@ -59,14 +90,18 @@ func New() *Denoiser {
 // Takes effect on the next Process, so it can move mid-stream; the flooring is
 // spectral, which is why it costs no dry/wet delay line and no comb filtering.
 func (d *Denoiser) SetGainFloor(floor float32) {
+	if d.st == nil {
+		return
+	}
 	C.rnnoise_set_gain_floor(d.st, C.float(floor))
 	runtime.KeepAlive(d)
 }
 
 // Process denoises one frame in place and reports the model's own estimate that
-// it held speech, 0-1. frame must hold exactly FrameSize samples.
+// it held speech, 0-1. frame must hold exactly FrameSize samples. What comes
+// back is the *previous* frame's audio: see the package comment.
 func (d *Denoiser) Process(frame []float32) float32 {
-	if len(frame) != FrameSize {
+	if d.st == nil || len(frame) != FrameSize {
 		return 0
 	}
 

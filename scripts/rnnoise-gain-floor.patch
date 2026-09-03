@@ -1,0 +1,57 @@
+--- a/internal/audio/rnnoise/denoise.c
++++ b/internal/audio/rnnoise/denoise.c
+@@ -79,6 +79,12 @@
+   int last_period;
+   float mem_hp_x[2];
+   float lastg[NB_BANDS];
++  /* rgoclient: floor under every band gain, 0 (full suppression, the stock
++     behaviour — rnnoise_init memsets it) to 1 (passthrough). Flooring the gains
++     in the model's own spectral domain is what a "suppression strength" dial
++     can be without a delay-compensated dry mix: the synthesis path is
++     untouched, so no comb filtering. */
++  float gain_floor;
+   RNNState rnn;
+   kiss_fft_cpx delayed_X[FREQ_SIZE];
+   kiss_fft_cpx delayed_P[FREQ_SIZE];
+@@ -320,6 +326,13 @@
+   return st;
+ }
+ 
++/* rgoclient: not in xiph's API. See the gain_floor field. */
++void rnnoise_set_gain_floor(DenoiseState *st, float gain_floor) {
++  if (gain_floor < 0) gain_floor = 0;
++  if (gain_floor > 1) gain_floor = 1;
++  st->gain_floor = gain_floor;
++}
++
+ void rnnoise_destroy(DenoiseState *st) {
+   free(st);
+ }
+@@ -481,6 +494,11 @@
+       /* Cap the decay at 0.6 per frame, corresponding to an RT60 of 135 ms.
+          That avoids unnaturally quick attenuation. */
+       g[i] = MAX16(g[i], alpha*st->lastg[i]);
++      /* rgoclient: cap how far a band may be pushed down. Applied after the
++         decay so lastg carries the floored value and the release stays
++         consistent, and after rnn_pitch_filter so the enhancement is
++         unaffected. */
++      g[i] = MAX16(g[i], st->gain_floor);
+       /* Compensate for energy change across frame when computing the threshold gain.
+          Avoids leaking noise when energy increases (e.g. transient noise). */
+       st->lastg[i] = MIN16(1.f, g[i]*(st->delayed_Ex[i]+1e-3)/(Ex[i]+1e-3));
+--- a/internal/audio/rnnoise/rnnoise.h
++++ b/internal/audio/rnnoise/rnnoise.h
+@@ -94,6 +94,13 @@
+ RNNOISE_EXPORT float rnnoise_process_frame(DenoiseState *st, float *out, const float *in);
+ 
+ /**
++ * rgoclient addition, not in xiph's API: floor every band gain at gain_floor
++ * (0 = full suppression, the default; 1 = passthrough), which caps how many dB
++ * the denoiser may take out. Takes effect on the next frame.
++ */
++RNNOISE_EXPORT void rnnoise_set_gain_floor(DenoiseState *st, float gain_floor);
++
++/**
+  * Load a model from a memory buffer
+  *
+  * It must be deallocated with rnnoise_model_free() and the buffer must remain

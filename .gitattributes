@@ -1,2 +1,6 @@
 # core.autocrlf=true converts on checkout, and bash cannot run a CRLF shebang.
 *.sh text eol=lf
+
+# The RNNoise weights. Detected as binary by content anyway, but a file whose
+# every byte matters should not be relying on that.
+*.bin binary

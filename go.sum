@@ -235,8 +235,10 @@ github.com/rogpeppe/go-internal v1.15.0 h1:D0RCU5rMAp+SpgkiNdrjfJ+LX4J1M32V2NeCY
 github.com/rogpeppe/go-internal v1.15.0/go.mod h1:DrUVZyrJU+txYW5/1kwtXQSMFio52ZOxX7yM1VHvnxs=
 github.com/rymdport/portal v0.4.2 h1:7jKRSemwlTyVHHrTGgQg7gmNPJs88xkbKcIL3NlcmSU=
 github.com/rymdport/portal v0.4.2/go.mod h1:kFF4jslnJ8pD5uCi17brj/ODlfIidOxlgUDTO5ncnC4=
-github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f h1:K2WN3CTjThFoREJKHtPLnEl304gbCTOLrXElrNjyT4Y=
-github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f/go.mod h1:AWEx797SwA4yqgOFWVpgapUkTk6MmeoJ+1nTwMt33T8=
+github.com/sentinelb51/gopus v0.0.0-20260903165801-7690dcefe00e h1:nJrno+7ZLOJ3qA1yTVFTPyYF/p1jbVqVB73SmGXKbEU=
+github.com/sentinelb51/gopus v0.0.0-20260903165801-7690dcefe00e/go.mod h1:AWEx797SwA4yqgOFWVpgapUkTk6MmeoJ+1nTwMt33T8=
+github.com/sentinelb51/gtcrn-go v0.2.0 h1:xo2SudDajHDahUD6QbocL1DLZsXXcHDO+C0A876KCeg=
+github.com/sentinelb51/gtcrn-go v0.2.0/go.mod h1:EMbDw5ixnSGG24dSfP+7aNQM57b1NXAjBk5ibB3Epvk=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66 h1:BeY1/dsQALbPZCJkEnxAIbUQCsaA/e9YMvhSeLRwBK8=
 github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66/go.mod h1:S5+w2U7ZDLkMPN8hlVSf+bx4WyFpnp5OBdgZiWDWwv0=
 github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.8 h1:8S5csEZJEmuLbdFCgAtRyFCm7Zu9psjttihZj4CXTtQ=

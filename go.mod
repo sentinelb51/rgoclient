@@ -13,16 +13,21 @@ require (
 	github.com/livekit/protocol v1.50.4
 	github.com/livekit/server-sdk-go/v2 v2.18.1
 	github.com/oklog/ulid/v2 v2.1.2
+	github.com/pion/rtcp v1.2.17
 	github.com/pion/rtp v1.10.5
 	github.com/pion/webrtc/v4 v4.2.18
 	// libopus, vendored and statically linked, so a fresh clone builds with no
 	// system libraries. A fork of layeh.com/gopus rather than upstream for the
 	// three encoder CTLs rgoclient asks for through voice.opusTuning — in-band
-	// FEC, packet-loss estimate and DTX — and, since, for libopus 1.5.2 with Deep
-	// PLC and for the vector instructions each architecture already guarantees.
+	// FEC, packet-loss estimate and DTX — and, since, for libopus 1.6.1 with every
+	// neural extension bar DRED (Deep PLC, LACE, NoLACE, blind bandwidth
+	// extension, their weights embedded as one blob rather than 71 MB of C) and
+	// for the vector instructions each architecture already guarantees.
 	// It carries its own module path rather than upstream's, so nothing here
-	// names a module that is not what gets built. See docs/voice-chat-todo.md.
-	github.com/sentinelb51/gopus v0.0.0-20260827035214-34d479408e2f
+	// names a module that is not what gets built. What each level costs is in
+	// docs/performance.md, and what is still out of it in docs/known-gaps.md.
+	github.com/sentinelb51/gopus v0.0.0-20260903165801-7690dcefe00e
+	github.com/sentinelb51/gtcrn-go v0.2.0
 	github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66
 	golang.design/x/clipboard v0.9.0
 	golang.org/x/image v0.45.0
@@ -90,7 +95,6 @@ require (
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/mdns/v2 v2.1.0 // indirect
 	github.com/pion/randutil v0.1.0 // indirect
-	github.com/pion/rtcp v1.2.17 // indirect
 	github.com/pion/sctp v1.11.1 // indirect
 	github.com/pion/sdp/v3 v3.0.19 // indirect
 	github.com/pion/srtp/v3 v3.0.13 // indirect

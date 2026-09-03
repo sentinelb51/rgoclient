@@ -194,6 +194,11 @@ type Options struct {
 	// on a stream that is not losing anything, and SetDeepPLC moves it mid-call.
 	DeepPLC bool
 
+	// Jitter is how much of the network's own lateness the receive buffers should
+	// cover, and so most of the delay between somebody speaking and being heard.
+	// The zero value is JitterBalanced; SetJitterProfile moves it mid-call.
+	Jitter JitterProfile
+
 	// SelfID is this account's own identity, so the client's own speaking can be
 	// reported alongside everybody else's. The voice server's active-speaker
 	// report is about *remote* participants and arrives half a second late; the
@@ -234,6 +239,11 @@ type Call struct {
 	// goroutine touching one — libopus decoder state is per stream and is not safe
 	// to reconfigure from under a decode.
 	deepPLC atomic.Bool
+
+	// jitter is read the same way and for a plainer reason: a subscribe can land
+	// on any goroutine lksdk chooses, so the profile a new lane opens at has to be
+	// readable off-thread. Never nil once Join has returned.
+	jitter atomic.Pointer[JitterProfile]
 
 	mu       sync.Mutex
 	speaking map[string]bool  // last reported, so only transitions are emitted
@@ -311,6 +321,7 @@ func Join(creds domain.CallCredentials, src PCMSource, sink PCMSink, opts Option
 	c.muted.Store(opts.Muted || opts.Deafened)
 	c.deafened.Store(opts.Deafened)
 	c.deepPLC.Store(opts.DeepPLC)
+	c.SetJitterProfile(opts.Jitter)
 	c.canShare = tokenAllowsScreen(creds.Token)
 
 	started := time.Now()
@@ -507,6 +518,26 @@ func (c *Call) SetDeepPLC(on bool) { c.deepPLC.Store(on) }
 
 // DeepPLC reports whether neural loss concealment is asked for.
 func (c *Call) DeepPLC() bool { return c.deepPLC.Load() }
+
+// SetJitterProfile moves how much lateness the receive buffers cover. Every open
+// lane picks it up on the filler's next pass, and lanes opened after this one
+// start on it.
+func (c *Call) SetJitterProfile(profile JitterProfile) {
+	if profile.Percentile <= 0 || profile.MaxDelay <= 0 {
+		profile = JitterBalanced
+	}
+
+	c.jitter.Store(&profile)
+}
+
+// jitterProfile is what a lane should be buffering to.
+func (c *Call) jitterProfile() JitterProfile {
+	if profile := c.jitter.Load(); profile != nil {
+		return *profile
+	}
+
+	return JitterBalanced
+}
 
 // Close hangs up. There is no leave route — leaving *is* disconnecting, after
 // which the gateway announces it — so this is the whole of it. Safe to call

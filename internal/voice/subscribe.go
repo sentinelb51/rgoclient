@@ -2,6 +2,7 @@ package voice
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -13,13 +14,31 @@ import (
 	"github.com/sentinelb51/gopus"
 )
 
+// disconnectError names why the room let go, since the notice will say it and
+// three of the reasons are different things to do about: the server removing
+// this participant is what the voice ingress does to a publisher whose declared
+// video is over its tier's limits (it never refuses the track), and this
+// account joining from a second client is what takes the seat from this one.
+func disconnectError(reason lksdk.DisconnectionReason) error {
+	switch reason {
+	case lksdk.ParticipantRemoved:
+		return errors.New("removed from the call by the server")
+	case lksdk.DuplicateIdentity:
+		return errors.New("this account joined the call from another client")
+	case lksdk.RoomClosed:
+		return errors.New("the call was closed")
+	}
+
+	return fmt.Errorf("disconnected from the voice server: %s", reason)
+}
+
 // callbacks is the whole of what the room tells this package. Every one of them
 // runs on lksdk's own goroutine, so each does the least it can and reports
 // rather than works.
 func (c *Call) callbacks() *lksdk.RoomCallback {
 	return &lksdk.RoomCallback{
-		OnDisconnected: func() {
-			c.fail(errors.New("disconnected from the voice server"))
+		OnDisconnectedWithReason: func(reason lksdk.DisconnectionReason) {
+			c.fail(disconnectError(reason))
 		},
 
 		OnReconnecting: func() { c.emit(ConnectionChanged{State: Reconnecting}) },
@@ -172,7 +191,40 @@ type lane struct {
 	// deepPLC is what this decoder was last told, so the setting is pushed on
 	// change rather than on every frame. Touched only by the filler.
 	deepPLC bool
+
+	// jitter is what the buffer was last told, for the same reason and at the same
+	// cost: SetProfile takes the buffer's own lock, which the reader goroutine is
+	// holding fifty times a second. Touched only by the filler.
+	jitter JitterProfile
+
+	// quiet counts DTX packets in a row, so the lane can stop paying to decode
+	// them. Touched only by the filler.
+	quiet int
+
+	// scratch is where a time-scaled frame is built, sized for the longest one
+	// expand can produce so it is allocated once rather than per correction.
+	// allow is the time-scaling ration this lane has earned and not yet spent.
+	// compressed and expanded count what has been done to it, which is only ever
+	// read by a test. All four are the filler's.
+	scratch              []int16
+	allow                float64
+	compressed, expanded int
 }
+
+// dtxPacket is whether a payload is what Opus emits in place of a frame while
+// discontinuous transmission has it saying nothing: the table-of-contents byte
+// and no frame behind it, one or two bytes. The decoder takes one as a lost
+// frame and conceals.
+func dtxPacket(payload []byte) bool { return len(payload) > 0 && len(payload) <= 2 }
+
+// quietAfter is how many DTX packets in a row a lane decodes before it stops
+// asking the decoder at all. The first few are worth it — concealment fades the
+// last real frame out rather than cutting it — and after that the decoder is
+// making comfort noise from nothing, at Deep PLC's price where that is on: 97 µs
+// a frame against 9, fifty times a second, for every participant who is not
+// talking. Silence written straight to the lane is what their gate sent, at no
+// cost, and with nothing under it for a boosted lane to lift.
+const quietAfter = 5
 
 // opusDecodeIn is what a binding has to offer for the receive path to decode
 // without allocating: 1920 B per frame per participant, fifty times a second,
@@ -201,9 +253,13 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 		return
 	}
 
-	buffer := newAdaptiveJitter()
+	profile := c.jitterProfile()
+	buffer := newAdaptiveJitter(profile)
 
-	l := &lane{buffer: buffer, decoder: decoder, track: track}
+	l := &lane{
+		buffer: buffer, decoder: decoder, track: track, jitter: profile,
+		scratch: make([]int16, 0, frameSize+maxLag),
+	}
 	if into, ok := any(decoder).(opusDecodeIn); ok {
 		l.into, l.pcm = into, make([]int16, frameSize)
 	}
@@ -281,7 +337,7 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 		payload := make([]byte, len(packet.Payload))
 		copy(payload, packet.Payload)
 
-		buffer.Push(packet.SequenceNumber, payload)
+		buffer.Push(packet.SequenceNumber, packet.Timestamp, payload)
 	}
 }
 
@@ -338,9 +394,18 @@ const maxFramesPerPass = 3
 // fillLanes tops every open lane up to the depth the speakers asked for.
 func (c *Call) fillLanes() {
 	deafened := c.deafened.Load()
+	profile := c.jitterProfile()
 
 	for _, p := range c.laneSnapshot() {
 		userID, l := p.userID, p.lane
+
+		l.applyJitter(profile)
+
+		// One reading per wake rather than one per frame. The loop below pops ahead
+		// of the speakers, so occupancy dips inside a pass without the buffer being
+		// short of anything — that audio is in the lane rather than missing, and
+		// stretching against the dip would be correcting for the filler's own stride.
+		drift := l.buffer.Drift()
 
 		// Bounded as well as conditioned: Want is answered by another goroutine, and
 		// a loop that only it can end is one bug away from never ending.
@@ -360,6 +425,16 @@ func (c *Call) fillLanes() {
 				continue
 			}
 
+			if dtxPacket(payload) {
+				l.quiet++
+				if l.quiet > quietAfter {
+					c.sink.Write(userID, silence[:])
+					continue
+				}
+			} else {
+				l.quiet = 0
+			}
+
 			l.applyDeepPLC(c.deepPLC.Load())
 
 			pcm, err := l.decodeFrame(payload, next)
@@ -368,15 +443,40 @@ func (c *Call) fillLanes() {
 				continue
 			}
 
-			c.sink.Write(userID, pcm)
+			c.sink.Write(userID, l.retime(pcm, drift))
 		}
 	}
 }
 
+// applyJitter pushes the call's profile onto this lane's buffer when it has
+// changed. The buffer holds what it can act on; a profile it cannot is ignored
+// there rather than filtered here.
+func (l *lane) applyJitter(profile JitterProfile) {
+	if l.jitter == profile {
+		return
+	}
+
+	l.jitter = profile
+	l.buffer.SetProfile(profile)
+}
+
 // applyDeepPLC pushes the call's setting onto this lane's decoder when it has
-// changed. libopus gates its neural concealer on the decoder's complexity being
-// at least ComplexityDeepPLC, and leaves the classic extrapolation in place
-// below that.
+// changed. libopus stacks its neural extensions on one dial: the concealer at
+// ComplexityDeepPLC, and LACE — a postfilter over decoded SILK — one above it.
+// Below either, the classic extrapolation stays and nothing is filtered.
+//
+// LACE rather than NoLACE, which is one higher again. The concealer is paid only
+// on a frame that was lost; a postfilter runs on every frame that arrives, so it
+// is the one level whose cost is charged to every talker, and the two differ by
+// more than double: 0.20 % of a core a lane against 0.43 % (48 kHz mono, 20 ms
+// frames, 13700HX). NoLACE is left on the table until somebody can hear the
+// difference it makes.
+//
+// The bandwidth extension is the one that does not follow from the dial, so it
+// is asked for beside it. At the bitrate this client publishes Opus stays in
+// hybrid mode, where BWE does nothing at all — it wants a SILK-only packet or a
+// concealed one — so what it is really here for is the second of those, which is
+// the same thing the switch is.
 func (l *lane) applyDeepPLC(on bool) {
 	if l.deepPLC == on {
 		return
@@ -384,35 +484,44 @@ func (l *lane) applyDeepPLC(on bool) {
 
 	complexity := gopus.ComplexityOff
 	if on {
-		complexity = gopus.ComplexityDeepPLC
+		complexity = gopus.ComplexityLACE
 	}
 
 	if err := l.decoder.SetComplexity(complexity); err != nil {
-		// A build without the model, or a system libopus older than 1.5. Say so once
+		// A build without the models, or a system libopus older than 1.5. Say so once
 		// per change rather than per frame, and carry on with classic concealment.
 		log.Printf("voice: deep PLC unavailable: %v", err)
+	}
+	if err := l.decoder.SetOSCEBWE(on); err != nil && on {
+		// 1.6 and OSCE, so older than the above; not worth a second sentence.
+		log.Printf("voice: bandwidth extension unavailable: %v", err)
 	}
 
 	l.deepPLC = on
 }
 
-// reportLoss tells the encoder what the worst path into this client is losing,
-// which is what decides how much redundancy in-band FEC carries.
+// reportLoss tells the encoder what the *sending* half of the connection is
+// losing, which is what decides how much redundancy in-band FEC carries.
+//
+// The node's own receiver reports are the only place that number exists, and
+// they are the right one: FEC protects what goes out, so what this client is
+// missing on the way in — a different path, and often the opposite verdict —
+// says nothing about how much of it to buy.
 func (c *Call) reportLoss() {
 	p := c.publisher.Load()
 	if p == nil {
 		return
 	}
 
-	// Negative is a window not yet measured, and a room with no lanes measures
-	// nothing: either way the encoder keeps what it has — the initial seed at the
-	// start, which exists precisely to cover the window before a measurement.
-	worst := c.worstLoss()
-	if worst < 0 {
+	// Negative is a node that has reported nothing yet: the encoder keeps what it
+	// has — the initial seed, which exists precisely to cover the window before a
+	// measurement.
+	loss := p.uplink.Loss()
+	if loss < 0 {
 		return
 	}
 
-	p.setLoss(worst)
+	p.setLoss(loss)
 }
 
 // worstLoss is what the worst path into this client is losing, negative where

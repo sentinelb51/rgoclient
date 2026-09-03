@@ -42,6 +42,11 @@ const sinkTargetSamples = sampleRate * 40 / 1000
 type sineSource struct {
 	phase float64
 	hz    float64
+
+	// started and frames are the pacing, and they are absolute on purpose — see
+	// Read.
+	started time.Time
+	frames  int
 }
 
 func (s *sineSource) Read(pcm []int16) (int, error) {
@@ -49,7 +54,24 @@ func (s *sineSource) Read(pcm []int16) (int, error) {
 		pcm[i] = int16(toneAmplitude * math.Sin(s.phase))
 		s.phase += 2 * math.Pi * s.hz / sampleRate
 	}
-	time.Sleep(frameMillis * time.Millisecond) // pace like a device, roughly
+
+	// Paced to an absolute schedule rather than by sleeping a frame at a time. A
+	// sleep per frame accumulates whatever the platform rounds it up by — on
+	// Windows a 20 ms sleep without a raised timer resolution is nearer 31 —
+	// while the publisher stamps every frame exactly 20 ms on regardless. The
+	// far end then measures the difference as lateness and buffers against it:
+	// this source used to run 2.8 % slow, and the receiver read that as 400 ms of
+	// network jitter and sat at its ceiling for the whole run. A real microphone
+	// is clocked by the device and does not drift like this, so neither should
+	// the thing standing in for one.
+	if s.started.IsZero() {
+		s.started = time.Now()
+	}
+	s.frames++
+
+	if wait := time.Until(s.started.Add(time.Duration(s.frames) * frameMillis * time.Millisecond)); wait > 0 {
+		time.Sleep(wait)
+	}
 
 	return len(pcm), nil
 }
@@ -273,7 +295,17 @@ func TestLiveTwoEnded(t *testing.T) {
 	if len(shared) == 0 {
 		t.Skipf("%s and %s share no voice channel", speaker.Username, listener.Username)
 	}
+
+	// The channel the two test accounts are actually alone in. Anything else they
+	// both happen to be in would do for the measurement, so it is a preference
+	// rather than a requirement.
 	channelID := shared[0]
+	for _, id := range shared {
+		if listenerChannels[id] == "jerome / vc" {
+			channelID = id
+			break
+		}
+	}
 	t.Logf("channel %s (%s)", listenerChannels[channelID], channelID)
 
 	speakerCreds, err := speakerClient.JoinCall(channelID, true)
@@ -320,7 +352,12 @@ func TestLiveTwoEnded(t *testing.T) {
 	}()
 
 	const (
-		seconds     = 25
+		// Long enough to watch the depth come back down, which is the assertion at
+		// the bottom. Deepening answers the next packet; shrinking cannot begin
+		// until whatever caused it has aged out of the estimator's own pair of
+		// windows, so the floor on a useful run is twice windowSpan plus the steps
+		// themselves.
+		seconds     = 45
 		deepPLCOn   = 9
 		deepPLCOff  = 17
 		maxSaneHeld = maxDepth
@@ -353,7 +390,8 @@ func TestLiveTwoEnded(t *testing.T) {
 
 		line := ""
 		for _, id := range ids {
-			buffer, ok := listenerCall.lanes[id].buffer.(*adaptiveJitter)
+			l := listenerCall.lanes[id]
+			buffer, ok := l.buffer.(*adaptiveJitter)
 			if !ok {
 				continue
 			}
@@ -364,8 +402,23 @@ func TestLiveTwoEnded(t *testing.T) {
 				shrank = shrank || buffer.depth < lastDepth
 			}
 			lastDepth = buffer.depth
-			line += fmt.Sprintf("%s held=%2d depth=%2d filling=%-5v loss=%d%%  ",
-				id[len(id)-4:], buffer.held, buffer.depth, buffer.filling, buffer.lossPercent)
+
+			// What the depth is now taken from, printed beside it: a depth that does
+			// not follow the measurement is the failure this design can have, and
+			// neither number says it alone.
+			late, measured := buffer.delay.lateness(buffer.profile.Percentile)
+			lateness := "  --"
+			if measured {
+				lateness = fmt.Sprintf("%3dms", late.Milliseconds())
+			}
+
+			// scaled is shorter/longer frames: this tone never goes quiet, so every
+			// correction it needs is one the buffer could not take in silence, and
+			// before stretch.go every one of them was an audible seam.
+			line += fmt.Sprintf("%s held=%2d depth=%2d (%2dms) p%.1f=%s filling=%-5v loss=%d%% scaled=%d/%d  ",
+				id[len(id)-4:], buffer.held, buffer.depth, buffer.depth*frameMillis,
+				float64(buffer.profile.Percentile)/10, lateness, buffer.filling, buffer.lossPercent,
+				l.compressed, l.expanded)
 			buffer.mu.Unlock()
 		}
 		listenerCall.mu.Unlock()

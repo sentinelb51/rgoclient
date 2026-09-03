@@ -105,19 +105,14 @@ jobs:
             # console from opening behind the window. Passing it anywhere else
             # is a link error, not a no-op.
             ldflags: -H windowsgui
-            # A bare exe is worth zipping into the artifact; the tarballs below
-            # are already compressed, so a second pass only costs CPU.
-            compression: 6
           - os: ubuntu-latest
             target: linux-amd64
             binary: RGOClient
             ldflags: ""
-            compression: 0
           - os: macos-latest
             target: macos-arm64
             binary: RGOClient
             ldflags: ""
-            compression: 0
 
     steps:
       - name: Checkout
@@ -148,19 +143,31 @@ jobs:
           CGO_ENABLED: 1
         run: go test ./...
 
+      # -s -w drop the symbol table and DWARF: a quarter of the binary, and
+      # everything a debugger would attach with. A panic keeps its function names
+      # and line numbers either way — those come from the pclntab, which the
+      # runtime itself walks and neither flag touches.
       - name: Build
         shell: bash
         env:
           CGO_ENABLED: 1
         run: >
           go build
-          -ldflags "${{ matrix.ldflags }} -X main.version=${{ needs.version.outputs.version }} -X main.build=${{ github.run_number }}"
+          -ldflags "-s -w ${{ matrix.ldflags }} -X main.version=${{ needs.version.outputs.version }} -X main.build=${{ github.run_number }}"
           -o dist/${{ matrix.binary }} ./cmd/rgoclient
 
-      - name: Name the Windows asset
+      # A release asset is served as-is, so a bare exe would be the one download
+      # arriving uncompressed — deflate takes ~45% off a Go binary. The exe inside
+      # keeps its plain name, the way the tarballs' binary does. It buys nothing
+      # against SmartScreen, which Explorer arms anyway by propagating the mark of
+      # the web onto what it extracts; what it does avoid is the download-time
+      # block a browser puts in front of an unsigned exe and not in front of a zip.
+      - name: Archive the Windows asset
         if: runner.os == 'Windows'
-        shell: bash
-        run: mv dist/RGOClient.exe "dist/RGOClient-${{ matrix.target }}.exe"
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/RGOClient.exe -DestinationPath "dist/RGOClient-${{ matrix.target }}.zip"
+          Remove-Item dist/RGOClient.exe
 
       # Linux gets the desktop entry, the icon and the installer beside the
       # binary — nothing is packaged or signed, so this is the honest middle
@@ -190,12 +197,14 @@ jobs:
           mv dist/* stage/
           tar -czf "dist/RGOClient-${{ matrix.target }}.tar.gz" -C stage .
 
+      # Every asset is an archive by the time it gets here, so the zip an artifact
+      # is wrapped in only costs CPU: store it.
       - name: Upload artifact
         uses: actions/upload-artifact@v7
         with:
           name: RGOClient-${{ matrix.target }}
           path: dist/*
-          compression-level: ${{ matrix.compression }}
+          compression-level: 0
           if-no-files-found: error
 
   publish:

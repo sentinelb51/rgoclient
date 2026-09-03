@@ -111,13 +111,15 @@ jobs:
           CGO_ENABLED: 1
         run: go test ./...
 
+      # Linked exactly as release.yml links it, -s -w included: what differs
+      # between a CI build and a release should be the version stamp alone.
       - name: Build
         shell: bash
         env:
           CGO_ENABLED: 1
         run: >
           go build
-          -ldflags "${{ matrix.ldflags }} -X main.version=${{ needs.version.outputs.version }} -X main.build=${{ github.run_number }}"
+          -ldflags "-s -w ${{ matrix.ldflags }} -X main.version=${{ needs.version.outputs.version }} -X main.build=${{ github.run_number }}"
           -o dist/${{ matrix.binary }} ./cmd/rgoclient
 
       - name: Upload artifact

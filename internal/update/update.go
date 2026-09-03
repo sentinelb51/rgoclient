@@ -156,7 +156,7 @@ func (r Release) AssetFor(goos, goarch string) (Asset, bool) {
 		return Asset{}, false
 	}
 
-	// The extension is the platform's rather than the target's — an exe on Windows,
+	// The extension is the platform's rather than the target's — a zip on Windows,
 	// a tarball elsewhere — so the match ends at the separator before it.
 	name := assetPrefix + t.token + "."
 	for _, asset := range r.Assets {

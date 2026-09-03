@@ -26,27 +26,68 @@ type Processor interface {
 /* High-pass */
 
 // highPass removes what is below speech: mains hum, desk knocks, the rumble a
-// laptop fan puts into a built-in microphone. It is a one-pole filter at ~90 Hz,
-// which is under the lowest voice fundamental and costs two multiplies a sample.
+// laptop fan puts into a built-in microphone. A fourth-order Butterworth at
+// ~90 Hz, as two biquads — 24 dB an octave, so 50 Hz mains is ~21 dB down and
+// 60 Hz ~16, where the one-pole this replaced managed 5 and 6. The difference
+// is the whole of what a listener who has turned this microphone up by 20 dB
+// hears of its hum. Ten multiplies a sample.
 //
 // It runs before the gate rather than after: rumble is loud enough to hold a
 // gate open on a frame with no speech in it at all.
 type highPass struct {
-	alpha           float32
-	lastIn, lastOut float32
+	stages [2]biquad
 
 	// bypass passes every frame through untouched, so the setting can move
 	// mid-call without the chain being rebuilt under a Read.
 	bypass bool
 }
 
-func newHighPass(cutoff float64) *highPass {
-	// Standard one-pole difference equation. rc/(rc+dt) is the pole; at 90 Hz and
-	// 48 kHz it lands near 0.988.
-	rc := 1 / (2 * math.Pi * cutoff)
-	dt := 1 / float64(sampleRate)
+// biquad is one second-order section, transposed direct form II. The state is
+// float64: at 90 Hz against 48 kHz the poles sit close enough to the unit
+// circle that float32 recursion leaves a DC residue the filter exists to
+// remove.
+type biquad struct {
+	b0, b1, b2, a1, a2 float64
+	z1, z2             float64
+}
 
-	return &highPass{alpha: float32(rc / (rc + dt))}
+// highPassSection is the RBJ cookbook high-pass at cutoff with the given Q.
+func highPassSection(cutoff, q float64) biquad {
+	w := 2 * math.Pi * cutoff / sampleRate
+	cosW, sinW := math.Cos(w), math.Sin(w)
+	alpha := sinW / (2 * q)
+	a0 := 1 + alpha
+
+	return biquad{
+		b0: (1 + cosW) / 2 / a0,
+		b1: -(1 + cosW) / a0,
+		b2: (1 + cosW) / 2 / a0,
+		a1: -2 * cosW / a0,
+		a2: (1 - alpha) / a0,
+	}
+}
+
+func (q *biquad) process(frame []float32) {
+	z1, z2 := q.z1, q.z2
+	for i, sample := range frame {
+		in := float64(sample)
+		out := q.b0*in + z1
+		z1 = q.b1*in - q.a1*out + z2
+		z2 = q.b2*in - q.a2*out
+		frame[i] = float32(out)
+	}
+	q.z1, q.z2 = z1, z2
+}
+
+// newHighPass builds the filter at cutoff. A fourth-order Butterworth is two
+// sections at a fixed pair of Qs, 1/(2cos(π/8)) and 1/(2cos(3π/8)).
+func newHighPass(cutoff float64) *highPass {
+	h := &highPass{}
+	for i, q := range [2]float64{0.5412, 1.3066} {
+		h.stages[i] = highPassSection(cutoff, q)
+	}
+
+	return h
 }
 
 // SetBypass turns the filter into a pass-through. Read applies it, like every
@@ -55,7 +96,9 @@ func newHighPass(cutoff float64) *highPass {
 // frame it last saw.
 func (h *highPass) SetBypass(bypass bool) {
 	if bypass && !h.bypass {
-		h.lastIn, h.lastOut = 0, 0
+		for i := range h.stages {
+			h.stages[i].z1, h.stages[i].z2 = 0, 0
+		}
 	}
 	h.bypass = bypass
 }
@@ -65,10 +108,8 @@ func (h *highPass) Process(frame []float32) bool {
 		return true
 	}
 
-	for i, in := range frame {
-		out := h.alpha * (h.lastOut + in - h.lastIn)
-		h.lastIn, h.lastOut = in, out
-		frame[i] = out
+	for i := range h.stages {
+		h.stages[i].process(frame)
 	}
 
 	return true
@@ -76,7 +117,23 @@ func (h *highPass) Process(frame []float32) bool {
 
 /* Noise suppression */
 
-// noiseSuppressor rewrites a frame with RNNoise, which is what removes noise
+// NoiseModel is which network the noise suppressor runs.
+type NoiseModel int
+
+const (
+	// NoiseRNNoise is Xiph's RNNoise: the whole band, 10 ms of delay.
+	NoiseRNNoise NoiseModel = iota
+
+	// NoiseGTCRN is GTCRN: deeper suppression, about 30 ms of delay. See
+	// gtcrn.go for where the delay comes from and how the band above the
+	// model's 8 kHz comes back.
+	NoiseGTCRN
+
+	// noiseNone is what ran last frame while nothing did.
+	noiseNone NoiseModel = -1
+)
+
+// noiseSuppressor rewrites a frame with RNNoise or GTCRN, which is what removes noise
 // *inside* speech — hiss, fans, hum, keyboard — where the gate can only silence
 // the frames between words. It sits between the high-pass and the gate: the
 // gate's RMS then measures the cleaned signal, so a fan under the threshold
@@ -89,6 +146,13 @@ func (h *highPass) Process(frame []float32) bool {
 // gate may *veto* opening on it (never open by it), which keeps one decider.
 type noiseSuppressor struct {
 	enabled bool
+	model   NoiseModel
+
+	// ran is the model that rewrote the last frame, noiseNone where none did.
+	// A switch, or a return from disabled, is what it detects: GTCRN's queues
+	// then hold audio that was never played, which must be dropped rather than
+	// played now. The floor is re-told to a model on the same signal.
+	ran NoiseModel
 
 	// floor is what the strength dial arrives as: a floor under the model's band
 	// gains, 0 full suppression, 1 passthrough. applied is what the denoiser was
@@ -105,7 +169,7 @@ type noiseSuppressor struct {
 	vad atomic.Uint32 // float32 bits
 
 	// dn is created on the first enabled frame rather than at open: its state is
-	// ~19 KB of C memory, and most captures with the setting off never need it.
+	// ~32 KB of C memory, and most captures with the setting off never need it.
 	// The build lands inside one frame — SetEnabled is applied by Read, on the
 	// capture's own goroutine, rather than by whoever moved the setting — so
 	// enabling mid-call costs that one frame a malloc and nothing after it.
@@ -113,19 +177,27 @@ type noiseSuppressor struct {
 	// It is never rebuilt. The state carries the filter's own memory, and a fresh
 	// one restarts the model from silence, which is audible at the seam.
 	dn *rnnoise.Denoiser
+
+	// gt is GTCRN's, on the same terms: built on the first frame it is asked
+	// for, and kept.
+	gt *gtcrnStage
 }
 
 // newNoiseSuppressor starts with no estimate at all, which is what it has until
 // a frame has been through the model: the zero value would read as "certainly
 // not speech" rather than as nothing having been measured.
 func newNoiseSuppressor() *noiseSuppressor {
-	n := &noiseSuppressor{}
+	n := &noiseSuppressor{ran: noiseNone}
 	n.vad.Store(floatBits(-1))
 
 	return n
 }
 
 func (n *noiseSuppressor) SetEnabled(enabled bool) { n.enabled = enabled }
+
+// SetModel picks the network. Applied by Read like every other stage setting,
+// and takes effect on the next frame, mid-call included.
+func (n *noiseSuppressor) SetModel(model NoiseModel) { n.model = model }
 
 // VAD is the model's estimate that the last frame held speech, 0-1, and
 // negative where the model is not running — which is no opinion rather than a
@@ -139,17 +211,30 @@ func (n *noiseSuppressor) SetFloor(floor float32) { n.floor = floor }
 func (n *noiseSuppressor) Process(frame []float32) bool {
 	if !n.enabled {
 		n.vad.Store(floatBits(-1))
+		n.ran = noiseNone
+		return true
+	}
+	if n.model == NoiseGTCRN {
+		n.processGTCRN(frame)
 		return true
 	}
 	if n.dn == nil {
 		n.dn = rnnoise.New()
 	}
-	if n.applied != n.floor {
+	if n.applied != n.floor || n.ran != NoiseRNNoise {
 		n.dn.SetGainFloor(n.floor)
 		n.applied = n.floor
 	}
+	n.ran = NoiseRNNoise
 
 	// The model's frame is 10 ms against the chain's 20, so a frame is two calls.
+	//
+	// The audio that comes back is one 10 ms frame behind what went in — the
+	// model's own lookahead — so the whole enabled chain is delayed by that, and
+	// the estimate stored below *leads* the audio it was taken from by the same
+	// amount. That way round is the useful one: the gate's veto lifts a frame
+	// before the speech reaches it, rather than a frame after, so a word's onset
+	// is not what pays for the check.
 	vad := float32(0)
 	for at := 0; at+rnnoise.FrameSize <= len(frame); at += rnnoise.FrameSize {
 		vad = max(vad, n.dn.Process(frame[at:at+rnnoise.FrameSize]))
@@ -157,6 +242,27 @@ func (n *noiseSuppressor) Process(frame []float32) bool {
 	n.vad.Store(floatBits(vad))
 
 	return true
+}
+
+// processGTCRN is the other model's frame. What it stores as the estimate is
+// the share of the frame's energy the model kept rather than a speech
+// probability — the network has no detector of its own — which reads the same
+// way for the gate's veto: near nothing for a room, most of it for a voice.
+func (n *noiseSuppressor) processGTCRN(frame []float32) {
+
+	if n.gt == nil {
+		n.gt = newGTCRNStage()
+	}
+	if n.ran != NoiseGTCRN {
+		n.gt.resetQueues()
+		n.gt.setFloor(n.floor)
+		n.applied = n.floor
+	} else if n.applied != n.floor {
+		n.gt.setFloor(n.floor)
+		n.applied = n.floor
+	}
+	n.ran = NoiseGTCRN
+	n.vad.Store(floatBits(n.gt.process(frame)))
 }
 
 // SuppressionFloor is the gain floor a suppression strength in decibels asks
@@ -177,7 +283,8 @@ func SuppressionFloor(db, full int) float32 {
 
 /* Preamp */
 
-// preamp is the microphone's own gain, and the meter's tap.
+// preamp is the microphone's own gain, the limiter that gain is held under,
+// and the meter's tap.
 //
 // It sits after the filters and in front of the gate rather than at the end of
 // the chain, which is the whole of what makes a quiet microphone usable: the gate
@@ -185,20 +292,26 @@ func SuppressionFloor(db, full int) float32 {
 // what lets the gate hear a voice it was closing on. RNNoise still sees the level
 // the microphone delivered, which is the level it was trained on.
 //
+// The limiter is what lets the gain go as high as it does: a loud voice at
+// +20 dB is otherwise past full scale on every cycle, and what the far end hears
+// of that is a buzz. Held under the ceiling instead, it is loud.
+//
 // The meter reads from here for the same reason. A bar and a threshold that
 // disagreed about the scale is the thing that makes a sensitivity slider
 // untunable, so there is one measurement and both come off it.
 //
 // gain is written by whoever moves the setting and level read by the UI thread,
 // while Process runs on the capture's own goroutine: both are atomic and neither
-// is read inside the loop it bounds.
+// is read inside the loop it bounds. lim is Process's alone.
 type preamp struct {
 	gain  atomic.Uint32 // float32 bits
 	level atomic.Uint32 // float32 bits
+
+	lim limiter
 }
 
 func newPreamp(gain float32) *preamp {
-	p := &preamp{}
+	p := &preamp{lim: newLimiter(softKnee)}
 	p.SetGain(gain)
 
 	return p
@@ -207,8 +320,8 @@ func newPreamp(gain float32) *preamp {
 // SetGain scales what the gate and the encoder see, 0 to maxGain.
 func (p *preamp) SetGain(gain float32) { p.gain.Store(floatBits(clampGain(gain))) }
 
-// Level is the frame's RMS after the gain, 0-1, which is what the gate's
-// threshold is compared against.
+// Level is the frame's RMS after the gain and the limiter, 0-1, which is what
+// the gate's threshold is compared against.
 func (p *preamp) Level() float32 { return bitsFloat(p.level.Load()) }
 
 // Process answers true: a gain has no opinion about whether a frame is speech.
@@ -219,6 +332,7 @@ func (p *preamp) Process(frame []float32) bool {
 		}
 	}
 
+	p.lim.apply(frame)
 	p.level.Store(floatBits(rms(frame)))
 
 	return true
@@ -244,11 +358,30 @@ const (
 	hysteresis = 6.0
 )
 
-// hangoverFrames is how many frames the gate stays open after the last one that
+// hangoverMillis is how long the gate stays open after the last frame that
 // passed. Speech has gaps inside a word — a stop consonant is silence — and a
-// gate that closes in them clips the word's tail. 25 frames of 10 ms is 250 ms,
-// long enough to carry a sentence over its own pauses.
-const hangoverFrames = 25
+// gate that closes in them clips the word's tail. 250 ms carries a sentence
+// over its own pauses. What it also carries is the room, at whatever the preamp
+// has made of it and whatever a listener then boosts it by, which is why it is
+// not longer: every frame of hangover is a frame of floor the far end hears.
+//
+// In frames because the gate decides per frame, and a frame is 20 ms — the
+// count used to be written down as if it were 10, and the tail was twice this.
+const (
+	hangoverMillis = 250
+	hangoverFrames = hangoverMillis * sampleRate / 1000 / FrameSamples
+)
+
+// How the gate moves between shut and open, in samples. The attack is a few
+// milliseconds, so the consonant that opened it is not sold short — a ramp the
+// length of a frame was fading in the first 20 ms of every word. The release is
+// long enough that what the hangover let through leaves rather than stops: a
+// floor cut off in one sample is a click, and one the far end has boosted is a
+// loud one.
+const (
+	gateAttackSamples  = sampleRate * 5 / 1000
+	gateReleaseSamples = sampleRate * 80 / 1000
+)
 
 // noiseGate decides whether a frame is speech, and silences it when it is not.
 //
@@ -275,8 +408,8 @@ type noiseGate struct {
 	bypass bool
 
 	// fade smooths the edges. A gate that switches to and from zero in one sample
-	// clicks; ramping over the frame costs one multiply a sample and does not.
-	level float32
+	// clicks; ramping costs one multiply a sample while it moves and does not.
+	fade fader
 }
 
 func newNoiseGate(thresholdDB int) *noiseGate {
@@ -356,7 +489,7 @@ func (g *noiseGate) Process(frame []float32) bool {
 	if g.bypass {
 		// Held open rather than merely passed through, so switching back to voice
 		// activity does not start with the gate mid-ramp.
-		g.level, g.remaining = 1, hangoverFrames
+		g.fade.level, g.remaining = 1, hangoverFrames
 
 		return true
 	}
@@ -392,16 +525,47 @@ func (g *noiseGate) Process(frame []float32) bool {
 	if voiced {
 		target = 1
 	}
-
-	// Ramp across the frame rather than jumping at its edge.
-	step := (target - g.level) / float32(len(frame))
-	for i := range frame {
-		g.level += step
-		frame[i] *= g.level
-	}
-	g.level = target
+	g.fade.apply(frame, target)
 
 	return voiced
+}
+
+/* The fade */
+
+// fader is a level that moves towards a target a sample at a time and scales a
+// frame by it on the way: the gate's edges, and push-to-talk's, which switch
+// to and from zero and would click if they did so in one sample.
+type fader struct {
+	level float32
+}
+
+// apply moves the level towards target across the frame — up over
+// gateAttackSamples, down over gateReleaseSamples — and scales each sample by
+// where it stands. A frame already at its target pays no multiply: open is
+// left alone, shut is cleared.
+func (f *fader) apply(frame []float32, target float32) {
+	if f.level == target {
+		if target == 0 {
+			clear(frame)
+		}
+
+		return
+	}
+
+	step := float32(1) / gateAttackSamples
+	if target < f.level {
+		step = -float32(1) / gateReleaseSamples
+	}
+
+	for i := range frame {
+		if f.level != target {
+			f.level += step
+			if (step > 0 && f.level > target) || (step < 0 && f.level < target) {
+				f.level = target
+			}
+		}
+		frame[i] *= f.level
+	}
 }
 
 /* Maths */

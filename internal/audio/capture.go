@@ -73,12 +73,23 @@ type Capture struct {
 	ns       *noiseSuppressor
 	highpass atomic.Bool
 	suppress atomic.Bool
+	model    atomic.Int32 // NoiseModel
 
 	// suppFloor is the suppression strength as the gain floor it maps to
 	// (float32 bits), and vadThreshold the gate's speech veto, 0-100. Both land
 	// here and are applied by Read, like the sensitivity.
 	suppFloor    atomic.Uint32
 	vadThreshold atomic.Int64
+
+	// idle is nobody consuming what Read answers with — a muted call, which still
+	// reads to keep the encoder's cadence and throws every frame away. It holds
+	// the suppressor off for as long as it stands, that stage being 97 % of what
+	// the chain costs and the only one whose output is worth nothing unheard.
+	//
+	// The model is held, not dropped: Process skips while disabled and leaves the
+	// state alone, so resuming is the same room it was already tracking rather
+	// than a cold start. Applied by Read, like the sensitivity.
+	idle atomic.Bool
 
 	// frameTimer paces the silent-device fallback in Read. One reused timer
 	// rather than a time.After per wait: Read waits once or twice every frame,
@@ -97,9 +108,9 @@ type Capture struct {
 	push     atomic.Bool
 	transmit atomic.Bool
 
-	// ramp is the push gate's own fade, for the reason the noise gate has one: a
-	// signal switched to and from zero in one sample clicks.
-	ramp float32
+	// push's own fade, for the reason the noise gate has one: a signal switched
+	// to and from zero in one sample clicks.
+	pushFade fader
 
 	// echo is where Read additionally writes the frame it has just answered with,
 	// for the settings page's microphone test. Nil is off, which is what every
@@ -139,11 +150,14 @@ type InputConfig struct {
 	// open. The gate runs either way, that being what the sensitivity slider means.
 	HighPass bool
 
-	// NoiseSuppression runs RNNoise between the filter and the gate, which is
-	// what removes noise *inside* the voice range while somebody is talking —
-	// hiss, fans, keyboard — where the gate can only silence the frames between
-	// words.
+	// NoiseSuppression runs the noise model between the filter and the gate,
+	// which is what removes noise *inside* the voice range while somebody is
+	// talking — hiss, fans, keyboard — where the gate can only silence the
+	// frames between words.
 	NoiseSuppression bool
+
+	// NoiseModel is which network that is. The zero value is RNNoise.
+	NoiseModel NoiseModel
 
 	// SuppressionFloor caps how deep that suppression cuts, as the linear gain
 	// floor audio.SuppressionFloor maps a strength in decibels to. The zero
@@ -161,9 +175,9 @@ type InputConfig struct {
 }
 
 // FrameSamples is how many samples one frame carries: 20 ms at 48 kHz mono,
-// which is the Opus frame every caller here encodes. periodSamples is the device
-// period underneath it, 10 ms, so a frame is two periods and the gate makes its
-// decision twice as often as a packet is sent.
+// which is the Opus frame every caller here encodes, and the frame the whole
+// chain — the gate's decision included — runs at. periodSamples is the device
+// period underneath it, 10 ms, so Read waits for two.
 const (
 	FrameSamples  = sampleRate * 20 / 1000
 	periodSamples = sampleRate * 10 / 1000
@@ -202,6 +216,7 @@ func OpenInput(id string, cfg InputConfig) (*Capture, error) {
 	c.push.Store(cfg.PushToTalk)
 	c.highpass.Store(cfg.HighPass)
 	c.suppress.Store(cfg.NoiseSuppression)
+	c.model.Store(int32(cfg.NoiseModel))
 	c.suppFloor.Store(floatBits(cfg.SuppressionFloor))
 	c.vadThreshold.Store(int64(cfg.VADThreshold))
 	c.soft.Store(cfg.SoftClip)
@@ -497,10 +512,15 @@ func (c *Capture) Read(pcm []int16) (int, error) {
 	}
 
 	push := c.push.Load()
-	suppress := c.suppress.Load()
+
+	// Idle folds into the setting rather than standing beside it: a disabled
+	// suppressor already answers "no opinion" and leaves its state untouched,
+	// which is exactly what an unheard frame wants.
+	suppress := c.suppress.Load() && !c.idle.Load()
 
 	c.hp.SetBypass(!c.highpass.Load())
 	c.ns.SetEnabled(suppress)
+	c.ns.SetModel(NoiseModel(c.model.Load()))
 	c.ns.SetFloor(bitsFloat(c.suppFloor.Load()))
 	c.gate.SetThreshold(int(c.threshold.Load()))
 	c.gate.SetBypass(push)
@@ -573,13 +593,7 @@ func (c *Capture) applyPush(frame []float32) bool {
 	if held {
 		target = 1
 	}
-
-	step := (target - c.ramp) / float32(len(frame))
-	for i := range frame {
-		c.ramp += step
-		frame[i] *= c.ramp
-	}
-	c.ramp = target
+	c.pushFade.apply(frame, target)
 
 	return held
 }
@@ -631,9 +645,13 @@ func (c *Capture) SetGateThreshold(db int) { c.threshold.Store(int64(db)) }
 // Read, like the sensitivity.
 func (c *Capture) SetHighPass(on bool) { c.highpass.Store(on) }
 
-// SetNoiseSuppression turns RNNoise on or off, mid-call included. Applied by
-// Read, like the sensitivity.
+// SetNoiseSuppression turns the noise model on or off, mid-call included.
+// Applied by Read, like the sensitivity.
 func (c *Capture) SetNoiseSuppression(on bool) { c.suppress.Store(on) }
+
+// SetNoiseModel picks which network that is, mid-call included. Applied by
+// Read, like the sensitivity.
+func (c *Capture) SetNoiseModel(model NoiseModel) { c.model.Store(int32(model)) }
 
 // SetSuppressionFloor caps how deep the suppression cuts — the linear floor
 // SuppressionFloor maps a strength in decibels to. Applied by Read.
@@ -642,6 +660,15 @@ func (c *Capture) SetSuppressionFloor(floor float32) { c.suppFloor.Store(floatBi
 // SetVADThreshold moves the gate's speech veto, 0-100, 0 off. Applied by Read,
 // and only while noise suppression runs — the model is what computes the answer.
 func (c *Capture) SetVADThreshold(percent int) { c.vadThreshold.Store(int64(percent)) }
+
+// SetIdle says whether anything is consuming what Read answers with. Read still
+// runs — it is the caller's clock, and a muted publisher is still paced by it —
+// but the suppressor is held off while nobody can hear the result.
+//
+// Only the caller knows: a muted call is still metered by the settings page,
+// which reads the same capture and wants the chain it is tuning. Applied by
+// Read, like the sensitivity.
+func (c *Capture) SetIdle(idle bool) { c.idle.Store(idle) }
 
 // Close stops the microphone. Safe from any goroutine, safe to call twice, and
 // safe while a Read is waiting — that Read answers ErrCaptureClosed.

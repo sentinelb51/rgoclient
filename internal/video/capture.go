@@ -24,6 +24,7 @@ package video
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -83,6 +84,7 @@ type CaptureConfig struct {
 	Codec   CaptureCodec
 	Speed   CaptureSpeed
 	Latency CaptureLatency
+	Rate    CaptureRate
 }
 
 // CaptureCodec is which codec family a share may be encoded in. Auto takes
@@ -131,6 +133,21 @@ const (
 	CaptureBuffered
 )
 
+// CaptureRate is how the bitrate ceiling is spent. Variable spends bits on
+// what moves and nearly nothing on a still screen, the ceiling binding only
+// while the picture is busy. Constant sends the ceiling at all times, padding
+// what does not need it — which wastes upload and is what a receiver's
+// bandwidth estimator, a fixed uplink or an ingest expecting a steady stream
+// is easiest on: an estimate probed continuously never has to be re-found when
+// motion starts, and a burst out of an idle stream is what overshoots a pipe
+// nothing has been measuring.
+type CaptureRate int
+
+const (
+	CaptureVariable CaptureRate = iota
+	CaptureConstant
+)
+
 /* The encoder */
 
 // shareEncoder is one way of turning frames into a share's bytes: the -c:v
@@ -152,7 +169,9 @@ func (e shareEncoder) av1() bool { return strings.HasPrefix(e.name, "av1_") }
 
 // args is the encoder's own flags at one effort and latency. Rate control is
 // not among them — that is rateControl's, so the two halves of a bitrate
-// decision are not spelled in different places.
+// decision are not spelled in different places. The one exception is x264's
+// constant-rate flag, which has to travel with the tune it shares a parameter
+// string with; the rate is a parameter here for that alone.
 //
 // Every H.264 set holds to the same contract: baseline-family profile
 // (WebRTC's common ground, and no B-frames by definition), 4:2:0, and **one
@@ -164,7 +183,7 @@ func (e shareEncoder) av1() bool { return strings.HasPrefix(e.name, "av1_") }
 // profile and no slicing clause: 8-bit 4:2:0 *is* profile 0, the only one
 // WebRTC speaks, and IVF frames the stream one temporal unit per sample, so
 // pacing cannot split.
-func (e shareEncoder) args(speed CaptureSpeed, latency CaptureLatency, fps int) []string {
+func (e shareEncoder) args(speed CaptureSpeed, latency CaptureLatency, rate CaptureRate, fps int) []string {
 	pick := func(quality, balanced, fast string) string {
 		switch speed {
 		case CaptureBalanced:
@@ -242,11 +261,27 @@ func (e shareEncoder) args(speed CaptureSpeed, latency CaptureLatency, fps int) 
 	args := []string{"-c:v", "libx264", "-pix_fmt", "yuv420p",
 		"-preset", pick("veryfast", "superfast", "ultrafast"),
 		"-profile:v", "baseline"}
-	if buffered {
-		return args // the preset's own rc-lookahead and mb-tree come back
+	if !buffered {
+		args = append(args, "-tune", "zerolatency") // the preset's own rc-lookahead and mb-tree go
 	}
 
-	return append(args, "-tune", "zerolatency", "-x264-params", "sliced-threads=0")
+	// ffmpeg's -x264-params *replaces* rather than merges, so a second flag
+	// would drop the first: the two things that set one are joined here.
+	// sliced-threads=0 unwinds the zerolatency tune's slicing (see the header),
+	// and nal-hrd=cbr is what makes x264 pad — it is the one encoder here that
+	// does not until asked, which is why capped VBR was free on it.
+	var params []string
+	if !buffered {
+		params = append(params, "sliced-threads=0")
+	}
+	if rate == CaptureConstant {
+		params = append(params, "nal-hrd=cbr")
+	}
+	if len(params) > 0 {
+		args = append(args, "-x264-params", strings.Join(params, ":"))
+	}
+
+	return args
 }
 
 // lookaheadSeconds is how far ahead the buffered mode may read, as a fraction
@@ -266,42 +301,69 @@ func lookahead(fps int) string {
 }
 
 // rateControl is everything about *how many bits*: the mode, the target, the
-// ceiling and the buffer. It is capped VBR on every encoder that has one, and
-// that is the whole point — a screen is idle most of the time, and CBR pays
-// the target rate for a still picture, padding the difference with filler.
-// Measured on this machine at 1080p30 with a 6.2 Mbps target: 5.97 Mbps for a
-// static screen under CBR against 0.05 under VBR, and an identical 6.35 for
-// content that genuinely needs it. The ceiling is what a slow uplink is
-// protected by; the average is what an idle one actually spends.
+// ceiling and the buffer. Capped VBR is the default and is the largest single
+// saving in the send half — a screen is idle most of the time, and CBR pays the
+// target rate for a still picture, padding the difference with filler. Measured
+// on this machine at 1080p30 with a 6.2 Mbps target: 5.97 Mbps for a static
+// screen under CBR against 0.05 under VBR, and an identical 6.35 for content
+// that genuinely needs it. The ceiling is what a slow uplink is protected by;
+// the average is what an idle one actually spends.
 //
-// libx264 is already this without being asked — it only pads when told to
-// (nal-hrd=cbr), which nothing here says.
-func (e shareEncoder) rateControl(bitrate int, latency CaptureLatency) []string {
+// CaptureConstant buys that back deliberately: see CaptureRate for what padding
+// is worth paying for. Under it the buffer shrinks to a second, the window a
+// ceiling that never moves is enforced over being the point.
+func (e shareEncoder) rateControl(bitrate int, latency CaptureLatency, mode CaptureRate) []string {
 	rate := fmt.Sprint(bitrate)
+	constant := mode == CaptureConstant
+
 	buf := fmt.Sprint(2 * bitrate)
+	if constant {
+		buf = rate
+	}
+
+	// Where an encoder reads the target as well as the ceiling, VBR asks for
+	// less than the cap — the gap is the room it spends only on motion.
+	target := rate
+	if !constant {
+		target = fmt.Sprint(bitrate * 4 / 5)
+	}
 
 	switch e.name {
 	case "av1_nvenc", "h264_nvenc":
-		return []string{"-rc", "vbr", "-b:v", rate, "-maxrate", rate, "-bufsize", buf}
-	case "av1_amf", "h264_amf":
-		// Latency-constrained where the share is meant to be live, peak
-		// where it is allowed to read ahead.
-		mode := "vbr_latency"
-		if latency == CaptureBuffered {
-			mode = "vbr_peak"
+		rc := "vbr"
+		if constant {
+			rc = "cbr"
 		}
 
-		return []string{"-rc", mode, "-b:v", rate, "-maxrate", rate, "-bufsize", buf}
+		return []string{"-rc", rc, "-b:v", rate, "-maxrate", rate, "-bufsize", buf}
+	case "av1_amf", "h264_amf":
+		// Latency-constrained where the share is meant to be live, peak
+		// where it is allowed to read ahead — and neither where the rate is
+		// not allowed to move at all.
+		rc := "vbr_latency"
+		switch {
+		case constant:
+			rc = "cbr"
+		case latency == CaptureBuffered:
+			rc = "vbr_peak"
+		}
+
+		return []string{"-rc", rc, "-b:v", rate, "-maxrate", rate, "-bufsize", buf}
 	case "av1_qsv", "h264_qsv":
 		// QSV has no -rc: it reads the *inequality*, taking CBR where the
-		// target and the ceiling agree and VBR where they do not. So the
-		// target is set below the ceiling rather than at it.
-		return []string{"-b:v", fmt.Sprint(bitrate * 4 / 5), "-maxrate", rate, "-bufsize", buf}
+		// target and the ceiling agree and VBR where they do not.
+		return []string{"-b:v", target, "-maxrate", rate, "-bufsize", buf}
 	case "av1_vaapi", "h264_vaapi":
-		return []string{"-rc_mode", "VBR",
-			"-b:v", fmt.Sprint(bitrate * 4 / 5), "-maxrate", rate, "-bufsize", buf}
+		rc := "VBR"
+		if constant {
+			rc = "CBR" // the driver wants the two equal, which target already is
+		}
+
+		return []string{"-rc_mode", rc, "-b:v", target, "-maxrate", rate, "-bufsize", buf}
 	}
 
+	// libx264 pads only under nal-hrd=cbr, which args carries — it shares a
+	// parameter string with the latency tune and ffmpeg does not merge two.
 	return []string{"-b:v", rate, "-maxrate", rate, "-bufsize", buf}
 }
 
@@ -440,13 +502,14 @@ func encoderWorks(tool string, enc shareEncoder) bool {
 	if enc.tail != "" {
 		args = append(args, "-vf", strings.TrimPrefix(enc.tail, ","))
 	}
-	// Probed at the lowest latency, which is the default; the buffered
-	// flags are older than the low-latency ones on every encoder here, so a
-	// machine that passes covers both. The rate control goes in too — a
-	// driver that refuses the VBR mode this would run at has to fail here,
-	// not at the first frame of a live track.
-	args = append(args, enc.args(CaptureBalanced, CaptureLowestLatency, 30)...)
-	args = append(args, enc.rateControl(1_000_000, CaptureLowestLatency)...)
+	// Probed at the lowest latency and the variable rate, which are the
+	// defaults; the buffered flags are older than the low-latency ones on
+	// every encoder here, and CBR older than every VBR spelling, so a machine
+	// that passes covers all four. The rate control goes in too — a driver
+	// that refuses the VBR mode this would run at has to fail here, not at
+	// the first frame of a live track.
+	args = append(args, enc.args(CaptureBalanced, CaptureLowestLatency, CaptureVariable, 30)...)
+	args = append(args, enc.rateControl(1_000_000, CaptureLowestLatency, CaptureVariable)...)
 	args = append(args, "-bf", "0", "-frames:v", "3", "-f", "null", "-")
 
 	cmd := exec.CommandContext(ctx, tool, args...)
@@ -497,18 +560,22 @@ func (t Tools) CaptureShare(cfg CaptureConfig) (*Stream, error) {
 	}
 	keyint = min(max(keyint, 1), 10)
 
-	// The fps filter makes the stream honestly constant-rate, which is the
-	// clock the publisher paces the track by — Annex-B carries no timing at
-	// all, and the IVF timestamps are overridden the same way. The pad half
-	// of the scale keeps the declared size true through a window resizing
-	// mid-share.
-	chain := fmt.Sprintf("fps=%d,%s%s", cfg.FPS, liveScaleFilter(cfg.Width, cfg.Height), enc.tail)
+	// The pad half of the scale keeps the declared size true through a
+	// window resizing mid-share. No fps filter: the stream is held to a
+	// constant rate by the output's own sync instead (below), which fills
+	// and drops on the frame in hand where the filter waits for the one after
+	// it to choose between them — a whole frame of latency on every share,
+	// two hundred milliseconds at 5 fps.
+	chain := liveScaleFilter(cfg.Width, cfg.Height) + enc.tail
 
-	// The container follows the codec: lksdk eats AV1 only from IVF and
-	// H.264 only as bare Annex-B.
-	format := "h264"
+	// The container follows the codec, and both carry lengths: AV1 in IVF,
+	// H.264 in FLV — never bare Annex-B, which would leave the tee to find
+	// the end of each frame at the start of the next. FLV stripped of the
+	// metadata tag and the sizes it would seek back to write, the output
+	// being a pipe.
+	format, container := "flv", []string{"-flvflags", "no_metadata+no_duration_filesize+no_sequence_end"}
 	if enc.av1() {
-		format = "ivf"
+		format, container = "ivf", nil
 	}
 
 	args := []string{"-v", "error", "-nostdin"}
@@ -522,8 +589,16 @@ func (t Tools) CaptureShare(cfg CaptureConfig) (*Stream, error) {
 		// whole of it and ffmpeg maps its one output on its own.
 		args = append(args, "-filter_complex", g.source+","+chain)
 	}
-	args = append(args, enc.args(cfg.Speed, cfg.Latency, cfg.FPS)...)
-	args = append(args, enc.rateControl(bitrate, cfg.Latency)...)
+	// Constant rate at the output: a grabber answers only when the screen
+	// changes (Graphics Capture idles at about three frames a second on a
+	// still window), and the publisher stamps every frame with the asked-for
+	// step, so the stream has to be filled to that rate for the timestamps
+	// to be honest and the keyframe interval, counted in frames, to be the
+	// seconds it was set from. Under capped VBR a repeated frame costs
+	// almost nothing to send.
+	args = append(args, "-fps_mode", "cfr", "-r", fmt.Sprint(cfg.FPS))
+	args = append(args, enc.args(cfg.Speed, cfg.Latency, cfg.Rate, cfg.FPS)...)
+	args = append(args, enc.rateControl(bitrate, cfg.Latency, cfg.Rate)...)
 	args = append(args,
 		// No B-frames, doubly: baseline forbids them, and each frame must be
 		// one sample in publish order.
@@ -534,6 +609,7 @@ func (t Tools) CaptureShare(cfg CaptureConfig) (*Stream, error) {
 	if !enc.hardware() {
 		args = append(args, "-threads", captureThreads(cfg.Width, cfg.Height))
 	}
+	args = append(args, container...)
 	args = append(args, "-f", format, "pipe:1")
 
 	return captureLaunch(t.FFmpeg, args)
@@ -594,17 +670,19 @@ func captureLaunch(tool string, args []string) (*Stream, error) {
 
 /* Teeing the stream */
 
-// ShareTee splits a capture child's stream in two: every byte still reaches
-// the reader publishing it, and a copy of each whole frame reaches whatever
-// is watching this end locally. It is the only place a share's bytes exist
-// twice — a LiveKit room never sends a publisher their own track back — so it
-// is what a self-preview is made of. It parses whichever of the two streams a
-// share here can be: H.264 Annex-B by scanning for start codes, AV1's IVF by
-// hopping the length-framed sections.
+// ShareTee frames a capture child's stream for its two consumers. The
+// primary is the publisher: ReadFrame answers one whole frame at a time — an
+// H.264 access unit in Annex-B, or an AV1 temporal unit with the IVF framing
+// stripped, which are exactly the two sample shapes lksdk packetises — and
+// blocks only on the child itself, so the pipe is drained at the rate frames
+// are produced and nothing between the screen and the room can hold a
+// backlog. The secondary is the local preview, the only place a share's
+// bytes exist twice — a LiveKit room never sends a publisher their own track
+// back — which is offered a copy of each frame as it completes.
 //
-// The copy is lossy on purpose, and that is the whole design. The
-// publisher's Read must never wait on the preview: a decoder stalled behind
-// a blocked UI thread — a window being dragged is enough on Windows — would
+// The preview's copy is lossy on purpose, and that is the whole design. The
+// publisher must never wait on the preview: a decoder stalled behind a
+// blocked UI thread — a window being dragged is enough on Windows — would
 // otherwise stall the share everybody else is watching. So a frame the
 // preview is too far behind to take is dropped rather than queued. Dropping
 // costs nothing structural either way: an access unit opens with its own
@@ -613,30 +691,32 @@ func captureLaunch(tool string, args []string) (*Stream, error) {
 type ShareTee struct {
 	src io.ReadCloser
 
-	// The Annex-B side of the parser. It runs whether or not anybody is
-	// watching — Annex-B has no lengths to hop by, so framing is a scan for
-	// start codes — but bytes are only ever *copied* for an attached
-	// preview, or to keep the latest parameter sets for one that attaches
-	// later.
-	zeros   int    // run of 0x00 bytes ending what has been seen so far
-	typed   bool   // a start code just closed; the next byte is a NAL header
-	curType int    // the NAL being walked, 0 before the first
-	copying bool   // that NAL's bytes are being kept in nal
-	nal     []byte // the NAL being assembled, a canonical start code first
-	inAU    bool   // between an AU's first NAL and its slice
-	hasIDR  bool   // the AU carries an IDR slice
+	// What ReadFrame works from: the chunk buffer the child is read into,
+	// frames completed and not yet taken, and the error held back until the
+	// queue is empty — bytes already framed are owed before the EOF behind
+	// them.
+	rbuf    []byte
+	queue   [][]byte
+	readErr error
 
-	// The IVF side (AV1): which of the three sections is being walked and
-	// what it is still owed. head assembles the one file header.
-	ivf       bool
+	// Both containers are walked section by section — which one is being
+	// walked and what it is still owed. head assembles the one file header,
+	// fh the current frame's (IVF) or tag's (FLV) header.
+	ivf       bool // AV1 in IVF; H.264 in FLV otherwise
 	phase     int
 	head      []byte
-	fh        [12]byte // the current frame's 12-byte header
-	fhn       int      // how much of it has arrived
-	remaining int      // body bytes still owed to the current frame
+	fh        [12]byte
+	fhn       int // how much of fh has arrived
+	remaining int // body bytes still owed to the current frame or tag
 
-	unit   []byte // the frame being assembled for the preview
-	keep   bool   // this frame is being copied, decided as it opens
+	// The FLV side (H.264): the tag being assembled and what its NAL units
+	// are prefixed with, which the sequence header says.
+	tagType byte
+	tag     []byte
+	nalLen  int
+	hasIDR  bool // the access unit in hand carries an IDR slice
+
+	unit   []byte // the frame being assembled
 	broken bool   // not the stream this was promised; stop parsing
 
 	// mu guards the attachment, which is claimed from the worker launching a
@@ -647,6 +727,7 @@ type ShareTee struct {
 	pps        []byte // attaches after the stream's own copies went past
 	fileHeader []byte // IVF's equivalent: the 32-byte header, replayed likewise
 	sentHeader bool   // this attachment has been given the file header
+	previewPTS uint64 // H.264: the frame count, stamped on the preview's IVF frames
 	frames     chan []byte
 	started    bool // whether this attachment has been given a frame to start on
 	closed     bool // the tee is finished; a late attachment gets nothing
@@ -658,28 +739,92 @@ const (
 	// what it eventually draws is now rather than a second ago.
 	shareTeeQueue = 8
 
-	// shareTeeMaxFrame is a sanity bound on an assembled unit: past it the
-	// bytes are not the Annex-B this side wrote, and the parser stops rather
-	// than growing without limit on a misread.
+	// shareTeeMaxFrame is a sanity bound on a frame or tag: past it the
+	// bytes are not the stream this side asked for, and the parser stops
+	// rather than growing without limit on a misread.
 	shareTeeMaxFrame = 16 << 20
+
+	// shareTeeReadChunk is how much of the child's stream one read asks for.
+	shareTeeReadChunk = 64 << 10
 )
 
-// NewShareTee wraps a capture stream — AV1 in IVF where av1, H.264 Annex-B
-// otherwise, which must match what the capture child was started to write.
-// Reading and closing the tee is reading and closing what it wraps.
-func NewShareTee(src io.ReadCloser, av1 bool) *ShareTee {
-	return &ShareTee{src: src, ivf: av1}
-}
+// errShareStream is a capture child writing something other than the stream
+// the tee was promised — the parse cannot continue, so neither can the share.
+var errShareStream = errors.New("video: the capture stream is not the format it was started to write")
 
-// Read hands the publisher its bytes, keeping a copy of each whole access
-// unit for the preview.
-func (t *ShareTee) Read(p []byte) (int, error) {
-	n, err := t.src.Read(p)
-	if n > 0 && !t.broken {
-		t.consume(p[:n])
+// NewShareTee wraps a capture stream — AV1 in IVF where av1, H.264 in FLV
+// otherwise, which must match what the capture child was started to write.
+// width and height are the encode box, which an H.264 preview's file header
+// declares (AV1's is the encoder's own, replayed). Closing the tee is closing
+// what it wraps.
+func NewShareTee(src io.ReadCloser, av1 bool, width, height int) *ShareTee {
+	t := &ShareTee{src: src, ivf: av1}
+	if !av1 {
+		t.fileHeader = newIVFFileHeader("H264", width, height)
 	}
 
-	return n, err
+	return t
+}
+
+// newIVFFileHeader is IVF's 32-byte file header: the fourcc, the box, and a
+// 1/90000 timebase, the RTP clock the preview's frames are stamped in. A
+// copy of voice.ivfMux.writeHeader by construction — voice imports only
+// domain — so a fix to either must be carried to the other.
+func newIVFFileHeader(fourCC string, width, height int) []byte {
+	h := make([]byte, ivfHeaderLen)
+	copy(h[0:], "DKIF")
+	binary.LittleEndian.PutUint16(h[6:], ivfHeaderLen)
+	copy(h[8:], fourCC)
+	binary.LittleEndian.PutUint16(h[12:], uint16(min(max(width, 0), 0xFFFF)))
+	binary.LittleEndian.PutUint16(h[14:], uint16(min(max(height, 0), 0xFFFF)))
+	binary.LittleEndian.PutUint32(h[16:], 90000)
+	binary.LittleEndian.PutUint32(h[20:], 1)
+
+	return h
+}
+
+// ivfFrame is one IVF frame: the 12-byte header — length, then the pts —
+// ahead of the body. What a preview reads its H.264 as, so the demuxer has
+// the length of every frame and closes it the moment it lands rather than at
+// the next one's start code.
+func ivfFrame(pts uint64, body []byte) []byte {
+	framed := make([]byte, 12, 12+len(body))
+	binary.LittleEndian.PutUint32(framed[0:], uint32(len(body)))
+	binary.LittleEndian.PutUint64(framed[4:], pts)
+
+	return append(framed, body...)
+}
+
+// ReadFrame hands the publisher the next whole frame, blocking on the child
+// while none is complete. One caller — the publisher's write loop owns the
+// parse the way lksdk's reader goroutine used to own Read. The error is the
+// stream ending, or a stream that stopped being the format promised.
+func (t *ShareTee) ReadFrame() ([]byte, error) {
+	for len(t.queue) == 0 {
+		if t.broken {
+			return nil, errShareStream
+		}
+		if t.readErr != nil {
+			return nil, t.readErr
+		}
+		if t.rbuf == nil {
+			t.rbuf = make([]byte, shareTeeReadChunk)
+		}
+		n, err := t.src.Read(t.rbuf)
+		if n > 0 && !t.broken {
+			t.consume(t.rbuf[:n])
+		}
+		if err != nil {
+			t.readErr = err
+		}
+	}
+
+	frame := t.queue[0]
+	n := copy(t.queue, t.queue[1:])
+	t.queue[n] = nil
+	t.queue = t.queue[:n]
+
+	return frame, nil
 }
 
 // Close detaches any preview and kills what the tee wraps. Nothing attaches
@@ -696,12 +841,13 @@ func (t *ShareTee) Close() error {
 }
 
 // Attach starts copying frames to out, what the demuxer needs to enter the
-// stream first: Annex-B replays the latest SPS and PPS — the encoders here
-// repeat them ahead of every keyframe anyway, and a duplicate costs a decoder
-// nothing — and IVF replays the file header, without which the bytes are not
-// a stream at all. One attachment at a time; a second replaces the first. out
-// is closed by Detach, by the stream ending, or by a write failing — never by
-// the caller.
+// stream first: the IVF file header, without which the bytes are not a
+// stream at all — the encoder's own for AV1, one written here for H.264 —
+// and for H.264 the latest SPS and PPS as a frame of their own (the encoders
+// here repeat them ahead of every keyframe anyway, and a duplicate costs a
+// decoder nothing). One attachment at a time; a second replaces the first.
+// out is closed by Detach, by the stream ending, or by a write failing —
+// never by the caller.
 func (t *ShareTee) Attach(out io.WriteCloser) {
 	t.Detach()
 
@@ -714,18 +860,12 @@ func (t *ShareTee) Attach(out io.WriteCloser) {
 	}
 	frames := make(chan []byte, shareTeeQueue)
 	t.frames, t.started = frames, false
-	if t.ivf {
-		t.sentHeader = t.fileHeader != nil
-		if t.sentHeader {
-			frames <- slices.Clone(t.fileHeader)
-		}
-	} else {
-		if t.sps != nil {
-			frames <- slices.Clone(t.sps)
-		}
-		if t.pps != nil {
-			frames <- slices.Clone(t.pps)
-		}
+	t.sentHeader = t.fileHeader != nil
+	if t.sentHeader {
+		frames <- slices.Clone(t.fileHeader)
+	}
+	if !t.ivf && (t.sps != nil || t.pps != nil) {
+		frames <- ivfFrame(t.previewPTS, slices.Concat(t.sps, t.pps))
 	}
 	t.mu.Unlock()
 
@@ -753,129 +893,248 @@ func (t *ShareTee) Detach() {
 	}
 }
 
-// consume walks the bytes that just crossed, assembling frames and emitting
-// them whole. Whether a frame is copied at all is decided once, as it opens,
-// and not revisited: with the preview closed the whole stream is scanned or
-// hopped past and nothing is kept, which is all a share nobody is previewing
-// pays.
+// consume walks the bytes that just crossed, assembling every frame whole:
+// the publisher takes each one through ReadFrame, and the preview is offered
+// a copy as it completes.
 func (t *ShareTee) consume(b []byte) {
 	if t.ivf {
 		t.consumeIVF(b)
 		return
 	}
 
-	t.consumeAnnexB(b)
+	t.consumeFLV(b)
 }
 
 // consumeAnnexB is H.264's walk. Annex-B is NALs behind start codes, an
 // access unit ending at its one slice — the encoder's side of the contract —
 // so a unit is complete when the start code after a slice arrives, which is
-// why the preview runs one frame interval behind the publisher's bytes.
-func (t *ShareTee) consumeAnnexB(b []byte) {
-	for _, c := range b {
-		switch {
-		case c == 0:
-			t.zeros++
-			if t.copying {
-				t.nal = append(t.nal, 0)
+// why both consumers run one frame interval behind the encoder's bytes.
+/* FLV (H.264) */
+
+const (
+	flvFileHeaderLen = 13 // the 9-byte header and the first "previous tag size"
+	flvTagHeaderLen  = 11
+	flvPrevSizeLen   = 4
+
+	flvTagVideo  = 9
+	flvCodecAVC  = 7
+	flvAVCConfig = 0 // the tag body is an AVCDecoderConfigurationRecord
+	flvAVCNALUs  = 1 // the tag body is one access unit, its NAL units length-prefixed
+)
+
+// The sections an FLV stream alternates between after its file header.
+const (
+	flvFileHeader = iota
+	flvTagHeader
+	flvTagBody
+	flvPrevSize
+)
+
+// consumeFLV is H.264's walk, and it is the IVF one again with a tag in
+// place of the 12-byte frame header: the container carries every tag's
+// length, so an access unit is complete the moment its bytes have crossed.
+// Bare Annex-B was here before it, and with no lengths to hop by it could
+// only close a unit at the start code opening the next — a frame of latency
+// on every frame, for both the room and the preview. The muxer converts the
+// encoder's start codes to length prefixes on the way in, and the parameter
+// sets arrive once, in a sequence header tag, rather than ahead of every
+// keyframe; the publisher's frame is the unit back in Annex-B with the sets
+// put in front of each IDR, which is what the packetiser and every decoder
+// expect.
+func (t *ShareTee) consumeFLV(b []byte) {
+	for len(b) > 0 && !t.broken {
+		switch t.phase {
+		case flvFileHeader:
+			n := min(len(b), flvFileHeaderLen-len(t.head))
+			t.head = append(t.head, b[:n]...)
+			b = b[n:]
+			if len(t.head) < flvFileHeaderLen {
+				return
 			}
-		case c == 1 && t.zeros >= 2:
-			t.finishNAL()
-		default:
-			if t.typed {
-				t.beginNAL(c)
-			} else if t.copying {
-				t.nal = append(t.nal, c)
+			if string(t.head[:3]) != "FLV" || t.head[3] != 1 ||
+				binary.BigEndian.Uint32(t.head[5:9]) != 9 {
+				t.breakOff()
+				return
 			}
-			t.zeros = 0
+			t.phase = flvTagHeader
+		case flvTagHeader:
+			n := min(len(b), flvTagHeaderLen-t.fhn)
+			copy(t.fh[t.fhn:], b[:n])
+			t.fhn += n
+			b = b[n:]
+			if t.fhn < flvTagHeaderLen {
+				return
+			}
+			t.tagType = t.fh[0]
+			size := int(t.fh[1])<<16 | int(t.fh[2])<<8 | int(t.fh[3])
+			if size > shareTeeMaxFrame {
+				t.breakOff()
+				return
+			}
+			t.remaining = size
+			t.fhn = 0
+			t.phase = flvTagBody
+			if size == 0 {
+				t.phase = flvPrevSize
+			}
+		case flvTagBody:
+			n := min(len(b), t.remaining)
+			t.tag = append(t.tag, b[:n]...)
+			t.remaining -= n
+			b = b[n:]
+			if t.remaining > 0 {
+				return
+			}
+			if t.tagType == flvTagVideo {
+				t.videoTag(t.tag)
+			}
+			t.tag = t.tag[:0]
+			t.phase = flvPrevSize
+		case flvPrevSize:
+			n := min(len(b), flvPrevSizeLen-t.fhn)
+			t.fhn += n
+			b = b[n:]
+			if t.fhn < flvPrevSizeLen {
+				return
+			}
+			t.fhn = 0
+			t.phase = flvTagHeader
 		}
+	}
+}
 
-		if len(t.nal) > shareTeeMaxFrame || len(t.unit) > shareTeeMaxFrame {
-			t.broken = true
-			t.Detach()
+// videoTag is one video tag: the sequence header, which carries the
+// parameter sets, or one access unit.
+func (t *ShareTee) videoTag(body []byte) {
+	if len(body) < 5 {
+		return
+	}
+	if body[0]&0x0F != flvCodecAVC {
+		t.breakOff()
+		return
+	}
 
+	switch body[1] {
+	case flvAVCConfig:
+		t.readAVCC(body[5:])
+	case flvAVCNALUs:
+		t.readNALUs(body[5:])
+	}
+}
+
+// readAVCC takes the parameter sets out of the decoder configuration record
+// and the width of the length every NAL unit is prefixed with.
+func (t *ShareTee) readAVCC(c []byte) {
+	if len(c) < 7 || c[0] != 1 {
+		t.breakOff()
+		return
+	}
+	t.nalLen = int(c[4]&3) + 1
+
+	var sps, pps []byte
+	i := 6
+	for k, count := 0, int(c[5]&0x1F); k < count && i+2 <= len(c); k++ {
+		l := int(binary.BigEndian.Uint16(c[i:]))
+		i += 2
+		if i+l > len(c) {
+			break
+		}
+		sps = append([]byte{0, 0, 0, 1}, c[i:i+l]...)
+		i += l
+	}
+	if i < len(c) {
+		for k, count := 0, int(c[i]); k < count; k++ {
+			i++
+			if i+2 > len(c) {
+				break
+			}
+			l := int(binary.BigEndian.Uint16(c[i:]))
+			i += 2
+			if i+l > len(c) {
+				break
+			}
+			pps = append([]byte{0, 0, 0, 1}, c[i:i+l]...)
+			i += l - 1
+		}
+	}
+
+	t.storePS(sps, pps)
+}
+
+// readNALUs is one access unit: its length-prefixed NAL units back in
+// Annex-B, the parameter sets put in front where it carries an IDR and none
+// of its own — the encoder, told to keep them for the container's header,
+// stops repeating them.
+func (t *ShareTee) readNALUs(d []byte) {
+	nalLen := t.nalLen
+	if nalLen == 0 {
+		nalLen = 4
+	}
+
+	unit := make([]byte, 0, len(d)+16)
+	hasIDR, inlinePS := false, false
+	for i := 0; i+nalLen <= len(d); {
+		l := 0
+		for _, c := range d[i : i+nalLen] {
+			l = l<<8 | int(c)
+		}
+		i += nalLen
+		if l <= 0 || i+l > len(d) {
+			t.breakOff()
 			return
 		}
-	}
-}
+		nal := d[i : i+l]
+		i += l
 
-// beginNAL reads the header byte a start code promised. An access unit's
-// fate is decided here, at its first NAL: copied for an attached preview,
-// or scanned past for nobody.
-func (t *ShareTee) beginNAL(c byte) {
-	t.typed = false
-	t.curType = int(c & 0x1F)
-	if !t.inAU {
-		t.inAU = true
-		t.keep = t.watched()
-	}
-	if t.curType == 5 {
-		t.hasIDR = true
-	}
-
-	t.copying = t.keep || t.curType == 7 || t.curType == 8
-	if t.copying {
-		t.nal = append(t.nal[:0], 0, 0, 0, 1, c)
-	}
-}
-
-// finishNAL is a start code closing: the NAL before it is complete, and the
-// access unit is too if that NAL was its slice.
-func (t *ShareTee) finishNAL() {
-	if t.copying {
-		// The zeros just counted open the next start code, or pad the byte
-		// stream; either way they are not this NAL's payload.
-		t.nal = t.nal[:len(t.nal)-min(t.zeros, len(t.nal))]
-	}
-	if t.copying && (t.curType == 7 || t.curType == 8) {
-		t.storePS()
-	}
-	if t.keep && t.copying {
-		t.unit = append(t.unit, t.nal...)
-	}
-	if t.curType >= 1 && t.curType <= 5 {
-		if t.keep {
-			t.emitUnit()
+		switch nal[0] & 0x1F {
+		case 7:
+			inlinePS = true
+			t.storePS(append([]byte{0, 0, 0, 1}, nal...), nil)
+		case 8:
+			t.storePS(nil, append([]byte{0, 0, 0, 1}, nal...))
+		case 5:
+			hasIDR = true
 		}
-		t.unit = t.unit[:0]
-		t.inAU, t.hasIDR = false, false
+		unit = append(unit, 0, 0, 0, 1)
+		unit = append(unit, nal...)
+	}
+	if len(unit) == 0 {
+		return
+	}
+	if hasIDR && !inlinePS && t.sps != nil {
+		unit = slices.Concat(t.sps, t.pps, unit)
 	}
 
-	t.typed = true
-	t.curType, t.copying = 0, false
-	t.zeros = 0
-	t.nal = t.nal[:0]
+	t.unit, t.hasIDR = unit, hasIDR
+	t.emitUnit()
+	t.queue = append(t.queue, t.unit)
+	t.unit, t.hasIDR = nil, false
 }
 
-// storePS files the completed parameter set for Attach to replay. Under mu
-// because Attach reads both from the UI thread.
-func (t *ShareTee) storePS() {
+// storePS files the parameter sets for Attach to replay, either alone. Under
+// mu because Attach reads both from the UI thread.
+func (t *ShareTee) storePS(sps, pps []byte) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
-	if t.curType == 7 {
-		t.sps = slices.Clone(t.nal)
-	} else {
-		t.pps = slices.Clone(t.nal)
+	if sps != nil {
+		t.sps = sps
+	}
+	if pps != nil {
+		t.pps = pps
 	}
 }
 
-// watched reports whether anything is attached, asked once per access unit
-// rather than once per byte.
-func (t *ShareTee) watched() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	return t.frames != nil
-}
-
-// emitUnit offers the assembled access unit to the preview, gated on an IDR
-// until one has started it — a decoder handed a stream that opens mid-GOP
-// answers with a run of complaints and no picture.
+// emitUnit offers the assembled access unit to the preview, framed as an
+// IVF frame and gated on an IDR until one has started it — a decoder handed
+// a stream that opens mid-GOP answers with a run of complaints and no
+// picture. The pts only counts: the preview reads what arrives when it
+// arrives, so the demuxer's clock is never consulted.
 func (t *ShareTee) emitUnit() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	t.previewPTS++
 	if t.frames == nil {
 		return
 	}
@@ -886,20 +1145,20 @@ func (t *ShareTee) emitUnit() {
 		t.started = true
 	}
 
-	t.offer(t.unit)
+	t.offer(ivfFrame(t.previewPTS, t.unit))
 }
 
-// offer copies what it is given to the preview, or drops it where the
-// preview is behind — see the type's own comment for why that is the point.
-// Callers hold mu, which is what keeps the send from racing Detach's close
-// and is also what makes the length check sound: one sender, so room seen is
-// room still there, and the copy is never made for a frame being dropped.
-func (t *ShareTee) offer(unit []byte) {
+// offer hands the preview a frame of its own, or drops it where the preview
+// is behind — see the type's own comment for why that is the point. Callers
+// hold mu, which is what keeps the send from racing Detach's close and is
+// also what makes the length check sound: one sender, so room seen is room
+// still there.
+func (t *ShareTee) offer(frame []byte) {
 	if t.frames == nil || len(t.frames) == cap(t.frames) {
 		return
 	}
 
-	t.frames <- slices.Clone(unit)
+	t.frames <- frame
 }
 
 // ivfHeaderLen is the one size IVF's file header comes in; the frame headers
@@ -916,7 +1175,9 @@ const (
 // consumeIVF is AV1's walk, and it is the cheaper of the two: IVF frames its
 // stream with lengths, so parsing is hopping section to section rather than
 // looking at every byte. A frame is one temporal unit, complete when its
-// declared bytes have crossed.
+// declared bytes have crossed; the publisher's frame is the body alone — the
+// track wants the OBUs, not the container — where the preview's carries the
+// 12-byte header its demuxer walks by.
 func (t *ShareTee) consumeIVF(b []byte) {
 	for len(b) > 0 && !t.broken {
 		switch t.phase {
@@ -948,25 +1209,18 @@ func (t *ShareTee) consumeIVF(b []byte) {
 				return
 			}
 			t.remaining = size
-			t.keep = t.watched()
-			if t.keep {
-				t.unit = append(t.unit[:0], t.fh[:]...)
-			}
 			t.phase = ivfFrameBody
 		case ivfFrameBody:
 			n := min(len(b), t.remaining)
-			if t.keep {
-				t.unit = append(t.unit, b[:n]...)
-			}
+			t.unit = append(t.unit, b[:n]...)
 			t.remaining -= n
 			b = b[n:]
 			if t.remaining > 0 {
 				return
 			}
-			if t.keep {
-				t.emitIVFUnit()
-				t.unit = t.unit[:0]
-			}
+			t.emitIVFUnit()
+			t.queue = append(t.queue, t.unit)
+			t.unit = nil
 			t.fhn = 0
 			t.phase = ivfFrameHeader
 		}
@@ -1001,7 +1255,7 @@ func (t *ShareTee) emitIVFUnit() {
 		return
 	}
 	if !t.started {
-		if !av1HasSequenceHeader(t.unit[len(t.fh):]) {
+		if !av1HasSequenceHeader(t.unit) {
 			return
 		}
 		// An attachment made before the stream's own file header had passed
@@ -1017,7 +1271,9 @@ func (t *ShareTee) emitIVFUnit() {
 		t.started = true
 	}
 
-	t.offer(t.unit)
+	framed := make([]byte, 0, len(t.fh)+len(t.unit))
+	framed = append(framed, t.fh[:]...)
+	t.offer(append(framed, t.unit...))
 }
 
 // av1HasSequenceHeader hops a temporal unit's OBUs — every one the encoders

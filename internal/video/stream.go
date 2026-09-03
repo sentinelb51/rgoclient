@@ -109,10 +109,14 @@ type LiveConfig struct {
 	Height int
 }
 
-// liveFormats is what LiveFrames accepts: IVF carrying VP8/VP9, and bare
-// Annex-B H.264. The string reaches a command line, so it is matched exactly
+// liveFormats is what LiveFrames accepts: IVF, carrying VP8, VP9, AV1 or —
+// under the H264 fourcc, which the demuxer maps like any other — H.264. One
+// framing for every codec because it is the one that says where each frame
+// ends: bare Annex-B was accepted once, and its parser can only close a
+// frame at the start code opening the next, a whole frame of delay on a
+// live stream. The string reaches a command line, so it is matched exactly
 // rather than trusted.
-var liveFormats = map[string]bool{"ivf": true, "h264": true}
+var liveFormats = map[string]bool{"ivf": true}
 
 // LiveFrames starts a child decoding a live byte stream written to its
 // stdin into raw RGBA frames — the player's exact-byte contract with no file
@@ -134,21 +138,38 @@ func (t Tools) LiveFrames(cfg LiveConfig) (*Stream, io.WriteCloser, error) {
 	}
 
 	// No -nostdin: stdin is the input. The latency flags stop the analysis
-	// buffering ahead of the decode; IVF's 32-byte header answers everything
-	// probing would, where H.264 has to be left to find its SPS in the stream.
+	// buffering ahead of the decode, and the probe is floored for *both*
+	// formats: the demuxer is named rather than sniffed, so nothing is being
+	// probed for, and the stream is entered at a keyframe either way — the
+	// parser reads H.264's SPS on the way past like any other NAL. Left at
+	// the default, libavformat reads its 5 MB before answering with a frame,
+	// which measured 3.1 s to first picture at 720p15 against 0.28 s here,
+	// for byte-identical output.
+	//
 	// Deliberately no `-fflags nobuffer`: it makes the IVF demuxer misframe a
 	// piped stream — every packet refused as invalid — and what it would buy
 	// is already bought by the zeroed analysis.
 	args := []string{"-v", "error", "-threads", liveThreads(cfg.Width, cfg.Height),
-		"-flags", "low_delay", "-analyzeduration", "0"}
-	if cfg.Format == "ivf" {
-		args = append(args, "-probesize", "32")
-	}
+		"-flags", "low_delay", "-analyzeduration", "0", "-probesize", "32"}
 	args = append(args,
 		"-f", cfg.Format,
 		"-i", "pipe:0",
 		"-an", "-sn", "-dn",
 		"-vf", liveScaleFilter(cfg.Width, cfg.Height),
+		// The output side single-threaded: the rawvideo encoder is otherwise
+		// run frame-threaded like any other, and frame threading holds one
+		// frame back — measured as exactly one frame of delay on every live
+		// stream, a raw-in raw-out control included. The decoder's threads
+		// are the ones before the input and are unaffected.
+		"-threads", "1",
+		// One frame out per frame in. The rawvideo muxer carries no
+		// timestamps, which makes ffmpeg's default sync *constant* rate: it
+		// pads the decoded frames out to the input's own clock, and the IVF
+		// the watch is remuxed into declares the 90 kHz RTP timebase — so it
+		// duplicated every frame a thousand-odd times, and the pipe stood
+		// seconds deep behind the picture. A live stream is paced by its
+		// sender; nothing here may invent or drop a frame.
+		"-fps_mode", "passthrough",
 		"-f", "rawvideo", "-pix_fmt", "rgba",
 		"pipe:1",
 	)
@@ -298,6 +319,24 @@ func (s *Stream) reap() {
 		close(s.done)
 	})
 	<-s.done
+}
+
+// Usage is the processor time the child spent, known once it has been
+// reaped and zero before. For measurement: a sandboxed child's times cannot
+// be read from outside the process that made it, and what a decode costs is
+// a number docs/performance.md wants.
+func (s *Stream) Usage() (user, system time.Duration) {
+	select {
+	case <-s.done:
+	default:
+		return 0, 0
+	}
+	state := s.cmd.ProcessState
+	if state == nil {
+		return 0, 0
+	}
+
+	return state.UserTime(), state.SystemTime()
 }
 
 // Stderr reports the tail of what the child logged, for the notice a failed

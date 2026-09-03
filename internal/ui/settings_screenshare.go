@@ -74,12 +74,13 @@ func (p *SettingsPage) screenshareSection() []settingsGroup {
 				},
 				func(s *config.Settings, picked string) { s.Screenshare.Latency = picked }),
 			p.optionRow("Codec",
-				"Auto uses AV1 when the graphics card can encode it, which sends "+
-					"the same picture with about a third less bandwidth. H.264 works "+
+				"Prefer AV1 sends it when the graphics card can encode it, at about "+
+					"a third less bandwidth than H.264, and falls back to H.264 "+
+					"automatically where it can't. H.264 forces that fallback always, "+
 					"for viewers on older clients and servers that do not take AV1.",
 				settings.Codec,
 				[]settingsOption{
-					{Label: "Auto", Value: config.ShareCodecAuto},
+					{Label: "Prefer AV1", Value: config.ShareCodecAuto},
 					{Label: "H.264", Value: config.ShareCodecH264},
 				},
 				func(s *config.Settings, picked string) { s.Screenshare.Codec = picked }),
@@ -91,6 +92,19 @@ func (p *SettingsPage) screenshareSection() []settingsGroup {
 				settings.Bitrate, config.ShareBitrateMin, config.ShareBitrateMax, "kbps",
 				func(s *config.Settings, kbps int) { s.Screenshare.Bitrate = kbps }),
 				customBandwidthReason(settings.Bandwidth)),
+			p.optionRow("Bitrate mode",
+				"Variable spends the limit only on what is moving, so a still "+
+					"screen costs almost nothing. Constant sends the limit at all "+
+					"times, padding the picture with filler when it does not need "+
+					"the bandwidth — it wastes upload, but some connections and "+
+					"servers handle a steady stream better than a stream that "+
+					"jumps from nothing to the limit when the screen starts moving.",
+				settings.RateControl,
+				[]settingsOption{
+					{Label: "Variable", Value: config.ShareRateVariable},
+					{Label: "Constant", Value: config.ShareRateConstant},
+				},
+				func(s *config.Settings, picked string) { s.Screenshare.RateControl = picked }),
 			p.optionRow("Keyframes",
 				"How often the whole picture is sent fresh instead of only what "+
 					"changed. Someone who joins, or whose connection drops, sees "+
@@ -125,11 +139,12 @@ func (p *SettingsPage) bandwidthRow(value string) fyne.CanvasObject {
 	})
 
 	return p.row("Bandwidth",
-		"The most a share is allowed to use. A still screen costs almost nothing "+
-			"whatever this is set to — the limit only applies while the picture is "+
-			"moving. Auto fits the size and frame rate you pick; Half and Quarter "+
-			"are for a slow upload, and soften motion rather than shrinking the "+
-			"picture. Custom sets the limit yourself.",
+		"The most a share is allowed to use. Unless Bitrate mode is Constant, a "+
+			"still screen costs almost nothing whatever this is set to — the limit "+
+			"only applies while the picture is moving. Auto fits the size and frame "+
+			"rate you pick; Half and Quarter are for a slow upload, and soften "+
+			"motion rather than shrinking the picture. Custom sets the limit "+
+			"yourself.",
 		control)
 }
 

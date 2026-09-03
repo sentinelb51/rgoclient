@@ -35,7 +35,6 @@ import (
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
-	"github.com/pion/webrtc/v4/pkg/media/samplebuilder"
 )
 
 /* The surface */
@@ -46,12 +45,14 @@ import (
 type ShareCodec string
 
 const (
-	// ShareIVF is VP8 or VP9 in IVF: a 32-byte header, then twelve bytes per
-	// frame. The timebase is 1/90000, so the RTP timestamp is the pts.
+	// ShareIVF is every codec in IVF: a 32-byte header, then twelve bytes per
+	// frame — VP8, VP9 and AV1 as the container was made for, and H.264
+	// under the H264 fourcc, which ffmpeg's demuxer maps like any other. One
+	// framing on purpose: bare Annex-B carries no lengths, so its parser can
+	// only close a frame at the start code opening the next, which on a live
+	// stream is a frame of delay for nothing. The timebase is 1/90000, so the
+	// RTP timestamp is the pts.
 	ShareIVF ShareCodec = "ivf"
-
-	// ShareH264 is H.264 as bare Annex-B, which carries no timestamps at all.
-	ShareH264 ShareCodec = "h264"
 )
 
 // ShareOpen is the watcher's half of a watch: called once, from the call's
@@ -264,12 +265,14 @@ func (c *Call) WatchShare(userID string, open ShareOpen) error {
 		}
 	}
 
-	// The subscribe callback is what starts the reader — unless the track is
-	// already here from a subscription that landed before anybody watched, in
-	// which case no callback is coming.
-	if track := video.TrackRemote(); track != nil {
-		c.startShareReader(video, track, userID)
-	}
+	// The subscribe callback is what starts the reader, and only ever that.
+	// The publication's TrackRemote is not consulted: lksdk keeps it after an
+	// unsubscribe — nothing clears it short of an unpublish — so a second
+	// watch of the same share would start its reader on the dead track,
+	// read EOF at once and report the share ended while the fresh
+	// subscription was still on its way. Every SetSubscribed(true) yields a
+	// new track and a new callback, the one before it having been switched
+	// off at registration, so waiting is always right.
 
 	return nil
 }
@@ -354,11 +357,18 @@ const (
 	// muxer declares, which is what makes the RTP timestamp the pts verbatim.
 	videoClockRate = 90000
 
-	// shareMaxLate is how many packets the reassembler may hold. It has to
-	// span the largest frame a share sends — a keyframe at screenshare
-	// bitrates runs to hundreds of packets — plus the reordering the network
-	// adds under it.
+	// shareMaxLate is how many packets the reassembler may hold behind a
+	// missing one. It has to span the largest frame a share sends — a
+	// keyframe at screenshare bitrates runs to hundreds of packets — plus the
+	// reordering the network adds under it.
 	shareMaxLate = 1024
+
+	// shareReorderWait is how long a missing packet is waited for before the
+	// frame it belongs to is given up on. A retransmission takes a round trip
+	// and the relay's turnaround; giving up sooner drops a frame that was
+	// about to be whole, and a dropped frame is a picture frozen until the
+	// next keyframe, a CLI encoder being unable to answer the demand for one.
+	shareReorderWait = 250 * time.Millisecond
 
 	// sharePLIInterval rate-limits the keyframe demands loss triggers: a
 	// burst of drops is one demand, not one per broken frame.
@@ -400,7 +410,7 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 	from.WritePLI(track.SSRC())
 	lastPLI := time.Now()
 
-	builder := samplebuilder.New(shareMaxLate, depacketizer, videoClockRate)
+	assembler := newFrameAssembler(depacketizer)
 
 	for {
 		select {
@@ -428,33 +438,170 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 			return
 		}
 
-		builder.Push(packet)
-
-		for sample := builder.Pop(); sample != nil; sample = builder.Pop() {
-			// A frame truncated by loss was dropped by the reassembler, and
-			// what follows references it — so a keyframe is demanded,
-			// throttled: a burst of holes is one demand.
-			if sample.PrevDroppedPackets > 0 && time.Since(lastPLI) > sharePLIInterval {
-				from.WritePLI(track.SSRC())
-				lastPLI = time.Now()
-			}
-
-			if len(sample.Data) == 0 {
-				continue
-			}
-
-			if err := mux.write(out, sample); err != nil {
-				select {
-				case <-w.done:
-					// The watcher closed its decoder; not the stream failing.
-				default:
-					endErr = fmt.Errorf("the decoder stopped taking the stream: %w", err)
-				}
-
+		now := time.Now()
+		var writeErr error
+		assembler.push(packet, now, func(frame []byte, timestamp uint32) {
+			if writeErr != nil {
 				return
 			}
+			writeErr = mux.write(out, &media.Sample{Data: frame, PacketTimestamp: timestamp})
+		})
+
+		// A frame lost to the network is one everything after it references,
+		// so a keyframe is demanded — throttled: a burst of holes is one
+		// demand.
+		if assembler.takeDropped() > 0 && now.Sub(lastPLI) > sharePLIInterval {
+			from.WritePLI(track.SSRC())
+			lastPLI = now
+		}
+
+		if writeErr != nil {
+			select {
+			case <-w.done:
+				// The watcher closed its decoder; not the stream failing.
+			default:
+				endErr = fmt.Errorf("the decoder stopped taking the stream: %w", writeErr)
+			}
+
+			return
 		}
 	}
+}
+
+/* Reassembly */
+
+// frameAssembler turns a share's RTP packets back into whole frames and
+// hands each over the moment its last packet lands. pion's samplebuilder
+// stood here before it and holds every complete frame until the packet
+// *after* it arrives — a frame of delay on every frame, two hundred
+// milliseconds at 5 fps — and its flush gives up on whatever is still in
+// flight, so it could not be hurried. This is the same reorder buffer without
+// the wait: packets are filed by sequence number and consumed in order; a
+// frame is the run of packets sharing a timestamp, closed by the marker; a
+// packet missing for longer than shareReorderWait is given up on, and the
+// frame it belonged to is dropped and counted so the reader can demand a
+// keyframe. One goroutine's property.
+type frameAssembler struct {
+	newDepacketizer func() rtp.Depacketizer
+	depacketizer    rtp.Depacketizer
+
+	buffer [1 << 16]*rtp.Packet
+	head   uint16    // the next sequence number to consume
+	newest uint16    // the highest filed
+	primed bool      // head is set
+	gapAt  time.Time // when head was first found missing; zero while it is not
+
+	frame     []byte
+	timestamp uint32
+	have      bool // a frame is open, at timestamp
+	broken    bool // it lost a packet: dropped at its end rather than emitted
+	dropped   int  // frames dropped since takeDropped
+}
+
+func newFrameAssembler(newDepacketizer func() rtp.Depacketizer) *frameAssembler {
+	return &frameAssembler{newDepacketizer: newDepacketizer, depacketizer: newDepacketizer()}
+}
+
+// push files one packet and consumes everything now in order, emit taking
+// each frame that completes. The frame handed to emit is reused afterwards.
+func (a *frameAssembler) push(p *rtp.Packet, now time.Time, emit func(frame []byte, timestamp uint32)) {
+	if !a.primed {
+		a.head, a.newest, a.primed = p.SequenceNumber, p.SequenceNumber, true
+	} else {
+		if int16(p.SequenceNumber-a.head) < 0 {
+			return // consumed or given up on: a retransmission that came too late
+		}
+		if int16(p.SequenceNumber-a.newest) > 0 {
+			a.newest = p.SequenceNumber
+		}
+	}
+	a.buffer[p.SequenceNumber] = p
+
+	for {
+		next := a.buffer[a.head]
+		if next == nil {
+			if a.head == a.newest+1 {
+				a.gapAt = time.Time{}
+				return // caught up
+			}
+			// A hole with packets filed beyond it: a retransmission takes a
+			// round trip, so it is waited for — up to a point, and up to a
+			// number of packets, the buffer being a ring.
+			if a.gapAt.IsZero() {
+				a.gapAt = now
+			}
+			if now.Sub(a.gapAt) < shareReorderWait && int(a.newest-a.head) < shareMaxLate {
+				return
+			}
+			a.head++
+			a.gapAt = time.Time{}
+			a.lose()
+
+			continue
+		}
+
+		a.buffer[a.head] = nil
+		a.head++
+		a.gapAt = time.Time{}
+		a.consume(next, emit)
+	}
+}
+
+// consume is one packet in order. A new timestamp is a new frame, which
+// closes the one open whether or not its marker was seen — a sender that
+// sets none still delimits by time.
+func (a *frameAssembler) consume(p *rtp.Packet, emit func([]byte, uint32)) {
+	if a.have && p.Timestamp != a.timestamp {
+		a.finish(emit)
+	}
+	if !a.have {
+		a.have, a.timestamp = true, p.Timestamp
+		if !a.depacketizer.IsPartitionHead(p.Payload) {
+			a.lose() // its first packet is what went missing
+		}
+	}
+	if a.broken {
+		return
+	}
+
+	payload, err := a.depacketizer.Unmarshal(p.Payload)
+	if err != nil {
+		a.lose()
+		return
+	}
+	a.frame = append(a.frame, payload...)
+
+	if a.depacketizer.IsPartitionTail(p.Marker, p.Payload) {
+		a.finish(emit)
+	}
+}
+
+// lose marks the frame in hand lost, and replaces the depacketizer with it:
+// pion's carry a fragment being reassembled across packets, and one whose end
+// never came would be prepended to the next frame's first unit.
+func (a *frameAssembler) lose() {
+	a.broken = true
+	a.depacketizer = a.newDepacketizer()
+}
+
+// finish closes the frame in hand: handed over whole, or counted as dropped.
+func (a *frameAssembler) finish(emit func([]byte, uint32)) {
+	switch {
+	case a.broken:
+		a.dropped++
+	case len(a.frame) > 0:
+		emit(a.frame, a.timestamp)
+	}
+	a.frame = a.frame[:0]
+	a.have, a.broken = false, false
+}
+
+// takeDropped reports the frames dropped since it was last asked.
+func (a *frameAssembler) takeDropped() int {
+	n := a.dropped
+	a.dropped = 0
+
+	return n
 }
 
 // shareDimensions is what the sender declared for the track, zero where they
@@ -475,17 +622,17 @@ func shareDimensions(pub *lksdk.RemoteTrackPublication) (int, int) {
 // temporal units in the low-overhead bitstream, which is exactly what an IVF
 // frame holds. Not ok is a codec this client cannot remux — H.265, should a
 // browser ever send one.
-func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, string, shareMux, rtp.Depacketizer, bool) {
+func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, string, shareMux, func() rtp.Depacketizer, bool) {
 	mime := track.Codec().MimeType
 	switch {
 	case strings.EqualFold(mime, webrtc.MimeTypeVP8):
-		return ShareIVF, "VP8", newIVFMux("VP80", width, height), &codecs.VP8Packet{}, true
+		return ShareIVF, "VP8", newIVFMux("VP80", width, height), func() rtp.Depacketizer { return &codecs.VP8Packet{} }, true
 	case strings.EqualFold(mime, webrtc.MimeTypeVP9):
-		return ShareIVF, "VP9", newIVFMux("VP90", width, height), &codecs.VP9Packet{}, true
+		return ShareIVF, "VP9", newIVFMux("VP90", width, height), func() rtp.Depacketizer { return &codecs.VP9Packet{} }, true
 	case strings.EqualFold(mime, webrtc.MimeTypeAV1):
-		return ShareIVF, "AV1", newIVFMux("AV01", width, height), &codecs.AV1Depacketizer{}, true
+		return ShareIVF, "AV1", newIVFMux("AV01", width, height), func() rtp.Depacketizer { return &codecs.AV1Depacketizer{} }, true
 	case strings.EqualFold(mime, webrtc.MimeTypeH264):
-		return ShareH264, "H.264", &annexBMux{}, &codecs.H264Packet{}, true
+		return ShareIVF, "H.264", newIVFMux("H264", width, height), func() rtp.Depacketizer { return &codecs.H264Packet{} }, true
 	}
 
 	return "", "", nil, nil, false
@@ -497,26 +644,6 @@ func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, strin
 // demuxer was told to expect. One goroutine's property; nothing here locks.
 type shareMux interface {
 	write(out io.Writer, sample *media.Sample) error
-}
-
-// annexBMux is H.264's: the depacketizer already emits Annex-B, so a frame
-// is its bytes and nothing else. The stream is held until an IDR starts it —
-// a decoder cannot enter a stream mid-GOP.
-type annexBMux struct {
-	started bool
-}
-
-func (m *annexBMux) write(out io.Writer, sample *media.Sample) error {
-	if !m.started {
-		if !h264KeyframeStarts(sample.Data) {
-			return nil
-		}
-		m.started = true
-	}
-
-	_, err := out.Write(sample.Data)
-
-	return err
 }
 
 // ivfMux frames VP8/VP9 in IVF. The header's dimensions are advisory — the
@@ -550,6 +677,9 @@ func (m *ivfMux) write(out io.Writer, sample *media.Sample) error {
 		if m.fourCC == "AV01" && !av1SequenceHeaderIn(sample.Data) {
 			return nil
 		}
+		if m.fourCC == "H264" && !h264KeyframeStarts(sample.Data) {
+			return nil
+		}
 		if err := m.writeHeader(out); err != nil {
 			return err
 		}
@@ -557,7 +687,7 @@ func (m *ivfMux) write(out io.Writer, sample *media.Sample) error {
 		m.last = sample.PacketTimestamp
 	}
 
-	// The samplebuilder emits in order, so the uint32 subtraction carries a
+	// The assembler emits in order, so the uint32 subtraction carries a
 	// wrap correctly; a jump past any real frame gap is a lie held out of the
 	// clock rather than believed.
 	delta := sample.PacketTimestamp - m.last
@@ -707,6 +837,17 @@ func (c ShareSendCodec) mime() string {
 // encoder started for the same answer.
 var ErrShareRefused = errors.New("the room refused the share")
 
+// ShareSource is the stream an outbound share publishes, already framed:
+// ReadFrame answers one whole frame — an H.264 access unit in Annex-B, or an
+// AV1 temporal unit with its container framing stripped, the two sample
+// shapes lksdk packetises — blocking until one is ready, and its error is the
+// stream ending. Declared structurally so voice never imports video, the
+// PCMSource arrangement again; video.ShareTee is what app hands in.
+type ShareSource interface {
+	ReadFrame() ([]byte, error)
+	Close() error
+}
+
 // ShareStopped reports this end's own share ending on its own terms rather
 // than the caller's: the byte stream feeding the track hit EOF or broke — the
 // captured window closed, the encoder died. Nothing follows StopShare or the
@@ -715,12 +856,12 @@ type ShareStopped struct{}
 
 func (ShareStopped) isVoiceEvent() {}
 
-// outboundShare is this end's own stream: the source the reader track eats
+// outboundShare is this end's own stream: the source the write loop drains
 // and the publication the room knows it as. stopped marks one being taken
 // down on purpose; settled marks the write loop having already ended, for the
 // start that races it. All of it is guarded by the call's mu.
 type outboundShare struct {
-	src   io.ReadCloser
+	src   ShareSource
 	track *lksdk.LocalTrack
 	pub   *lksdk.LocalTrackPublication
 
@@ -734,29 +875,26 @@ type outboundShare struct {
 // the button before a refused AddTrack has to say it.
 func (c *Call) CanShare() bool { return c.canShare }
 
-// StartShare publishes a screenshare: codec's bytes read from src — an
-// encoder's stdout — declared to the room at width×height, which every
-// viewer sizes a window by and the server enforces its limits against. It
-// blocks for the publish negotiation, so it belongs on a worker. One share
-// at a time; the source is closed by whatever ends it.
+// StartShare publishes a screenshare: codec's frames read from src — an
+// encoder's stdout, framed — declared to the room at width×height, which
+// every viewer sizes a window by and the server enforces its limits against.
+// It blocks for the publish negotiation, so it belongs on a worker. One
+// share at a time; the source is closed by whatever ends it.
 //
-// fps is what the track is *paced* by, and it is asked for rather than read
-// off the stream because Annex-B carries no timing at all: lksdk stamps a
-// flat 33 ms on every slice regardless of the real rate. The capture child
-// is held to a constant rate by its own fps filter, so the duration is a
-// number this side already knows — ReaderTrackWithFrameDuration overrides
-// the stamp with it. For H.264 it is applied per VCL NAL, which is why the
-// encoder's side of the contract is one slice per frame (video's args say so
-// too): a sliced encode would sleep once per slice and publish at a fraction
-// of its speed. For AV1 the sample is the IVF frame — one temporal unit —
-// so the contract holds by construction, and the IVF timestamps the encoder
-// wrote are overridden the same way.
-func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height, fps int) error {
+// fps steps the RTP timestamps and nothing else — the write loop paces
+// nothing, see pumpShareSend. It is asked for rather than read off the
+// stream because Annex-B carries no timing at all, and the capture child's
+// own fps filter is what makes the flat step honest. The one-slice-per-frame
+// contract on the encoder (video's args say so too) is what lets a frame be
+// recognised at all: an access unit ends at its slice, so a sliced encode
+// would fuse frames. For AV1 the frame is the IVF frame — one temporal unit
+// — and the contract holds by construction.
+func (c *Call) StartShare(src ShareSource, codec ShareSendCodec, width, height, fps int) error {
 	if src == nil {
 		return errors.New("no stream to publish")
 	}
 	if fps < 1 {
-		return errors.New("no frame rate to pace the share by")
+		return errors.New("no frame rate to stamp the share with")
 	}
 	if !c.canShare {
 		return errors.New("the server does not allow publishing a screenshare here")
@@ -783,13 +921,25 @@ func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height
 		c.mu.Unlock()
 	}
 
-	track, err := lksdk.NewLocalReaderTrack(src, codec.mime(),
-		lksdk.ReaderTrackWithFrameDuration(time.Second/time.Duration(fps)),
-		lksdk.ReaderTrackWithOnWriteComplete(func() { c.settleShareSend(out) }))
+	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
+		MimeType: codec.mime(), ClockRate: videoClockRate,
+	})
 	if err != nil {
 		release()
 		return fmt.Errorf("share track: %w", err)
 	}
+
+	// The write loop starts now, ahead of the publish, because draining the
+	// encoder through the negotiation is the point: frames it produces while
+	// the room is still answering are dropped here rather than queued in the
+	// pipe — a queue the paced sender it replaced replayed at 1× forever, a
+	// standing delay every viewer kept and the sender's own preview never
+	// showed. Bound once is enough: a rebind after a reconnect finds the loop
+	// already running.
+	bound := make(chan struct{})
+	var once sync.Once
+	track.OnBind(func() { once.Do(func() { close(bound) }) })
+	go c.pumpShareSend(out, track, codec, time.Second/time.Duration(fps), bound)
 
 	pub, err := c.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
 		Name:        "screenshare",
@@ -818,6 +968,61 @@ func (c *Call) StartShare(src io.ReadCloser, codec ShareSendCodec, width, height
 	}
 
 	return nil
+}
+
+// pumpShareSend is an outbound share's write loop, and it paces nothing: the
+// capture child's fps filter is the clock, so a frame is published the moment
+// it arrives and frame only steps the RTP timestamps. lksdk's own reader
+// track is deliberately not used — its writeWorker sends exactly one frame
+// per duration off a schedule of its own, so a backlog standing when it
+// starts, and any a stall ever adds, is replayed at 1× for the life of the
+// share: a fixed seconds-long delay every viewer keeps, measured here at
+// roughly five. Writing on arrival is what makes the share as live as the
+// encoder.
+//
+// Until the track is bound nothing can be sent, and entering mid-GOP decodes
+// as nothing anyway, so pre-bind and pre-keyframe frames are dropped rather
+// than queued: a viewer starts at most one keyframe interval behind the
+// screen, never seconds.
+func (c *Call) pumpShareSend(out *outboundShare, track *lksdk.LocalTrack,
+	codec ShareSendCodec, frame time.Duration, bound <-chan struct{}) {
+
+	defer c.settleShareSend(out)
+
+	started := false
+	for {
+		select {
+		case <-c.done:
+			return
+		default:
+		}
+
+		data, err := out.src.ReadFrame()
+		if err != nil {
+			return
+		}
+
+		select {
+		case <-bound:
+		default:
+			continue
+		}
+
+		if !started {
+			if codec == SendShareAV1 {
+				if !av1SequenceHeaderIn(data) {
+					continue
+				}
+			} else if !h264KeyframeStarts(data) {
+				continue
+			}
+			started = true
+		}
+
+		if err := track.WriteSample(media.Sample{Data: data, Duration: frame}, nil); err != nil {
+			return
+		}
+	}
 }
 
 // StopShare takes this end's stream down on purpose: unpublish, and the
@@ -849,10 +1054,10 @@ func (c *Call) StopShare() {
 	_ = out.src.Close()
 }
 
-// settleShareSend is the reader track's write loop ending — EOF from the
-// encoder, or the track closed under it. Only an end nobody here asked for is
-// reported; a share that never finished publishing is StartShare's error to
-// carry instead.
+// settleShareSend is the write loop ending — EOF from the encoder, the call
+// closing, or the track refusing a write. Only an end nobody here asked for
+// is reported; a share that never finished publishing is StartShare's error
+// to carry instead.
 func (c *Call) settleShareSend(out *outboundShare) {
 	c.mu.Lock()
 	out.settled = true

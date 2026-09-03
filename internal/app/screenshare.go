@@ -8,18 +8,29 @@ package app
 // one-playback rule — and every decision is here because each is a policy
 // about a remote participant's bitstream: what decodes it (internal/video's
 // sandboxed child, fed on stdin instead of a file), at what size, and what
-// tears it down — the window closing, the sender stopping, the call ending,
-// a logout.
+// ends it. Two of those end the window outright: the reader closing it, and
+// the call ending under it. The sender stopping does not — the watch ends
+// (endShareView) but the window stands with a note in the picture's place,
+// since a sender who comes back is not a different watch, and a resumed tap
+// on the same mark (resumeShareView) re-subscribes it in place rather than
+// opening a second window. Nothing here notices a sender coming back on its
+// own; the tap is what asks again.
 //
 // Unlike the video player's, the frame pump paces nothing: a live stream is
-// paced by the sender, so the pump paints what arrives when it arrives and
+// paced by the sender, so the pump reads what arrives when it arrives and
 // always drains the pipe — a held frame is latency nothing takes back out.
+// The painter is behind a latest-wins mailbox rather than a waited hop for
+// the same reason: painting stalls for seconds while a window is dragged on
+// Windows, and a stall the pump waited out would stand in the stream as
+// delay for the rest of the watch. A frame the painter missed is dropped,
+// the tee's own rule on the watching side.
 //
 // Sending is the same pipeline pointed the other way and is shorter, because
-// nothing here reads it: the capture child's stdout *is* the published
-// track's source, so lksdk drains the pipe and the frame duration handed to
-// StartShare is the clock — Annex-B carries no timing of its own, and IVF's
-// is overridden. What this half owns is the picker, the box the
+// nothing here reads it: the capture child's stdout, framed by the tee, *is*
+// the published track's source — voice's write loop drains it as frames
+// arrive and paces nothing, the child's own fps filter being the clock and
+// the asked-for rate only stepping the RTP timestamps. What this half owns
+// is the picker, the box the
 // encoder is started at — which the instance's publish limits bound, a
 // declared size over them being a disconnection rather than a refusal — and
 // every way a share stops.
@@ -33,7 +44,9 @@ import (
 	"log"
 	"math"
 	"runtime"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -74,22 +87,53 @@ type shareView struct {
 	// own stream, teed off the encoder rather than delivered by the room.
 	self bool
 
-	// codecTag names what the feed's bytes are, worn by the window title once
+	// baseTitle is the window's title, set once and never changed — what used
+	// to be a codec tag appended here is the codec badge now.
+	baseTitle string
+
+	// codecTag names what the feed's bytes are, worn by the codec badge once
 	// the feed mounts — the codec for a watch, plus the encoder's own name
 	// for the self preview.
 	codecTag string
 
+	// ended marks the feed having stopped while the window is kept open: the
+	// decoder is torn down and the source released exactly as a close would
+	// do, but the window stands with a note in the picture's place, UI-thread
+	// only like frame/view below. Tapping the live mark again is the only way
+	// out of it — nothing here polls for the sender coming back on its own —
+	// and OnWatchShare reads it to tell a resume from a plain refocus.
+	ended bool
+
 	win      fyne.Window
 	backdrop *canvas.Rectangle
 
-	// frame is what the canvas draws and scratch what the pump reads into;
-	// the copy between them happens under a waited UI hop, which is what
-	// keeps the painter off bytes mid-frame. Both exist only once the feed
-	// has mounted.
+	// frame is what the canvas draws; what the pump reads into rotates
+	// through the mailbox below. All of it exists only once the feed has
+	// mounted.
 	view          *canvas.Image
 	frame         *image.RGBA
 	width, height int
-	scratch       []byte
+
+	// stats is the resolution/FPS/codec card worn over the picture — built
+	// fresh at every mount, as frame and view are, since a resume may bring a
+	// different size or codec. fps is measured off arrivals rather than
+	// asked for: nothing on the wire carries the sender's chosen rate, and a
+	// self preview's own target can run ahead of what the encoder actually
+	// keeps up with. fpsFrames/fpsMarkAt belong to the pump goroutine alone.
+	stats     *shareStats
+	fpsFrames int
+	fpsMarkAt time.Time
+
+	// The pump and the painter meet in a latest-wins mailbox so neither ever
+	// waits on the other: the pump always drains the decoder — a frame held
+	// in the pipe is latency for the rest of the watch — and a painter that
+	// stalled (a dragged window blocks painting for seconds on Windows)
+	// costs dropped frames rather than a stream that runs behind from then
+	// on. free holds the buffers not in flight; hopQueued collapses paint
+	// hops so a burst of frames is one trip.
+	mail      chan []byte
+	free      chan []byte
+	hopQueued atomic.Bool
 
 	// mu orders install against halt: the stream is created on the call's
 	// goroutine and the halt can come from anywhere.
@@ -126,6 +170,17 @@ func (v *shareView) halt() {
 	}
 }
 
+// reopen readies an ended view for a fresh decoder: install and halt guard
+// against a view torn down for good, and a resume is not that — it is the
+// same view about to be handed a new stream. UI thread, called before
+// anything that could race a stale stream's own halt has a chance to run.
+func (v *shareView) reopen() {
+	v.mu.Lock()
+	v.stopped = false
+	v.stream = nil
+	v.mu.Unlock()
+}
+
 /* Opening a watch */
 
 // OnWatchShare opens the window watching somebody's stream — the tap on the
@@ -157,7 +212,11 @@ func (a *App) OnWatchShare(channelID, userID string) {
 
 	if v := a.share; v != nil {
 		if v.userID == userID {
-			v.win.RequestFocus()
+			if v.ended {
+				a.resumeShareView(v)
+			} else {
+				v.win.RequestFocus()
+			}
 			return
 		}
 		a.closeShare() // one stream at a time: one decoder child, one window
@@ -201,39 +260,64 @@ func (a *App) OnWatchShare(channelID, userID string) {
 // than after the first frame because closing it is the way out of the watch
 // — a watch that never delivers must leave something to close.
 func (v *shareView) buildWindow(a *App) {
-	title := "Screenshare"
+	v.baseTitle = "Screenshare"
 	switch name := a.voiceParticipantOf(v.channelID, v.userID).Name; {
 	case v.self:
-		title = "Your screen"
+		v.baseTitle = "Your screen"
 	case name != "":
-		title = name + " — screenshare"
+		v.baseTitle = name + " — screenshare"
 	}
 
 	// Black rather than a theme surface: it is the letterbox, and the decoder
 	// pads its frames with exactly this.
 	v.backdrop = canvas.NewRectangle(color.Black)
 
-	note := canvas.NewText("Connecting to the stream...", theme.Colors.TextPrimary)
-	note.TextSize = theme.Sizes.MemberStatusTextSize
-
-	v.win = a.fyne.NewWindow(title)
-	v.win.SetContent(container.NewStack(v.backdrop, container.NewCenter(note)))
+	v.win = a.fyne.NewWindow(v.baseTitle)
+	v.showConnecting()
 	v.win.Resize(fyne.NewSize(shareWindowWidth, shareWindowWidth*9/16))
 	v.win.SetOnClosed(func() { a.onShareWindowClosed(v) })
 	v.win.Show()
 }
 
+// showConnecting swaps in the note stood in for the picture before the first
+// frame arrives — and again on a resume, in place of the "ended" note. UI
+// thread.
+func (v *shareView) showConnecting() {
+	v.frame, v.view, v.stats = nil, nil, nil
+	v.win.SetContent(container.NewStack(v.backdrop, v.note("Connecting to the stream...")))
+}
+
+// showEnded swaps in the note left standing once the feed stops, in place of
+// closing the window — a reader who has not noticed keeps their place rather
+// than losing it. UI thread.
+func (v *shareView) showEnded(message string) {
+	v.ended = true
+	v.frame, v.view, v.stats = nil, nil, nil
+	v.win.SetContent(container.NewStack(v.backdrop, v.note(message)))
+}
+
+// note is the label both of the above stand in the window with.
+func (v *shareView) note(text string) fyne.CanvasObject {
+	note := canvas.NewText(text, theme.Colors.TextPrimary)
+	note.TextSize = theme.Sizes.MemberStatusTextSize
+
+	return container.NewCenter(note)
+}
+
 // onShareWindowClosed is the reader closing the window, which is the whole
 // of how a watch is given up on purpose — and the echo of closeShare's own
-// Close, told apart by the field already being cleared.
+// Close, told apart by the field already being cleared. Skips the teardown
+// an ended view has already had, the same guard closeShare makes.
 func (a *App) onShareWindowClosed(v *shareView) {
 	if a.share != v {
 		return
 	}
 	a.share = nil
 
-	a.releaseShareSource(v)
-	go v.halt()
+	if !v.ended {
+		a.releaseShareSource(v)
+		go v.halt()
+	}
 }
 
 // releaseShareSource lets go of whatever was feeding a view: a subscription
@@ -254,7 +338,8 @@ func (a *App) releaseShareSource(v *shareView) {
 
 // closeShare tears the running watch down: the subscription, the decoder and
 // the window. Safe with nothing watched, which is what lets dropCall call it
-// unconditionally. UI thread.
+// unconditionally. Skips the teardown an ended view has already had — only
+// the window itself is left to close. UI thread.
 func (a *App) closeShare() {
 	v := a.share
 	if v == nil {
@@ -262,25 +347,87 @@ func (a *App) closeShare() {
 	}
 	a.share = nil
 
-	a.releaseShareSource(v)
-	go v.halt()
+	if !v.ended {
+		a.releaseShareSource(v)
+		go v.halt()
+	}
 	v.win.Close()
 }
 
+// endShareView is the other way a watch stops: not closed but left standing,
+// a note in the picture's place. Idempotent — v.ended is what tells an
+// end already handled from a second signal of the same one, the sender's
+// unpublish and the decoder's own EOF being able to arrive in either order.
+// UI thread.
+func (a *App) endShareView(v *shareView, message string) {
+	if a.share != v || v.ended {
+		return
+	}
+
+	a.releaseShareSource(v)
+	go v.halt()
+	v.showEnded(message)
+}
+
+// resumeShareView re-subscribes an ended watch without a new window: the
+// live mark tapped again is the only way in — nothing here polls for the
+// sender coming back on its own. reopen lets a fresh stream install into a
+// view halt already latched shut. UI thread.
+func (a *App) resumeShareView(v *shareView) {
+	v.reopen()
+	v.ended = false
+	v.showConnecting()
+
+	if v.self {
+		if a.sending == nil {
+			a.notify(ui.ToneWarning, "You are not sharing your screen.")
+			a.endShareView(v, "The screenshare has ended.")
+			return
+		}
+		a.startSelfPreview(v)
+		return
+	}
+
+	call := a.call
+	if call == nil || a.callChannelID != v.channelID {
+		a.notify(ui.ToneWarning, "Join the call to watch the stream.")
+		a.endShareView(v, "The screenshare has ended.")
+		return
+	}
+
+	epoch := a.epoch
+	a.background(func() error {
+		return call.WatchShare(v.userID, func(codec voice.ShareCodec, name string, width, height int) (io.WriteCloser, error) {
+			return a.openShareDecoder(v, epoch, codec, name, width, height)
+		})
+	}, func(err error) {
+		if a.share != v {
+			return
+		}
+		if errors.Is(err, voice.ErrNoShare) {
+			a.endShareView(v, "The stream has not started again yet.")
+			return
+		}
+		a.endShareView(v, fmt.Sprintf("Not watched: %v", err))
+	})
+}
+
 // onShareEnded is the voice session reporting a watch ending on the far
-// side's terms: the sender stopped, left, or the stream broke. A stop is
-// silent — the window going is the whole of the news — where a failure says
-// why.
+// side's terms: the sender stopped, left, or the stream broke. A stop leaves
+// only the note — where a failure says why, on the window as well as in a
+// notice, the window standing being no reason to stop saying it there too.
 func (a *App) onShareEnded(e voice.ShareEnded) {
 	v := a.share
 	if v == nil || v.userID != e.UserID {
 		return
 	}
 
-	a.closeShare()
+	message := "The screenshare has ended."
 	if e.Err != nil {
+		message = fmt.Sprintf("The screenshare ended: %v", e.Err)
 		a.notifyTitled(ui.ToneWarning, "Stream ended", "%v", e.Err)
 	}
+	a.endShareView(v, message)
 }
 
 /* The decoder and the pump */
@@ -310,7 +457,7 @@ func (a *App) openShareDecoder(v *shareView, epoch uint64, codec voice.ShareCode
 
 	v.width, v.height = width, height
 	v.codecTag = name
-	v.scratch = make([]byte, width*height*4)
+	v.armMailbox()
 
 	a.doOnUI(func() {
 		if a.stale(epoch) || a.share != v {
@@ -334,15 +481,18 @@ func (a *App) startSelfPreview(v *shareView) {
 	width, height := shareDecodeSize(sending.width, sending.height)
 	epoch := a.epoch
 
-	format, tag := voice.ShareH264, "H.264"
+	tag := "H.264"
 	if sending.av1 {
-		format, tag = voice.ShareIVF, "AV1"
+		tag = "AV1"
 	}
-	v.codecTag = tag + " · " + sending.encoder
+	// Parenthesised rather than "AV1 · NVENC": a middot reads as two peer
+	// facts, which for a moment made the codec look like a choice between
+	// two things, when the encoder is only naming what is encoding it.
+	v.codecTag = tag + " (" + sending.encoder + ")"
 
 	a.background(func() error {
 		stream, in, err := a.videoTools.LiveFrames(video.LiveConfig{
-			Format: string(format), Width: width, Height: height,
+			Format: string(voice.ShareIVF), Width: width, Height: height,
 		})
 		if err != nil {
 			return err
@@ -356,7 +506,7 @@ func (a *App) startSelfPreview(v *shareView) {
 		}
 
 		v.width, v.height = width, height
-		v.scratch = make([]byte, width*height*4)
+		v.armMailbox()
 
 		a.doOnUI(func() {
 			if a.stale(epoch) || a.share != v {
@@ -383,49 +533,204 @@ func (a *App) startSelfPreview(v *shareView) {
 // mountFeed swaps the window's waiting note for the live picture, sized to
 // the stream's aspect. UI thread.
 func (v *shareView) mountFeed() {
-	if v.codecTag != "" {
-		v.win.SetTitle(v.win.Title() + "  [" + v.codecTag + "]")
-	}
-
 	v.frame = image.NewRGBA(image.Rect(0, 0, v.width, v.height))
 	v.view = canvas.NewImageFromImage(v.frame)
 	v.view.FillMode = canvas.ImageFillContain
 	v.view.ScaleMode = canvas.ImageScaleSmooth
 
-	v.win.SetContent(container.NewStack(v.backdrop, v.view))
+	v.stats = newShareStats()
+	v.stats.setRes(fmt.Sprintf("%d × %d", v.width, v.height))
+	v.stats.setCodec(v.codecTag)
+	chrome := container.New(shareChromeLayout{}, v.stats.container)
+
+	v.win.SetContent(container.NewStack(v.backdrop, v.view, chrome))
 	if v.width > 0 {
 		v.win.Resize(fyne.NewSize(shareWindowWidth,
 			shareWindowWidth*float32(v.height)/float32(v.width)))
 	}
 }
 
-// pumpShareFrames reads frames and paints them as they come — no wall
-// clock: the sender paces the stream, and always draining is what keeps the
-// pipe from turning into latency. The hop waits because scratch is reused
-// the moment it returns. The stream's own window has its own canvas, so a
-// paint here dirties nothing of the main window.
+/* Chrome: the resolution, FPS and codec card */
+
+// shareBadgeInset is the gap between the window's edge and the card.
+const shareBadgeInset = 10
+
+// shareChromeLayout hangs the stats card over the picture's top-left corner.
+// It reports no minimum, exactly as the video card's own chrome layout does:
+// the backdrop is what sizes the stack, and a badge must never grow the
+// window it floats on.
+type shareChromeLayout struct{}
+
+func (shareChromeLayout) MinSize([]fyne.CanvasObject) fyne.Size { return fyne.Size{} }
+
+func (shareChromeLayout) Layout(objects []fyne.CanvasObject, _ fyne.Size) {
+	if len(objects) == 0 {
+		return
+	}
+	badge := objects[0]
+	badge.Resize(badge.MinSize())
+	badge.Move(fyne.NewPos(shareBadgeInset, shareBadgeInset))
+}
+
+// shareStats is the one card worn over the picture's top-left corner — the
+// settings page's own invite-card surface (SessionCardBg, SettingsGroupRadius,
+// the lighter SettingsIslandOutline, a lifted shadow) rather than the video
+// card's translucent chip: this window is its own surface floating over a
+// live picture, not a control drawn on a page, and reads better lifted the
+// way an island does.
+//
+// Resolution, FPS and codec are one joined line rather than three separate
+// pills — three peer facts read as one card — so a middot between them is
+// unambiguous once nothing inside a part uses one too: the codec's own
+// encoder is parenthesised for exactly that reason (startSelfPreview).
+type shareStats struct {
+	container *fyne.Container
+	text      *canvas.Text
+
+	res, fps, codec string
+}
+
+func newShareStats() *shareStats {
+	text := canvas.NewText("", theme.Colors.TextPrimary)
+	text.TextSize = theme.Sizes.SettingsDetailSize
+
+	bg := canvas.NewRectangle(theme.Colors.SessionCardBg)
+	bg.CornerRadius = theme.Sizes.SettingsGroupRadius
+	ui.Outline(bg)
+	bg.StrokeColor = theme.Colors.SettingsIslandOutline
+	ui.Elevate(bg)
+
+	padV, padH := theme.Sizes.SettingsRowPaddingV, theme.Sizes.SettingsRowPaddingH
+	inset := ui.NewInset(text, padV, padV, padH, padH)
+
+	return &shareStats{container: container.NewStack(bg, inset), text: text}
+}
+
+func (s *shareStats) setRes(text string)   { s.res = text; s.join() }
+func (s *shareStats) setFPS(text string)   { s.fps = text; s.join() }
+func (s *shareStats) setCodec(text string) { s.codec = text; s.join() }
+
+// join re-renders the line from whichever parts have arrived. FPS starts
+// empty, so the card opens with just resolution and codec and grows by one
+// clause once the pump has measured a second — never a hole where it will
+// sit, there being nothing beside it to leave a gap in.
+func (s *shareStats) join() {
+	parts := make([]string, 0, 3)
+	for _, part := range []string{s.res, s.fps, s.codec} {
+		if part != "" {
+			parts = append(parts, part)
+		}
+	}
+
+	text := strings.Join(parts, "   ·   ")
+	if s.text.Text == text {
+		return
+	}
+	s.text.Text = text
+	s.text.Refresh()
+}
+
+// shareFrameBuffers is a watch's whole frame allocation: one buffer under
+// the pump's read, one standing in the mailbox, one under the painter — so
+// neither side can ever wait for a buffer, which is what makes the free
+// channel's receives and sends below unable to block.
+const shareFrameBuffers = 3
+
+// armMailbox readies the mailbox for the feed's frame size, once the decoder
+// is installed and before the pump starts.
+func (v *shareView) armMailbox() {
+	v.mail = make(chan []byte, 1)
+	v.free = make(chan []byte, shareFrameBuffers)
+	for range shareFrameBuffers {
+		v.free <- make([]byte, v.width*v.height*4)
+	}
+
+	v.fpsFrames = 0
+	v.fpsMarkAt = time.Now()
+}
+
+// pumpShareFrames reads frames as they come — no wall clock: the sender
+// paces the stream, and always draining is what keeps the pipe from turning
+// into latency. Each frame is posted to the mailbox for the painter,
+// replacing one it has not collected: the pump must never wait on the UI
+// thread, or a stalled painter would back the stall up through the decoder
+// into the stream as standing delay. The stream's own window has its own
+// canvas, so a paint dirties nothing of the main window.
 func (a *App) pumpShareFrames(v *shareView, epoch uint64) {
 	for {
-		if err := v.stream.ReadFrame(v.scratch); err != nil {
+		buf := <-v.free
+		if err := v.stream.ReadFrame(buf); err != nil {
 			a.settleShareEnd(v, epoch)
 			return
 		}
 
-		a.doOnUI(func() {
-			if a.stale(epoch) || a.share != v || v.frame == nil {
-				return
-			}
+		v.fpsFrames++
+		if elapsed := time.Since(v.fpsMarkAt); elapsed >= time.Second {
+			fps := float64(v.fpsFrames) / elapsed.Seconds()
+			v.fpsFrames = 0
+			v.fpsMarkAt = time.Now()
+			a.doOnUI(func() { a.setShareFPS(v, epoch, fps) }, false)
+		}
 
-			copy(v.frame.Pix, v.scratch)
-			v.view.Refresh()
-		}, true)
+		select {
+		case v.mail <- buf:
+		default:
+			// The painter is behind: the standing frame is recycled and the
+			// newer one takes its place. One producer, so the vacated slot
+			// cannot be refilled from elsewhere.
+			select {
+			case old := <-v.mail:
+				v.free <- old
+			default:
+			}
+			v.mail <- buf
+		}
+
+		if v.hopQueued.CompareAndSwap(false, true) {
+			a.doOnUI(func() { a.paintShareFrame(v, epoch) }, false)
+		}
 	}
+}
+
+// paintShareFrame is the painter's half of the mailbox: the latest frame
+// into the mounted image, on the UI thread. The claim is released before the
+// mailbox is read, so a frame landing mid-paint queues the next hop rather
+// than being missed.
+func (a *App) paintShareFrame(v *shareView, epoch uint64) {
+	v.hopQueued.Store(false)
+
+	var buf []byte
+	select {
+	case buf = <-v.mail:
+	default:
+		return
+	}
+	defer func() { v.free <- buf }()
+
+	if a.stale(epoch) || a.share != v || v.frame == nil {
+		return
+	}
+
+	copy(v.frame.Pix, buf)
+	v.view.Refresh()
+}
+
+// setShareFPS is the stats card's FPS clause: the pump's own arrival rate,
+// measured over the last second — nothing on the wire carries what the
+// sender's encoder was asked for. v.stats is nil while the picture is not
+// mounted (showConnecting, showEnded), the same guard v.frame answers to
+// above. UI thread.
+func (a *App) setShareFPS(v *shareView, epoch uint64, fps float64) {
+	if a.stale(epoch) || a.share != v || v.stats == nil {
+		return
+	}
+	v.stats.setFPS(fmt.Sprintf("%.0f fps", fps))
 }
 
 // settleShareEnd is the frame pipe ending. An owner tearing the watch down
 // has already put things right — the stop flag says so — and the voice
 // session's own teardown paths report through ShareEnded; what is left is
-// the child dying on its own, which closes the window like any other end.
+// the child dying on its own, which ends the view like any other end.
 func (a *App) settleShareEnd(v *shareView, epoch uint64) {
 	v.mu.Lock()
 	stopped := v.stopped
@@ -438,7 +743,7 @@ func (a *App) settleShareEnd(v *shareView, epoch uint64) {
 		if a.stale(epoch) || a.share != v {
 			return
 		}
-		a.closeShare()
+		a.endShareView(v, "The screenshare has ended.")
 	}, false)
 }
 
@@ -466,9 +771,10 @@ func shareDecodeSize(width, height int) (int, int) {
 /* Sending: what this account puts on screen elsewhere */
 
 // sendingShare is this end's own running share: the capture child and what it
-// was started with. The child's stdout *is* the published track's source, so
-// there is no pump here — lksdk reads the pipe on its own goroutine and paces
-// the track by the frame duration StartShare was handed.
+// was started with. The child's stdout, framed by the tee, *is* the published
+// track's source, so there is no pump here — voice's write loop drains it as
+// frames arrive, and the frame duration StartShare was handed only steps the
+// RTP timestamps.
 type sendingShare struct {
 	stream *video.Stream
 	choice ui.ShareChoice
@@ -491,7 +797,7 @@ type sendingShare struct {
 }
 
 // halt kills the capture child, idempotently and from any goroutine. The
-// child dying is what ends the reader track, which unpublishes. Through the
+// child dying is what ends the write loop, which unpublishes. Through the
 // tee rather than the stream, so a preview watching this end is let go with
 // it and one still being launched never attaches at all.
 func (s *sendingShare) halt() bool {
@@ -649,6 +955,7 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 			Codec:           codec,
 			Speed:           captureSpeed(settings.EncoderSpeed),
 			Latency:         captureLatency(settings.Latency),
+			Rate:            captureRate(settings.RateControl),
 		})
 		if err != nil {
 			return nil, false, err
@@ -656,7 +963,7 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 
 		sending = &sendingShare{
 			stream: stream, choice: choice,
-			tee: video.NewShareTee(stream, enc.AV1), av1: enc.AV1, encoder: enc.Name,
+			tee: video.NewShareTee(stream, enc.AV1, width, height), av1: enc.AV1, encoder: enc.Name,
 			width: width, height: height,
 		}
 
@@ -1005,6 +1312,17 @@ func captureLatency(setting string) video.CaptureLatency {
 	}
 
 	return video.CaptureLowestLatency
+}
+
+// captureRate is the same for the bitrate mode. What constant buys is not a
+// codec fact either — it is about the connection carrying the share, which is
+// the reason it is offered at all rather than settled once here.
+func captureRate(setting string) video.CaptureRate {
+	if setting == config.ShareRateConstant {
+		return video.CaptureConstant
+	}
+
+	return video.CaptureVariable
 }
 
 // captureCodec is the third dial: the codec preference as video's own value.

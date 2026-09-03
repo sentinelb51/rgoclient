@@ -212,7 +212,7 @@ func (v *AttachmentViewer) bar(onClose func()) fyne.CanvasObject {
 	// strip's height, which would draw the two buttons as tall rectangles of
 	// different widths rather than as the one square each.
 	buttons := HBoxNoSpacing()
-	if link := v.attachment.URL; link != "" {
+	if link := fileLink(v.attachment); link != "" {
 		browse := NewGlyphButton(fynetheme.ComputerIcon(), func() { v.deps.Actions.OnLinkTapped(link, "") })
 		buttons.Add(vcenter(browse.saying(v.tip, "Open in browser")))
 	}
@@ -251,7 +251,7 @@ func (v *AttachmentViewer) menuItems() []*fyne.MenuItem {
 			actionMark(assets.ActionCopyIcon), v.copyImage))
 	}
 
-	if link := v.attachment.URL; link != "" {
+	if link := fileLink(v.attachment); link != "" {
 		items = append(items,
 			fyne.NewMenuItemWithIcon("Copy link", actionMark(assets.ActionCopyIcon),
 				func() { CopyToClipboard(link) }),
@@ -272,7 +272,7 @@ func (v *AttachmentViewer) Copy() {
 		return
 	}
 
-	if link := v.attachment.URL; link != "" {
+	if link := fileLink(v.attachment); link != "" {
 		CopyToClipboard(link)
 	}
 }

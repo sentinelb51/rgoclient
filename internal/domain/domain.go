@@ -135,6 +135,11 @@ type File struct {
 	Name string
 	URL  string
 
+	// Source is where the file itself lives, for one whose URL is a proxy's —
+	// what a reader is offered when they ask for the link rather than the
+	// picture. Empty for anything fetched from where it is.
+	Source string
+
 	Kind   FileKind
 	Size   int
 	Width  int
@@ -146,12 +151,13 @@ type File struct {
 	// offers it a player.
 	ContentType string
 
-	// Foreign marks a URL served by somebody other than the instance's own CDN —
-	// an embed's picture, fetched from whatever host the unfurl named. It is not
-	// about trust in the picture but in the *name*: a CDN URL's file ID is what
-	// every cache entry is keyed by, and a foreign path shaped like one would
-	// otherwise be filed under an ID it does not own, so one message's embed could
-	// replace an avatar or a server icon everywhere it is drawn.
+	// Foreign marks a file that is somebody else's rather than one of the
+	// instance's own uploads — an embed's picture, found at whatever host the
+	// unfurl named, however it is then fetched. It is not about trust in the
+	// picture but in the *name*: a CDN URL's file ID is what every cache entry is
+	// keyed by, and a foreign path shaped like one would otherwise be filed under
+	// an ID it does not own, so one message's embed could replace an avatar or a
+	// server icon everywhere it is drawn.
 	Foreign bool
 }
 

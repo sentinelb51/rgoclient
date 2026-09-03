@@ -51,10 +51,10 @@ const (
 const gifStillDelay = 100 * time.Millisecond
 
 // gifCandidate reports whether an image file is worth offering a player: the
-// server recorded it as a GIF, or its name or URL says so. A GIF served under
-// neither stays a still — the fetch would refuse anything else by magic anyway,
-// so this is only what keeps hovers over ordinary pictures from fetching them
-// twice.
+// server recorded it as a GIF, its name or URL says so, or it is an unfurl's
+// picture that says nothing at all. The fetch would refuse anything else by
+// magic anyway, so this is only what keeps hovers over pictures that announce
+// themselves as something else from fetching them twice.
 func gifCandidate(file *domain.File) bool {
 	if file == nil || file.Kind != domain.FileImage || file.URL == "" {
 		return false
@@ -67,8 +67,16 @@ func gifCandidate(file *domain.File) bool {
 	}
 
 	path, _, _ := strings.Cut(file.URL, "?")
+	if strings.HasSuffix(strings.ToLower(path), ".gif") {
+		return true
+	}
 
-	return strings.HasSuffix(strings.ToLower(path), ".gif")
+	// A foreign picture that says nothing about itself is offered one anyway: an
+	// unfurl names a page as often as a file — a gifbox GIF arrives with no
+	// extension and no type — and its URL here is the proxy's, whose own path
+	// says nothing either. Being wrong costs one request, which the magic check
+	// refuses and the animator remembers as failed.
+	return file.Foreign && !strings.Contains(file.Name, ".")
 }
 
 // gifAnimator plays a GIF into the picture an imageFrame (or a picker tile's

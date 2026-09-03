@@ -10,10 +10,13 @@ package client
 
 import (
 	"image/color"
+	"log"
 	"math"
+	"net/url"
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 
 	"github.com/sentinelb51/revoltgo"
 
@@ -205,6 +208,59 @@ func toReactions(reactions map[string][]string) []domain.Reaction {
 	return out
 }
 
+/* January */
+
+// januaryFallback is the media proxy used when the instance could not be asked
+// where its own is. A constant that has already moved once — the revolt.chat
+// spellings of it no longer resolve — which is why it is only the failure path
+// and the answer normally comes from the instance itself.
+const januaryFallback = "https://proxy.stoatusercontent.com"
+
+// januaryBase is where a foreign embed's media is fetched through, without its
+// trailing slash, or "" for an instance that runs no proxy. Package level
+// because toEmbed is a pure function reached from every history page and every
+// gateway event, and the answer is instance configuration that cannot change
+// under a run — the memoisation exception, not shared state.
+var januaryBase atomic.Pointer[string]
+
+// resolveJanuary asks the instance where its media proxy is and holds the
+// answer for the run. Never fatal: a client that cannot ask still draws every
+// picture the fallback reaches, and a login is not the thing to fail over it.
+func resolveJanuary(session *revoltgo.Session) {
+	instance, err := session.Instance()
+	if err != nil {
+		log.Printf("instance config: %v; embeds proxied through %s", err, januaryFallback)
+		store := januaryFallback
+		januaryBase.Store(&store)
+
+		return
+	}
+
+	var base string
+	if january := instance.Features.January; january.Enabled {
+		base = strings.TrimSuffix(january.URL, "/")
+	}
+	januaryBase.Store(&base)
+}
+
+// proxied is where a picture an unfurl named is actually fetched from. **Not an
+// optimisation**: the URL Revolt hands over is the one the *link* pointed at,
+// which for a gifbox GIF is an HTML page — January is what resolves it to the
+// bytes, and without it the embed draws an empty box. Everything foreign goes
+// through it rather than only what needs it, which also keeps the reader's
+// address off whatever host somebody else's message named.
+//
+// Only what is fetched: an embed's own URL is what its title opens, and that
+// stays the page it was.
+func proxied(raw string) string {
+	base := januaryBase.Load()
+	if raw == "" || base == nil || *base == "" {
+		return raw
+	}
+
+	return *base + "/proxy?url=" + url.QueryEscape(raw)
+}
+
 /* Embeds */
 
 func toEmbedKind(kind string) domain.EmbedKind {
@@ -237,7 +293,7 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 		SiteName:    embed.SiteName,
 		Title:       embed.Title,
 		Description: embed.Description,
-		IconURL:     embed.IconURL,
+		IconURL:     proxied(embed.IconURL),
 	}
 	if out.URL == "" {
 		out.URL = embed.OriginalURL
@@ -255,7 +311,8 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 	case embed.Video != nil && embed.Video.URL != "":
 		out.Video = &domain.File{
 			Name:    nameFromURL(embed.Video.URL),
-			URL:     embed.Video.URL,
+			URL:     proxied(embed.Video.URL),
+			Source:  embed.Video.URL,
 			Kind:    domain.FileVideo,
 			Width:   embed.Video.Width,
 			Height:  embed.Video.Height,
@@ -263,7 +320,8 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 		}
 	case kind == domain.EmbedVideo && out.URL != "":
 		out.Video = &domain.File{
-			Name: nameFromURL(out.URL), URL: out.URL, Kind: domain.FileVideo, Foreign: true,
+			Name: nameFromURL(out.URL), URL: proxied(out.URL), Source: out.URL,
+			Kind: domain.FileVideo, Foreign: true,
 		}
 	}
 	if embed.Special != nil && embed.Special.Type == revoltgo.MessageEmbedSpecialGIF {
@@ -274,7 +332,8 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 	case embed.Image != nil:
 		out.Image = &domain.File{
 			Name:    nameFromURL(embed.Image.URL),
-			URL:     embed.Image.URL,
+			URL:     proxied(embed.Image.URL),
+			Source:  embed.Image.URL,
 			Kind:    domain.FileImage,
 			Width:   embed.Image.Width,
 			Height:  embed.Image.Height,
@@ -292,11 +351,14 @@ func toEmbed(embed *revoltgo.MessageEmbed) *domain.Embed {
 			}
 		}
 	case kind == domain.EmbedImage:
-		// A bare image embed *is* its URL, and its dimensions sit beside the type
-		// where revoltgo has no field for them — so it is drawn against the same
-		// placeholder box an attachment with no metadata gets.
+		// A bare image embed *is* its URL — which is the *link*, not the picture:
+		// a gifbox GIF arrives as its page here, and only January resolves that
+		// to the bytes. Its dimensions sit beside the type where revoltgo has no
+		// field for them, so it is drawn against the same placeholder box an
+		// attachment with no metadata gets.
 		out.Image = &domain.File{
-			Name: nameFromURL(embed.URL), URL: embed.URL, Kind: domain.FileImage, Foreign: true,
+			Name: nameFromURL(embed.URL), URL: proxied(embed.URL), Source: embed.URL,
+			Kind: domain.FileImage, Foreign: true,
 		}
 	}
 

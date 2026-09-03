@@ -167,13 +167,19 @@ func (c *Client) OpenAs(token, sessionID string) error {
 }
 
 // start attaches a session: it drops whatever came before, registers the gateway
-// handlers against this session's epoch, and opens the websocket.
+// handlers against this session's epoch, resolves the instance's media proxy and
+// opens the websocket.
 func (c *Client) start(session *revoltgo.Session) error {
 	c.Close()
 
 	epoch := c.epoch.Add(1)
 	c.register(session, epoch)
 	c.session.Store(session)
+
+	// Ahead of the websocket, not beside it: Ready carries messages, and an
+	// embed converted before the proxy is known would be filed under a URL that
+	// draws nothing. It needs no token, so it costs one request either way.
+	resolveJanuary(session)
 
 	if err := session.Open(); err != nil {
 		c.session.Store(nil)

@@ -1452,6 +1452,21 @@ func fileCacheID(file *domain.File) string {
 	return imageCacheID(file.URL)
 }
 
+// fileLink is the address a file is handed out under — copied, or opened in a
+// browser. Not the one it is fetched from: an embed's picture is fetched
+// through the instance's proxy, and a reader asking for the link wants the
+// picture's own address rather than the wrapper around it.
+func fileLink(file *domain.File) string {
+	if file == nil {
+		return ""
+	}
+	if file.Source != "" {
+		return file.Source
+	}
+
+	return file.URL
+}
+
 // imageFrame is a picture in the box it is drawn in, at most bounds and never
 // enlarged to fill it. Revolt makes a file's dimensions optional and carries
 // none at all for a bare embed picture or an avatar: without them the box is

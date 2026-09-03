@@ -26,7 +26,7 @@ require (
 	// It carries its own module path rather than upstream's, so nothing here
 	// names a module that is not what gets built. What each level costs is in
 	// docs/performance.md, and what is still out of it in docs/known-gaps.md.
-	github.com/sentinelb51/gopus v0.0.0-20260903165801-7690dcefe00e
+	github.com/sentinelb51/gopus v0.0.0-20260903200144-fc2bc1e6a306
 	github.com/sentinelb51/gtcrn-go v0.2.0
 	github.com/sentinelb51/revoltgo v0.0.0-20260827152846-1b01f181fe66
 	golang.design/x/clipboard v0.9.0

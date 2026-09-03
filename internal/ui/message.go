@@ -143,7 +143,8 @@ type MessageWidget struct {
 	deleted bool
 
 	editing   bool
-	emptyBody bool // says nothing, so the slot stays hidden outside an edit
+	editEntry *EditEntry // the live editor while editing is true, for EditMentions
+	emptyBody bool       // says nothing, so the slot stays hidden outside an edit
 
 	// overChild is the pointer being over something in the row that takes hover for
 	// itself — the action group, a reaction chip. Innermost wins and nothing above
@@ -537,15 +538,17 @@ func (w *MessageWidget) TappedSecondary(e *fyne.PointEvent) {
 // StartEdit swaps the body for an in-place editor, save/cancel floating where the
 // quick-actions do. Saving unchanged or emptied content counts as a cancel.
 // Answers with the entry to focus, or nil when the message is not editable or is
-// already being edited.
-func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func()) *EditEntry {
+// already being edited. window is threaded to the editor's mention picker the
+// same way MessageInput takes one, for the mouse-pick refocus.
+func (w *MessageWidget) StartEdit(window fyne.Window, onSave func(newContent string), onCancel func()) *EditEntry {
 	if w.editing || !w.canEdit() {
 		return nil
 	}
 	w.editing = true
 	w.stopHideTimer()
 
-	entry := NewEditEntry(w.message.Content)
+	entry := NewEditEntry(w.message.Content, w.deps, window)
+	w.editEntry = entry
 	cancel := func() {
 		w.CancelEdit()
 		if onCancel != nil {
@@ -566,7 +569,7 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 	entry.OnSave, entry.OnCancel = save, cancel
 
 	hint := newText("esc to cancel  •  enter to save", theme.Colors.TimestampText, theme.Sizes.MessageTimestampSize)
-	w.bodySlot.Objects = []fyne.CanvasObject{container.NewVBox(WithCaret(entry), hint)}
+	w.bodySlot.Objects = []fyne.CanvasObject{container.NewVBox(entry.Mentions, WithCaret(entry), hint)}
 	w.bodySlot.Show()
 	w.bodySlot.Refresh()
 
@@ -581,6 +584,17 @@ func (w *MessageWidget) StartEdit(onSave func(newContent string), onCancel func(
 
 	w.setHighlighted(true)
 	return entry
+}
+
+// EditMentions returns the in-place editor's mention picker while one is
+// active, or nil — the controller mirrors mention candidates into it exactly
+// as it does the composer's.
+func (w *MessageWidget) EditMentions() *MentionPicker {
+	if !w.editing || w.editEntry == nil {
+		return nil
+	}
+
+	return w.editEntry.Mentions
 }
 
 // HasRelativeTime reports whether this row's body carries a <t:…:R>. The
@@ -618,6 +632,7 @@ func (w *MessageWidget) CancelEdit() {
 		return
 	}
 	w.editing = false
+	w.editEntry = nil
 
 	w.bodySlot.Objects = []fyne.CanvasObject{w.body}
 	if w.emptyBody {
@@ -1746,13 +1761,18 @@ func resolveReply(deps Deps, channelID, messageID string) (author domain.Author,
 
 /* In-place editor */
 
-var _ desktop.Keyable = (*EditEntry)(nil)
+var (
+	_ desktop.Keyable   = (*EditEntry)(nil)
+	_ desktop.Mouseable = (*EditEntry)(nil)
+)
 
 // EditEntry is the multi-line entry used for in-place message editing: Enter
 // saves, Shift+Enter inserts a newline, Escape cancels. It grows with its
-// content like the main composer.
+// content like the main composer, and shares the composer's @/#/: picker
+// through mentionField — see MessageInput.
 type EditEntry struct {
 	widget.Entry
+	*mentionField
 	OnSave   func()
 	OnCancel func()
 
@@ -1761,14 +1781,17 @@ type EditEntry struct {
 	cursorPlaced bool
 }
 
-// NewEditEntry creates an edit entry pre-filled with the message's content, the
-// cursor placed at the end on the first layout.
-func NewEditEntry(content string) *EditEntry {
+// NewEditEntry creates an edit entry pre-filled with the message's content,
+// the cursor placed at the end on the first layout. window is what canvas
+// focus returns to after a mouse-picked mention blurs the entry — the same
+// reason MessageInput takes one.
+func NewEditEntry(content string, deps Deps, window fyne.Window) *EditEntry {
 	e := &EditEntry{}
 	e.ExtendBaseWidget(e)
 	e.MultiLine = true
 	e.Wrapping = fyne.TextWrapWord
 	e.SetText(content)
+	e.mentionField = newMentionField(deps, &e.Entry, window, e)
 
 	return e
 }
@@ -1797,6 +1820,13 @@ func (e *EditEntry) FocusLost() {
 	e.Entry.FocusLost()
 }
 
+// MouseDown lets the entry place the caret, then re-evaluates the picker
+// against where it landed — see MessageInput.MouseDown.
+func (e *EditEntry) MouseDown(ev *desktop.MouseEvent) {
+	e.Entry.MouseDown(ev)
+	e.syncMentions()
+}
+
 func (e *EditEntry) KeyDown(key *fyne.KeyEvent) {
 	if key.Name == desktop.KeyShiftLeft || key.Name == desktop.KeyShiftRight {
 		e.shiftPressed = true
@@ -1811,7 +1841,15 @@ func (e *EditEntry) KeyUp(key *fyne.KeyEvent) {
 
 // TypedKey saves on Enter, inserts a newline on Shift+Enter, cancels on Escape,
 // and otherwise defers to the embedded entry, refreshing so MinSize recomputes.
+// An open mention picker gets first refusal on the navigation keys, exactly as
+// the composer's does — which is also what lets Escape close the picker alone
+// on its first press rather than cancelling the whole edit.
 func (e *EditEntry) TypedKey(key *fyne.KeyEvent) {
+	if e.Mentions.Visible() && e.handleMentionKey(key) {
+		return
+	}
+	defer e.syncMentions()
+
 	switch {
 	case key.Name == fyne.KeyEscape:
 		if e.OnCancel != nil {
@@ -1832,4 +1870,15 @@ func (e *EditEntry) TypedKey(key *fyne.KeyEvent) {
 
 func (e *EditEntry) TypedRune(r rune) {
 	e.Entry.TypedRune(r)
+	e.syncMentions()
+}
+
+// TypedShortcut re-evaluates the picker after a paste, which can land a marker
+// character without a rune ever reaching TypedRune. Refreshed explicitly,
+// unlike TypedKey/TypedRune — what a shortcut dispatches to does not all end
+// in one, MessageInput's own reasoning.
+func (e *EditEntry) TypedShortcut(s fyne.Shortcut) {
+	e.Entry.TypedShortcut(s)
+	e.Refresh()
+	e.syncMentions()
 }

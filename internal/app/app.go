@@ -1053,12 +1053,22 @@ func (a *App) startEditing(w *ui.MessageWidget) {
 		)
 	}
 
-	entry := w.StartEdit(save, func() {
+	entry := w.StartEdit(a.window, save, func() {
 		a.editing = nil
 		a.focusInput()
 	})
 	if entry == nil {
 		return
+	}
+
+	// Seeded from the composer's own pools rather than a fresh walk: they were
+	// resolved for the same channel and go stale at the same events, which
+	// setMentionCandidates keeps both pickers current against from here on.
+	if a.input != nil {
+		users, channels, emojis := a.input.Mentions.Pools()
+		entry.Mentions.SetCandidates(ui.MentionUser, users)
+		entry.Mentions.SetCandidates(ui.MentionChannel, channels)
+		entry.Mentions.SetCandidates(ui.MentionEmoji, emojis)
 	}
 
 	a.editing = w

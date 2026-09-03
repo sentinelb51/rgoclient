@@ -753,13 +753,18 @@ func recipientMembers(store domain.Store, channel domain.Channel) []domain.Membe
 
 // setMentionCandidates hands the picker a list somebody else has already
 // resolved, which is how refreshMemberList and refreshChannelList share their
-// own walks with it.
+// own walks with it. Mirrored into an in-place editor's own picker too, while
+// one is open — an edit is the composer's typing surface standing somewhere
+// else, and its picker is fed nothing on its own.
 func (a *App) setMentionCandidates(kind ui.MentionKind, candidates []ui.MentionCandidate) {
-	if a.input == nil {
-		return
+	if a.input != nil {
+		a.input.Mentions.SetCandidates(kind, candidates)
 	}
-
-	a.input.Mentions.SetCandidates(kind, candidates)
+	if a.editing != nil {
+		if editing := a.editing.EditMentions(); editing != nil {
+			editing.SetCandidates(kind, candidates)
+		}
+	}
 }
 
 // recipientCandidates resolves a conversation's mentionable people from what the

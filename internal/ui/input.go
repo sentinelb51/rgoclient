@@ -108,13 +108,10 @@ type MessageInput struct {
 	// playing anything: this package has no business knowing there is audio.
 	OnKeystroke func(Keystroke)
 
-	// Mentions is the autocomplete list, mounted above the reply cards and hidden
-	// until the caret sits inside a mention. mentionStart is the marker's byte
-	// offset, or -1, and mentionKind what it opened — together only used to notice
-	// the caret moving to a *different* mention, so the highlight restarts.
-	Mentions     *MentionPicker
-	mentionStart int
-	mentionKind  MentionKind
+	// mentionField is the @/#/: picker and the marker state behind it — shared
+	// with EditEntry so an in-place edit gets the same autocomplete the composer
+	// does. Mentions is promoted, so a.input.Mentions still reaches the picker.
+	*mentionField
 
 	Attachments         []domain.Attachment
 	AttachmentContainer *fyne.Container
@@ -161,11 +158,10 @@ func NewMessageInput(deps Deps, window fyne.Window) *MessageInput {
 	m := &MessageInput{
 		deps:                deps,
 		window:              window,
-		mentionStart:        -1,
 		AttachmentContainer: container.NewHBox(),
 		ReplyContainer:      NewGapColumn(theme.Sizes.ComposerRowGap),
 	}
-	m.Mentions = NewMentionPicker(deps, m.acceptMention)
+	m.mentionField = newMentionField(deps, &m.Entry, window, m)
 	m.EmojiButton = NewIconButton(assets.ActionEmojiIcon, m.pickEmoji, nil)
 	m.GIFButton = NewIconButton(assets.ActionGIFIcon, m.pickGIF, nil)
 	m.AttachButton = NewIconButton(assets.ActionAddIcon, m.attachFile, nil)
@@ -792,18 +788,46 @@ func (m *MessageInput) TypedShortcut(s fyne.Shortcut) {
 
 /* The mention picker */
 
+// mentionField is the @/#/: detection shared by every entry that can open the
+// mention picker mid-typing — MessageInput and EditEntry. It reads and writes
+// the caret through entry rather than holding one of its own, since both
+// embed a widget.Entry by value; focus is what canvas focus returns to after
+// a mouse-picked candidate blurs the entry, Fyne focusing a fyne.Focusable
+// rather than a bare *widget.Entry.
+type mentionField struct {
+	entry  *widget.Entry
+	window fyne.Window
+	focus  fyne.Focusable
+
+	// Mentions is the autocomplete list, hidden until the caret sits inside a
+	// mention. mentionStart is the marker's byte offset, or -1, and mentionKind
+	// what it opened — together only used to notice the caret moving to a
+	// *different* mention, so the highlight restarts.
+	Mentions     *MentionPicker
+	mentionStart int
+	mentionKind  MentionKind
+}
+
+// newMentionField builds a hidden picker wired to entry.
+func newMentionField(deps Deps, entry *widget.Entry, window fyne.Window, focus fyne.Focusable) *mentionField {
+	f := &mentionField{entry: entry, window: window, focus: focus, mentionStart: -1}
+	f.Mentions = NewMentionPicker(deps, f.acceptMention)
+
+	return f
+}
+
 // handleMentionKey lets an open picker consume a navigation key, reporting
 // whether it did.
-func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
+func (f *mentionField) handleMentionKey(key *fyne.KeyEvent) bool {
 	switch key.Name {
 	case fyne.KeyUp:
-		m.Mentions.Step(-1)
+		f.Mentions.Step(-1)
 	case fyne.KeyDown:
-		m.Mentions.Step(1)
+		f.Mentions.Step(1)
 	case fyne.KeyReturn, fyne.KeyEnter, fyne.KeyTab:
-		m.Mentions.Accept()
+		f.Mentions.Accept()
 	case fyne.KeyEscape:
-		m.hideMentions()
+		f.hideMentions()
 	default:
 		return false
 	}
@@ -814,30 +838,30 @@ func (m *MessageInput) handleMentionKey(key *fyne.KeyEvent) bool {
 // syncMentions re-evaluates the picker against the caret. Driven from the typing
 // methods rather than Entry.OnChanged because the picker also closes when the
 // caret merely *moves* out of a mention, which changes no text.
-func (m *MessageInput) syncMentions() {
-	start, kind, query, ok := m.mentionQuery()
+func (f *mentionField) syncMentions() {
+	start, kind, query, ok := f.mentionQuery()
 	if ok {
-		if start != m.mentionStart || kind != m.mentionKind {
-			m.Mentions.Reset() // a different mention starts at the top of its list
+		if start != f.mentionStart || kind != f.mentionKind {
+			f.Mentions.Reset() // a different mention starts at the top of its list
 		}
-		if m.Mentions.Update(kind, query) {
-			m.mentionStart, m.mentionKind = start, kind
-			m.Mentions.Show()
+		if f.Mentions.Update(kind, query) {
+			f.mentionStart, f.mentionKind = start, kind
+			f.Mentions.Show()
 			return
 		}
 	}
-	m.mentionStart = -1
-	m.hideMentions()
+	f.mentionStart = -1
+	f.hideMentions()
 }
 
 // hideMentions closes the picker without disturbing the text or the caret.
-func (m *MessageInput) hideMentions() {
-	if !m.Mentions.Visible() {
+func (f *mentionField) hideMentions() {
+	if !f.Mentions.Visible() {
 		return
 	}
 
-	m.Mentions.Reset()
-	m.Mentions.Hide()
+	f.Mentions.Reset()
+	f.Mentions.Hide()
 }
 
 // mentionQuery finds the mention the caret sits in: the marker's byte offset,
@@ -849,14 +873,15 @@ func (m *MessageInput) hideMentions() {
 // The emoji marker is the one that has to earn its list: ':' is punctuation
 // people type on purpose, so it opens nothing until emojiQueryMin characters
 // follow it, which also leaves an emoticon like ":)" alone.
-func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string, ok bool) {
-	cursor := m.cursorOffset()
+func (f *mentionField) mentionQuery() (start int, kind MentionKind, query string, ok bool) {
+	text := f.entry.Text
+	cursor := f.cursorOffset()
 
 	// Bounded by the current word: the walk back stops at the first space. In place
 	// rather than over a []rune copy — this runs on every keystroke before any
 	// early-out, and a message is not short.
 	for i := cursor; i > 0; {
-		r, size := utf8.DecodeLastRuneInString(m.Text[:i])
+		r, size := utf8.DecodeLastRuneInString(text[:i])
 		i -= size
 
 		if unicode.IsSpace(r) {
@@ -867,11 +892,11 @@ func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string
 		if !isMarker {
 			continue
 		}
-		if before, _ := utf8.DecodeLastRuneInString(m.Text[:i]); i > 0 && !unicode.IsSpace(before) {
+		if before, _ := utf8.DecodeLastRuneInString(text[:i]); i > 0 && !unicode.IsSpace(before) {
 			return 0, 0, "", false
 		}
 
-		typed := m.Text[i+1 : cursor]
+		typed := text[i+1 : cursor]
 		if marked == MentionEmoji && utf8.RuneCountInString(typed) < emojiQueryMin {
 			return 0, 0, "", false
 		}
@@ -886,43 +911,45 @@ func (m *MessageInput) mentionQuery() (start int, kind MentionKind, query string
 // leaving the caret after it and a space ready for the next word. The span is
 // re-derived rather than taken from mentionStart: picking with the mouse blurs
 // the entry before the tap is delivered, by which time the picker is hidden.
-func (m *MessageInput) acceptMention(candidate MentionCandidate) {
-	start, _, _, ok := m.mentionQuery()
+func (f *mentionField) acceptMention(candidate MentionCandidate) {
+	start, _, _, ok := f.mentionQuery()
 	if !ok {
 		return
 	}
 
-	cursor := m.cursorOffset()
+	cursor := f.cursorOffset()
 	token := candidate.token()
-	text := m.Text[:start] + token + m.Text[cursor:]
+	text := f.entry.Text[:start] + token + f.entry.Text[cursor:]
 
-	m.mentionStart = -1
-	m.hideMentions()
+	f.mentionStart = -1
+	f.hideMentions()
 
-	m.SetText(text)
-	m.CursorRow, m.CursorColumn = cursorPosition(text, start+len(token))
-	m.Refresh()
+	f.entry.SetText(text)
+	f.entry.CursorRow, f.entry.CursorColumn = cursorPosition(text, start+len(token))
+	f.entry.Refresh()
 
-	if m.window != nil {
-		m.window.Canvas().Focus(m)
+	if f.window != nil {
+		f.window.Canvas().Focus(f.focus)
 	}
 }
 
-// cursorOffset returns the caret as a byte offset into Text, which is what the
-// mention helpers want — Fyne tracks a row/column pair, what drawing a caret
-// needs. Walked in place: splitting Text into lines per keystroke allocated the
-// whole message twice over for one number.
-func (m *MessageInput) cursorOffset() int {
+// cursorOffset returns the caret as a byte offset into the entry's text,
+// which is what the mention helpers want — Fyne tracks a row/column pair,
+// what drawing a caret needs. Walked in place: splitting the text into lines
+// per keystroke allocated the whole message twice over for one number.
+func (f *mentionField) cursorOffset() int {
+	text := f.entry.Text
+
 	var offset int
-	for range m.CursorRow {
-		i := strings.IndexByte(m.Text[offset:], '\n')
+	for range f.entry.CursorRow {
+		i := strings.IndexByte(text[offset:], '\n')
 		if i < 0 {
-			return len(m.Text)
+			return len(text)
 		}
 		offset += i + 1
 	}
 
-	line := m.Text[offset:]
+	line := text[offset:]
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
 	}
@@ -930,7 +957,7 @@ func (m *MessageInput) cursorOffset() int {
 	// The column is in runes; ranging a string yields the byte index each starts at.
 	var col int
 	for i := range line {
-		if col == m.CursorColumn {
+		if col == f.entry.CursorColumn {
 			return offset + i
 		}
 		col++
@@ -1992,6 +2019,13 @@ func (p *MentionPicker) SetCandidates(kind MentionKind, candidates []MentionCand
 		p.Reset()
 		p.Hide()
 	}
+}
+
+// Pools returns the three candidate lists currently held, letting a second
+// picker — the in-place editor's — start seeded with what this one already
+// resolved rather than empty until the next walk happens to run again.
+func (p *MentionPicker) Pools() (users, channels, emojis []MentionCandidate) {
+	return p.users, p.channels, p.emojis
 }
 
 // pool is the candidate list a kind filters against.

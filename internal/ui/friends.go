@@ -183,9 +183,15 @@ type FriendsPage struct {
 	widget.BaseWidget
 
 	deps    Deps
-	list    *fyne.Container // the sections themselves, replaced wholesale on a refill
+	list    *fyne.Container // the sections' rows, reassembled per refill
 	content fyne.CanvasObject
 	onUser  func(userID string, anchor fyne.CanvasObject)
+
+	// cards is one widget per person, kept across refills and reused by redraw:
+	// presence alone refills this page while it is open, and rebuilding every
+	// card for one ring was an avatar, two texts and a row of buttons per person
+	// per flicker. SetSections prunes it to the people still listed.
+	cards map[string]*friendCard
 
 	// sections is the last answer the controller gave, kept so folding one can
 	// redraw from it: what a fold changes is how the page is *drawn*, and asking
@@ -225,6 +231,7 @@ func NewFriendsPage(deps Deps, onUser func(userID string, anchor fyne.CanvasObje
 		deps:   deps,
 		list:   VBoxNoSpacing(),
 		onUser: onUser,
+		cards:  make(map[string]*friendCard),
 	}
 
 	padding := theme.Sizes.FriendsPagePadding
@@ -363,6 +370,22 @@ func (e *askEntry) FocusLost() {
 func (p *FriendsPage) SetSections(sections []FriendSection) {
 	p.sections = sections
 	p.redraw()
+
+	// A card is kept while its person is listed at all — folded or filtered away
+	// included, so an unfold puts back what was built — and dropped here, after
+	// the redraw's sweep has seen it, so an ended relationship does not hold its
+	// widget for the life of the page.
+	listed := make(map[string]bool, len(p.cards))
+	for _, section := range sections {
+		for _, entry := range section.Entries {
+			listed[entry.UserID] = true
+		}
+	}
+	for userID := range p.cards {
+		if !listed[userID] {
+			delete(p.cards, userID)
+		}
+	}
 }
 
 // redraw builds the list from what the controller last gave and what the reader
@@ -370,11 +393,8 @@ func (p *FriendsPage) SetSections(sections []FriendSection) {
 // hidden — which is the point of folding one: a page carrying tens of stale
 // requests should cost what the heading costs, not what the requests do.
 func (p *FriendsPage) redraw() {
-	// The cards about to be dropped include whichever button the pointer is on, and
-	// a discarded widget hears nothing: it will never report the pointer leaving.
-	p.hideTip()
-
 	var rows []fyne.CanvasObject
+	drawn := make(map[string]bool, len(p.cards))
 
 	for _, section := range p.sections {
 		entries := p.matching(section.Entries)
@@ -399,6 +419,7 @@ func (p *FriendsPage) redraw() {
 				rows = append(rows, VerticalSpacer(theme.Sizes.FriendsCardGap))
 			}
 			rows = append(rows, p.card(entry))
+			drawn[entry.UserID] = true
 		}
 	}
 
@@ -410,8 +431,22 @@ func (p *FriendsPage) redraw() {
 		rows = []fyne.CanvasObject{p.empty()}
 	}
 
+	// A card that has just left the screen may hold the pointer, and a widget no
+	// longer drawn never reports it leaving — so its hover fill is put back and
+	// any label it raised comes down by hand. A card that stays keeps both,
+	// which is what lets a presence refill land under a tooltip being read.
+	for userID, card := range p.cards {
+		if card.drawn && !drawn[userID] {
+			card.setHovered(false)
+			p.hideTip()
+		}
+		card.drawn = drawn[userID]
+	}
+
+	// Relayout rather than Refresh: the reused cards would be walked per refill
+	// for nothing, every avatar on the page re-uploaded among it.
 	p.list.Objects = rows
-	p.list.Refresh()
+	Relayout(p.list)
 }
 
 // isFolded answers for one section: what the reader decided, or the state the
@@ -562,14 +597,38 @@ func (p *FriendsPage) matching(entries []FriendEntry) []FriendEntry {
 
 /* One person */
 
-// card draws one person: their picture and name at one end, what can be done
-// about them at the other. The card *is* the row's primary action — a
+// card is the row for one person: the held one where what it was built from
+// still stands — presence and callbacks brought up to date in place — and a
+// build otherwise. A person whose name, picture or buttons moved is rebuilt
+// whole rather than patched: it is one card, once in a while, and the closures
+// wired at build capture the same snapshot the texts are drawn from.
+func (p *FriendsPage) card(entry FriendEntry) fyne.CanvasObject {
+	held, ok := p.cards[entry.UserID]
+	if ok && held.stands(entry) {
+		held.update(entry)
+
+		return held
+	}
+	if ok && held.drawn {
+		// The pointer may be on the card being replaced, and a discarded widget
+		// never reports it leaving.
+		p.hideTip()
+	}
+
+	built := p.buildCard(entry)
+	p.cards[entry.UserID] = built
+
+	return built
+}
+
+// buildCard draws one person: their picture and name at one end, what can be
+// done about them at the other. The card *is* the row's primary action — a
 // conversation where there is one to open — and the picture leading it is the way
 // to their profile, which is where everything neither offers lives.
-func (p *FriendsPage) card(entry FriendEntry) fyne.CanvasObject {
-	c := &friendCard{background: newIslandCard(), userID: entry.UserID}
+func (p *FriendsPage) buildCard(entry FriendEntry) *friendCard {
+	c := &friendCard{background: newIslandCard(), userID: entry.UserID, entry: entry}
 
-	profile := func() {
+	c.openProfile = func() {
 		if p.onUser != nil {
 			p.onUser(c.userID, c)
 		}
@@ -577,7 +636,7 @@ func (p *FriendsPage) card(entry FriendEntry) fyne.CanvasObject {
 
 	c.onTap = entry.Open
 	if c.onTap == nil {
-		c.onTap = profile
+		c.onTap = c.openProfile
 	}
 
 	name := newBoldText(entry.Name, theme.Colors.TextPrimary, theme.Sizes.FriendsNameSize)
@@ -591,7 +650,7 @@ func (p *FriendsPage) card(entry FriendEntry) fyne.CanvasObject {
 	// The name column takes the leftover width, so a long one shortens rather than
 	// pushing the buttons off the card.
 	row := NewFillRow(2,
-		p.face(entry, c, profile),
+		p.face(entry, c, c.openProfile),
 		HorizontalSpacer(gap),
 		vcenter(lines),
 		HorizontalSpacer(gap),
@@ -620,6 +679,7 @@ func (p *FriendsPage) face(entry FriendEntry, card *friendCard, onTap func()) fy
 
 	ring := canvas.NewCircle(presenceColor(entry.Presence))
 	ring.Hidden = !entry.Presence.IsOnline()
+	card.ring = ring
 
 	face := container.New(&memberRingLayout{band: theme.Sizes.MemberPresenceRing}, ring, avatar)
 
@@ -643,7 +703,9 @@ func (p *FriendsPage) buttons(entry FriendEntry, card *friendCard) fyne.CanvasOb
 	for _, action := range entry.Buttons {
 		mark, tint := friendMark(action)
 		if mark == nil {
-			offered = append(offered, newProfileButton(action, false))
+			fallback := newProfileButton(action, false)
+			card.taps = append(card.taps, &fallback.tapBase)
+			offered = append(offered, fallback)
 			continue
 		}
 
@@ -655,6 +717,7 @@ func (p *FriendsPage) buttons(entry FriendEntry, card *friendCard) fyne.CanvasOb
 			p.tip(action.Label, button, hovering)
 		})
 
+		card.taps = append(card.taps, &button.tapBase)
 		offered = append(offered, button)
 	}
 
@@ -734,6 +797,20 @@ type friendCard struct {
 	background *canvas.Rectangle
 	content    fyne.CanvasObject
 	userID     string
+
+	// entry is what the card was built from, held for stands to compare a refill
+	// against; ring and taps are what update then repaints and re-points in
+	// place, and openProfile is the tap a row with no conversation falls back to.
+	entry       FriendEntry
+	ring        *canvas.Circle
+	openProfile func()
+
+	taps []*tapBase // one per button, in Buttons order
+
+	// drawn says the card was in the last redraw's rows, which is what tells a
+	// card leaving the screen — whose hover and tooltip need taking down by
+	// hand — from one that was already folded or filtered away.
+	drawn bool
 }
 
 var (
@@ -749,6 +826,50 @@ const cardHoverLift = 0.25
 
 func (c *friendCard) CreateRenderer() fyne.WidgetRenderer {
 	return widget.NewSimpleRenderer(c.content)
+}
+
+// stands reports whether entry is what the card already draws, presence aside:
+// presence is what refills this page, so it is repainted in place rather than
+// counted against the build, and the callbacks are re-pointed rather than
+// compared, a func having no equality to ask about.
+func (c *friendCard) stands(entry FriendEntry) bool {
+	if c.entry.Name != entry.Name || c.entry.Handle != entry.Handle ||
+		c.entry.AvatarURL != entry.AvatarURL || len(c.entry.Buttons) != len(entry.Buttons) {
+		return false
+	}
+	for i, action := range entry.Buttons {
+		held := c.entry.Buttons[i]
+		if held.Action != action.Action || held.Label != action.Label || held.Danger != action.Danger {
+			return false
+		}
+	}
+
+	return true
+}
+
+// update brings a card whose build stands up to this refill: the ring, and
+// every callback — the closures wired last time captured that refill's
+// snapshot, and a confirmation raised off a stale one would name the person as
+// they were. Only the ring can actually have moved, but a re-point costs
+// nothing to be sure with.
+func (c *friendCard) update(entry FriendEntry) {
+	if c.entry.Presence != entry.Presence {
+		c.ring.Hidden = !entry.Presence.IsOnline()
+		if !c.ring.Hidden {
+			c.ring.FillColor = presenceColor(entry.Presence)
+		}
+		c.ring.Refresh()
+	}
+
+	c.onTap = entry.Open
+	if c.onTap == nil {
+		c.onTap = c.openProfile
+	}
+	for i, action := range entry.Buttons {
+		c.taps[i].onTap = action.Do
+	}
+
+	c.entry = entry
 }
 
 func (c *friendCard) MouseIn(*desktop.MouseEvent) { c.setHovered(true) }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/rtcp"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/sentinelb51/gopus"
@@ -37,6 +38,16 @@ const (
 	// settings; it is a cap handed to the encoder, which allocates the packet it
 	// returns — gopus offers no caller-supplied buffer.
 	maxPacket = 1275
+
+	// speakingLevel and silentLevel are what this end reports in the RTP
+	// audio-level extension (RFC 6464: 0 loudest, 127 silence) on its own
+	// packets — the gate's Voiced() is the only measurement PCMSource offers,
+	// so the report is binary rather than a real RMS. Without this extension
+	// the SFU has nothing to compute this participant's entry in the active-
+	// speaker set from, and every other client's ring for this account stays
+	// dark regardless of how loud the mic actually is.
+	speakingLevel = 20
+	silentLevel   = 127
 )
 
 // opusTuning is what a libopus binding has to offer for the loss tolerance this
@@ -74,6 +85,7 @@ type publisher struct {
 	source  PCMSource
 	encoder *gopus.Encoder
 	tuning  opusTuning
+	uplink  *uplink
 
 	// into is the caller-buffer encode where the binding offers one, and packet
 	// the buffer it fills — the loop's own, consumed by WriteSample in the same
@@ -102,7 +114,74 @@ type microphone struct {
 	track   *lksdk.LocalTrack
 	encoder *gopus.Encoder
 	tuning  opusTuning
+	uplink  *uplink
 }
+
+/* What the far end makes of what was sent */
+
+// uplink is the loss the voice node reports on this client's own track, which is
+// the only measurement of the *sending* half there is — nothing here can count
+// what failed to arrive somewhere else.
+//
+// It is what an FEC level has to be set from. In-band FEC protects what goes
+// out, so sizing it against what this client is *missing* on the way in reads a
+// different path entirely: a bad download buys redundancy nobody needs, and a
+// bad upload buys none when it matters most.
+//
+// Per-hop rather than end to end. A LiveKit node answers for what it received
+// from here and forwards on its own account; what a listener then loses on their
+// own downlink is the node's to deal with and never reaches this client.
+type uplink struct {
+	// track is stored rather than passed in because the handler is an argument to
+	// the call that builds the track. Nothing reads the SSRC before Bind, and Bind
+	// is what starts the reader that calls onRTCP at all.
+	track atomic.Pointer[lksdk.LocalTrack]
+
+	// percent is the newest report's, and negative until one lands: a node that
+	// has said nothing has not said nothing was lost.
+	percent atomic.Int64
+}
+
+func newUplink() *uplink {
+	u := &uplink{}
+	u.percent.Store(-1)
+
+	return u
+}
+
+// onRTCP is handed every RTCP packet on the microphone's track, on lksdk's own
+// reader goroutine — so it stores and returns, nothing more.
+//
+// Only the reception block naming this track's SSRC says anything about it: a
+// compound packet carries one per stream, and pion delivers the packet to every
+// sender it mentions.
+func (u *uplink) onRTCP(packet rtcp.Packet) {
+	report, ok := packet.(*rtcp.ReceiverReport)
+	if !ok {
+		return
+	}
+
+	track := u.track.Load()
+	if track == nil {
+		return
+	}
+
+	ssrc := uint32(track.SSRC())
+	for _, block := range report.Reports {
+		if block.SSRC != ssrc {
+			continue
+		}
+
+		// FractionLost is an 8-bit binary fraction of what was expected since the
+		// previous report, which is already the interval an FEC level wants. The
+		// cumulative count beside it would need a total this end does not keep.
+		u.percent.Store(int64(block.FractionLost) * 100 / 256)
+	}
+}
+
+// Loss is what the node last reported losing, negative where it has reported
+// nothing at all.
+func (u *uplink) Loss() int { return int(u.percent.Load()) }
 
 // micPublication is what the track is published as, shared by both dials so the
 // far end sees the same thing whichever one connected.
@@ -132,7 +211,7 @@ func newMicrophone(opts Options) (*microphone, error) {
 	encoder.SetBitrate(bitrate)
 	encoder.SetVbr(true)
 
-	mic := &microphone{encoder: encoder}
+	mic := &microphone{encoder: encoder, uplink: newUplink()}
 
 	// Loss tolerance, where the binding offers it. A build without the fork simply
 	// runs without FEC rather than failing to compile or to start.
@@ -157,16 +236,22 @@ func newMicrophone(opts Options) (*microphone, error) {
 	// The fmtp line is pion's own default registration verbatim, so the match is
 	// the exact one rather than the fallback, and it is what says out loud that
 	// this encoder has in-band FEC turned on.
+	//
+	// The RTCP handler is the sending half's only feedback: lksdk reads the
+	// track's RTCP for its own bookkeeping and hands every packet on to this,
+	// which is what makes the node's receiver reports reachable without an
+	// interceptor of our own — see docs/known-gaps.md.
 	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
 		MimeType:    webrtc.MimeTypeOpus,
 		ClockRate:   sampleRate,
 		Channels:    sdpChannels,
 		SDPFmtpLine: "minptime=10;useinbandfec=1",
-	})
+	}, lksdk.WithRTCPHandler(mic.uplink.onRTCP))
 	if err != nil {
 		return nil, fmt.Errorf("opus track: %w", err)
 	}
 	mic.track = track
+	mic.uplink.track.Store(track)
 
 	return mic, nil
 }
@@ -185,6 +270,7 @@ func newPublisher(mic *microphone, pub *lksdk.LocalTrackPublication, src PCMSour
 		source:  src,
 		encoder: mic.encoder,
 		tuning:  mic.tuning,
+		uplink:  mic.uplink,
 		done:    make(chan struct{}),
 	}
 	if into, ok := any(mic.encoder).(opusEncodeIn); ok {
@@ -247,7 +333,8 @@ func (p *publisher) run(call *Call) {
 		// This end's own ring, off the gate rather than off the server's
 		// active-speaker report: that report is about remote participants and lands
 		// half a second late, where the gate has already decided.
-		p.reportSpeaking(call, p.source.Voiced())
+		voiced := p.source.Voiced()
+		p.reportSpeaking(call, voiced)
 
 		encoded, err := p.encodeFrame(pcm)
 		if err != nil {
@@ -255,10 +342,15 @@ func (p *publisher) run(call *Call) {
 			continue
 		}
 
+		level := uint8(silentLevel)
+		if voiced {
+			level = speakingLevel
+		}
+
 		if err := p.track.WriteSample(media.Sample{
 			Data:     encoded,
 			Duration: frameMillis * time.Millisecond,
-		}, nil); err != nil {
+		}, &lksdk.SampleWriteOptions{AudioLevel: &level}); err != nil {
 			select {
 			case <-p.done:
 				return

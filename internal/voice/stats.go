@@ -24,11 +24,13 @@ type Stats struct {
 	// Loss is the percentage the worst path *into* this client is missing, and is
 	// negative where no window has completed — a room nobody has spoken in has
 	// measured nothing, which is not the same as having measured nothing lost.
-	//
-	// One direction only: what the voice node makes of what this end sends comes
-	// back in RTCP receiver reports, which lksdk reads for its own congestion
-	// control and does not pass on.
 	Loss int
+
+	// SendLoss is the other direction: what the voice node reports missing of what
+	// this end sent, negative until it has reported anything. Nothing here can
+	// count what failed to arrive somewhere else, so it is the node's number
+	// rather than one of ours — the hop to it, not the path to any listener.
+	SendLoss int
 }
 
 // StatsChanged is one sample. Emitted on the timer rather than on a change: a
@@ -60,9 +62,25 @@ func (c *Call) sampleStats() {
 			return
 
 		case <-ticker.C:
-			c.emit(StatsChanged{Stats: Stats{RTT: c.roundTrip(), Loss: c.worstLoss()}})
+			c.emit(StatsChanged{Stats: Stats{
+				RTT:      c.roundTrip(),
+				Loss:     c.worstLoss(),
+				SendLoss: c.sendLoss(),
+			}})
 		}
 	}
+}
+
+// sendLoss is what the node reports losing of this end's own track, negative
+// before it has reported anything — and before there is a publisher to report
+// about.
+func (c *Call) sendLoss() int {
+	p := c.publisher.Load()
+	if p == nil {
+		return -1
+	}
+
+	return p.uplink.Loss()
 }
 
 // roundTrip is the round trip to the voice node. Zero where there is nothing to

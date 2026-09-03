@@ -388,7 +388,7 @@ rather than an assumption:
   captured that cannot be turned off (Windows 11 can, and does here).
   Each rung is **probed once per run** rather than guessed at, and the picker
   warns only when the floor is what a share will actually use.
-- **The send encode is capped VBR, not CBR, and that is the largest single
+- **The send encode is capped VBR by default, and that is the largest single
   saving in the send half.** A screen is idle most of the time, and CBR pays
   the target rate for a still picture — nvenc pads the difference with filler
   NALs (type 12). Measured on an RTX 4070 Laptop, 1080p30, 6.22 Mbps target,
@@ -403,6 +403,16 @@ rather than an assumption:
   sets. The mode is per encoder (`shareEncoder.rateControl`): `vbr` on NVENC,
   `vbr_latency`/`vbr_peak` on AMF, `rc_mode VBR` on VAAPI, and on QSV the
   *inequality* between `-b:v` and `-maxrate`, which is the only thing it reads.
+  **CBR is a setting** (`Screenshare.RateControl`) because the padding is not
+  purely waste on every path: the stream it replaces idles near zero and bursts
+  to the ceiling the moment the screen moves, and a bandwidth estimator or a
+  fixed uplink that has been measuring nothing is what that burst overshoots —
+  which is the reason a live-streaming service ingests CBR. Nothing here has
+  measured that effect, so the default stays the mode with the number behind it.
+  Constant also shortens the buffer to one second from two, a ceiling that never
+  moves being the point, and turns on `nal-hrd=cbr` for libx264 — which is
+  emitted from `args` rather than `rateControl`, ffmpeg's `-x264-params`
+  replacing rather than merging, so it has to travel with the latency tune.
 - **Keyframe interval is nearly free under VBR, so Sparse is four seconds and
   not eight.** Same rig, 300 frames, moderate motion: 1 s = 1.29 Mbps, 2 s =
   1.20, 4 s = 1.17, 8 s = 1.17. Eight seconds bought **nothing** over four
@@ -452,22 +462,22 @@ rather than an assumption:
   | tee, nothing attached | 213 µs | 42 µs | 240 B |
   | tee, nothing attached, copying bodies | 318 µs | 147 µs | 90 KB |
 
-  The third row is what it did first, and the second is after **a body nobody
-  is watching is counted past rather than copied**: only the 32-byte file
-  header and each frame's 12-byte header are ever kept when the preview is
-  closed. 3.5× off the overhead, and the 90 KB — one buffer grown to hold the
-  largest keyframe, then held for the life of the share — goes away with it.
-  In real terms the tee costs **~1 µs of CPU per second of sharing** at
-  1.4 Mbps and ~8 µs at 1080p60 and 12 Mbps.
+  The third row is what it did first, and the second was after **a body
+  nobody is watching was counted past rather than copied**. That skip was
+  then **deliberately given back** (2026-08) when publishing moved to
+  arrival-paced `WriteSample` — the tee became the framer, and the assembled
+  body *is* the publisher's sample buffer now, so the third row's cost is
+  paid again but buys the sample that had to exist anyway rather than being
+  overhead on a passthrough. ~150 µs and one frame-sized buffer per 7.7 MB
+  of stream, the price of deleting a fixed ~5 s of viewer latency (below).
 
-  (The numbers above are the IVF tee's; the H.264 move rewrote it for
-  Annex-B, where framing has to be a byte scan for start codes rather than
-  length hops — the same order of cost, paid per byte instead of per
-  header. The AV1 send brought the IVF walk back beside it, so an AV1 share's
-  tee is the cheap per-header kind again. The skip survived the rewrite: whether an access unit is copied is
-  decided **once, at its first NAL**, and with nothing attached only the
-  parameter sets — a few dozen bytes per GOP — are ever kept, replayed to a
-  preview that attaches mid-share so its decoder can enter at the next IDR.)
+  (The numbers above are the IVF tee's; the H.264 walk hops FLV tags the
+  same way, plus a length-prefix-to-start-code rewrite of each unit. It was
+  a byte scan for Annex-B start codes until 2026-09, when that scan turned
+  out to cost a frame of latency — a unit's end is only known at the next
+  one's start — rather than only bytes. The parameter sets are still kept
+  aside and replayed to a preview that attaches mid-share, so its decoder
+  can enter at the next IDR.)
 
   **Bandwidth is zero either way and in both states**: the tee is local, and a
   preview neither publishes nor subscribes anything. With the preview open the
@@ -476,6 +486,53 @@ rather than an assumption:
   writer goroutine measures the drop path rather than the work. The real cost
   of watching your own share is the second ffmpeg child decoding it and the
   paint, which is the receive path's cost, not the tee's.
+- **A share's latency is a queueing property, not an encoding one** —
+  reported as a ~5 s glass-to-glass delay every viewer saw while the
+  self-preview was instant. The encoder's own contribution at the default
+  lowest-latency flags is one frame; the five seconds were a standing queue
+  between the encoder and the wire: lksdk's paced writeWorker sends exactly
+  one frame per duration off its own schedule, so everything encoded during
+  the publish negotiation — and every `fps`-filter duplicate burst a grabber
+  stutter adds later — was replayed at 1× for the life of the share, and a
+  matched-rate queue never drains. Invisible in the preview because the tee
+  taps bytes upstream of where the queue stood. The fix was structural, not
+  a tuning: write on arrival (`voice.pumpShareSend`), drop what cannot be
+  sent yet, and there is no buffer left that *can* hold seconds. The same
+  ratchet existed on the watch side — a waited paint hop under a dragged
+  window — and got the same cure, a latest-wins mailbox that drops frames
+  for a slow painter. The lesson generalises: in a live pipeline, every
+  queue is latency and every pacer must be downstream of the drop.
+- **Glass-to-glass, measured (2026-09).** The clock harness
+  (`internal/app/screenshare_live_test.go`: a window whose picture is the
+  wall clock, shared by one saved account and decoded back by the other
+  through Stoat's `hel1` relay, 44 ms RTT from here) put a number on every
+  frame, and the number was made of *held frames*, one each in six places
+  — every one a whole frame at any rate, so 33 ms at 30 fps and 200 ms at
+  5. Medians, 816×488 at 30 fps, AV1 on NVENC unless said:
+
+  | stage | preview (tee → decoder) | watch (through the relay) |
+  |---|---|---|
+  | as found (decoder syncing CFR against IVF's 90 kHz clock) | — | 13–27 s, growing |
+  | `-fps_mode passthrough` | 103 ms | 204 ms (H.264: 173 / 283) |
+  | + output `-threads 1`, H.264 in IVF, preview in IVF | 79 ms | 152 ms (H.264: 106 / 181) |
+  | + no `fps` filter (output CFR sync), own frame assembler | 42 ms | 88 ms |
+  | + H.264 send in FLV | H.264: 41 ms | H.264: 86–93 ms |
+
+  The same run at 5 fps: 50 / 90–99 ms, where each held frame had been
+  200. At 60 fps and 1156×672 (3.3 Mbps): 51 / 93–100 ms. What is left is
+  real: ~12 ms of clock granularity, a frame of capture and encode on the
+  GPU, the one-way trip and the relay's turnaround (~50 ms of the 88), and
+  the decoder (~2 ms, measured alone). The first picture still waits for a
+  keyframe — up to the interval, a CLI encoder answering no PLI — and that
+  is the largest number a viewer now sees. Encoder cost at this size:
+  0.6% of a core mean (NVENC), 188 MB resident.
+
+  Two ffmpeg defaults did the holding and are worth knowing cold: **the
+  rawvideo encoder is frame-threaded** like any other, and frame threading
+  keeps one frame back — a raw-in raw-out control showed it, so it was
+  never the codec — and **the `fps` filter needs the frame after** to
+  choose between them, where the output's own CFR sync (`-fps_mode cfr -r
+  N`) decides on the frame in hand. Neither shows in a file transcode.
 
 ## Still needs more than a patch
 
@@ -596,6 +653,29 @@ are closed after `Start` and the read end by `reap` rather than by `Wait`.
 frame is what turns a stalled reader into decoder backpressure instead of a
 queue of stale frames; in, a megabyte of a 1.4 Mbps bitstream is six seconds of
 latency nothing takes back out. The size is a parameter for exactly that.
+
+### The live decoder's probe is floored, both formats
+
+`avformat_find_stream_info` reads up to `probesize` before it answers with a
+frame, and the default is 5 MB. `LiveFrames` floored it for IVF and left H.264
+at the default, on the theory that H.264 has to be left to find its SPS. (Since
+2026-09 every live stream is IVF — H.264 under the `H264` fourcc — so the
+second column is history; the measurement stands.)
+Measured against a 720p15 4 Mbps Annex-B stream fed at real time, time to first
+picture:
+
+| flags | to first frame |
+|---|---|
+| `-analyzeduration 0` | 3057 ms |
+| `+ -probesize 32` | 280 ms |
+| `+ -fpsprobesize 0` | 3063 ms |
+
+`-fpsprobesize` moves nothing; `-probesize` is the whole of it, and 20 frames
+decode byte-identical either way — the demuxer is named rather than sniffed, so
+there is nothing to probe *for*. IVF measured 273 ms already. **Startup only**:
+150 frames arrive at 9980 / 10006 ms against 10000 ms of stream, so the
+pipeline takes it back. The cost is time to first picture, which for H.264 was
+most of what a viewer waited.
 
 ### Looked at and not taken
 
@@ -760,3 +840,320 @@ Measured on WASAPI shared mode: the microphone negotiates `IAudioClient3` at a
 480-frame period with **passthrough** — no resample, no format conversion —
 because the capture device is opened at exactly 48 kHz mono f32. Asking for
 anything else puts a converter in the path for nothing.
+
+### What a silent participant costs
+
+The publisher sends Opus's DTX packets — one or two bytes, fifty a second — for
+as long as its gate is shut, and the decoder takes each as a lost frame. With
+Deep PLC on that is the neural concealer running on nothing: **97 µs a frame
+against 9** without it, and against 18 for a real frame (offline, 9950X3D). Ten
+quiet participants were half a core. `voice.quietAfter` decodes the first five
+of a run — the fade-out of the last real frame — and writes silence for the
+rest, which is what the far end's gate produced anyway.
+
+### Levelling and placement are free (2026-09)
+
+Both receive-side treatments run inside `mixLanes`, which is the callback's
+hottest loop, so the question was whether they could be afforded there at all.
+Four active lanes, one 1024-frame chunk — 21.3 ms of audio — on a 13700HX:
+
+| | per chunk | of a core |
+| --- | ---: | ---: |
+| neither | 18.7 µs | 0.088 % |
+| levelling | 19.6 µs | 0.092 % |
+| both | 19.6 µs | 0.092 % |
+
+**0.004 % of a core for the pair**, at four lanes. The measurement includes the
+ring push that feeds it, so the absolute figures overstate the mix itself and
+only the delta is honest.
+
+What keeps it there is that neither is per-sample work of its own. Placement
+replaces one `int32` conversion with two multiplies. Levelling measures once a
+*block* — one squared int64 a sample, `blockRMS` — and the per-sample cost is a
+single one-pole add, which `(*leveller).next` inlines into the loop; the branch
+picking which slope it is on is hoisted into `retarget`, once a block. The
+sum is accumulated as int64 rather than float32, which a thousand squared
+samples would overflow the mantissa of well before the end of a chunk.
+
+The reason levelling smooths per sample rather than stepping the gain per block
+is not cost: a block is up to 21 ms, and the gain step across one at the release
+slope is ~0.6 dB, which on a sustained vowel is an audible edge.
+
+### What buffer depth costs, and what picking it badly costs (2026-09)
+
+The jitter buffer is 60-80 % of mouth-to-ear, so its depth *is* the latency
+number. Cost is not the interesting axis — one histogram bucket increment per
+arrival, fifty a second per talker, and a percentile walked over 80 buckets once
+a second — against a receive path already spending 15 µs a frame decoding. It
+does not appear in a profile.
+
+What is expensive is choosing the depth wrongly, in either direction. Simulated
+over five minutes of one talker per row, mean delay and dropouts a minute:
+
+| | clean wifi | busy wifi | 40-110 ms tail on 2 % |
+| --- | ---: | ---: | ---: |
+| p98 | 41 ms / 0 | 67 ms / 11.6 | 88 ms / 23.0 |
+| p99 | 41 ms / 0 | 77 ms / 9.2 | 112 ms / 4.0 |
+| p99.5 | 44 ms / 0 | 91 ms / 4.8 | 124 ms / 0.6 |
+| retired rule | 40 ms / 0 | 75 ms / 8.4 | 102 ms / 9.0 |
+
+Two things in that table. The knee is between p98 and p99.5 and it is steep —
+**24 ms of delay is worth 22 dropouts a minute** on a link with a tail, which is
+why `JitterBalanced` sits past it. And on a link with no tail every row is the
+same buffer, so the profile is free to be conservative: nobody on a good
+connection pays for it.
+
+The retired rule is the row worth reading twice. It grew on a starve and shrank
+after 250 packets played without one, and its dropout rate is **8.4 and 9.0 a
+minute on two very different links** — because the number is a property of the
+shrink rule rather than of the network. Shrinking blind until it starves, one
+starve per five clean seconds, is a dropout every five seconds forever on
+anything whose jitter sits between two depth steps. No depth setting escapes it;
+the rule walks back down to the edge whatever it is given.
+
+The estimator's own floor is the part that had to be measured rather than
+reasoned about. Lateness is a wall clock here minus a sample clock there, so it
+carries the two clocks' drift, and taking the zero over the whole histogram
+window turns drift into lateness that is not there. A live run caught it: a test
+publisher paced by a coarse Windows sleep ran 2.8 % slow, the estimator read a
+steadily-climbing 400 ms — the top of its range — and pinned the buffer at its
+ceiling for the whole call on a connection that was fine. The floor is now a
+one-second trailing minimum, which bounds drift exposure to a second's worth and
+is more correct anyway: a delay that went up and *stayed* up is the connection's
+new length, not jitter, and buffering against it spends delay to cover delay.
+
+### Correcting the depth without anybody hearing it (2026-09)
+
+A depth change taken in Opus comfort noise is free, and a conversation supplies
+one every few seconds. What is left is the source that never goes quiet — a
+shared video, music over a microphone, a client with DTX switched off — and
+screenshare audio is exactly that: it arrives as `SCREEN_SHARE_AUDIO`, is
+subscribed through `ShareLane`, and gets its own buffer with no silence in it
+anywhere.
+
+The rule that used to cover this dropped or invented one 20 ms frame every
+200 ms. Counting them on a live two-ended run against a 440 Hz tone, which has
+no DTX by construction, over 45 seconds: **21 and 25 audible corrections**, in
+two independent runs, nearly all of them draining one burst — a link that stalls
+and then delivers 30 frames at once is 600 ms of standing delay, and a rationed
+5 frames a second takes four seconds to shed it.
+
+`stretch.go` sheds it by shortening the frame instead. Removing exactly one
+pitch period leaves pitch alone — the period's *length* is what pitch is — so a
+vowel becomes one cycle shorter out of fifty, which no ear resolves. Resampling
+would raise every frequency by the ratio, which is the chipmunk effect and is
+why the naive version is not an option. The period is found by cross-correlating
+the frame's last 5 ms against itself at every lag from 2 to 10 ms rather than by
+detecting a pitch: detection has no answer at all for `s`, `f` or `sh`, where a
+search settles for the least bad lag and noise splicing into noise is inaudible
+regardless.
+
+Two things fell out of the design that were not obvious up front. Nothing is
+reported back to the buffer, because the speakers are filled against `Want`: a
+frame handed over short leaves the lane hungry and the filler pops another, so
+occupancy follows the length of what was written and the accounting is the one a
+plain frame already gets. And `Drift` is read once per fill pass rather than per
+frame — the pass pops up to three frames ahead of the speakers, so occupancy
+dips inside it without anything being missing, and correcting against that dip
+is correcting for the filler's own stride.
+
+Cost is one correlation search per corrected frame — 385 lags over a 240-sample
+window, ~90 k multiply-accumulates, tens of µs — and only on frames it corrects,
+against a receive path already spending 15 µs a frame decoding. The ration is
+the part that matters more than the cost: one period out of 20 ms is 11 % for a
+440 Hz tone and over 40 % for a low voice, and sustaining 40 % for a second is
+speech that is audibly hurried even though every splice in it is clean. A lag is
+never trimmed to fit, part of a period not being spliceable, so what is limited
+is how many frames in a row may carry one — 25 % of the stream, which for the
+440 Hz case never binds and for a 120 Hz voice is every other frame.
+
+Measured on the same harness afterwards: bursts of 36, 23 and 35 frames drained
+to depth in about five seconds each, with **zero** dropped frames. Sink-side
+peak occupancy rises about 10 ms while expanding, `expand` writing up to 25 ms
+where the filler asked for 20 — bounded by the longest lag, and spent only when
+the buffer is short and trying not to gap.
+
+## What noise suppression costs
+
+RNNoise's 2017 model was replaced with upstream's current one (main at
+`70f1d256`) in 2026-09. It is 33× the arithmetic — 42 features to 65, three
+GRUs of 24/48/96 to three of 384, 85 KB of weights to 3.4 MB — and **cheaper**,
+because the old `rnn.c` walked `weights[j*stride+i]` scalar with a per-neuron
+tanh lookup and the new one runs block-sparse int8 through libopus's `nnet`.
+One 10 ms frame, i7-13700HX, one core:
+
+| | µs/frame | of a core |
+| --- | --- | --- |
+| 2017 model, any `-march` | 264 | 2.64 % |
+| current, plain x86-64 | 194 | 1.94 % |
+| **current, x86-64-v3** | **95** | **0.95 %** |
+
+The DSP front end is ~30 µs of each and is the same code in both; the network
+alone goes 232 µs → 63 µs. Suppression depth on stationary broadband noise,
+gain floor 0: **−8.9 dB → −36.5 dB**, and the strength dial is now honest
+across its whole range where it used to run out of model at about 9 dB.
+
+`-march=x86-64-v3` is the entire margin — `vec.h` reaches `vec_avx.h` off
+`__SSE2__` either way, but the width it works in comes from `__AVX2__` and
+`__FMA__`. `rnnoise/march_amd64.go` asks for it, mirroring the floor gopus
+already puts under this binary for Deep PLC. arm64 needs no flag: clang defaults
+Apple Silicon to `apple-m1`, so `__ARM_FEATURE_DOTPROD` is set and
+`vec_neon.h`'s `vdotq_s32` is already what runs on every Mac this builds for.
+
+That is the top of the ladder, not a rung short of it — the newer instruction is
+the slower one:
+
+| `-march`, same source, same box | µs/frame |
+| --- | --- |
+| none (SSE2) | 193 |
+| **x86-64-v3** | **93** |
+| x86-64-v3 + `-mavxvnni` | 107 |
+| native (v3 + VNNI here) | 107 |
+| native `-mno-avxvnni` | 92 |
+
+`vec_avx.h` takes a VNNI dot product wherever one exists, and it loses to the
+AVX2 sequence it replaces by 15 % on a 13700HX — gopus measured the same header
+the same way round on Zen 5, so it is both vendors' current silicon. `-march=native`
+is the wrong flag here as well as the unportable one. Not v4 either: AVX-512 is
+gone from every Intel consumer part since Rocket Lake.
+
+The cost is **10 ms of delay**. From v0.2 on the model gets a frame of
+lookahead: `rnnoise_process_frame` answers with the previous frame's audio, so
+the capture chain is delayed by one 10 ms subframe while suppression is on, and
+not at all while it is off. Paid once, on the send side. The gate's VAD veto
+gets the same 10 ms as *lead* rather than lag — the estimate belongs to the
+frame that went in, the audio to the one before it — which is the direction
+that stops a word's onset paying for the check.
+
+Also +3.5 MB of binary (104.6 → 108.1 MB) and +14 KB of `DenoiseState`
+(18,512 → 32,688 bytes), one stream.
+
+### GTCRN (2026-09)
+
+The second model, chosen on the settings row beside the switch. GTCRN (Rong
+et al., ICASSP 2024) is 47.7 K weights and 33 MMAC/s at 16 kHz, and ships as
+[`gtcrn-go`](https://github.com/sentinelb51/gtcrn-go): a pure Go port of
+upstream's streaming model with BatchNorm folded at export, held to the
+PyTorch reference block by block on a 3 s clip to float32 rounding. No cgo,
+no ONNX Runtime — every other implementation anywhere is an ONNX Runtime
+wrapper, and a 20 MB runtime in-process for a 48 K parameter network was the
+wrong price.
+
+One 16 ms hop, i7-13700HX, one core:
+
+| kernels | µs/hop | of a core |
+| --- | --- | --- |
+| plain Go, first working port | 242 | 1.5 % |
+| plain Go, restructured | 220 | 1.4 % |
+| AVX2 + FMA, the convs | 114 | 0.7 % |
+| AVX2 + FMA, the GRUs too (v0.1) | 63 | 0.4 % |
+| **v0.2: activations fused, real FFT, four GRU chains interleaved** | **34** | **0.2 %** |
+
+Scalar Go tops out near one multiply a cycle here and cannot vectorise, so
+the port went the way RNNoise's `-march` did: six kernels in Go assembly,
+dispatched on cpuid, the plain ones kept as the fallback and the test oracle.
+The two that mattered were not the obvious ones. The 1×1 convs were 37 % of
+a frame and vectorised as expected; the GRUs were 65 % of what remained, and
+their cost was the gate transcendentals computed one at a time. Along
+frequency the recurrence is real, so those 33 steps run inside one assembly
+call with the state in a register; along time the 33 bands are independent
+cells, so the hidden half of the gates is a second pointwise conv and one
+pass advances them all. v0.2 took the rest that was cheap: PReLU fused into
+every conv's store, the ERB matrices as the pointwise kernel with one output
+row, the four frequency-direction GRUs of a block walked in one loop so the
+CPU overlaps their gate maths, a real FFT on a half-length complex one, and
+the last block of a row redone at the row's end rather than a scalar tail —
+which is only valid where a lane is a pure function of its inputs, and the
+GRU cell update is not. What is left is flat.
+
+In the chain it is 1.25 hops a frame plus the resampling and the band
+reconstruction — two interpolations and one decimation, all through one
+AVX2 FIR kernel in `internal/audio/fir_amd64.s` — 44 µs per 20 ms, measured
+with fresh input each frame: a benchmark that feeds its own output back in
+decays into denormals and reads 70.
+RNNoise is 190 for the same 20 ms. The delay is the cost, ~30 ms against
+10, and `docs/known-gaps.md` says why it cannot be less.
+
+### It is the whole capture chain, and muting is the only frame it may skip
+
+Per 20 ms frame — two model calls and the cgo crossing — against the rest of the
+chain together:
+
+| stage | µs/frame | of a core |
+| --- | --- | --- |
+| high-pass + preamp + gate | 7 | 0.03 % |
+| **suppressor** | **206** | **1.03 %** |
+
+So the stage is 97 % of what an open microphone costs, and it cannot be skipped
+on a quiet frame: the gate measures the *cleaned* RMS, which is what stops a fan
+holding it open, and the VAD the veto reads is the model's own output. Gating
+the model on a voice estimate the model produces is circular.
+
+Mute is the one state where nothing reads the answer — the publisher still calls
+`Read` to keep its cadence and discards the frame — so `Capture.SetIdle` holds
+the stage off there. `App.applyCaptureIdle` is the one producer, because muted
+is not the whole condition: the settings meter can borrow the call's own capture,
+and a reader tuning the gate while muted needs the chain they are tuning.
+
+The state is held rather than dropped, which is what makes this free. Skipping
+`Process` leaves `DenoiseState` alone, so resuming is the same room the model
+was already tracking: measured against a model fed continuously across a 30 s
+gap, the resumed one is within ±3 dB from the first frame — the noise's own
+frame-to-frame spread. A *cold* model is the thing to avoid, leaking up to 20 dB
+more noise for ~140 ms before it settles.
+
+Push-to-talk discards its frames the same way and deliberately does **not** idle.
+The resume would land on a word's onset every time, and keeping the model warm
+is the only reason to run it while the key is up — idling there would destroy
+exactly the thing being paid for.
+
+## What the neural decoder costs (2026-09)
+
+libopus went 1.5.2 -> 1.6.1 with OSCE and the blind bandwidth extension turned
+on. Everything a receiver gets from it hangs off one dial — the decoder's
+complexity, which is 0 unless something sets it — and "Repair dropped audio"
+sets it to LACE. Per decoder, per 20 ms frame, 48 kHz mono, 13700HX:
+
+| | 12 kbps (SILK-only) | 32 kbps (hybrid) | of a core |
+| --- | --- | --- | --- |
+| off | 18.0 µs | 26.0 µs | 0.13 % |
+| Deep PLC (5) | 17.8 | 26.1 | 0.13 % |
+| **LACE (6)** | **31.9** | **39.9** | **0.20 %** |
+| NoLACE (7) | 77.1 | 86.3 | 0.43 % |
+| off, 10 % loss | 17.7 | 25.4 | 0.13 % |
+| Deep PLC, 10 % loss | 53.4 | 61.1 | 0.31 % |
+| LACE, 10 % loss | 65.7 | 73.6 | 0.37 % |
+
+Two different shapes, which is the whole reason LACE is the level taken and
+NoLACE is not. **Deep PLC is free until something is lost** — on 1.6.1 a good
+frame decodes to the same bytes at complexity 5 as at 0, and times the same, in
+both modes. (The 1.5.2 measurement that claimed a quarter more per good frame no
+longer holds.) A postfilter is the opposite: LACE and NoLACE run on every frame
+that *arrives*, so what they cost is charged per talker for as long as they talk.
+Quiet lanes skip the decoder entirely (`voice.quietAfter`), so the bill scales
+with who is talking, not who is in the room — four talkers is 0.8 % of a core at
+LACE and 1.7 % at NoLACE.
+
+**The bandwidth extension is inert at the bitrate this client sends.** It fires
+only on a SILK-only packet or a concealed one, and 32 kbps keeps Opus in hybrid
+for every frame — measured bit-identical with it on and off, at both 32 and
+16 kbps, until packets start disappearing. Opus only picks SILK-only below about
+16 kbps. It is on regardless, because the case where it *does* act is a concealed
+frame, which is what the switch is for, and it costs nothing to have.
+
+The weights stopped being C. Upstream emits 71 MB of float literals for these
+models and downloads them at `autogen.sh` time; gopus writes them into one
+3.5 MB `opus_data.bin`, embeds it, and hands it to each decoder through
+`OPUS_SET_DNN_BLOB`. Its vendored tree went 8.1 MB to 3.9 MB while gaining three
+models; the client binary went 108.1 MB to 110.6 MB.
+
+### Compiling libopus's own SSE4.1 and AVX2 sources buys nothing
+
+`march_amd64.go` gives the whole gopus package AVX2, so upstream's hand-written
+SSE4.1 and AVX2 kernels for celt and silk *can* be compiled and presumed rather
+than left to run-time dispatch that this build does not have. Tried, all ten
+files: **130.7 µs to encode a 20 ms frame either way**, and decode inside the
+noise at every complexity. Those intrinsics were written for a compiler that had
+been told nothing about the target; once `-march=x86-64-v3` tells it, gcc reaches
+the same width from the plain C. Ten vendored files and a second dispatch level
+for zero, so they are not there — `opus-1.6.1/config.h` carries the note.

@@ -532,3 +532,28 @@ Which of the two pictures a membership is drawn with is not answerable from
 membership has none, so the two are indistinguishable by then.
 `domain.Member.ServerAvatar` is set alongside and is what says there is one to
 take off.
+
+## An unfurl's picture is a *link*, and only January resolves it
+
+A bare image embed arrives as `{"type":"Image","url":…,"width":…,"height":…}`
+where `url` is what the message linked to, not what can be drawn. For a gifbox
+GIF — everything the client's own picker sends — that is
+`gifbox.me/view/<id>`, an HTML page, so fetching it directly draws nothing at
+all. `proxied` in `convert.go` sends every foreign embed URL through January
+instead (`features.january.url`, resolved once in `start` before the websocket,
+since Ready carries messages). The same wrapper hides the reader's address from
+whatever host somebody else's message named, and follows the redirects a CDN
+answers a bare `HEAD` with.
+
+Three things it changes downstream. `domain.File.Source` is the address the file
+actually lives at, because `URL` is now the proxy's and `ui.fileLink` is what a
+reader is handed. January **transcodes** — a JPEG or a PNG comes back as WebP,
+which is why `cache/image.go` registers `x/image/webp` — but passes a GIF
+through untouched, so the animator still gets real GIF bytes. And it serves
+whole bodies only, no ranges; nothing here asks for one.
+
+`width`/`height`/`size` sit beside the type on a bare image embed and
+`revoltgo.MessageEmbed` has no field for any of them, so the box is reserved and
+re-fitted from the decode. The same embed carries no content type and its URL no
+extension, which is why `ui.gifCandidate` offers a player to any foreign picture
+whose name says nothing.

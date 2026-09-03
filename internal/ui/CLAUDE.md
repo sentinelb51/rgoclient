@@ -803,6 +803,18 @@ naming and the test policy.
     glyph and the tint, so the card's word and the page's mark cannot come to mean
     different things. What a mark means is the tooltip's to say.
 
+  **A refill reuses the cards** (`FriendsPage.cards`, by user ID): presence is
+  what refills this page while it is open, and rebuilding every card for one
+  ring was an avatar, two texts and a row of buttons per person per flicker.
+  `friendCard.stands` decides — anything beyond presence moving rebuilds that
+  one card, so the closures wired at build always capture the snapshot the
+  texts are drawn from — `update` repaints the ring and re-points the
+  callbacks, and the list ends in `Relayout` rather than `Refresh`, which
+  would walk every reused card and re-upload its avatar. A card leaving the
+  *screen* has its hover and tooltip taken down by hand (`friendCard.drawn`),
+  a widget no longer drawn never reporting the pointer out; one leaving the
+  *list* is pruned in `SetSections`.
+
   **Every heading folds** (`friendsHeader`), because a section here only ever
   grows: nobody cleans up sent requests, and a hundred of them would stand between
   the reader and their friends. Three things about it:
@@ -810,7 +822,8 @@ naming and the test policy.
     the point of folding one. So `fold` redraws the whole list rather than
     toggling visibility, and `FriendsPage.sections` keeps the controller's last
     answer so a click on a heading is a redraw rather than a walk of every
-    relationship.
+    relationship. An unfold builds them once; `cards` keeps them across a
+    refold, out of the tree.
   - `FriendsPage.folded` is what the *reader* decided, by caption, and is absent
     until they touch one — which is how a decision is told from
     `FriendSection.Folded`, the state the controller asks a section to *start* in

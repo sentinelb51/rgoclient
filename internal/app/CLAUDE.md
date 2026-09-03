@@ -125,6 +125,14 @@ DAG and conventions.
    applies optimistically and calls `Client.EditMessage`; failure reverts.
    Message-area rebuilds cancel the active edit; `refreshMessage` leaves a message
    being edited alone.
+   **The editor opens the same `@`/`#`/`:` picker the composer does.**
+   `EditEntry` shares `MessageInput`'s `mentionField` (`internal/ui/input.go`),
+   so nothing about detecting a mention differs between typing a new message and
+   editing one. `startEditing` seeds it from `a.input.Mentions.Pools()` rather
+   than re-running a member/channel/emoji walk for a box that is about to close
+   — the composer already resolved them for this channel — and
+   `setMentionCandidates` mirrors every later update into `a.editing.EditMentions()`
+   too, so the two stay current off the same events.
    **An edit is announced twice over**: the row trails a pencil and how long ago
    (`MessageWidget.buildEditMark`), and `refreshMessage` flashes it as it lands.
    An update arrives as "this message changed", so `newlyEdited` compares the held
@@ -1004,7 +1012,9 @@ DAG and conventions.
     Presence is drawn on every row, so `onPresenceChanged` queues `refreshFriends`
     **before** the member sidebar's own gate — this page is the one surface open
     while no server is, which is the first thing that gate drops, and its people are
-    the reader's own rather than a thousand strangers.
+    the reader's own rather than a thousand strangers. The page reuses its cards
+    across refills, so that walk repaints rings rather than rebuilding rows — see
+    `internal/ui/CLAUDE.md`.
     Somebody the gateway names that `State` has never cached has no name to draw —
     `EventUserRelationship` carries the account and nothing files it — so
     `friendsChanged` queues them through `ensureAuthor`, and `flushAuthors` refills.
@@ -1462,13 +1472,21 @@ DAG and conventions.
     disconnect and tear down a call that just connected.
     **Settings apply to a call already running.** `applyVoiceSettings` pushes
     sensitivity, input gain, soft clipping, the rumble filter, noise suppression
-    (its strength and speech-veto dials included), call volume and the output
+    (its strength and speech-veto dials included), call volume, levelling,
+    placement, the buffering profile and the output
     device onto whatever is open, and re-arms the push-to-talk poll; without it
     each is read once at join and a slider dragged mid-call does nothing, which
     reads as a broken setting rather than a deferred one. `inputConfig` and
     `applyCaptureSettings` are the one builder and one pusher both microphone
     openers share — a dial only the join carried would behave differently in a
     call than under the meter tuning it.
+    `applyCaptureIdle` is the third pusher and the odd one: not a setting but
+    whether anything is *listening*, which is muted **and** the meter not having
+    borrowed this same capture. It holds the suppressor off, that stage being
+    97 % of what the chain costs and its output worth nothing unheard — see
+    `docs/performance.md`. One producer, called from both mute toggles, from
+    `installCall` and from the monitor's start and stop, because either fact
+    alone is half the answer.
     **Both gains are decibels** (`config.VoiceGainOffDB`..`VoiceGainMaxDB`,
     −40 = off, +20 = ×10), converted at the seam by `audio.GainFromDB` — `audio`
     speaks linear gain, being where the arithmetic is, and `config` owns where
@@ -1527,6 +1545,15 @@ DAG and conventions.
     at join, `Call.SetDeepPLC` from `applyVoiceSettings` after. The call holds an
     atomic and the filler pushes it onto a decoder when it changes, because libopus
     decoder state is per stream and must not be reconfigured from under a decode.
+    **Buffering travels the same road, and `jitterProfile` is the seam.**
+    `voice` names the three trades (`JitterResponsive` / `Balanced` / `Smooth`, a
+    percentile of measured arrival lateness and a ceiling on delay) and knows
+    nothing of config; `app.jitterProfile` maps the setting's name onto one, the
+    way `resolveCores` decides what a *kind* of core is for. `voice.Options` at
+    join, `Call.SetJitterProfile` from `applyVoiceSettings` after, and the filler
+    pushes it onto a lane's buffer on change — `SetProfile` takes the buffer's own
+    lock, which the reader goroutine holds fifty times a second, so pushing it per
+    frame would be a lock for nothing.
     **A second pump, not `dispatch`.** `client.Event`'s marker is unexported so a
     voice event cannot be one, and that channel *blocks rather than drops*, so
     speaking updates would stall the gateway reader behind them. `pumpCall` is
@@ -1600,13 +1627,18 @@ DAG and conventions.
     other: a `ConnectionChanged` says which of the three states the call is in
     and measures nothing, a `StatsChanged` measures and says nothing about the
     state. `callQuality` grades a *connected* call on the round trip and on the
-    loss, at whichever is worse, and everything short of connected is fair —
-    amber for a call that has not landed, red kept for one that is up and
-    unusable. What the thresholds are is policy and lives here, the way
-    `resolveCores` does; `ui.CallQuality` is the seam they cross.
+    loss **in either direction**, at whichever of the three is worse, and
+    everything short of connected is fair — amber for a call that has not landed,
+    red kept for one that is up and unusable. Both directions because the one
+    fault this bar used to draw green is the reader whose upload is the broken
+    half: they hear everybody perfectly and are the one nobody can hear. What the
+    thresholds are is policy and lives here, the way `resolveCores` does;
+    `ui.CallQuality` is the seam they cross.
     **The number is read by pointing at it**, `callStateTooltip` composing the
-    word with the round trip and the loss, each left out until there is one — a
-    nought would claim a measurement nothing has made. It is composed here
+    word with the round trip and each direction's loss, named `in` and `out`
+    because which half is broken is the whole of what a reader can act on. Each
+    is left out until there is one — a nought would claim a measurement nothing
+    has made. It is composed here
     rather than pushed into the widget so a sample costs no `settleCallIsland`,
     and a tooltip standing open is re-shown on each sample (`callStateOver`):
     somebody holding the pointer there is watching the number, not reading it
@@ -1642,7 +1674,9 @@ DAG and conventions.
     borrowing above exists to avoid. The estimate is `Capture.VAD`, and it is
     **negative** where the model is not running: it runs only while suppression
     does, and a bar left at its last answer would report a microphone nothing is
-    listening to.
+    listening to. Under GTCRN the number is the share of the frame's energy the
+    mask kept rather than a probability — that network has no detector — which
+    the gate's veto and the bar both read the same way.
 37. **A group conversation.** Everything a group *is* was here before one could
     be made: it is a channel, so its sidebar row, header, messages and edit card
     are every channel's, and leaving one is `confirmCloseChannel`. What
@@ -1975,9 +2009,21 @@ DAG and conventions.
     the window *before* the subscription — a watch that never delivers must
     leave something to close — and hands `voice.WatchShare` a `ShareOpen`
     that launches the decoder at `shareDecodeSize` (the sender's declared
-    size, believed only under the 1080p cap) and starts the pump. The pump is
+    size, believed only under the 1080p cap) and starts the pump. Every
+    watch is IVF — `voice.ShareIVF` is the one `ShareCodec` left, H.264
+    riding it under the `H264` fourcc — because a length per frame is what
+    lets the decoder close one as it lands; see `docs/screenshare-todo.md`
+    "Facts" for the six held frames that were found and removed in 2026-09,
+    and `screenshare_live_test.go` for the two-account clock harness that
+    found them (`RGO_SHARE_LIVE=1 RGO_SHARE_CLOCK=scripts/share-clock.py`).
+    The pump is
     `pumpVideoFrames` minus the clock: live is paced by the sender, so it
-    paints on arrival under a waited hop and always drains; the share window
+    reads on arrival and always drains, and the painter sits behind a
+    latest-wins mailbox (`paintShareFrame`, three rotating buffers) rather
+    than a waited hop — painting stalls for seconds while a window is
+    dragged on Windows, and a stall the pump waited out would back up
+    through the decoder into standing delay for the rest of the watch, so a
+    frame the painter missed is dropped instead. The share window
     is its own `fyne.Window`, so a frame dirties nothing of the main canvas.
     Every teardown meets in `closeShare`: the window's own close,
     `voice.ShareEnded` (a sender stopping is silent, a failure is a notice),
@@ -1998,13 +2044,13 @@ DAG and conventions.
 
 47. **Sending a screenshare.** The other half of `screenshare.go`, and shorter
     than the watch for one reason: **nothing here reads the stream**. The
-    capture child's stdout *is* the published track's source
-    (`Call.StartShare` takes an `io.ReadCloser`), so lksdk drains the pipe on
-    its own goroutine and there is no pump, no scratch buffer and no UI hop
+    capture child's stdout, framed by the tee, *is* the published track's
+    source (`Call.StartShare` takes a `voice.ShareSource`), so voice's write
+    loop drains it and there is no pump, no scratch buffer and no UI hop
     per frame. What is published is a `video.ShareTee` around that stdout
     rather than the stream itself, which is what makes a self-preview
-    possible without a second capture; the tee drops frames rather than ever
-    making that drain wait, and `sendingShare.halt` goes through
+    possible without a second capture; the tee drops preview frames rather
+    than ever making that drain wait, and `sendingShare.halt` goes through
     `tee.Close()` so stopping a share also lets go of the preview watching
     it and refuses one still being launched.
     The way in is the **call island's** share button (`SetSharing`), which is
@@ -2045,15 +2091,23 @@ DAG and conventions.
     where this computes in `float64`. With nothing fetched yet the *new-user*
     tier's numbers are assumed: guessing low costs a few pixels, guessing high
     costs somebody their call.
-    **The track is paced by the rate that was asked for**, not by the stream:
-    Annex-B carries no timing, so `ReaderSampleProvider` stamps a flat 33 ms
-    per slice. `ReaderTrackWithFrameDuration` overrides it, which is honest
-    because the child's own `fps` filter holds the rate constant — for H.264
-    it is applied per VCL NAL, which is why the encoder is held to one slice
-    per frame (`video`'s side of the contract), and for AV1 per IVF frame,
-    where the contract holds by construction.
+    **The track is written on arrival and paced by nothing** —
+    `voice.pumpShareSend`, not lksdk's reader track, whose writeWorker sends
+    one frame per duration off a schedule of its own and therefore replays
+    any standing backlog (everything encoded during the publish negotiation,
+    plus every stall after) at 1× forever: a fixed multi-second delay every
+    viewer kept and the sender's preview never showed, because the preview
+    taps the tee upstream of where the queue stood. The capture child's own
+    constant-rate output is the clock (the output's sync, not an `fps`
+    filter, which holds a frame); the asked-for rate only steps the RTP
+    timestamps, and pre-bind and pre-keyframe frames are dropped rather than
+    queued, so a viewer starts at most one keyframe interval behind. The
+    child writes AV1 in IVF or H.264 in FLV — containers with lengths, so
+    the tee closes a frame as it lands rather than at the next one's start
+    code; the one-slice-per-frame contract (`video`'s side) still holds
+    because a sliced encode would be several units to one frame.
     **The codec is `config.Screenshare.Codec` through `captureCodec`**, one
-    of five dials beside effort and latency: Auto is AV1 where the GPU
+    of six dials beside effort and latency: Auto is AV1 where the GPU
     encodes it — at `shareAV1BitrateScale` of the H.264 bitrate, the gain
     taken as bandwidth — and a publish the room refuses at AV1 is retried
     once as H.264 inside `beginShare`'s worker before anything is reported.
@@ -2064,6 +2118,14 @@ DAG and conventions.
     the codec being chosen after it — and
     Keyframes is `shareKeyframeSeconds` (1 / 2 / 8 s) into
     `CaptureConfig.KeyframeSeconds` — policy here, clamped in `video`.
+    **Bitrate mode is the sixth** (`captureRate` → `video.CaptureRate`), and
+    is the one dial whose default is chosen for the *bandwidth* rather than
+    for the picture: capped VBR spends nothing on a still screen, and
+    constant pads it to the ceiling so the rate never moves — which is what a
+    fixed uplink and a receiver's bandwidth estimator are steadiest on, an
+    estimate probed continuously never having to be re-found when the screen
+    starts moving. Offered rather than settled here because which of the two
+    is right is a fact about the connection, not about this client.
     What a feed's bytes are is worn by its window title once it mounts
     (`shareView.codecTag`): the negotiated codec for a watch, threaded
     through `voice.ShareOpen`'s name, and codec · encoder for the self

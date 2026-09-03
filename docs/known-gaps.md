@@ -102,16 +102,21 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   working adapter's candidate winning, but the dead ones are checked first and
   logged per pair. Fixing it means a hook upstream in `livekit/server-sdk-go`.
 
-- **A call measures one direction of its loss.** The state bar's grade and its
-  tooltip come from `voice.Stats`: the round trip off the ICE agent's own consent
-  checks, and the worst loss the jitter buffers have counted — both about what
-  reaches *this* client. What the voice node makes of what this end sends comes
-  back in RTCP receiver reports, which lksdk reads for its own congestion control
-  behind `LocalTrackPublication.readRTCP` and does not pass on; a
-  `RemoteInboundRTPStreamStats` off the peer connection would need pion's stats
-  interceptor registered, which is lksdk's registry to build. So a reader whose
-  upload is the broken half sees a green bar and is told about it by the people
-  who cannot hear them.
+- **The sending half's loss is the node's word, at the node's cadence.**
+  `voice.Stats.SendLoss` is `FractionLost × 100/256` off the RTCP receiver
+  reports on the microphone's own track, which is the only measurement of that
+  direction there is — nothing here can count what failed to arrive elsewhere.
+  Two limits come with it. It is **per-hop**: it says what the voice node
+  received, so a listener losing packets on their own downlink is invisible to
+  the client that is talking to them, and is the node's to deal with. And the
+  interval is the node's to choose — `FractionLost` is "since the previous
+  report", where the inbound number is a 200-packet window of our own — so it
+  arrives sparser and jumpier than the half beside it.
+
+  `RemoteInboundRTPStreamStats` off the peer connection would be the richer
+  answer and is the route that *is* blocked: lksdk builds its registry in a
+  private `registerDefaultInterceptors` and never calls
+  `webrtc.ConfigureStatsInterceptor`.
 
 - **Loss is measured over speech, not over time.** The window is 200 played
   packets — four seconds of somebody talking — so a quiet room's percentage is
@@ -120,8 +125,27 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   otherwise read as a dead connection), which is the same decision seen from the
   other side.
 
-- **No echo cancellation.** The capture chain is a high-pass, RNNoise, a preamp
-  and a noise gate; `audio.Processor` is the seam AEC would go in and `Engine`
+- **GTCRN's band above 8 kHz is gained, not denoised.** The second noise
+  model works at 16 kHz. What the microphone had above 8 kHz is put back
+  beside its output — the input delayed by the whole path, less the same
+  hops sent round untouched, which is exactly what the low path cannot
+  carry — under one gain per hop: the share of energy the model kept above
+  6 kHz, its own verdict on its top bands. A fricative keeps its air and
+  hiss does not, but noise *during* speech in that band passes with the
+  speech, where the model would have shaped it bin by bin. A model at 48 kHz
+  would be the fix; none of that size exists trained.
+
+- **GTCRN's delay is 30 ms and cannot be less.** The model's hop is 16 ms
+  of overlap it was trained under. The queue between a 20 ms frame and a
+  16 ms hop costs `hop - gcd(frame, hop)` at 16 kHz — 256 - 64 samples,
+  12 ms — for any constant-latency schedule, and only a frame that is a
+  multiple of 16 ms would remove it, which Opus does not have. The two
+  filters are 0.9 ms each and must stay linear-phase for the band
+  reconstruction above to cancel. Against RNNoise's 10 ms; both are on the
+  row that picks the model.
+
+- **No echo cancellation.** The capture chain is a high-pass, a noise model, a
+  preamp and a noise gate; `audio.Processor` is the seam AEC would go in and `Engine`
   owns both directions precisely so the playback reference is reachable, but
   nothing implements one. Headphones are assumed — on speakers the far end hears
   itself.
@@ -130,8 +154,9 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the gate's threshold is another; neither follows the room. That is deliberate —
   an adaptive floor that guesses wrong is a microphone nobody can reason about —
   but it does mean a quiet microphone is fixed by hand, up to `maxGain`'s +20 dB,
-  and that a gain far enough up to need soft clipping is amplifying the room's
-  own noise along with the voice.
+  and that a gain far enough up to need the limiter is amplifying the room's own
+  noise along with the voice — which the gate's hangover then sends, 250 ms of it
+  after every sentence.
 
 - **Push-to-talk is Windows-only, and binds from a list rather than a captured
   key.** `ui.KeyHeld` is `GetAsyncKeyState`, which needs no canvas focus — the
@@ -144,15 +169,27 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   arbitrary key still needs focus; the list is the modifiers and mouse buttons
   people actually bind.
 
-- **DRED and OSCE are not vendored.** `sentinelb51/gopus` vendors libopus 1.5.2
-  plus the `dnn/` sources Deep PLC needs, so neural loss concealment is available
-  and switched by the "Repair dropped audio" setting. What is still out is DRED —
-  redundant copies of past speech stapled to later packets, which recovers a burst
-  loss instead of concealing it — and OSCE's LACE/NoLACE decoder enhancement.
-  DRED is the one worth wanting, and the reason it is not here is that it needs
-  the *sender* to enable it too: against the official web client, or anything else
-  that is not this library, it buys nothing. The two are also 10 MB of model data
-  against Deep PLC's 5.
+- **DRED is not vendored.** `sentinelb51/gopus` vendors libopus 1.6.1 with Deep
+  PLC, OSCE and the blind bandwidth extension, all switched by the "Repair
+  dropped audio" setting. What is still out is DRED — redundant copies of past
+  speech stapled to later packets, which recovers a burst loss instead of
+  concealing it. It is the one worth wanting, and the reason it is not here is
+  that it needs the *sender* to enable it too: against the official web client,
+  or anything else that is not this library, it buys nothing.
+
+  **NoLACE is compiled but not offered.** It is one level above LACE on the same
+  complexity dial and more than twice the cost per talker — 0.43 % of a core a
+  lane against 0.20 %, where a plain decode is 0.13 % — and unlike the concealer
+  a postfilter runs on every frame that arrives, so that is charged to everyone
+  talking rather than to a bad connection. `voice.lane.applyDeepPLC` is the one
+  line to change if somebody can hear what it buys.
+
+  **The bandwidth extension does nothing at this bitrate**, and is on anyway.
+  It fires only on a SILK-only packet or a concealed one, and 32 kbps keeps Opus
+  in hybrid mode — measured: bit-identical output with it on and off, until
+  packets start being lost, and it is the losing case the switch is about. Opus
+  only drops to SILK-only below about 16 kbps.
+
   **amd64 builds require AVX2** — `-march=x86-64-v3`, so Haswell or Excavator
   (2013) and newer; below that the failure is SIGILL, and the answer is
   `-tags opus_baseline`, which drops the flag and roughly triples the cost of a
@@ -160,7 +197,9 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the compiler's own `__AVX2__`: without it the model runs an SSE2 fallback at
   690 µs a concealed frame against 227. libopus's own SSE/SSE2/Neon intrinsics
   are on as well and are worth 0.5 %, gcc having long since learned to
-  auto-vectorise what they were hand-written for. arm64 takes no floor and is
+  auto-vectorise what they were hand-written for — and its SSE4.1 and AVX2 ones,
+  which that same floor makes reachable, were tried on top and are worth *zero*:
+  130.7 µs to encode a 20 ms frame either way. arm64 takes no floor and is
   unmeasured. Released amd64 binaries compile the *Go* half at the matching level
   too (`GOAMD64: v3` in both workflows), which costs no compatibility the C floor
   has not already spent. AVX-512 was measured and left alone: 3 % on the one

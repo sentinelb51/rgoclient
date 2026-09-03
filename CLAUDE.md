@@ -30,7 +30,7 @@ cpu                            no internal dependencies    (Win32 / sysfs, no cg
 power                          no internal dependencies    (Win32, no cgo)
 video                          no internal dependencies    (ffmpeg child, os/exec, xgb/x-sys)
 audio/rnnoise                  no internal dependencies    (vendored Xiph C, cgo)
-audio      -> audio/rnnoise                  (+ malgo, go-mp3)
+audio      -> audio/rnnoise                  (+ malgo, go-mp3, gtcrn-go)
 voice      -> domain                         (+ lksdk, gopus)
 util       -> config
 cache      -> domain
@@ -207,24 +207,64 @@ internal/
                          and the call's per-participant lanes, summed without
                          allocating — and the wake it sends afterwards, which is
                          the clock the whole receive path is paced by. Also the
-                         gain ceiling and softClip, the curve the *sum* meets it
-                         through, both directions sharing the one definition),
+                         gain ceiling, the limiter one boosted source is held
+                         under, and softClip, the curve the *sum* meets it
+                         through — both directions sharing the one definition.
+                         And the two treatments a lane gets on the way to the
+                         speakers: leveller, a slow bounded gain that brings every
+                         participant to one loudness and only learns from a block
+                         loud enough to be speech, so a gap cannot wind it up; and
+                         the constant-power pan table that seats each lane a few
+                         degrees off the last, which is what lets the ear separate
+                         two people talking at once. Both are a *person's* — the
+                         microphone test reports what is being sent and a video
+                         carries its own mix, so lane.person is what excludes them),
                          ring.go (the wait-free SPSC queue every
                          hand-off across that callback is made of), sink.go (the
                          call's lanes; Want is how deep they are kept and is what
                          stops a decoder running ahead of the speakers),
                          capture.go + process.go (the microphone and
-                         the chain that cleans and gates it: high-pass, RNNoise,
-                         preamp, gate — the gain inside the chain and in front of
-                         the gate, so it is what the gate and the meter both
-                         measure, every stage always present and bypassed rather
-                         than absent so a setting moves mid-call — and a Capture
-                         outlives its device, which its own supervisor reopens,
-                         falls back to the default, or swaps on SetDevice, none
-                         of it visible to the reader inside Read),
-                         rnnoise/ (Xiph's RNNoise v0.1.1 vendored as C, the last
-                         release whose model ships in-tree; symbols rnn_-prefixed
-                         so it coexists with gopus's libopus), device.go
+                         the chain that cleans and gates it: high-pass, the
+                         noise model, preamp, gate — the gain inside the chain
+                         and in front of the gate, so it is what the gate and
+                         the meter both measure, every stage always present and
+                         bypassed rather than absent so a setting moves mid-call
+                         — and a Capture outlives its device, which its own
+                         supervisor reopens, falls back to the default, or swaps
+                         on SetDevice, none of it visible to the reader inside
+                         Read. The noise stage runs one of two networks, a
+                         setting choosing: RNNoise, or GTCRN),
+                         gtcrn.go (GTCRN inside a 48 kHz, 20 ms chain: the model
+                         is 16 kHz on 256-sample hops, which is a hop and a
+                         quarter a frame, so input queues to a whole hop and
+                         output is primed with the most a frame can ever be
+                         short by — 192 samples — and never runs dry. The band
+                         above 8 kHz comes back beside the model's output: the
+                         input delayed by the whole path less the same hops
+                         sent round untouched, under a gain the model itself
+                         supplies, KeptAbove(6 kHz). The network is
+                         github.com/sentinelb51/gtcrn-go, a pure Go port with
+                         AVX2 kernels, kept a repository of its own the way
+                         the Fyne fork is),
+                         resample.go (the 48 kHz <-> 16 kHz filter that stage
+                         needs, linear-phase because the band reconstruction
+                         subtracts its output from a delayed input: one
+                         Kaiser-windowed sinc, split by phase so the decimator
+                         and the interpolator are both fir.go's one loop),
+                         fir.go + fir_amd64.{go,s} (that loop, and its AVX2
+                         form, dispatched on cpuid),
+                         rnnoise/ (Xiph's RNNoise vendored as C at main's 70f1d256,
+                         which is the newest commit on either the GitLab original
+                         or the GitHub mirror; symbols rnn_-prefixed so it
+                         coexists with gopus's libopus. The weights are
+                         rnnoise_data.bin rather than C literals — upstream emits
+                         them as a 74 MB source file that USE_WEIGHTS_FILE
+                         excludes from the build anyway — go:embed'd, so a fresh
+                         clone still builds with nothing downloaded, and
+                         re-vendored by scripts/update-rnnoise.sh. It buys
+                         -36.5 dB where the 2017 model bought -8.9, and costs
+                         10 ms of delay while it is on. march_amd64.go is what
+                         makes it cheap: see docs/performance.md), device.go
                          (enumeration and the process's one miniaudio context),
                          effects.go + effects_{windows,other}.go (what the OS is
                          already doing to a microphone before this client's chain
@@ -294,28 +334,56 @@ internal/
                          LiveKit track; newMicrophone is split from newPublisher
                          because the track has to exist before the room does;
                          opusTuning is the assertion that lights
-                         up FEC/DTX where the binding has them), subscribe.go
+                         up FEC/DTX where the binding has them; and uplink, the
+                         one measurement of the *sending* half — the node's RTCP
+                         receiver reports on this track, reached by lksdk's own
+                         WithRTCPHandler rather than by an interceptor, and what
+                         the FEC level is sized from, redundancy protecting what
+                         goes out rather than what comes in), subscribe.go
                          (RTP -> jitter -> decode -> sink: a reader goroutine per
                          participant, and one playLanes for all of them, woken by
                          the speakers rather than by a ticker so playout cannot
                          drift against the device), jitter.go (the Jitter interface
                          and the adaptive buffer behind it — what is left of
                          mouth-to-ear latency lives here, which is why it is
-                         replaceable), share.go (both halves of a screenshare:
+                         replaceable. Depth is a *measurement*: every arrival's
+                         lateness against a short trailing floor, filed in a
+                         histogram, and the depth is whatever percentile the
+                         JitterProfile names — so a spike that was absorbed is
+                         evidence too, where the old rule had to produce an
+                         audible gap before it could learn anything. Both
+                         directions of a change wait for Opus's comfort noise,
+                         where dropping or replaying 20 ms is free; what is left
+                         over is reported as Drift and corrected in the decoded
+                         audio instead), stretch.go (that correction: one frame
+                         made shorter or longer by the period it repeats at,
+                         found by searching rather than by detecting a pitch,
+                         which is what a source that never goes quiet needs — a
+                         shared video, music, a client with DTX off. Nothing is
+                         reported back, the speakers being filled against Want,
+                         so a short frame simply leaves the lane hungry. The
+                         ration is on how many frames in a row may carry a
+                         period, a low voice's being 40 % of one),
+                         share.go (both halves of a screenshare:
                          the registry and the nothing-video-until-watched
                          subscription policy, and the watch — RTP reassembled and
                          remuxed into the byte stream a decoder reads on stdin;
-                         then the send half, an encoder's stdout published as one
-                         SCREEN_SHARE track, paced by the rate asked for rather
-                         than the stream's own timestamps, plus tokenAllowsScreen,
-                         which reads the join JWT's grant. Both seams are plain
-                         io: an io.WriteCloser in, an io.ReadCloser out, so voice
-                         never imports video), stats.go (how the connection itself
+                         then the send half, an encoder's frames published as one
+                         SCREEN_SHARE track the moment each arrives — the write
+                         loop paces nothing, the capture child's constant-rate
+                         output being the clock, a paced sender replaying any
+                         standing backlog forever as delay — plus tokenAllowsScreen,
+                         which reads the join JWT's grant. Both seams stay
+                         structural, so voice never imports video: an
+                         io.WriteCloser in, and framed reads out (ShareSource,
+                         which video.ShareTee answers)), stats.go (how the connection itself
                          is doing, sampled on a goroutine of its own so the receive
                          path's clock is never the thing measuring: the round trip
                          off the ICE agent's own consent checks, which travel the
-                         5-tuple the audio does, and the loss the jitter buffers
-                         already count. What a grade means is app's)
+                         5-tuple the audio does, and loss in *both* directions —
+                         inbound the jitter buffers' own count, outbound the
+                         publisher's uplink, which only the node can see. What a
+                         grade means is app's)
   video/                 the ffmpeg driver, both directions: video.go (discovery, the
                          magic-byte sniff that forces the demuxer, the probe whose
                          every answer is clamped, the poster), stream.go (the
@@ -327,15 +395,18 @@ internal/
                          under limits), capture.go + capture_{linux,windows,other}.go
                          (the other direction: what this machine can share, and the
                          one child that grabs, scales and encodes it — AV1 in IVF
-                         where the GPU offers an encoder, H.264 Annex-B otherwise;
+                         where the GPU offers an encoder, H.264 in FLV otherwise,
+                         both containers carrying every frame's length;
                          NVENC/AMF/QSV/VAAPI probed once per run per family,
                          libx264 the H.264 floor and AV1 hardware-only. Contained rather than sandboxed — the strict profile
                          severs the display capture needs, and the input is this
-                         machine's own screen. Also ShareTee, which splits that
-                         child's stdout so this end can watch what it sends: the
-                         publisher's every byte, and a copy of each whole frame
-                         that is *dropped* rather than queued, a preview never
-                         being allowed to stall the share). capture_windows.go
+                         machine's own screen. Also ShareTee, which frames that
+                         child's stdout: whole frames for the publisher
+                         (ReadFrame, drained at production speed so the pipe can
+                         never stand as latency), and a copy of each offered to
+                         a local preview and *dropped* where it is behind, a
+                         preview never being allowed to stall the
+                         share). capture_windows.go
                          additionally holds the three-rung ladder every Windows
                          source walks — Graphics Capture by handle, which alone
                          scales on the GPU and so reads back the encode box
@@ -378,7 +449,15 @@ packaging/linux/         the .desktop entry and the install.sh filing it, the
 
 scripts/                 update-deps.sh — every module *except* Fyne and the
                          versions its go.mod pins, which is why it is not a
-                         `go get -u`
+                         `go get -u`. update-rnnoise.sh — the denoiser, whose
+                         upstream is autotools and fetches its model at
+                         ./autogen.sh time: this turns both into a flat cgo
+                         package and a committed weights blob, and re-applies
+                         rnnoise-gain-floor.patch. share-clock.py — the window
+                         whose picture is the wall clock, which the two-account
+                         screenshare harness
+                         (internal/app/screenshare_live_test.go) shares and
+                         decodes back to measure glass-to-glass latency
 ```
 
 Where things live that the filename doesn't say. The *why* of each is in that
@@ -836,10 +915,14 @@ ahead of it, and a platform is compiled once per run instead of twice.
 Every job carries a `timeout-minutes`: a deadlocked widget test would otherwise
 hold a runner for six hours, billed at 10× on macOS.
 
-Assets are named for their target. The unix ones ship as a `.tar.gz`: a release
-asset is served as-is and an artifact is re-zipped, and neither keeps the
-execute bit. macOS gets a bare binary rather than an `.app` — see
-`docs/known-gaps.md`.
+Assets are named for their target, and every one of them is an archive — for
+different reasons. The unix ones ship as a `.tar.gz` because a release asset is
+served as-is and an artifact is re-zipped, and neither keeps the execute bit; the
+Windows one is a `.zip` because served as-is is also uncompressed, and deflate
+takes ~45% off a Go binary. Both hold the binary under its plain name.
+`update.AssetFor` matches the prefix up to that extension, so it does not care
+which is which. macOS gets a bare binary inside its tarball rather than an `.app`
+— see `docs/known-gaps.md`.
 
 ## Known gaps
 

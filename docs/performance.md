@@ -435,7 +435,9 @@ rather than an assumption:
   value produces identical output, so the setting only means anything under
   motion.
 - **GPU-side scaling was tried and rejected: `scale_d3d11` does not work
-  here.** The theory was good — the chain downloads the whole desktop as BGRA
+  here.** *(Superseded 2026-09: the readback it was meant to shrink is gone
+  altogether on the direct path — see "Three codecs, one profile and no
+  readback" below. Kept as the record of why the filter is not used.)* The theory was good — the chain downloads the whole desktop as BGRA
   (16.4 MB/frame at 2560×1600) before swscale shrinks it, so scaling on the
   GPU first would cut the readback ~13× and delete a CPU stage. Two things
   killed it. The win is far smaller than it looks: the *entire* capture +
@@ -533,6 +535,98 @@ rather than an assumption:
   never the codec — and **the `fps` filter needs the frame after** to
   choose between them, where the output's own CFR sync (`-fps_mode cfr -r
   N`) decides on the frame in hand. Neither shows in a file transcode.
+
+### Three codecs, one profile and no readback (2026-09)
+
+Everything an encoder can be asked for was measured against two lossless
+clips before anything was changed: 300 frames of 1920×1200 at 30 fps — code
+scrolling on white (`text`, the case a screen encoder is hardest on) and this
+desktop as it stood (`desk`, static but for a clock) — each encoded with the
+production flags on the RTX 4070 Laptop and scored back against the source
+with VMAF and PSNR-Y. VMAF saturates near 99.8 on screen content at any rate
+worth sending, so PSNR-Y is the number that separates anything; VMAF is
+quoted where it falls off a cliff, which is the only time it says something
+PSNR does not.
+
+**Capped VBR does not bind on a screen.** At the automatic ceiling nothing
+spent it — `text` at 4 Mbps ran 1.8–2.1 Mbps, `desk` 0.6–0.7 — so equal
+ceilings meant equal quality by construction and said nothing. The ladder
+below was measured where the cap *does* bind, which is a slow uplink or a
+busy screen, and that is also where a better codec pays.
+
+| ceiling, `text` | H.264 baseline | H.264 Main | H.265 | AV1 |
+|---|---|---|---|---|
+| 1500 kbps | 49.0 dB @ 1427 | 51.2 @ 1321 | 51.5 @ 1214 | 56.8 @ 1284 |
+| 1000 kbps | 43.3 @ 966 | 45.6 @ 908 | 46.7 @ 882 | 51.4 @ 909 |
+| 600 kbps | 37.0 @ 598 (VMAF 92.9) | 40.6 @ 548 (98.2) | 41.6 @ 555 (95.7) | 46.6 @ 590 (99.0) |
+| 350 kbps | 31.2 @ 393 (70.5) | 36.1 @ 339 (90.3) | 37.3 @ 359 (87.1) | 39.0 @ 346 (92.3) |
+
+| ceiling, `desk` | H.264 baseline | H.264 Main | H.265 | AV1 |
+|---|---|---|---|---|
+| 400 kbps | 40.2 dB @ 272 | 42.0 @ 191 | 45.9 @ 305 | 50.6 @ 267 |
+| 250 kbps | 39.3 @ 244 | 41.4 @ 191 | 44.2 @ 264 | 48.1 @ 223 |
+| 150 kbps | 33.1 @ 174 | 40.3 @ 162 | 37.6 @ 177 | 45.7 @ 152 |
+
+Read across for equal quality: on `text` AV1 reaches baseline H.264's
+picture at **about half** the bits, H.265 at about 0.65–0.7×, and H.264's
+own **Main profile at 0.6–0.65×** — CABAC alone, no B-frames involved. On
+`desk` the same, except that Main *beats* NVENC's H.265 at the bottom (40.3
+dB at 162 kbps against 37.6 at 177). So on screen content this GPU's H.265
+buys nothing over H.264 Main; its tier exists for natural video and games,
+where the published gap is 25–30 % and CABAC's is nearer 10, and for AMD
+and Intel, whose H.264 blocks are weaker than their H.265 ones. The
+budget scales (`app.shareAV1BitrateScale` 0.7, `shareHEVCBitrateScale`
+0.8, `shareMainBitrateScale` 0.9) are set from the *smaller* of each
+codec's two gains, so a share is never worse than baseline at the whole
+budget and the rest of the gain shows as picture.
+
+**Nothing else moved the needle**, and every one of these was tried at
+each of the four ceilings on `text` (and three on `desk`):
+
+- **Spatial AQ** (`-spatial-aq 1`): PSNR down 1.5–3 dB at the same spend,
+  VMAF 91.0 against 92.9 at 600 kbps, and on `desk` at 250 kbps a collapse
+  to 83.0 against 92.0. Off.
+- **Temporal AQ** (`-temporal-aq 1`): on the static desktop it cost **half
+  again the bitrate** (1017 kbps against 680 at the same picture) — it
+  spends on the background that is not moving. Off.
+- **Multipass** (`-multipass fullres`): mixed, worse where it bound (VMAF
+  91.4 against 92.9 at 600 kbps), 30 % more encode time. Off.
+- **Presets**: p6 and p7 against p4 were within 0.05 dB on H.264 and H.265
+  at every ceiling, and 30 % slower; AV1's p6 gained 0.9 dB at 350 kbps and
+  nothing above it. Quality stays p4, which is the level the numbers were
+  taken at.
+- **`-tune ll` against `ull`**: byte-identical output.
+
+**No readback.** Graphics Capture answers with a D3D11 texture and NVENC
+and AMF take one as input, converting BGRA to 4:2:0 on the way in — so
+where a probe finds the pairing willing the graph is the grabber alone and
+`hwdownload`, `format=bgra`, `scale` and `pad` are gone. Decoded back, the
+pixels are byte-identical to swscale's (both convert BT.601 limited; a
+mid-tone checked at the centre of each). A 2560×1600 monitor into
+1728×1080 at 60 fps for ten seconds, still desktop, `h264_nvenc`:
+
+| chain | process CPU | resident |
+|---|---|---|
+| direct: gfxcapture → NVENC | **0.016 s** | 193 MB |
+| readback: gfxcapture → hwdownload → swscale → NVENC | 0.156 s | 438 MB |
+
+Ten times less processor and 245 MB less memory in the child, at the one
+size where the readback was most of the cost. First frame on the direct
+path measured 170–230 ms after the child started, every codec.
+
+**H.265 without the held frame.** ffmpeg's IVF demuxer maps no fourcc to
+H.265, so the watch cannot take the framing H.264 rides. Raw Annex-B closes
+a unit at the NAL that opens the next — the frame of delay IVF was adopted
+to remove — *unless that NAL is sent early*: an access unit delimiter is
+optional and may open a unit, so `voice.annexBMux` writes one after every
+unit it hands the decoder. Measured on a pipe at 5 fps, real-time source,
+NVENC H.265, the production decoder flags: **median hold 5.6 ms with the
+delimiter, 207.5 ms without** (min 2.1 / max 9.9 against 5.4 / 370.4).
+
+**Live, through Stoat's relay** (the clock harness, 916×538 at 30 fps,
+`hel1`, same session for both): H.265 watch median **92–94 ms**, AV1 92–93,
+the sender's own preview 45–46 either way — the codec makes no difference
+to latency, which was the point of the framing above.
 
 ## Still needs more than a patch
 

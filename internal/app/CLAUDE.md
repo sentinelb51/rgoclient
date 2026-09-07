@@ -215,11 +215,14 @@ DAG and conventions.
    **Friends and Saved Notes are pinned above that list** (`App.channelTop`, via
    `setChannelGroup`), neither being a conversation with anybody: one is ordered by
    nothing, the other would be moved about by its own last message. The block sits
-   *outside* the list's side padding and above its scroll, so it is the full width
-   of the column and does not scroll away; its own hairline marks it off, and an
-   empty group draws none. Saved Notes is drawn twice over as not-a-person:
-   `ui.avatarLed` leaves it a glyph row rather than the taller avatar-led card, the
-   picture otherwise being this account's own standing in for a notepad. Its rows
+   above the scroll so it does not scroll away, but *inside* the list's side
+   padding: a pinned row standing six pixels left of every row under it is the one
+   thing the eye finds in a column. Its own hairline marks it off, and an empty
+   group draws none. Both pinned rows are conversation cards like the list's —
+   same height, same 32-wide lead — with `ui.conversationLead`'s disc where the
+   others have a face: Saved Notes carries no picture (`client/store.go` clears
+   it), the only one Revolt has for that channel being this account's own avatar
+   drawn against notes it wrote to itself. Its rows
    answer to selection, unread and typing like any other, hence `App.channelRows`
    walking both halves — a walk that knew only the list would leave one row that
    never repaints. The Friends row is *not* in that walk, being no channel, so
@@ -1023,11 +1026,14 @@ DAG and conventions.
     `resolveRelated` queues whoever `Store.HasUser` cannot answer for — otherwise
     somebody befriended long ago and not spoken to since is a relationship with no
     account behind it, and this list is a walk of the accounts.
-    The page is **filtered** by name or handle from the field in its header, which
-    is built once in the constructor: the list is replaced wholesale on every
+    The page has **one field**, standing over the list rather than in its header
+    and built once in the constructor: the list is replaced wholesale on every
     refill and presence alone refills it, so a field inside it would lose what was
-    being typed. A filter also unfolds what it matched — a hit inside a shut
-    section is a hit nobody can see.
+    being typed. What is typed narrows the page by name or handle — a filter
+    unfolds what it matched, a hit inside a shut section being a hit nobody can
+    see — and where it is a whole handle the **Add friend** button appears in it
+    and `askFriend` sends the request (item 37). Searching the list and reaching
+    somebody who is not in it are one question typed once.
 28. **Jumping to a message.** Tapping a quoted line is `Actions.OnJumpToMessage` →
     `App.OnJumpToMessage`, three answers cheapest first: already in the window
     (`revealMessage`), in the channel's cached tail (`jumpWithinCache`), or a
@@ -1078,51 +1084,54 @@ DAG and conventions.
     by the first placing — and `MessageWidget.Flash` marks it; see the ui note on
     why a wash is an animation and not state. Hovering stops it, the pointer
     arriving being the reader having found the row.
-29. **Channel search** shares the pins panel's route (`Client.SearchMessages`, the
-    two being mutually exclusive on the wire — Revolt refuses `query` and `pinned`
-    together), its refusal to cache what comes back and its author resolution in
-    the fetching worker. All three draw the same `ui.MessageCard` on the same island
-    (`App.messageCard`), each dropping what its own subject already said — pins
-    the pinned badge, the inbox the mention edge. What is search's alone is the
-    field, the run of filter chips and the three orders.
-    It asks for **nothing** until Enter: a search is a request per query, so the
-    field reports on submit rather than on every keystroke, and `App.searchQuery`
-    is what drops the answer to a superseded one — a second Enter while the first
-    is still out is the ordinary case, and the two can land in either order.
-    The island reports **every** change through one hook (`App.onSearchChanged`)
-    and decides nothing: which of them costs a request is answered here, because
-    the answer is held here. `App.searchFound` is the messages the last request
-    returned, kept while the island is up, and `ui.SearchQuery.SameRequest` is what
-    tells the narrowing done *here* from the four things the route is actually
-    asked with — the query, the order and the two ends of the span — so toggling a
-    filter or picking a person re-runs `drawSearchResults` over what is already in
-    hand and changing the order or a date asks again. Something *has to differ*
-    for that fast path (`narrowedApart`), which is what keeps a second Enter on an
-    unchanged query a real request rather than a redraw. `App.searchAnswered`
-    distinguishes "nothing came back" from "nothing has been asked", which an
-    empty slice cannot, and is what makes a chip toggled mid-flight do nothing:
-    the pending answer is drawn through the narrowing standing when it lands.
-    Every filter but the span is a property of the message the route cannot be
-    asked about (`matchesSearch`), so the count line carries both numbers — see
-    the known gap. The **author** is one of those, which is the whole reason the
-    picker is honest only about the hundred: `loadSearchAuthors` fills it from the
-    membership `refreshMemberList` last walked, or walks one off the UI thread
-    where the sidebar has not — the same slice, published and never written into.
-    The **span** is the exception and is sent, so `withinSpan` re-checks it
+29. **Channel search is a walk, not a request.** It draws the same
+    `ui.MessageCard` on the same island the pins panel and the inbox do
+    (`App.messageCard`) and shares their refusal to cache what comes back and
+    their author resolution in the fetching worker. Everything else about it now
+    follows from one fact: `DataMessageSearch` filters on **words and a window of
+    message IDs and nothing else**, so `from:`, `mentions:`, `has:` and `is:` are
+    questions the route cannot be asked and are answered here, by reading messages
+    back and keeping the ones that match.
+    **Two sources, one loop.** `walkSearch` asks for a page, keeps what matches
+    and goes again: `Client.SearchMessages` where the query has words, and
+    `Client.ScanMessages` — the plain history route — where it has none, which is
+    what makes `has:image` on its own answerable at all. `searchPage` is the one
+    branch between them and `searchSort` the one place Relevance is turned into
+    Newest for a query with nothing to be relevant to.
+    **The walk is what makes a filter work.** One page of a hundred narrowed by a
+    person who speaks rarely is nothing, which is what the old count line's "0 of
+    100" was reporting. It keeps going until it has `searchWant` matches or its
+    budget (`config.Behaviour.SearchScanPages`) runs out, and the island's
+    **Keep searching** spends the budget again from `App.searchCursor`. A page
+    that brings nothing new stops it — see the client note on the unverified
+    honouring of `before`/`after` on `/search`. An order that cannot be paged gets
+    one request whatever the setting says (`searchBudget`).
+    **So every change re-asks**, which is a deliberate reversal: the narrowing is
+    applied *inside* the walk, so `App.searchFound` is the answer rather than a
+    superset of it, and taking a chip off cannot widen a set that was never
+    gathered. `ui.SearchQuery.SameRequest` survives for nothing here; what drops a
+    superseded answer is `App.searchSeq`, bumped by every walk from the top.
+    `App.searchScanned` is the count line's denominator — messages read, not
+    results found.
+    **The island parses and this resolves.** `ui.SearchTerms` is the field parsed
+    (searchquery.go, no store and no widget); `App.resolvePeople` turns the names
+    in `from:`/`mentions:` into accounts against `App.searchAuthors`, which
+    `loadSearchAuthors` fills from the membership `refreshMemberList` last walked
+    or walks off the UI thread where the sidebar has not — the same slice,
+    published and never written into. That membership lands *late*, so
+    `takeSearchAuthors` re-resolves and re-asks where the answer moved: a `from:`
+    typed before it arrived matched nobody. `me` is `SelfID`, an ID is taken as
+    one (a webhook or somebody departed is in no membership), and a name that
+    resolves to nobody goes in `searchNote` under the field rather than quietly
+    matching nothing — as does a value no key takes (`ui.SearchTerms.Unknown`).
+    **The span is the one filter that is sent**, so `withinSpan` re-checks it
     locally rather than trusting a field nothing in this repo has verified the
     backend reads on this route.
-    The hundred is per *request*, not per island: `loadMoreSearch` asks again
-    beginning past the last result held and `appendUnseen` grows `searchFound`, so
-    both numbers on the count line climb. `drawSearchResults` is the **single
-    writer** of the button — every path that can move whether there is a next page
-    ends there, so it cannot be left saying something the state has stopped
-    agreeing with. `App.searchSeq` is what kills a page still in flight when the
-    query is re-asked: `SameRequest` cannot tell the same query asked twice apart,
-    and a page of the answer just thrown away would append to the new one.
-    Relevance offers no next page at all — see the client note on `pageFrom`.
-    `refillSearch` wraps every change to the island in a `repositionOverlay`,
-    unlike the pins panel: replacing cards with "Searching..." is a change of
-    height, and a centred card sized from its own minimum re-places for neither.
+    `drawSearchResults` is the **single writer** of the way to more — every path
+    that can move whether there is any ends there — and `refillSearch` wraps every
+    change to the island in a `repositionOverlay`, unlike the pins panel:
+    replacing cards with "Searching..." is a change of height, and a centred card
+    sized from its own minimum re-places for neither.
 30. **Creating a server** is `ui.PromptDialog` — one field, because a name is all
     Revolt takes at creation — and it *replaces* the join dialog rather than
     stacking on it, the modal layer holding one card. The response is ignored (see
@@ -1710,9 +1719,9 @@ DAG and conventions.
     and deliberately **not** from `refreshRecipients` — `flushAuthors` ends there,
     and it releases the guard on a failure, so re-queueing from inside it would be
     one request per batch forever for an account that cannot be fetched.
-    **Asking somebody new** is the field at the head of the friends page
-    (`askFriend`), and it is the only way to reach an account this client has
-    never drawn — every other route to a person is a surface they appear on. The
+    **Asking somebody new** is the friends page's own field, the same one that
+    narrows it (`askFriend`), and it is the only way to reach an account this
+    client has never drawn — every other route to a person is a surface they appear on. The
     handle goes to the same route `AddFriend` uses; `done(sent)` is what clears
     the field on success and keeps it for a typo. The account behind the answer is
     not cached, so the row appears when the gateway files it, not when the request
@@ -2009,13 +2018,16 @@ DAG and conventions.
     the window *before* the subscription — a watch that never delivers must
     leave something to close — and hands `voice.WatchShare` a `ShareOpen`
     that launches the decoder at `shareDecodeSize` (the sender's declared
-    size, believed only under the 1080p cap) and starts the pump. Every
-    watch is IVF — `voice.ShareIVF` is the one `ShareCodec` left, H.264
-    riding it under the `H264` fourcc — because a length per frame is what
-    lets the decoder close one as it lands; see `docs/screenshare-todo.md`
-    "Facts" for the six held frames that were found and removed in 2026-09,
-    and `screenshare_live_test.go` for the two-account clock harness that
-    found them (`RGO_SHARE_LIVE=1 RGO_SHARE_CLOCK=scripts/share-clock.py`).
+    size, believed only under the 1080p cap) and starts the pump. A watch
+    is IVF (`voice.ShareIVF`, H.264 riding it under the `H264` fourcc)
+    because a length per frame is what lets the decoder close one as it
+    lands — or, for H.265, which IVF refuses, raw Annex-B with the next
+    unit's delimiter behind every unit (`voice.ShareHEVC`), which closes it
+    the same way; see `docs/screenshare-todo.md` "Facts" for the six held
+    frames that were found and removed in 2026-09, and
+    `screenshare_live_test.go` for the two-account clock harness that found
+    them (`RGO_SHARE_LIVE=1 RGO_SHARE_CLOCK=scripts/share-clock.py`,
+    `RGO_SHARE_CODEC=hevc` to force the middle tier).
     The pump is
     `pumpVideoFrames` minus the clock: live is paced by the sender, so it
     reads on arrival and always drains, and the painter sits behind a
@@ -2025,6 +2037,16 @@ DAG and conventions.
     through the decoder into standing delay for the rest of the watch, so a
     frame the painter missed is dropped instead. The share window
     is its own `fyne.Window`, so a frame dirties nothing of the main canvas.
+    **The stats card's fps clause is a measurement, not a count**
+    (`shareRate`): arrivals over a sliding two seconds, a running mean over
+    that, and the figure held until the mean moves off it. A count inside a
+    wall-clock second was what it used to be, and a watch *opens by catching
+    up* — the room delivers what it had buffered and the pump drains it as
+    fast as it arrives, which is right for latency and is not a frame rate —
+    so it drew 106 on a 60 fps share. `steady` is the gate: nothing is
+    measured while the window disagrees with its own newest half, so a
+    backlog holds the figure rather than spiking it. Measured live over 48 s
+    a 60 fps share now draws one number and keeps it.
     Every teardown meets in `closeShare`: the window's own close,
     `voice.ShareEnded` (a sender stopping is silent, a failure is a notice),
     the pipe dying (`settleShareEnd`, guarded on `stopped` so an owner's kill
@@ -2106,11 +2128,17 @@ DAG and conventions.
     the tee closes a frame as it lands rather than at the next one's start
     code; the one-slice-per-frame contract (`video`'s side) still holds
     because a sliced encode would be several units to one frame.
-    **The codec is `config.Screenshare.Codec` through `captureCodec`**, one
-    of six dials beside effort and latency: Auto is AV1 where the GPU
-    encodes it — at `shareAV1BitrateScale` of the H.264 bitrate, the gain
-    taken as bandwidth — and a publish the room refuses at AV1 is retried
-    once as H.264 inside `beginShare`'s worker before anything is reported.
+    **The codec is `config.Screenshare.Codec` through `shareCodecOrder`**,
+    one of six dials beside effort and latency: Auto walks
+    `video.ShareCodecs` best first — AV1, H.265, H.264 — skipping what this
+    machine cannot encode and what the room has refused this session
+    (`App.shareRefused`, cleared with the session), each codec at its own
+    discount on the H.264 baseline budget (`shareBitrate`), the gain taken
+    as bandwidth. `beginShare`'s worker tries the next codec down on
+    `voice.ErrShareRefused` before anything is reported, and marks the
+    refusal so the next share pays nothing for it; the two H.264 values
+    stop the walk at H.264, `sendShareCodec` carrying the profile — Main,
+    or baseline for the oldest decoders — into the SDP beside the bitstream.
     The last two dials are the slow-uplink pair: Bandwidth scales the
     automatic bitrate budget inside `shareBitrate` (×1 / ×0.5 / ×0.25) or,
     at `ShareBandwidthCustom`, hands it over to `Screenshare.Bitrate`
@@ -2130,9 +2158,50 @@ DAG and conventions.
     (`shareView.codecTag`): the negotiated codec for a watch, threaded
     through `voice.ShareOpen`'s name, and codec · encoder for the self
     preview, off `sendingShare.encoder`.
+    **The sound is a second track and is started after the picture.**
+    `startShareAudio` runs in the same worker once the codec attempt has
+    resolved — after the AV1→H.264 retry, so it is opened once rather than per
+    attempt — and it can never fail the share: `reportShareAudio` says the
+    picture is going out without sound and returns, and a platform with no
+    loopback at all says nothing, the row offering it not being drawn there.
+    **Which process is captured is not decided here.** `source.ProcessID()` is
+    the source's own answer — a window resolves to its process tree, a monitor
+    to zero, which `audio.OpenLoopback` reads as the whole machine minus this
+    client — so the split between "that window's sound" and "everything" falls
+    out of which source was picked, with no branch in this file. That is also
+    why the four audio dials are *settings* rather than picker choices: the only
+    per-share part of the question is already answered by the source.
+    Stereo always (`shareAudioChannels`), the far end's lane being stereo to
+    match; the rate, bit depth and bitrate come off `config.Screenshare`, and
+    `config.sanitise` is what keeps a hand-edited rate from being one Opus does
+    not carry natively — the whole point of the menu is that nothing resamples.
+    **The encoder is built from `sound.Format()`, not from the setting.** The
+    two can differ — a machine old enough to fall back to the device tap takes
+    the engine's rate rather than the one asked for — and configuring Opus from
+    the request rather than the answer is a stream at the wrong speed. It is
+    logged for the same reason it is read: the one failure this path has had in
+    the field was a format nobody could see.
+    **A source that stops drawing is the one failure nobody can see.** Windows
+    minimises a fullscreen window the moment it loses the foreground, which is
+    what opening the picker does, so the enumeration offers minimised windows
+    (`video.CaptureSource.Minimised`, which the picker's row says out loud) and
+    `video.CaptureShare` brings one back on its way past — `SHOWNOACTIVATE`,
+    the foreground being the reader's to give. What that cannot fix is a game
+    that stops drawing while it is behind the client: the child lives, the
+    publication stands, and every viewer keeps the last frame. So
+    `watchShareStall` polls `ShareTee.Idle` once a second and reports once per
+    episode (`shareStallAfter`), re-armed when frames return. A *still* screen
+    is not this — the child fills to a constant rate, so what stops the stream
+    is a grabber holding no picture at all. A **closed** window is neither:
+    Graphics Capture ends its stream about half a second after the window
+    is destroyed (measured 2026-09, both graphs), the child exits, and
+    `onShareStopped` takes it from there.
     Every stop meets in `stopSharing` (the button, `dropCall`, logging out) or
     `onShareStopped` (`voice.ShareStopped` — the encoder died, the captured
-    window closed), and both are idempotent through `sendingShare.halt`.
+    window closed), and both are idempotent through `sendingShare.halt`. The
+    sound needs no path of its own: `Call.StopShare` stops it, a share's
+    picture ending being the share ending, and `dropCall` takes both down with
+    the room.
 
 48. **Saying once that the OS is already filtering the microphone.**
     `checkInputEffects` runs from `installCall`, off the UI thread, and asks

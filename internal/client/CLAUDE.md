@@ -241,9 +241,18 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   page. Which end moves is the *order's* — a `Latest` answer walks back through
   `before`, an `Oldest` one forward through `after` — and `Relevance` moves
   neither: the route re-ranks whatever window it is given, so narrowing one is not
-  the page after it. On the unverified honouring above, `app.appendUnseen` drops a
-  page that repeats what is held and a wholly repeated page stops the paging,
-  which is what a build ignoring the fields would look like from here.
+  the page after it. On the unverified honouring above, `app.walkSearch` stops on
+  a page that brought nothing new, which is what a build ignoring the fields would
+  look like from here.
+  **`Client.ScanMessages` is the same request against `/messages` instead**, for a
+  query whose filters are all things the route cannot be asked about — `has:image`
+  with no words. It takes `SearchMessages`' own parameters so a caller can walk
+  either source with one loop, and it goes through `Client.scan` rather than
+  `messagePage`: that one claims `c.fetching` for the channel, and a walk is many
+  requests in a row against the channel the reader is also scrolling, so every page
+  after the first would answer `ErrBusy` — or take the claim away from the scroll
+  that wanted it. Like `search` it comes from a keystroke and writes nothing to the
+  cache, which is why neither is guarded.
 - `Session.ServerCreate` and `Session.InviteJoin` decode their own responses now
   (`ServerCreateResponse`, `InviteJoin` — server plus default channels either
   way), but `Client.CreateServer` and `Client.JoinInvite` still ignore them and

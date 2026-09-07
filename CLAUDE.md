@@ -65,8 +65,10 @@ page as `ui.CPUCores`, the way a device list reaches it as `ui.AudioDevice`.
 `video` crosses the same seam the way `cpu` does: it drives an ffmpeg child and
 answers with pixels and PCM at sizes the caller chose, knowing nothing of
 Revolt, Fyne or the mixer. It also points that child the other way — the screen
-into AV1 or H.264, on the GPU where a probe finds an encoder willing (AV1
-hardware or nothing, H.264 down to libx264) — and lists
+into AV1, H.265 or H.264, on the GPU where a probe finds an encoder willing
+(the first two hardware or nothing, H.264 down to libx264), and on Windows
+without the frame ever leaving the GPU where a second probe finds the encoder
+takes Graphics Capture's texture — and lists
 what this machine can capture, which reaches the picker as
 `ui.ShareSource` the way a device list reaches the settings page.
 `ui`'s `VideoCard` never imports it — every decision a card needs is an
@@ -222,7 +224,50 @@ internal/
                          ring.go (the wait-free SPSC queue every
                          hand-off across that callback is made of), sink.go (the
                          call's lanes; Want is how deep they are kept and is what
-                         stops a decoder running ahead of the speakers),
+                         stops a decoder running ahead of the speakers. A lane is
+                         mono or, through OpenStereo, interleaved pairs — a
+                         screenshare's sound and a video's, which arrive with an
+                         image somebody else mixed. Stereo is therefore also what
+                         says a lane is not a person: neither the leveller nor the
+                         pan applies to one, and its limiter is *linked*, one gain
+                         off the louder of the pair so a loud moment on one side
+                         cannot slide the image to the other. Every depth stays
+                         counted in samples, so a stereo lane's is twice a mono
+                         one's for the same span of time),
+                         loopback.go + loopback_{windows,other}.go (the machine's
+                         own output captured back, which is what a screenshare
+                         sends beside its picture. Both cases are **process**
+                         loopback — WASAPI's ActivateAudioInterfaceAsync against
+                         the process-loopback virtual device: a window's own PID
+                         captures that program and its children, so sharing a
+                         window sends that window's sound and not the
+                         notification arriving over it, and the whole machine is
+                         the same call *excluding* this client's own tree. That
+                         is not a flourish. The plain device tap is a tap on the
+                         endpoint and runs at whatever the engine mixes at,
+                         refusing anything else — a machine mixing at 44.1 kHz
+                         cannot serve one to Opus without a resampler, which is
+                         the thing this path exists to have none of — where the
+                         virtual device converts into the format it is given.
+                         Excluding ourselves is also the better answer: sharing a
+                         screen while in a call would otherwise send the other
+                         participants' voices back into the room on top of
+                         themselves. The device tap remains as the fallback for
+                         Windows before build 20348, at the engine's own rate and
+                         so usable only where that is one Opus takes — which is
+                         why OpenLoopback reports the format it *settled* on and
+                         the caller builds its encoder from that. The
+                         COM is pure Go on effects_windows.go's vtable idiom, plus
+                         the one thing that file did not need: an
+                         IActivateAudioInterfaceCompletionHandler implemented here,
+                         a Go object with a syscall.NewCallback vtable, pinned and
+                         kept in a registry because the callback arrives on a
+                         thread the runtime does not own. Nothing resamples: the
+                         rates on offer are Opus's own and 44100 is deliberately
+                         absent, the engine converting into whichever of them was
+                         asked for. Raw on purpose, sharing nothing with Capture's
+                         chain, every stage of which is damage to a game rendered
+                         clean),
                          capture.go + process.go (the microphone and
                          the chain that cleans and gates it: high-pass, the
                          noise model, preamp, gate — the gain inside the chain
@@ -312,7 +357,10 @@ internal/
                          updates.go
   ui/                    ui.go, layouts.go, widgets.go, crop.go, sidebar.go, members.go,
                          message.go, messagelist.go, reactions.go, emoji.go,
-                         gifs.go, video.go, screenshare.go, embed.go, invite.go, search.go,
+                         gifs.go, video.go, screenshare.go, embed.go, invite.go,
+                         search.go + searchquery.go (the island, and the query
+                         language it is typed in — the parse is pure and holds no
+                         widget),
                          markdown.go, code.go, attachment.go, input.go, modal.go,
                          profile.go, friends.go, group.go, panels.go, notice.go,
                          login.go (the card the screens before Ready are drawn on,
@@ -394,11 +442,17 @@ internal/
                          each self-tested once and falling back to a plain child
                          under limits), capture.go + capture_{linux,windows,other}.go
                          (the other direction: what this machine can share, and the
-                         one child that grabs, scales and encodes it — AV1 in IVF
-                         where the GPU offers an encoder, H.264 in FLV otherwise,
-                         both containers carrying every frame's length;
-                         NVENC/AMF/QSV/VAAPI probed once per run per family,
-                         libx264 the H.264 floor and AV1 hardware-only. Contained rather than sandboxed — the strict profile
+                         one child that grabs, scales and encodes it — AV1 in IVF,
+                         H.265 and H.264 in FLV, every container carrying each
+                         frame's length; the codec is the caller's exact choice
+                         (ShareCodec, best first: AV1, H.265, H.264), each
+                         probed once per run across NVENC/AMF/QSV/VAAPI, the first
+                         two hardware-only and libx264 the H.264 floor, and
+                         H.264 in Main unless held to Baseline. On Windows a
+                         second probe per encoder asks whether it takes Graphics
+                         Capture's D3D11 texture as it is — NVENC and AMF do —
+                         and then the graph is the grabber alone: no readback,
+                         no swscale. Contained rather than sandboxed — the strict profile
                          severs the display capture needs, and the input is this
                          machine's own screen. Also ShareTee, which frames that
                          child's stdout: whole frames for the publisher
@@ -510,8 +564,12 @@ package's own `CLAUDE.md`; this is the map:
   `messageWhen`) lives in pins: one summary, resolved and counted once, that each
   surface then takes back what its own subject already said — the pins panel
   drops the pinned badge, the inbox drops the mention edge. It carries a `Where`
-  for the inbox, whose cards come from as many channels as the account is in. `search.go` additionally holds the answer the filter chips
-  narrow — the route takes no filter, so a chip is applied here. `mentions.go` holds both halves of
+  for the inbox, whose cards come from as many channels as the account is in.
+  `search.go` is the odd one and is not a fetch at all but a **walk**: the route
+  filters on words alone, so `from:`, `has:` and the rest are answered by reading
+  messages back — `/search` where there are words, the plain history route where
+  there are none — and keeping what matches, bounded by a budget the island
+  offers to spend again. `mentions.go` holds both halves of
   mentions — the set (channel → message IDs, what the sidebar counts and the
   rail marks off) and the inbox, those IDs fetched back into messages — because
   a channel gaining one moves both and neither is legible without the other.
@@ -697,16 +755,24 @@ package's own `CLAUDE.md`; this is the map:
   entirely where it carries nothing. A card's line is flattened by
   `ui.PreviewText`, which is where a body's markdown and its emoji shortcodes are
   resolved for a summary the controller assembles.
+- `ui/searchquery.go` — the query language, and nothing that draws:
+  `key:value[,value]` parsed into `SearchTerms`, plus the writers a chip and a
+  drawer rewrite the field with (`ToggleTerm`, `SetTerm`) and `completionIn`,
+  which says what is being typed at the end of the field. One rule — **or within
+  a key, and across keys** — so a comma always widens and a space always narrows.
+  A token naming no key is *text*: a URL, a time and an emoji shortcode all carry
+  a colon, and warning about those would be noise on every third query.
 - `ui/search.go` — channel search: the same island, plus what only a question
-  being refined needs. `SearchQuery` is the whole of what it asks —
-  `SameRequest` is what tells the narrowing done locally from the four things the
-  route is sent — and `searchChip` is the pill the filter run, the three orders
-  and the date presets are all made of. Three of those chips stand for a *value*
-  rather than a bit, which a bitset cannot hold, so two of them open a **drawer**
-  under the run: `authorDrawer`, which is a field over the composer's own
-  `MentionPicker`, and `dateDrawer`, which is the two ends of a `span` typed out
-  beside the runs of days worth not typing. One drawer at a time, each hidden with
-  the gap above it (`drawerSlot`) so a shut one costs no height.
+  being refined needs. **The field is the query and the chips write into it** —
+  tapping Images puts `has:image` in the field, typing it lights the chip, and
+  there is one string either way. `searchChip` is the pill the filter run, the
+  three orders, the drawer's suggestions and the date presets are all made of;
+  `termChip` is one carrying the term it writes. **One drawer** under the run
+  (`searchDrawer`) completes whatever is at the end of the field, swapping its
+  body between the keys, one key's values, the composer's own `MentionPicker` for
+  `from:`/`mentions:` and the two ends of a `span` for the date keys — which is
+  what makes a syntax discoverable without the reader having to know the words. It
+  is hidden with the gap above it (`drawerSlot`) so a shut one costs no height.
 - `ui/modal.go` — the cards that are not lists: the attachment viewer, the join
   dialog (which previews what a pasted code opens once the typing settles),
   `PromptDialog` (a field per answer and one button), `BanDialog` (a

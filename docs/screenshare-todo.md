@@ -19,17 +19,26 @@ the video player's architecture pointed at a live stream:
 
 - **Sending** is one ffmpeg child that captures, scales and encodes in a
   single pass, writing to stdout what the tee frames and voice's own write
-  loop publishes the moment each frame arrives: AV1 in IVF where the GPU
-  encodes it — probed per family, hardware or nothing, no CPU holding a live
-  AV1 encode — and H.264 in FLV otherwise (never bare Annex-B: the
+  loop publishes the moment each frame arrives. Three codecs, walked best
+  first (`video.ShareCodecs`): AV1 in IVF and H.265 in FLV where the GPU
+  encodes them — probed per codec, hardware or nothing, no CPU holding a
+  live encode of either — and H.264 in FLV otherwise, hardware where the
+  machine has any (NVENC, AMF, QSV or VAAPI, probed once per run with a test
+  encode) and libx264 at the last. Never bare Annex-B on the send side: each
   container carries every frame's length, and a tee without lengths can only
-  close a frame at the next one's start code), hardware where the machine
-  has any (NVENC, AMF, QSV or VAAPI, probed once per run with a test encode)
-  and libx264 at the last. H.264 as the floor *because* of that: no
-  VP8 encoder exists in silicon on any GPU. AV1 ships the same picture at
-  ~0.7× the bitrate (`app.shareAV1BitrateScale`), the gain taken as
-  bandwidth; a room that refuses the AV1 publish is retried as H.264, and
-  `config.Screenshare.Codec` forces H.264 for viewers that cannot take AV1.
+  close a frame at the next one's start code. H.264 as the floor *because*
+  of that: no VP8 encoder exists in silicon on any GPU; H.265 in the middle
+  because every GPU that encodes H.264 has encoded it since about 2015,
+  where AV1 encoders are one generation old. Each better codec ships the
+  same picture for fewer bits and the gain is taken as bandwidth
+  (`app.shareAV1BitrateScale` and its two siblings, measured in
+  `docs/performance.md`); H.264 itself is Main profile — CABAC, a third
+  fewer bits than baseline on screen content — unless the Codec setting
+  holds it to baseline for the oldest decoders. A room that refuses a codec
+  is remembered for the session (`app.refusedCodecs`) and the next codec
+  down is tried, so a refusal is paid once. On Windows the frame never
+  leaves the GPU where a probe finds the encoder takes Graphics Capture's
+  texture (NVENC and AMF do).
 - **Receiving** is lksdk handing back encoded frames, remuxed to the same byte
   stream and fed to a **sandboxed** ffmpeg child on stdin, which answers RGBA
   at the size the view chose — the video player's exact-byte contract, live.
@@ -147,6 +156,34 @@ module's.
 - **`-fflags nobuffer` breaks a piped IVF outright**: half the frames lost
   and the rest 1.6 s late, measured again in 2026-09. Not the answer to
   anything here.
+- **ffmpeg's IVF demuxer maps no fourcc to H.265** — `HEVC`, `hvc1`, `hev1`
+  and `H265` all answer "no decoder found for: none" (9.0.1), where `H264`
+  maps fine — and its IVF *muxer* refuses H.265 too, so the send side is
+  FLV's enhanced tag (`hvc1`, E-RTMP) and the receive side is raw Annex-B
+  with **the next unit's access unit delimiter written after every unit**.
+  The parser closes a unit on the NAL that opens the next, and a delimiter
+  is that NAL, legal to send ahead of the frame it belongs to; measured at
+  5 fps, the held frame goes from 207 ms to 5.6 ms (`voice.annexBMux`,
+  `video.hevcAUD`). The same trick would free H.264 from IVF; not taken,
+  IVF being measured and fine.
+- **Stoat's LiveKit takes H.265** — verified live 2026-09-04 through the
+  clock harness: a second account decoded it through the relay at a 93 ms
+  median, the same figure the other two codecs measure.
+- **lksdk cannot say a codec was refused.** `PublishTrack` waits ten seconds
+  for `TrackPublished` and answers `ErrTrackPublishTimeout`, or the server
+  files the track under a codec it *does* take, or the negotiation that
+  follows leaves the track unbound and `WriteSample` a silent no-op for the
+  life of the share. `Call.StartShare` therefore reads the recorded codec
+  off the publication (`pub.MimeType()`) and then waits for the bind, five
+  seconds at most (`shareBindWait`), before answering `ErrShareRefused`;
+  a bind lands within a round trip of the publish on a room that took the
+  codec, so a share that was accepted pays nothing.
+- **NVENC and AMF take a D3D11 texture as input** and convert its colour on
+  the way in — BGRA to 4:2:0 on the GPU — where QSV takes only its own
+  frames. Decoded back, the direct path's pixels are byte-identical to
+  swscale's (both BT.601 limited), so nothing about the picture changes;
+  what changes is that `hwdownload`, `format=bgra`, `scale` and `pad` are
+  all gone from the chain, the graph being the grabber alone.
 
 ## Phase 0 — built
 
@@ -250,7 +287,14 @@ what stands, and what the build turned up:
   pure-Go connection of our own, the toolkit's belonging to glfw — with RandR
   for the monitors and the EWMH `_NET_CLIENT_LIST` for the windows; Windows is
   `EnumDisplayMonitors` / `EnumWindows` through `x/sys`, the `cpu` package's
-  precedent, skipping cloaked, minimised, tool-window and untitled handles.
+  precedent, skipping cloaked and tool-window handles, and naming a
+  caption-less one after its program. **Minimised windows are offered** — the
+  shell's own alt-tab rule: a fullscreen game is minimised by Windows the
+  moment it loses the foreground, which is what opening the picker does, so
+  rejecting iconic handles hid the one window the picker was opened for.
+  `wakeSource` then brings such a window back as the child starts, with
+  `SHOWNOACTIVATE` so the reader keeps the foreground; a game that goes
+  straight back down is a stalled share, which `app.watchShareStall` reports.
   The callbacks are built **once** at package level: `syscall.NewCallback`
   slots are never freed and the process's allowance is small.
 - **One child does everything**: grab → scale+pad → encode → IVF or FLV on
@@ -265,6 +309,16 @@ what stands, and what the build turned up:
   picked, and it is the only grabber here that **scales before handing the
   frame over** — so the readback is the encode box rather than the whole
   screen, and swscale is left with a format conversion instead of a resize.
+  And on the top rung there is usually **no readback at all**: `directWorks`
+  probes, once per encoder per run, whether the encoder takes the D3D11
+  texture as it is (`gfxDirect`; NVENC and AMF do, QSV does not), and then
+  the graph is the grabber with the box forced and nothing after it. The
+  grabber pads a resized window to the top-left where the processor chain
+  centred it, the one visible difference, and only ever after a shared
+  window has changed shape. A direct probe that passes is recorded as a
+  Graphics Capture pass too, which is why `startSharing` asks
+  `ShareEncoder` before `CaptureFallback`: one capture session on the
+  picker's worker rather than two.
   Measured on an RTX 4070 Laptop, 2560×1600 monitor into a 1280×720 share at
   30 fps: **0.23 s of process CPU over fifteen seconds becomes 0.05 s**, same
   450 frames out. Bicubic, the resampling being the GPU's either way. It fits
@@ -377,10 +431,53 @@ what stands, and what the build turned up:
   binds or before the first keyframe after it, and the pipe can never stand
   between the screen and the room as delay.
 - Every stop path meets in `stopSharing` / `onShareStopped`: the button, the
-  encoder dying (the captured window closed — `OnWriteComplete` → unpublish →
-  `ShareStopped`), `dropCall`, and logging out.
-- Still open on send: **share audio** (a second Opus track from a WASAPI
-  loopback or a Pulse monitor), **Windows window capture
+  encoder dying (the captured window closed — Graphics Capture ends its
+  stream about half a second after the window is destroyed, measured
+  2026-09 on both graphs, and the child's exit is `ShareStopped`),
+  `dropCall`, and logging out. The live harness's last scenario asserts the
+  window case, and fails only when a clock window from an earlier run is
+  still up — the source is picked by title, so the stale one is what gets
+  shared and it never dies.
+- **Share audio** — built, Windows only. `audio.Loopback` captures what the
+  machine is playing and `Call.StartShareAudio` publishes it as a second Opus
+  track (`SCREEN_SHARE_AUDIO`), stereo, `gopus.Audio`, DTX on and FEC off —
+  the opposite of the microphone, this being music: true silence is worth not
+  sending, and in-band FEC is SILK's, which Opus has left for CELT at any
+  bitrate a share runs at.
+  - **Which process is captured is the source's own answer**, not a decision
+    in `app`: `video.CaptureSource.ProcessID` resolves a window handle through
+    `GetWindowThreadProcessId` and answers zero for a monitor. So sharing a
+    window sends that window's sound and sharing a screen sends everything —
+    the split a reader means by picking one or the other, with no special case
+    anywhere above.
+  - **Both are process loopback**, the whole-machine case being the same
+    activation *excluding this client's own tree*. Found the hard way
+    (2026-09-04, `AUDCLNT_E_UNSUPPORTED_FORMAT` on a share): the plain device
+    tap runs at whatever the engine mixes at and refuses every other rate, so
+    a machine mixing at 44.1 kHz — which is common — could not serve one to
+    Opus at all without the resampler this path exists to avoid, while the
+    virtual device converts into the format it is handed. Excluding ourselves
+    is the better answer anyway: sharing a screen while in a call would
+    otherwise send the other participants' voices back into the room on top of
+    themselves.
+  - **Nothing resamples.** The rates on offer are Opus's own (48/24/16/12/8
+    kHz) and 44100 is absent so a filter and a delay can never enter the path.
+    Bit depth picks what the engine delivers (16 PCM or 32 float) and stops
+    there — Opus is the wire either way. The device tap survives only as the
+    fallback for Windows before build 20348, at the engine's own rate and
+    therefore usable only where that is one Opus takes; `OpenLoopback` reports
+    the format it *settled* on and `app` builds the encoder from that rather
+    than from what it asked for.
+  - **The sound never takes the picture down**: it is started after the
+    publish, in the same worker, and a room that refuses the track or a machine
+    that will not give up its loopback is a share without sound plus one line.
+  - The one silent failure is a track that never binds — for Opus that means
+    the fmtp or the channel count — so `pumpShareAudio` says so after
+    `bindWarning` rather than parking on the bind wait forever.
+- Still open on send: **Linux and macOS share audio** (a Pulse/PipeWire monitor
+  is an ordinary capture device, so it needs no API of its own — what is
+  missing is which of them is a monitor; macOS has nothing without a kernel
+  extension), **Windows window capture
   without the pointer flicker** (WGC, which is WinRT and has no ffmpeg input),
   **macOS** (avfoundation screens plus the consent prompt), and **Wayland**,
   which has no grabber in stock ffmpeg — the portal is its own project, so a
@@ -404,8 +501,8 @@ table is still the plan.
 | Resolution | Source / 1080p / 720p / 480p | `scale` (+`pad` never needed on send: the source aspect is known) |
 | Framerate | 5 / 15 / 30 / 60 | grabber `-framerate` / `max_framerate`, and the output's `-fps_mode cfr -r N` filling what a still screen does not deliver |
 | Quality | Auto / bitrate override | **built** — `-b:v/-maxrate/-bufsize`; auto ≈ 0.1 bit per pixel per frame (720p30 ≈ 2.5 Mbps, 1080p30 ≈ 4.5, 1080p60 ≈ 8). The override is Bandwidth's fourth value (Custom) plus `Screenshare.Bitrate` in kbit/s, bounded by what the encoder clamps to |
-| Audio | on / off | the loopback capture + second track; greyed on macOS |
-| Codec | Auto (AV1 where the GPU encodes it) / H.264 | AV1 hardware-only, ~0.7× the bitrate for the same picture; H.264 the floor, libx264 at the last; VP8/VP9 remain receive-only, for senders that are browsers |
+| Audio | on / off, rate, bit depth, bitrate | **built** — Settings → Screen sharing → Sound, the group left out entirely where `audio.LoopbackAvailable` says the machine cannot capture itself. Not the picker: what is captured follows the source, so the only per-share part is already answered by which source was picked |
+| Codec | Best available (AV1, then H.265, then H.264) / H.264 / H.264 baseline | **built** — AV1 and H.265 hardware-only at 0.7× and 0.8× the baseline budget, H.264 Main at 0.9× and libx264 at the last; the two H.264 values force the floor for browser viewers, baseline for the oldest decoders. A room's refusal is remembered per session. VP8/VP9 remain receive-only, for senders that are browsers |
 | Bandwidth | Auto / Half / Quarter | a scale on the automatic bitrate budget, the slow-uplink dial |
 | Keyframes | Frequent (1 s) / Standard (2 s) / Sparse (8 s) | `-g`; the whole loss-recovery story — a CLI encoder cannot answer a PLI, so the interval is both the join wait and the smear after loss |
 | Bitrate mode | Variable / Constant | **built** — the mode half of the rate control, spelled per encoder in `shareEncoder.rateControl` (x264's `nal-hrd=cbr` travelling with the tune in `args`). Variable is the default and the saving; constant pads to the ceiling for a fixed uplink or an estimator that dislikes a stream idling at nothing between bursts |
@@ -438,8 +535,20 @@ which is the decoder's W×H and free to differ from the sender's.
    probe order, flags and the one-slice contract live in
    `video/capture.go`); ~~AV1~~ **done**, both directions (hardware-only
    send at a bitrate discount, IVF through the same tee and reader track;
-   receive through pion's depacketizer into the ivfMux). Left: macOS screens,
-   the Wayland portal investigation, and Windows window capture through WGC.
+   receive through pion's depacketizer into the ivfMux); ~~H.265~~ **done**
+   (2026-09), both directions — FLV's enhanced tag through the tee, raw
+   Annex-B behind a delimiter into the decoder, pion's `H265Depacketizer`
+   on receive, verified against Stoat; ~~zero-copy capture~~ **done** —
+   Graphics Capture's texture straight into NVENC or AMF, probed per
+   encoder; ~~H.264 Main~~ **done**, baseline kept as a setting. Left:
+   macOS screens, the Wayland portal investigation, and Windows window
+   capture through WGC. Measured and *not* taken (`docs/performance.md`):
+   adaptive quantisation, multipass, slower presets, the `ll` tune — none
+   moves picture per bit on screen content — and per-region bit
+   weighting ("game mode"), which no encoder reachable through ffmpeg's
+   command line exposes: NVENC's emphasis map and x264's per-macroblock
+   offsets are library calls, and the dials a mode would set (latency,
+   frame rate, keyframes, rate control) are already the rows.
 
 ## Carried from the voice queue
 

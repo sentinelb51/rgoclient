@@ -523,11 +523,13 @@ naming and the test policy.
   reads against a Danger fill as well as against the plain surface. A disabled
   button still accepts focus — Fyne's manager walks the tree and does not ask —
   and draws no ring, pressing no more from the keyboard than from the pointer.
-- **A list narrowed by typing uses `newFilterField`.** The settings rail, the
-  friends page and the group picker all mount one, so the mark, the field and the
-  surface under them are built in `widgets.go` rather than three times; Escape
-  empties it rather than reaching the surface as "close", but only while there is
-  something to empty. `matchesFilter` is the comparison all three share. The
+- **A list narrowed by typing uses `newFilterField`.** The settings rail and the
+  group picker mount one, so the mark, the field and the surface under them are
+  built in `widgets.go` rather than twice; Escape empties it rather than reaching
+  the surface as "close", but only while there is something to empty.
+  `matchesFilter` is the comparison they share with the friends page, whose one
+  field is its own (`friendsField`) because the button beside it makes the bar a
+  control rather than a box. The
   group picker **hides** its rows rather than rebuilding them — a rebuilt row is
   a row whose pick is gone — and `noSpacingLayout` charges no gap for a hidden
   child, which is what makes that work.
@@ -847,20 +849,38 @@ naming and the test policy.
   `MessageAreaMinWidth`, so the width is a ceiling to shrink under and the
   layout reports **no** width of its own — a minimum here would put the page into
   the window's.
-  It carries one control of its own: `buildAsk`, the field and button that send a
-  friend request to a typed handle. **One surface**, not a field on a card — the
-  button is seated inside the field's trailing edge by `FriendsAskInset`, which the
-  bar's height is chosen against (`ButtonMinHeight` plus twice it), and the mark
-  leading it starts at a card's own left padding so the bar and the rows share an
-  edge. Its focus edge is `askEntry`'s doing: `WithCaret` makes Fyne's input border
-  transparent — that being what stops every entry drawing a box inside the one it
-  is already in — so the surface's outline lights instead of the entry's.
-  It is built **once, in the constructor**, and
-  stands between the header and the scroll rather than in the list — `SetSections`
-  replaces that list wholesale and presence alone refills it, so a field inside it
-  would lose what somebody was typing. It reports through
-  `onAsk(handle, done)` rather than clearing itself: the field is emptied by what
-  took and kept by what did not, and only the controller knows which.
+  It carries one control of its own: `buildSearch`, which is **one field for
+  both** of the things a reader arrives with somebody in mind for. What is typed
+  narrows the list (`FriendsPage.filter`, matched on name and handle), and where
+  it is a whole handle the **Add friend** button appears inside the field's
+  trailing edge and sends a request. Two boxes asking for the same string was
+  what a separate `newFilterField` in the header and an ask bar under it came to;
+  the page now has no field in its header at all.
+  - `looksLikeHandle` is what puts the button up — a name and a discriminator,
+    the only shape Revolt looks an account up by — and decides **nothing else**:
+    the client cleans what it is given and answers for anything this lets
+    through. `friendsQuery` drops the leading `@` for both, so a handle copied
+    out of the client and pasted back finds the row it came from.
+  - Showing it is `offerAsk`, which `Relayout`s the bar: `noSpacingLayout` lays
+    out the visible children only and hiding one re-runs no layout, so the field
+    gets the whole bar back while what is in it is a filter.
+  - The button is seated inside the field's trailing edge by `FriendsAskInset`,
+    which the bar's height is chosen against (`ButtonMinHeight` plus twice it),
+    and the mark leading it starts at a card's own left padding so the bar and
+    the rows share an edge. Its focus edge is `friendsField`'s doing: `WithCaret`
+    makes Fyne's input border transparent — that being what stops every entry
+    drawing a box inside the one it is already in — so the surface's outline
+    lights instead of the entry's. Escape empties it, as it does every other
+    list-narrowing field here.
+  - A filter unfolds what it matched, and a handle that matched nothing says the
+    button beside it is the answer rather than reporting a search that failed.
+
+  It is built **once, in the constructor**, and stands between the header and the
+  scroll rather than in the list — `SetSections` replaces that list wholesale and
+  presence alone refills it, so a field inside it would lose what somebody was
+  typing. It reports through `onAsk(handle, done)` rather than clearing itself:
+  the field is emptied by what took and kept by what did not, and only the
+  controller knows which.
 - **The Security section is the one that fetches, and the one that must not.**
   Its three answers arrive as one `SecurityState` held in `cachedOne` — the
   single-value twin of `cachedList`, same three rules — for the life of one
@@ -902,6 +922,21 @@ naming and the test policy.
     is chosen to cut a card in half: the rows carry their own mark down the right
     edge, which is where a bar would land, so the cut is the whole of what says
     the list goes on.
+- **The search field is the query; the chips and the drawer write into it.**
+  `ui/search.go` holds no filter state of its own — `SearchQuery.Raw` is the whole
+  of it and `SearchTerms` is that parsed once per report, so a chip is lit by the
+  text and a tap rewrites the text (`ToggleTerm` / `SetTerm` in
+  `searchquery.go`). Two rules fall out. `setRaw` writes the field with
+  `OnChanged` nil'd and then moves the caret to the end — `widget.Entry.SetText`
+  leaves it where it stood, so what is typed next would carry on from the middle
+  of a term nobody typed; the mention picker's accept path is the same two lines.
+  And there is **one drawer**, not one per kind of answer, because only one thing
+  is ever being typed: `searchDrawer.show` reads `completionIn` and wears the
+  keys, one key's values, the `MentionPicker` or the date panel, hiding the other
+  three so the panel is as tall as whatever is up. Only the people body takes
+  arrow keys — the rest are chips, and a run of shortcuts needs no cursor — which
+  is why the field is a `pickerEntry` and `SearchDialog.key` forwards to the
+  drawer alone.
 - **The screenshare picker is that same island row with a radio's rule.**
   `ui/screenshare.go`'s `shareSourceRow` is `pickRow` — the same card, the same
   three fills in the same precedence, the same `pickMark` at the end — and the

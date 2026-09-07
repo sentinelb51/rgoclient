@@ -30,6 +30,16 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   and the sender cannot answer a viewer's keyframe request — a CLI encoder has
   no way to hear a PLI — so a late joiner waits up to the two-second GOP for a
   picture.
+- **The picker offers 1080p and stoat.chat will not carry it.** The instance
+  caps a published video track by *area* — `features.limits.<tier>.video_resolution`,
+  1280x720 = 921,600 px on the default tier and 1080x720 on the new-user one —
+  and `voice-ingress` enforces it by **removing the publisher from the voice
+  channel**, not by refusing the track, which is why `fitShareBox` shrinks to
+  fit rather than trying. So on a 2560x1600 monitor the Source and 1080p chips
+  both come out at 1214x758 and 720p is the last rung that means what it says.
+  Measured live, 2026-09: the publication, the arriving bitstream and ffprobe
+  all agree on 1214x758. Nothing here can lift it — the ladder is the picker's
+  own and is not told what the instance allows.
 - **Sharing a screen needs X11 or Windows.** Capture is `x11grab` on Linux and,
   on Windows, `gfxcapture` for either kind with `ddagrab` and then `gdigrab`
   behind it; enumeration is
@@ -42,6 +52,17 @@ Where something is limited by revoltgo or Fyne rather than by effort:
 - **An occluded X11 window captures whatever the server still holds for it**,
   which without a compositor is garbage over the covered region. Every X11
   capturer shares this; the picker says so rather than pretending otherwise.
+- **A Windows window in true exclusive fullscreen hands back no frames, and a
+  protected one hands back black.** Exclusive fullscreen gives the swapchain
+  to the display and bypasses DWM, so Graphics Capture holds nothing for that
+  HWND; Fullscreen Optimizations turn most games into borderless flip, where
+  it works, but a title that opts out does not — sharing the *monitor* is the
+  way round. A window that has called `SetWindowDisplayAffinity` with
+  `WDA_EXCLUDEFROMCAPTURE` (a DRM player, some anti-cheats) has no way round:
+  it is composed for the screen and excluded from every capture API, the
+  monitor's included. Both are the source refusing rather than the ladder
+  failing, and neither is distinguishable from a slow start at enumeration
+  time, so the picker offers the window either way.
 - **Windows capture only reaches `gdigrab` on an old machine, and then it
   flickers the mouse pointer.** gdigrab's `BitBlt` carries `CAPTUREBLT`, which
   redraws the pointer once per captured frame — visible to everybody at the
@@ -54,18 +75,27 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   Desktop Duplication wants ffmpeg 6.0 and a session with an output to
   duplicate, which an RDP session has not.
 - **A share encodes in hardware only where the ffmpeg build and the driver
-  agree.** The codec families are AV1 and H.264 exactly so NVENC, AMF, QSV
+  agree.** The codecs are AV1, H.265 and H.264 exactly so NVENC, AMF, QSV
   and VAAPI are reachable — no VP8 encoder exists in silicon — and each
-  candidate is probed with a real test encode; AV1 is hardware or nothing,
-  H.264 falls to libx264. What the probe cannot fix is the pairing: a new
-  ffmpeg can demand a newer driver API than the installed driver speaks (seen
-  live: gyan.dev 7.0.1 wants nvenc 12.2, a 537 driver offers 12.1, so an RTX
-  4070 encoded on the CPU until the driver moved). The probe's log line says
-  which way it went, and the self preview's title carries the codec and
-  encoder name; nothing surfaces it before a share starts. And hardware AV1 is
-  a *generation* question on top: NVENC AV1 needs Ada (RTX 40), AMF AV1 an
-  RX 7000, QSV AV1 Arc or Meteor Lake — older silicon probes clean out of
-  the AV1 family and shares go H.264 without a word.
+  candidate is probed with a real test encode; AV1 and H.265 are hardware or
+  nothing, H.264 falls to libx264. What the probe cannot fix is the pairing:
+  a new ffmpeg can demand a newer driver API than the installed driver speaks
+  (seen live: gyan.dev 7.0.1 wants nvenc 12.2, a 537 driver offers 12.1, so
+  an RTX 4070 encoded on the CPU until the driver moved). The probe's log
+  line says which way it went, and the self preview's title carries the
+  codec and encoder name; nothing surfaces it before a share starts. And
+  hardware AV1 is a *generation* question on top: NVENC AV1 needs Ada (RTX
+  40), AMF AV1 an RX 7000, QSV AV1 Arc or Meteor Lake — older silicon probes
+  clean out of AV1 and shares go H.265 without a word, which every GPU since
+  about 2015 encodes.
+- **A viewer in a browser may not decode what Auto picks.** Every rgoclient
+  decodes all three through ffmpeg, but a browser watching through the web
+  client takes H.264 everywhere, AV1 in software in Chrome and Firefox, and
+  H.265 only where the browser has a hardware decoder it is willing to use —
+  so a sender whose GPU has H.265 but not AV1 is invisible to some browsers
+  under Auto. The Codec setting's H.264 value is the answer, and it is the
+  sender's to set: nothing announces what a subscriber can decode. Whether
+  the web client draws a share at all has not been checked either way.
   A *remote* speaking ring comes from the voice server's active-speaker report;
   this account's own comes off the capture gate instead, that report being about
   other people and landing about half a second late.
@@ -148,7 +178,27 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   preamp and a noise gate; `audio.Processor` is the seam AEC would go in and `Engine`
   owns both directions precisely so the playback reference is reachable, but
   nothing implements one. Headphones are assumed — on speakers the far end hears
-  itself.
+  itself. **Sharing sound on speakers is the same gap seen twice**: what the
+  share sends is also coming out of the speakers and back in through the
+  microphone, so the room hears it once as a clean track and once as a smeared
+  copy behind the sender's voice. What is *not* a problem, because the capture
+  excludes this client's own process tree, is the call's own audio being folded
+  back into the share.
+
+- **Share audio wants Windows 10 build 20348 or newer.** Process loopback is
+  what everything above rests on, and that is where it arrived. Older Windows
+  falls back to the device tap, which runs at whatever the audio engine mixes
+  at — so it works on a machine set to 48 kHz and refuses one set to 44.1,
+  naming the rate and the fix. Resampling it instead is the one thing this path
+  is built not to do.
+
+- **Share audio is Windows only.** `audio.LoopbackAvailable` is what says so,
+  and the settings group is left out where it answers false. Linux has the
+  capability and not the plumbing — a PulseAudio or PipeWire monitor is an
+  ordinary capture device, so it already arrives through `Inputs()` and what is
+  missing is only which of them is a monitor, plus `_NET_WM_PID` for the
+  per-window half. macOS has nothing to plumb: there is no supported way to
+  capture system output without a kernel extension this client does not ship.
 
 - **No automatic gain control.** The input gain is a number the reader sets, and
   the gate's threshold is another; neither follows the room. That is deliberate —
@@ -339,41 +389,61 @@ Where something is limited by revoltgo or Fyne rather than by effort:
   the message cache reaches — see above. Neither *gains* anything: a message sent
   after the search that would have matched it is not added, and the inbox lists
   what it fetched when it opened. Re-asking is reopening.
-- **Channel search pages the same way and adds three limits of its own.** It
-  searches the **open channel** only: Revolt's route is per channel,
-  so there is no search across a server, let alone across the account. The
-  matching is MongoDB's full-text search rather than a substring scan — words, not
-  fragments, with what counts as a word decided by the server — so half a word
-  finds nothing and there is no way to ask for a phrase. A query is 1–64
-  characters (a longer one is cut before it is sent) and runs on Enter rather than
-  as you type, each one being a request.
-- **Every search filter but the dates narrows the answer, not the request.**
+- **Channel search searches the open channel and nothing wider.** Revolt's route
+  is per channel, so there is no search across a server, let alone across the
+  account, and there is no `in:`. Where there *are* words, the matching is
+  MongoDB's full-text search rather than a substring scan — words, not fragments,
+  with what counts as a word decided by the server — so half a word finds nothing
+  and there is no way to ask for a phrase. A query is 1–64 characters (a longer
+  one is cut before it is sent) and runs on Enter rather than as you type.
+- **Every filter but the dates is answered by reading messages, not by asking.**
   `DataMessageSearch` takes a query, an order, a limit, a `pinned` flag that
   cannot be sent beside a query, and a `before`/`after` window of message IDs —
-  there is no author, attachment, mention or reaction filter on the wire — so
-  every chip except the date one is applied to the hundred that came back.
-  **Narrowing by author therefore finds that author's messages *among those
-  hundred*, not their hundred**, which is why the count line reports both
-  numbers, and why a person who spoke rarely may not appear at all under a common
-  query. Narrowing by date does not have that flaw, the window being sent; it is
-  re-checked here as well, so a Revolt build that ignored the field on `/search`
-  would cost a wrong count rather than a filter that silently did nothing. The
-  three orders **are** sent (`Relevance`, `Latest`, `Oldest`), so changing one is
-  a fresh request, as is moving a date, while toggling a chip or picking a person
-  is free.
-- **A search pages, and only in the two orders that have a direction.**
-  `before`/`after` carry both the date span and the page cursor, so
-  `client.pageFrom` sends whichever of the two is tighter — the reader's window is
-  what may not be left, and a page only ever moves inside one. **Best** (Revolt's
-  `Relevance`) offers no next page at all: the route re-ranks whatever window it
-  is given, so a narrower one is not the page after a wider one, and there is
-  nothing honest to put on the button. Whether `/search` honours the fields the
-  history route does is **not verified against the backend**, so a repeated page
-  is dropped rather than drawn twice and a page that is entirely repeats stops the
-  paging — which is what a build ignoring them would look like from here.
-  The dates are read as **local** calendar days and sent as zero-entropy ULIDs at
-  each edge, so the span is exact to the millisecond of local midnight and a
-  message minted in that same millisecond at the `after` edge is kept.
+  there is no author, attachment, mention or reaction filter on the wire. So
+  `from:`, `mentions:`, `has:` and `is:` are applied here, over pages the client
+  fetches and walks: `/search` where there are words, the plain history route
+  where there are none (`client.ScanMessages`, which is how `has:image` on its own
+  is answered at all). The dates *are* sent, and are re-checked locally as well —
+  a Revolt build that ignored the field on `/search` would cost a wrong count
+  rather than a filter that silently did nothing.
+- **A walk is bounded, and the bound is visible.** One press spends at most
+  `config.Behaviour.SearchScanPages` requests (default 8, a hundred messages
+  each) and stops early once it has `searchWant` matches. So a filter over a busy
+  channel finds what is in the recent few thousand messages rather than reading
+  its whole history unasked; the count line says how many messages were read, and
+  **Keep searching** spends the budget again from where it stopped. What this
+  cannot do is tell "nothing matches" from "nothing matches *yet*" — only an
+  exhausted channel says the first, and the button going away is the whole of
+  that signal.
+- **A narrowed search is a request per change.** The filtering happens inside the
+  walk, so what is held is the answer rather than a superset of it: taking a chip
+  off cannot widen a set that was never gathered, and every chip, person, date and
+  order re-asks. That is the price of a filter that finds things; before, a chip
+  was free and found almost nothing.
+- **Only the two chronological orders can be walked at all.** `before`/`after`
+  carry both the date span and the page cursor, so `client.pageFrom` sends
+  whichever is tighter — the reader's window is what may not be left. **Best**
+  (Revolt's `Relevance`) re-ranks whatever window it is given, so a narrower one
+  is not the page after a wider one: it gets one request whatever the budget says,
+  and a filter under it searches that one ranked hundred. A query with no words
+  falls back to newest-first, there being nothing to be relevant to. Whether
+  `/search` honours the fields the history route does is **not verified against
+  the backend**, so a page that repeats what is already held stops the walk —
+  which is what a build ignoring them would look like from here. The dates are
+  read as **local** calendar days, inclusive at both ends (`before:` is "on or
+  before"), and sent as zero-entropy ULIDs at each edge.
+- **`has:` and `is:` see only what the client can see.** `has:link` reads the
+  embeds and scans the body for a scheme, so a link nothing unfurled in a message
+  with embeds switched off is found by the scan and not by the embed; `has:image`
+  and its two siblings read the *server's* classification of an attachment, so a
+  picture uploaded under a name Autumn could not introspect is a file rather than
+  an image. `is:bot` is the account's flag or a webhook, and a masquerade is
+  neither. There is no `has:sticker` or `has:poll` — Revolt has neither.
+- **A name in `from:` or `mentions:` is looked up among the people this channel
+  can be narrowed to**, which for a server is one membership fetch and for a
+  conversation its recipients. Somebody who has left, or a webhook, is in neither
+  and can only be named by ID. A name that resolves to nobody is said out loud
+  under the field rather than quietly matching nothing.
 - **The mention inbox lists what Revolt has kept, which is not everything that
   ever named you.** The set is the `mentions` array on each unread marker, so it
   holds only what is still *unread*: acknowledging a channel prunes it, and there

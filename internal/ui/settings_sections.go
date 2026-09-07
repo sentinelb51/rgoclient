@@ -662,6 +662,14 @@ func (p *SettingsPage) behaviourSection() []settingsGroup {
 				settings.MessageOverscan, 0, maxMessageOverscan, "",
 				func(s *config.Settings, v int) { s.Behaviour.MessageOverscan = v })),
 		),
+		p.group("Search", "Revolt can only search for words, so a filter like has:image is answered by reading the channel back and keeping what matches.",
+			p.numberRow("Messages read per search",
+				"How far back one search reads looking for matches. Searching again from the island carries on where it stopped.",
+				settings.SearchScanPages*searchScanStep, searchScanStep, maxSearchScan, "",
+				func(s *config.Settings, v int) {
+					s.Behaviour.SearchScanPages = max(1, v/searchScanStep)
+				}),
+		),
 		p.group("Deleted messages", "A deleted message is marked in red and left on screen for a moment, so the conversation does not jump out from under you.",
 			p.numberRow("Keep deleted messages on screen",
 				"How long the marked message stays before it goes. Zero takes it away at once.",
@@ -1583,6 +1591,12 @@ const (
 	maxRefreshDelay    = 5000
 	maxMemberOverscan  = 50
 	maxMessageOverscan = 50
+
+	// A search budget is counted in requests and Revolt answers a hundred messages
+	// to each, so the row is drawn in messages: what a reader is choosing is how
+	// far back a filter looks, not how many times the client asks.
+	searchScanStep = 100
+	maxSearchScan  = 5000
 
 	// The frame rate is floored well above zero: the slider reaches every value
 	// between these two, and the ones near the bottom are indistinguishable from a

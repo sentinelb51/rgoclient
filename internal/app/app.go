@@ -274,22 +274,34 @@ type App struct {
 	// drawn under a newer. searchChannelID is what pins' own is, for the same
 	// reason.
 	//
-	// searchFound is that answer — every page of it — held while the island is up so
-	// a filter chip narrows what is already here rather than asking again;
-	// searchAnswered tells "nothing came back" from "nothing has been asked yet",
-	// which an empty slice cannot.
+	// searchFound is that answer — every message a walk kept, across every page it
+	// spent — held while the island is up so re-drawing it costs no request.
 	//
-	// searchMore is whether another page is worth offering and searchPaging whether
-	// one is already out. Both die with the request they belong to, a new query
-	// being a fresh answer to page through — and searchSeq is what kills a page
-	// still in flight when that happens, the same query asked twice being
-	// indistinguishable to SameRequest.
+	// searchScanned is how many messages were *read* to find them, which is the
+	// count line's denominator: the route filters on words alone, so a question
+	// about who wrote something or what it carries is answered by reading messages
+	// back and keeping the ones that match. searchCursor is where the next walk
+	// picks up and searchMore whether one is worth offering — the budget having run
+	// out rather than the channel. searchPaging is whether one is already out.
+	//
+	// All of them die with the request they belong to, a new query being a fresh
+	// answer to walk — and searchSeq is what kills a page still in flight when that
+	// happens, the same query asked twice being indistinguishable to SameRequest.
+	//
+	// searchPeople is `from:`/`mentions:` resolved to accounts, once per query
+	// rather than per message: ui parses the names and only the store can answer
+	// them.
+	// searchAuthors is who this channel can be narrowed to — the island's own
+	// picker, and what a name is looked up in. One walk feeds both.
 	search          *ui.SearchDialog
 	searchChannelID string
 	searchQuery     ui.SearchQuery
 	searchFound     []*domain.Message
+	searchAuthors   []ui.MentionCandidate
+	searchPeople    searchPeople
+	searchCursor    string
 	searchSeq       uint64
-	searchAnswered  bool
+	searchScanned   int
 	searchMore      bool
 	searchPaging    bool
 

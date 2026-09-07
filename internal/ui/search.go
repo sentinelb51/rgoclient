@@ -3,15 +3,19 @@ package ui
 // Channel search: the island in panels.go, plus what only this surface has. The
 // pins panel and the mention inbox are answers the reader asked one question
 // for; a search is a question they refine, so this one carries the controls to
-// refine it with — a field, a run of filter chips, the two drawers that hold
-// what a chip cannot, and the three orders the route can answer in.
+// refine it with — a field, a run of chips, one drawer that completes whatever
+// is being typed, and the three orders the route can answer in.
 //
-// Nothing here decides what a filter means. The dialog owns which chips are lit
-// and reports the whole query on every change; the controller holds the messages
-// and knows whether a change has to reach the network — see app/search.go.
+// **The field is the query and the chips write into it.** A chip is a shortcut
+// for a term and a reading of one, never a state of its own: tapping Images puts
+// `has:image` in the field, typing it lights the chip, and there is one string
+// either way. The grammar itself is searchquery.go's; nothing here decides what
+// a term means, and nothing here resolves a name to an account — the controller
+// holds the messages and the store. See app/search.go.
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"fyne.io/fyne/v2"
@@ -26,84 +30,11 @@ import (
 	"RGOClient/internal/util"
 )
 
-/* What a search asks for */
-
-// SearchFilter is one condition a result has to meet, of the kind a single bit
-// can hold: a message either carries a picture or it does not. The two that need
-// a value of their own — which person, which days — are fields on the query
-// beside these, and are asked for in a drawer rather than by a chip alone.
-type SearchFilter int
-
-const (
-	FilterMentionsMe SearchFilter = iota
-	FilterPinned
-	FilterFiles
-	FilterImages
-	FilterLinks
-	FilterReactions
-)
-
-// SearchFilters is a set of them, one bit each — a value, so the controller can
-// tell one query from another with == rather than walking a map.
-type SearchFilters uint32
-
-// Has reports whether filter is on.
-func (f SearchFilters) Has(filter SearchFilter) bool { return f&(1<<filter) != 0 }
-
-// Any reports whether anything is narrowing the answer.
-func (f SearchFilters) Any() bool { return f != 0 }
-
-func (f SearchFilters) with(filter SearchFilter, on bool) SearchFilters {
-	if on {
-		return f | 1<<filter
-	}
-
-	return f &^ (1 << filter)
-}
-
-// SearchQuery is the whole state of the island: what was last submitted, in what
-// order, narrowed by what. Text moves on submit only — a filter tapped while
-// something half-typed sits in the field narrows the results on screen, which is
-// what the reader is looking at.
-type SearchQuery struct {
-	Text    string
-	Sort    domain.MessageSort
-	Filters SearchFilters
-
-	// AuthorID narrows to one person, and is applied to the answer exactly as the
-	// chips are: DataMessageSearch carries no author, so nobody's messages can be
-	// *asked* for — only found among the hundred that came back.
-	AuthorID string
-
-	// After and Before bound the answer in time, and are the only narrowing here
-	// that is genuinely sent. Held as the instants the reader named rather than as
-	// the message IDs the route takes at either end, which is the client's own
-	// business — see client.SearchMessages.
-	//
-	// Half-open: After is the first instant kept and Before the first one dropped,
-	// so one day is that day's start and the next day's.
-	After, Before time.Time
-}
-
-// SameRequest reports whether q and other would be answered by the same request.
-// Neither the chips nor the author are in it — both are applied to the answer, so
-// changing one costs nothing. The span is: it is what the route is bounded with.
-func (q SearchQuery) SameRequest(other SearchQuery) bool {
-	return q.Text == other.Text && q.Sort == other.Sort &&
-		q.After.Equal(other.After) && q.Before.Equal(other.Before)
-}
-
-// Narrowed reports whether anything at all is cutting the answer down — a chip,
-// an author or a span. What Clear puts back.
-func (q SearchQuery) Narrowed() bool {
-	return q.Filters.Any() || q.AuthorID != "" || !q.After.IsZero() || !q.Before.IsZero()
-}
-
 /* The island */
 
 // SearchDialog searches one channel for what is typed in it. Unlike the pins
-// panel it asks for nothing until it is told to: Revolt's search is a request
-// per query, so it runs on submit rather than on every keystroke.
+// panel it asks for nothing until it is told to: a search is a request per query,
+// so it runs on submit rather than on every keystroke.
 type SearchDialog struct {
 	*messageIsland
 
@@ -113,58 +44,90 @@ type SearchDialog struct {
 	// clicked into before it can be typed into is a click nobody meant to spend.
 	Entry fyne.Focusable
 
-	// OnResize fires when the island's height moves under its own steam: a drawer
-	// opening, a chip taking a longer name, a row appearing in the author list.
+	// OnResize fires when the island's height moves under its own steam: the
+	// drawer opening, a chip taking a longer name, a row appearing in the picker.
 	// The layer centres what it holds from that height and re-measures for nobody.
 	OnResize func()
 
 	onChange func(SearchQuery)
 
-	entry  *modalEntry
-	query  SearchQuery
-	selfID string
+	entry *pickerEntry
+	query SearchQuery
 
-	filters map[SearchFilter]*searchChip
-	sorts   map[domain.MessageSort]*searchChip
+	chips  []*termChip
+	sorts  map[domain.MessageSort]*searchChip
+	drawer *searchDrawer
 
-	// The three chips standing for a value rather than a bit. fromMe and author
-	// write the same field: one is the shortcut, the other the picker, and which is
-	// lit is decided by whose ID the query holds.
-	fromMe *searchChip
-	author *searchChip
-	dates  *searchChip
-
-	authors *authorDrawer
-	days    *dateDrawer
+	note     *canvas.Text
+	noteSlot fyne.CanvasObject
 
 	chipRow   *fyne.Container
-	block     *fyne.Container   // the chips and both drawers, relaid as one
+	block     *fyne.Container   // the chips, the note and the drawer, relaid as one
 	clearSlot fyne.CanvasObject // the Clear chip and the gap before it, hidden together
 }
 
-// The author and date chips as they read with nothing chosen. The lit forms name
-// the person or the span instead, so the chip is the whole of what it is worth.
+// The two chips standing for a value rather than a condition, as they read with
+// nothing chosen. Their lit forms name the person or the span instead, so the
+// chip is the whole of what it is worth.
 const (
-	fromMeLabel  = "From me"
 	anyoneLabel  = "From anyone"
 	anyTimeLabel = "Any time"
 )
 
-// searchFilterChips are the conditions on offer, in the order they are drawn,
-// after the three that carry a value. The three the client already has a mark for
+// searchTermChips are the conditions on offer, in the order they are drawn.
+// Each is one term the tap writes into the field, so what a chip means is said
+// in searchquery.go and not twice. The three the client already has a mark for
 // borrow it: a message carrying an @ and the chip that finds one are otherwise
 // the same thing drawn twice.
-var searchFilterChips = []struct {
-	filter SearchFilter
-	icon   fyne.Resource
-	label  string
+//
+// Not every term is here — `has:embed`, `has:reply` and the four `is:` values
+// past pinned are typed or picked out of the drawer. A run of eighteen chips is
+// a wall rather than a set of shortcuts.
+var searchTermChips = []struct {
+	key   SearchKey
+	value string
+	icon  fyne.Resource
+	label string
 }{
-	{FilterMentionsMe, assets.MentionIcon, "Mentions"},
-	{FilterPinned, assets.SystemPinnedIcon, "Pinned"},
-	{FilterFiles, assets.SearchAttachmentIcon, "Files"},
-	{FilterImages, assets.SearchImageIcon, "Images"},
-	{FilterLinks, assets.SearchLinkIcon, "Links"},
-	{FilterReactions, assets.SearchReactionIcon, "Reactions"},
+	{KeyFrom, "me", assets.AccountIcon, "From me"},
+	{KeyMentions, "me", assets.MentionIcon, "Mentions me"},
+	{KeyIs, "pinned", assets.SystemPinnedIcon, "Pinned"},
+	{KeyHas, "file", assets.SearchAttachmentIcon, "Files"},
+	{KeyHas, "image", assets.SearchImageIcon, "Images"},
+	{KeyHas, "video", assets.SearchVideoIcon, "Video"},
+	{KeyHas, "link", assets.SearchLinkIcon, "Links"},
+	{KeyHas, "reaction", assets.SearchReactionIcon, "Reactions"},
+}
+
+// searchKeyMark is the mark a key is offered under. What a *value* is offered
+// under is the chip that writes it where there is one (searchValueMark), so a
+// picture means the same shape in the run and in the drawer; the rest fall back
+// to their key's, a run of identical magnifiers saying nothing at all.
+func searchKeyMark(key SearchKey) fyne.Resource {
+	switch key {
+	case KeyFrom:
+		return assets.MembersIcon
+	case KeyMentions:
+		return assets.MentionIcon
+	case KeyHas:
+		return assets.SearchAttachmentIcon
+	case KeyIs:
+		return assets.SystemPinnedIcon
+	case KeyAfter, KeyBefore, KeyDuring:
+		return assets.SearchDateIcon
+	}
+
+	return assets.SearchIcon
+}
+
+func searchValueMark(key SearchKey, value string) fyne.Resource {
+	for _, entry := range searchTermChips {
+		if entry.key == key && entry.value == value {
+			return entry.icon
+		}
+	}
+
+	return searchKeyMark(key)
 }
 
 // searchSortChips are the three orders the route answers in: what it thinks
@@ -179,25 +142,25 @@ var searchSortChips = []struct {
 	{domain.SortOldest, assets.SearchOldestIcon, "Oldest"},
 }
 
-// NewSearchDialog builds the island for a channel. selfID is what the From me
-// chip writes, and what tells that chip's state from the picker's. onChange
-// receives the whole query whenever any part of it moves — the field submitted, a
-// filter toggled, a person picked, an order chosen — and the controller decides
-// which of those has to reach the network. onClose dismisses the layer.
-func NewSearchDialog(deps Deps, channel, selfID string, onChange func(SearchQuery),
+// NewSearchDialog builds the island for a channel. onChange receives the whole
+// query whenever any part of it moves — the field submitted, a chip tapped, a
+// person picked, an order chosen — and the controller decides which of those has
+// to reach the network. onClose dismisses the layer.
+func NewSearchDialog(deps Deps, channel string, onChange func(SearchQuery),
 	onMore, onClose func()) *SearchDialog {
+
 	d := &SearchDialog{
 		onChange: onChange,
 		query:    SearchQuery{Sort: domain.SortRelevance},
-		selfID:   selfID,
-		filters:  make(map[SearchFilter]*searchChip, len(searchFilterChips)),
 		sorts:    make(map[domain.MessageSort]*searchChip, len(searchSortChips)),
 	}
 
-	// The field handles Escape itself — see modalEntry.
-	d.entry = newModalEntry(onClose)
-	d.entry.SetPlaceHolder("Search this channel")
+	// The field handles Escape itself — see modalEntry — and hands the drawer's
+	// list first refusal on the keys that move through it.
+	d.entry = newPickerEntry(onClose, d.key)
+	d.entry.SetPlaceHolder("Search, or type a filter like has:image")
 	d.entry.OnSubmitted = d.submit
+	d.entry.OnChanged = d.typed
 	d.Entry = d.entry
 
 	// The controls are built before the island rather than into it: the island is
@@ -207,7 +170,7 @@ func NewSearchDialog(deps Deps, channel, selfID string, onChange func(SearchQuer
 		Mark:     assets.SearchIcon,
 		Title:    "Search",
 		Where:    "in " + channel,
-		Controls: []fyne.CanvasObject{d.buildField(), d.buildFilters(deps)},
+		Controls: []fyne.CanvasObject{d.buildField(), d.buildChips(deps)},
 		Trailing: d.buildSorts(),
 		OnMore:   onMore,
 		OnClose:  onClose,
@@ -228,8 +191,8 @@ func (d *SearchDialog) buildField() fyne.CanvasObject {
 	return searchField(assets.SearchIcon, WithCaret(d.entry))
 }
 
-// searchField is that box, shared with the drawers' own fields so a date typed
-// into one looks like a query typed into the other.
+// searchField is that box, shared with the drawer's own date fields so a day
+// typed into one looks like a query typed into the other.
 func searchField(mark fyne.Resource, content fyne.CanvasObject) fyne.CanvasObject {
 	pad := theme.Sizes.IslandChipPaddingH
 
@@ -249,33 +212,48 @@ func searchField(mark fyne.Resource, content fyne.CanvasObject) fyne.CanvasObjec
 		container.NewStack(field, NewInset(row, 0, 0, pad, pad)))
 }
 
-// buildFilters is the run of chips and the two drawers under it, wrapping against
-// the island's inner width. The drawers hang here rather than beside the field
-// because each belongs to the chip that opens it; only one is ever up, so the
-// island grows by one panel at most. A Clear that only appeared when something
-// was on would put a second row under the run half the time, which is why Clear
-// rides in the count row instead.
-func (d *SearchDialog) buildFilters(deps Deps) fyne.CanvasObject {
-	chips := make([]fyne.CanvasObject, 0, len(searchFilterChips)+3)
+// buildChips is the run of chips, the line under it and the drawer, wrapping
+// against the island's inner width. All three hang together because all three
+// are about the field above them; only one drawer is ever up, so the island
+// grows by one panel at most. A Clear that only appeared when something was on
+// would put a second row under the run half the time, which is why Clear rides
+// in the count row instead.
+func (d *SearchDialog) buildChips(deps Deps) fyne.CanvasObject {
+	chips := make([]fyne.CanvasObject, 0, len(searchTermChips)+2)
 
-	d.fromMe = newSearchChip(assets.AccountIcon, fromMeLabel, d.toggleFromMe)
-	d.author = newSearchChip(assets.MembersIcon, anyoneLabel, d.toggleAuthors)
-	d.dates = newSearchChip(assets.SearchDateIcon, anyTimeLabel, d.toggleDates)
-	chips = append(chips, d.fromMe, d.author, d.dates)
+	for _, entry := range searchTermChips {
+		chip := newTermChip(entry.icon, entry.label, entry.key, entry.value)
+		chip.onTap = func() { d.toggleTerm(entry.key, entry.value) }
 
-	for _, entry := range searchFilterChips {
-		chip := newSearchChip(entry.icon, entry.label, nil)
-		chip.onTap = func() { d.toggle(entry.filter) }
-
-		d.filters[entry.filter] = chip
+		d.chips = append(d.chips, chip)
 		chips = append(chips, chip)
 	}
 
-	d.chipRow = NewFlow(islandInnerWidth(), theme.Sizes.IslandChipGap, chips...)
-	d.authors = newAuthorDrawer(deps, d.pickAuthor, d.closeDrawers, d.resized)
-	d.days = newDateDrawer(d.setSpan, d.closeDrawers)
+	// The two that stand for a value rather than a condition, so a tap opens the
+	// drawer where the others simply light.
+	people := newTermChip(assets.MembersIcon, anyoneLabel, KeyFrom, "")
+	people.onTap = func() { d.reachFor(KeyFrom) }
 
-	d.block = VBoxNoSpacing(d.chipRow, d.authors.slot, d.days.slot)
+	days := newTermChip(assets.SearchDateIcon, anyTimeLabel, KeyAfter, "")
+	days.onTap = func() { d.reachFor(KeyAfter) }
+
+	d.chips = append(d.chips, people, days)
+	chips = append(chips, people, days)
+
+	d.chipRow = NewFlow(islandInnerWidth(), theme.Sizes.IslandChipGap, chips...)
+	d.drawer = newSearchDrawer(deps, d.complete, d.setSpan, d.closeDrawer, d.resized)
+
+	// The note is what the island says about the *query* rather than about the
+	// answer — a filter that named nothing, a person nobody here is called — so it
+	// stands with the field rather than in the well.
+	d.note = newText("", theme.Colors.IslandHintText, theme.Sizes.IslandPreviewSize)
+	d.noteSlot = VBoxNoSpacing(
+		VerticalSpacer(theme.Sizes.IslandChipGap),
+		NewInset(d.note, 0, 0, theme.Sizes.IslandChipPaddingH, 0),
+	)
+	d.noteSlot.Hide()
+
+	d.block = VBoxNoSpacing(d.chipRow, d.noteSlot, d.drawer.slot)
 
 	return d.block
 }
@@ -309,163 +287,138 @@ func (d *SearchDialog) buildSorts() fyne.CanvasObject {
 	return HBoxNoSpacing(d.clearSlot, HorizontalSpacer(gap), HBoxNoSpacing(sorts...))
 }
 
-/* Who wrote it */
+/* What the field says */
 
-// SetAuthors hands the picker the people this channel can be narrowed to,
+// SetAuthors hands the drawer the people this channel can be narrowed to,
 // resolved by the controller off the UI thread. Late is the ordinary case — a
 // server's membership is a walk — so the drawer can already be open, which is why
-// the picker re-runs its own query on being refilled. Call on the UI thread.
+// it re-runs its own query on being refilled. Call on the UI thread.
 func (d *SearchDialog) SetAuthors(candidates []MentionCandidate) {
-	d.authors.setCandidates(candidates)
-	if d.authors.slot.Visible() {
-		d.authors.refilter()
-		d.resized()
+	d.drawer.setCandidates(candidates)
+	if d.drawer.mode == drawerPeople {
+		d.syncDrawer()
 	}
 }
 
-// toggleFromMe is the shortcut past the picker, the one person a reader looks for
-// often enough to be worth a chip of their own. Tapping it while it is lit is the
-// way back to anyone, which is what makes it read as a filter rather than a menu.
-func (d *SearchDialog) toggleFromMe() {
-	if d.selfID == "" {
-		return
-	}
-	if d.query.AuthorID == d.selfID {
-		d.setAuthor("", "")
-		return
+// SetNote is what the island says about the query itself, "" for nothing to say.
+// Call on the UI thread.
+func (d *SearchDialog) SetNote(note string) {
+	if d.note.Text != note {
+		d.note.Text = note
+		d.note.Refresh()
 	}
 
-	d.setAuthor(d.selfID, "")
-}
-
-// toggleAuthors opens the picker, or clears the person it chose. A chip standing
-// for somebody is put out by tapping it, like every other chip in the run; only a
-// chip standing for nobody opens the drawer.
-func (d *SearchDialog) toggleAuthors() {
-	if d.query.AuthorID != "" && d.query.AuthorID != d.selfID {
-		d.setAuthor("", "")
-		return
-	}
-	if d.authors.slot.Visible() {
-		d.closeDrawers()
-		return
-	}
-
-	d.days.slot.Hide()
-	d.authors.open()
+	showIf(d.noteSlot, note != "")
 	d.resized()
-	d.focus(d.authors.entry)
 }
 
-// pickAuthor takes the drawer's choice and closes it: one person is the whole of
-// what it was open to ask.
-func (d *SearchDialog) pickAuthor(candidate MentionCandidate) {
-	d.closeDrawers()
-	d.setAuthor(candidate.ID, candidate.Name)
+// typed runs on every keystroke and reaches the network for nothing: what it
+// moves is the drawer, which completes whatever is at the end of the field.
+func (d *SearchDialog) typed(string) {
+	d.syncDrawer()
+}
+
+// submit is Enter: the field as it stands, parsed, reported.
+func (d *SearchDialog) submit(string) {
+	d.closeDrawer()
+	d.report()
+}
+
+// toggleTerm is a chip tap — the term goes into the field or comes out of it,
+// and the query is re-asked. The field is rewritten rather than a flag being
+// set: there is one query and it is the text.
+func (d *SearchDialog) toggleTerm(key SearchKey, value string) {
+	d.closeDrawer()
+	d.setRaw(ToggleTerm(d.entry.Text, key, value))
+	d.report()
+}
+
+// reachFor opens the drawer on a key the reader tapped rather than typed, and is
+// what the two value chips do. A chip standing for something already chosen puts
+// it out instead, the rule every other chip in the run follows.
+func (d *SearchDialog) reachFor(key SearchKey) {
+	if d.dropChosen(key) {
+		return
+	}
+	if d.drawer.showing(key) {
+		d.closeDrawer()
+		return
+	}
+
+	// Typed rather than opened directly, so the drawer's own reading of the field
+	// is the only thing that decides what it shows. Only where the field is not
+	// already sitting at this key: a chip tapped shut and open again would
+	// otherwise leave `after: after:` behind it.
+	if completionIn(d.entry.Text).key != key {
+		d.setRaw(appendKey(d.entry.Text, key))
+	}
+
+	d.syncDrawer()
+}
+
+// dropChosen clears the value a chip stands for, answering whether there was
+// one. A span is both its ends; a person is however many were named.
+func (d *SearchDialog) dropChosen(key SearchKey) bool {
+	terms := ParseSearchTerms(d.entry.Text)
+
+	if key == KeyFrom {
+		if len(terms.From) == 0 {
+			return false
+		}
+
+		d.setRaw(SetTerm(d.entry.Text, KeyFrom, ""))
+		d.report()
+
+		return true
+	}
+
+	if terms.After.IsZero() && terms.Before.IsZero() {
+		return false
+	}
+	d.setRaw(clearSpan(d.entry.Text))
+	d.report()
+
+	return true
+}
+
+// complete is a pick out of the drawer: the part being typed is replaced by what
+// was chosen. A key completes to itself and a colon and leaves the drawer open on
+// its values — one pick is half an answer there — where anything else finishes
+// the term and re-asks.
+func (d *SearchDialog) complete(text string, done bool) {
+	at := completionIn(d.entry.Text)
+	d.setRaw(completeWith(d.entry.Text, at, text))
+
+	if !done {
+		d.syncDrawer()
+		d.focus(d.entry)
+
+		return
+	}
+
+	d.closeDrawer()
+	d.report()
 	d.focus(d.entry)
 }
 
-// setAuthor records the person and repaints both chips from that one field. name
-// is what the chip should read; empty means the person is this account, which the
-// From me chip says instead.
-func (d *SearchDialog) setAuthor(userID, name string) {
-	if d.applyAuthor(userID, name) {
-		d.report()
-	}
-}
-
-// applyAuthor is that without the report, so a change made alongside others is
-// reported once. Answers whether anything moved.
-func (d *SearchDialog) applyAuthor(userID, name string) bool {
-	if d.query.AuthorID == userID {
-		return false
-	}
-	d.query.AuthorID = userID
-
-	self := userID != "" && userID == d.selfID
-	d.fromMe.Set(self)
-
-	label := anyoneLabel
-	if userID != "" && !self {
-		label = "From " + name
-	}
-	d.author.SetLabel(label)
-	d.author.Set(userID != "" && !self)
-
-	return true
-}
-
-/* When it was written */
-
-// toggleDates opens the span drawer, or clears the span it holds — the author
-// chip's rule, for the same reason.
-func (d *SearchDialog) toggleDates() {
-	if !d.days.span.empty() {
-		d.days.clear()
-		return
-	}
-	if d.days.slot.Visible() {
-		d.closeDrawers()
-		return
-	}
-
-	d.authors.close()
-	d.days.slot.Show()
-	d.resized()
-	d.focus(d.days.after.entry)
-}
-
-// setSpan takes the days the drawer now holds and turns them into the instants
-// the query is bounded by. Called for a preset, for a date typed in full, and for
-// a field emptied — the drawer reports nothing in between, a half-typed date
-// being a date nobody has finished naming.
+// setSpan is the date panel's answer, written as the two terms it stands for.
+// `during:` is dropped on the way: the panel names two ends, and a window said
+// twice over is one the reader cannot correct from here.
 func (d *SearchDialog) setSpan(s span) {
-	if d.applySpan(s) {
-		d.report()
-	}
+	raw := SetTerm(d.entry.Text, KeyDuring, "")
+	raw = SetTerm(raw, KeyAfter, dayValue(s.after))
+	raw = SetTerm(raw, KeyBefore, dayValue(s.before))
+
+	d.setRaw(raw)
+	d.report()
 }
 
-// applySpan is setSpan without the report, for the same reason applyAuthor is.
-func (d *SearchDialog) applySpan(s span) bool {
-	after, before := s.instants()
-	if d.query.After.Equal(after) && d.query.Before.Equal(before) {
-		return false
-	}
-	d.query.After, d.query.Before = after, before
-
-	d.dates.SetLabel(s.label())
-	d.dates.Set(!s.empty())
-
-	return true
-}
-
-/* Reporting what changed */
-
-func (d *SearchDialog) submit(text string) {
-	d.query.Text = text
-	d.onChange(d.query)
-}
-
-func (d *SearchDialog) toggle(filter SearchFilter) {
-	d.query.Filters = d.query.Filters.with(filter, !d.query.Filters.Has(filter))
-	d.paintFilters()
-	d.onChange(d.query)
-}
-
-// clearFilters puts the whole of the narrowing back, drawers included: Clear
+// clearFilters puts the whole of the narrowing back and leaves the words: Clear
 // names what the count line lost, and a person or a span took as much of it as a
-// chip did.
-// Each half is put back silently and the whole change reported once: three
-// reports for one tap would be a request the reader never asked for, the
-// controller reading an unchanged query as the same question asked again.
+// chip did. What the reader was searching *for* is not a filter.
 func (d *SearchDialog) clearFilters() {
-	d.closeDrawers()
-
-	d.query.Filters = 0
-	d.days.reset()
-	d.applySpan(span{})
-	d.applyAuthor("", "")
-
+	d.closeDrawer()
+	d.setRaw(ParseSearchTerms(d.entry.Text).Text)
 	d.report()
 }
 
@@ -480,34 +433,93 @@ func (d *SearchDialog) pickSort(sort domain.MessageSort) {
 	d.query.Sort = sort
 	d.sorts[sort].Set(true)
 
-	d.onChange(d.query)
+	d.report()
 }
 
-// report is what the value chips end on: a relabelled chip is a differently wide
-// chip, so the run has to be rewrapped before the query goes anywhere.
+// setRaw writes the field without the change coming back as a keystroke: every
+// caller here is already deciding what happens next, and re-entering the drawer
+// from inside a chip tap would reopen it under the pointer.
+func (d *SearchDialog) setRaw(raw string) {
+	if d.entry.Text == raw {
+		return
+	}
+
+	changed := d.entry.OnChanged
+	d.entry.OnChanged = nil
+	d.entry.SetText(raw)
+	d.entry.OnChanged = changed
+
+	// SetText leaves the caret where it stood, so what is typed next would carry on
+	// from the middle of a term nobody typed. The picker's own accept path is the
+	// same two lines for the same reason.
+	d.entry.CursorRow, d.entry.CursorColumn = cursorPosition(raw, len(raw))
+	d.entry.Refresh()
+}
+
+// report parses the field, repaints what reads it and hands the query over. A
+// relabelled chip is a differently wide chip, so the run is rewrapped before the
+// query goes anywhere.
 func (d *SearchDialog) report() {
-	d.paintFilters()
+	d.query = NewSearchQuery(d.entry.Text, d.query.Sort)
+
+	d.paintChips()
 	d.resized()
 	d.onChange(d.query)
 }
 
-func (d *SearchDialog) paintFilters() {
-	for filter, chip := range d.filters {
-		chip.Set(d.query.Filters.Has(filter))
+// paintChips lights each chip from the field. A chip standing for a value says
+// what the value is, so the run is what the query reads as.
+func (d *SearchDialog) paintChips() {
+	terms := d.query.Terms
+
+	for _, chip := range d.chips {
+		switch {
+		case chip.value != "":
+			chip.Set(terms.holds(chip.key, chip.value))
+		case chip.key == KeyFrom:
+			chip.SetLabel(fromLabel(terms.From))
+			chip.Set(len(terms.From) > 0)
+		default:
+			chip.SetLabel(spanLabel(terms.After, terms.Before))
+			chip.Set(!terms.After.IsZero() || !terms.Before.IsZero())
+		}
 	}
 
 	showIf(d.clearSlot, d.query.Narrowed())
 }
 
-// closeDrawers puts both panels away without touching what they chose — Escape
-// out of one, and the way every other opening closes the one before it.
-func (d *SearchDialog) closeDrawers() {
-	if !d.authors.slot.Visible() && !d.days.slot.Visible() {
+// fromLabel names who the answer is narrowed to. One person is named; more than
+// one is counted, a run of handles being wider than the island.
+func fromLabel(from []string) string {
+	switch len(from) {
+	case 0:
+		return anyoneLabel
+	case 1:
+		return "From " + from[0]
+	}
+
+	return "From " + strconv.Itoa(len(from)) + " people"
+}
+
+// key lets the drawer's list consume the keys that move through it, exactly as
+// the composer's own does. Enter belongs to the list while one is up: a candidate
+// under the cursor is what the reader is answering, not the query behind it.
+func (d *SearchDialog) key(event *fyne.KeyEvent) bool {
+	return d.drawer.key(event)
+}
+
+// syncDrawer re-reads the field and shows whatever completes the end of it.
+func (d *SearchDialog) syncDrawer() {
+	d.drawer.show(completionIn(d.entry.Text), ParseSearchTerms(d.entry.Text))
+	d.resized()
+}
+
+func (d *SearchDialog) closeDrawer() {
+	if d.drawer.mode == drawerNone {
 		return
 	}
 
-	d.authors.close()
-	d.days.slot.Hide()
+	d.drawer.close()
 	d.resized()
 }
 
@@ -533,35 +545,47 @@ func (d *SearchDialog) focus(target fyne.Focusable) {
 
 /* Filling it */
 
-// SetResults replaces the cards. found is how many came back before the filters
-// were applied, which the line reports alongside: the route caps one answer at
-// 100, so a reader narrowing what is held has to be able to see how much they
-// are narrowing. Both numbers grow as further pages are asked for. Call on the UI
-// thread.
-func (d *SearchDialog) SetResults(results []MessageCard, found int) {
-	cards := make([]fyne.CanvasObject, 0, len(results))
-	for _, result := range results {
+// SearchOutcome is what one search came to. Scanned is how many messages were
+// read to find them, which is the honest denominator now that a narrow question
+// is answered by walking rather than by one request: the route filters on words
+// alone, so everything else is found by reading messages back.
+type SearchOutcome struct {
+	Results []MessageCard
+	Scanned int
+
+	// More is what another press reads, "" where there is nothing further to ask
+	// for, and Busy draws it as the request it already is.
+	More string
+	Busy bool
+}
+
+// SetResults replaces the cards. Call on the UI thread.
+func (d *SearchDialog) SetResults(outcome SearchOutcome) {
+	cards := make([]fyne.CanvasObject, 0, len(outcome.Results))
+	for _, result := range outcome.Results {
 		cards = append(cards, newMessageCard(d.deps, result))
 	}
 
 	d.setCards(cards)
 
 	switch {
-	case len(results) > 0:
-		d.setCount(countLine(len(results), found))
+	case len(outcome.Results) > 0:
+		d.setCount(countLine(len(outcome.Results), outcome.Scanned))
 		d.say("")
-	case found > 0:
-		d.setCount(countLine(0, found))
-		d.say("Nothing here matches those filters.")
+	case outcome.Scanned > 0:
+		d.setCount(countLine(0, outcome.Scanned))
+		d.say("Nothing here matches that.")
 	default:
 		d.setCount("")
 		d.say("Nothing matched that.")
 	}
+
+	d.SetMore(outcome.More, outcome.Busy)
 }
 
 // Prompt is the island as it opens: nothing asked, nothing to count.
 func (d *SearchDialog) Prompt() {
-	d.reset("Type something and press Enter.")
+	d.reset("Type something and press Enter, or pick a filter.")
 }
 
 // Searching says a request is out, replacing whatever the last one found: a list
@@ -575,113 +599,243 @@ func (d *SearchDialog) Fail(reason string) {
 	d.reset(reason)
 }
 
-// countLine says how much of the answer is on screen. Both numbers appear only
-// when they differ: "24 of 24 results" is a sum nobody asked for.
-func countLine(shown, found int) string {
-	if shown == found {
-		return util.Quantity(found, "result")
+// countLine says how much of the answer is on screen and how much was read to
+// find it. The second number appears only where it differs: a search that
+// answered every message it looked at is one whose denominator says nothing.
+func countLine(shown, scanned int) string {
+	if shown == scanned {
+		return util.Quantity(shown, "result")
 	}
 
-	return strconv.Itoa(shown) + " of " + util.Quantity(found, "result")
+	return util.Quantity(shown, "result") + " in " + strconv.Itoa(scanned) + " messages"
 }
 
-/* The drawer that picks a person */
+/* The drawer */
 
-// authorDrawer is what the author chip opens: a field, and the composer's own
-// mention picker under it. Reusing that widget is what makes a 2000-member server
-// cheap to filter — it ranks into fixed scratch and allocates nothing per
-// keystroke — and it makes these rows look like the rows an @ opens, which is
-// where the reader last saw this list.
-type authorDrawer struct {
-	slot *fyne.Container // the gap above and the body, shown and hidden as one
+// drawerMode is which of the drawer's four bodies is up. What decides it is the
+// end of the field: a bare word is a key to name, a key and a colon is a value to
+// pick, and the two that take an answer rather than a condition have a panel
+// each.
+type drawerMode uint8
 
-	entry  *pickerEntry
+const (
+	drawerNone drawerMode = iota
+	drawerKeys
+	drawerValues
+	drawerPeople
+	drawerDays
+)
+
+// searchDrawer is the one panel under the field, and is what makes a syntax
+// discoverable: it completes whatever is being typed rather than the reader
+// having to know the words. One drawer rather than one per kind of answer,
+// because only one thing is ever being typed.
+type searchDrawer struct {
+	slot *fyne.Container
+	mode drawerMode
+
+	keys   *fyne.Container
+	values *fyne.Container
 	picker *MentionPicker
-	hint   *canvas.Text
+	days   *dateDrawer
 
-	onPick   func(MentionCandidate)
-	onResize func()
+	hint *canvas.Text
+
+	onComplete func(text string, done bool)
+	onResize   func()
 
 	empty bool // no candidates at all, which is a different sentence from no match
 }
 
-func newAuthorDrawer(deps Deps, onPick func(MentionCandidate), onCancel, onResize func()) *authorDrawer {
-	w := &authorDrawer{onPick: onPick, onResize: onResize, empty: true}
+func newSearchDrawer(deps Deps, onComplete func(string, bool), onSpan func(span),
+	onCancel, onResize func()) *searchDrawer {
 
+	w := &searchDrawer{onComplete: onComplete, onResize: onResize, empty: true}
+
+	w.keys = NewFlow(searchDrawerWidth(), theme.Sizes.IslandChipGap)
+	w.values = NewFlow(searchDrawerWidth(), theme.Sizes.IslandChipGap)
 	w.picker = NewMentionPicker(deps, w.accept)
+	w.days = newDateDrawer(onSpan, onCancel)
 	w.hint = newText("", theme.Colors.IslandHintText, theme.Sizes.IslandPreviewSize)
-	w.hint.Hide()
-
-	w.entry = newPickerEntry(onCancel, w.key)
-	w.entry.SetPlaceHolder("Type a name")
-	w.entry.OnChanged = func(string) { w.refilter(); w.resize() }
-	w.entry.OnSubmitted = func(string) { w.picker.Accept() }
 
 	w.slot = drawerSlot(VBoxNoSpacing(
-		searchField(assets.AccountIcon, WithCaret(w.entry)),
-		VerticalSpacer(theme.Sizes.IslandChipGap),
+		w.keys,
+		w.values,
 		w.picker,
+		w.days.body,
 		NewInset(w.hint, 0, 0, theme.Sizes.IslandChipPaddingH, 0),
 	))
 
 	return w
 }
 
-// setCandidates replaces the pool. The picker keeps its own copy, so this is the
-// one place the drawer holds anything about who exists.
-func (w *authorDrawer) setCandidates(candidates []MentionCandidate) {
+// searchDrawerWidth is what a run inside the drawer wraps against: the island's
+// own room, less the well's padding on both sides.
+func searchDrawerWidth() float32 {
+	return islandInnerWidth() - 2*theme.Sizes.SearchDrawerPadding
+}
+
+// setCandidates replaces the pool the people body draws from.
+func (w *searchDrawer) setCandidates(candidates []MentionCandidate) {
 	w.empty = len(candidates) == 0
 	w.picker.SetCandidates(MentionUser, candidates)
 }
 
-// open shows the drawer with the head of the pool already listed — the bare-@
-// case, which is the picker's own way of saying "everyone".
-func (w *authorDrawer) open() {
-	w.entry.SetText("")
-	w.picker.Reset()
-	w.refilter()
-	w.slot.Show()
+// show reads the end of the field and puts up whatever completes it. terms is
+// the field already parsed, so the value body can mark what is already on.
+func (w *searchDrawer) show(at searchCompletion, terms SearchTerms) {
+	switch {
+	case at.key == KeyNone && at.prefix == "" && w.mode == drawerNone:
+		// Nothing typed and nothing open: a drawer that appeared on its own the
+		// moment the island did would cover the answer before there was one.
+		return
+	case at.key == KeyNone:
+		w.showKeys(at.prefix)
+	case at.key == KeyFrom || at.key == KeyMentions:
+		w.showPeople(at.prefix)
+	case at.key == KeyHas || at.key == KeyIs:
+		w.showValues(at.key, at.prefix, terms)
+	default:
+		w.showDays(terms)
+	}
 }
 
-func (w *authorDrawer) close() {
-	w.slot.Hide()
-	w.picker.Reset()
-	w.picker.Hide()
+// showKeys lists the filters, narrowed by what has been typed of one. A word
+// that matches no key closes the drawer rather than saying so: most words are
+// what the reader is searching for.
+func (w *searchDrawer) showKeys(prefix string) {
+	chips := make([]fyne.CanvasObject, 0, len(searchKeys))
+	for _, entry := range searchKeys {
+		if !strings.HasPrefix(entry.name, prefix) {
+			continue
+		}
+
+		chip := newSearchChip(searchKeyMark(entry.key), entry.name+": "+entry.hint, nil)
+		chip.onTap = func() { w.onComplete(entry.name+":", false) }
+		chips = append(chips, chip)
+	}
+	if len(chips) == 0 {
+		w.close()
+		return
+	}
+
+	w.keys.Objects = chips
+	w.wear(drawerKeys, "")
 }
 
-// refilter re-runs the typed query and says what the rows cannot: that there is
-// nobody to pick from, or nobody by that name.
-func (w *authorDrawer) refilter() {
-	if w.picker.Update(MentionUser, w.entry.Text) {
-		w.picker.Show()
-		w.hint.Hide()
+// showValues lists what one key takes, marking what the field already holds so
+// the run reads as the state as well as the offer.
+func (w *searchDrawer) showValues(key SearchKey, prefix string, terms SearchTerms) {
+	chips := make([]fyne.CanvasObject, 0, len(searchFlagValues))
+	for _, entry := range searchFlagValues {
+		if entry.key != key || !strings.HasPrefix(entry.value, prefix) {
+			continue
+		}
+
+		chip := newSearchChip(searchValueMark(key, entry.value), entry.value, nil)
+		chip.Set(terms.holds(key, entry.value))
+		chip.onTap = func() { w.onComplete(entry.value, true) }
+		chips = append(chips, chip)
+	}
+	if len(chips) == 0 {
+		w.values.Objects = nil
+		w.wear(drawerValues, searchKeyName(key)+" does not take that. Comma-separate for either.")
 
 		return
 	}
 
-	w.picker.Hide()
-	w.hint.Text = "Nobody by that name."
-	if w.empty {
-		w.hint.Text = "Nobody here to narrow by yet."
-	}
-	w.hint.Refresh()
-	w.hint.Show()
+	w.values.Objects = chips
+	w.wear(drawerValues, "Comma-separate values for either of them.")
 }
 
-// accept reports the chosen person. Guarded because the picker offers whatever it
-// last matched, and an empty list matches a candidate with no ID at all.
-func (w *authorDrawer) accept(candidate MentionCandidate) {
+// showPeople is the composer's own mention picker, which is what makes a
+// 2000-member server cheap to filter — it ranks into fixed scratch and allocates
+// nothing per keystroke — and makes these rows look like the rows an @ opens,
+// which is where the reader last saw this list.
+func (w *searchDrawer) showPeople(prefix string) {
+	if w.picker.Update(MentionUser, prefix) {
+		w.wear(drawerPeople, "")
+		return
+	}
+
+	hint := "Nobody by that name."
+	if w.empty {
+		hint = "Nobody here to narrow by yet."
+	}
+	w.wear(drawerPeople, hint)
+}
+
+// showDays is the two ends typed out and the runs worth not typing. Unlike the
+// others it stays put after a choice — a range is two answers, and a preset is as
+// often the start of narrowing one as the end of it.
+func (w *searchDrawer) showDays(terms SearchTerms) {
+	w.days.fill(terms)
+	w.wear(drawerDays, "")
+}
+
+// wear shows one body and puts the rest away. A hidden child is skipped by the
+// column, so the drawer is as tall as whichever is up.
+func (w *searchDrawer) wear(mode drawerMode, hint string) {
+	w.mode = mode
+
+	showIf(w.keys, mode == drawerKeys)
+	showIf(w.values, mode == drawerValues)
+	showIf(w.picker, mode == drawerPeople && hint == "")
+	showIf(w.days.body, mode == drawerDays)
+
+	if w.hint.Text != hint {
+		w.hint.Text = hint
+		w.hint.Refresh()
+	}
+	showIf(w.hint, hint != "")
+
+	w.slot.Show()
+	Relayout(w.slot)
+}
+
+// showing reports whether the body a key opens is the one already up, which is
+// what makes its chip a toggle rather than a switch between two panels: tapping
+// the date chip while the people list is open moves to the dates, and tapping it
+// again puts them away.
+func (w *searchDrawer) showing(key SearchKey) bool {
+	switch key {
+	case KeyFrom, KeyMentions:
+		return w.mode == drawerPeople
+	case KeyAfter, KeyBefore, KeyDuring:
+		return w.mode == drawerDays
+	}
+
+	return false
+}
+
+func (w *searchDrawer) close() {
+	w.mode = drawerNone
+	w.picker.Reset()
+	w.picker.Hide()
+	w.slot.Hide()
+}
+
+// accept reports the chosen person as the handle a term is written with — a
+// handle has no spaces where a display name routinely does, and both find the
+// same account. Guarded because the picker offers whatever it last matched, and
+// an empty list matches a candidate with no ID at all.
+func (w *searchDrawer) accept(candidate MentionCandidate) {
 	if candidate.ID == "" {
 		return
 	}
 
-	w.onPick(candidate)
+	name := candidate.Username
+	if name == "" {
+		name = candidate.Name
+	}
+
+	w.onComplete(quoteValue(name), true)
 }
 
-// key lets the list consume the keys that move through it, exactly as the
-// composer's own does.
-func (w *authorDrawer) key(event *fyne.KeyEvent) bool {
-	if !w.picker.Visible() {
+// key lets the people list consume the keys that move through it. The other
+// bodies are chips, which are tapped: a run of shortcuts does not need a cursor.
+func (w *searchDrawer) key(event *fyne.KeyEvent) bool {
+	if w.mode != drawerPeople || !w.picker.Visible() {
 		return false
 	}
 
@@ -690,7 +844,7 @@ func (w *authorDrawer) key(event *fyne.KeyEvent) bool {
 		w.picker.Step(-1)
 	case fyne.KeyDown:
 		w.picker.Step(1)
-	case fyne.KeyTab:
+	case fyne.KeyTab, fyne.KeyReturn, fyne.KeyEnter:
 		w.picker.Accept()
 	default:
 		return false
@@ -699,67 +853,60 @@ func (w *authorDrawer) key(event *fyne.KeyEvent) bool {
 	return true
 }
 
-func (w *authorDrawer) resize() {
-	if w.onResize != nil {
-		w.onResize()
-	}
-}
+/* When it was written */
 
-/* The drawer that picks a span */
-
-// span is what the date drawer has been told: the two *days* the reader named,
-// either of them zero for an end left open. Days rather than instants, because a
-// day is what was typed and what the chip has to be able to say back.
+// span is the two *days* a date panel has been told, either of them zero for an
+// end left open. Days rather than instants, because a day is what was typed and
+// what the chip has to be able to say back.
 type span struct {
 	after, before time.Time
 }
 
 func (s span) empty() bool { return s.after.IsZero() && s.before.IsZero() }
 
-// same compares two spans by the instants they name. == would compare the
-// time.Time structs, which a parsed day and a computed one need not share.
+// same compares two spans by the days they name. == would compare the time.Time
+// structs, which a parsed day and a computed one need not share.
 func (s span) same(other span) bool {
 	return s.after.Equal(other.after) && s.before.Equal(other.before)
 }
 
-// instants turns the pair into the bounds the query carries. Before is the day
-// *after* the one named, the range being half-open: a search bounded at a day's
-// first instant would lose the whole of the day it named.
-func (s span) instants() (after, before time.Time) {
-	after = s.after
-	if !s.before.IsZero() {
-		before = s.before.AddDate(0, 0, 1)
+// spanLabel is what the date chip reads for the window the query holds. Before
+// is the first instant *dropped*, so the last day inside the span is the one
+// before it — which is the day the reader named.
+func spanLabel(after, before time.Time) string {
+	last := time.Time{}
+	if !before.IsZero() {
+		last = before.AddDate(0, 0, -1)
 	}
 
-	return after, before
-}
-
-// label is the chip's whole text. A span with one end open says which end it is,
-// there being no second date to read the direction from.
-func (s span) label() string {
 	switch {
-	case s.after.IsZero() && s.before.IsZero():
+	case after.IsZero() && last.IsZero():
 		return anyTimeLabel
-	case s.before.IsZero():
-		return "Since " + shortDay(s.after)
-	case s.after.IsZero():
-		return "Until " + shortDay(s.before)
-	case s.after.Equal(s.before):
-		return shortDay(s.after)
+	case last.IsZero():
+		return "Since " + shortDay(after)
+	case after.IsZero():
+		return "Until " + shortDay(last)
+	case after.Equal(last):
+		return shortDay(after)
 	}
 
-	return shortDay(s.after) + " to " + shortDay(s.before)
+	return shortDay(after) + " to " + shortDay(last)
 }
 
 // The layouts a day is read and written in: typed as the unambiguous ordering,
 // shown on a chip as the short one, with the year only when it is not this one.
+// A month and a year are the shorter forms `during:` takes, a reader naming
+// August rather than its thirty-one days.
+//
 // dayEntryHint is that first layout said in letters rather than in Go's
 // reference date, which as a placeholder reads as a date somebody already typed.
 const (
-	dayEntryLayout = "2006-01-02"
-	dayEntryHint   = "YYYY-MM-DD"
-	shortDayLayout = "Jan 2"
-	longDayLayout  = "Jan 2, 2006"
+	dayEntryLayout   = "2006-01-02"
+	monthEntryLayout = "2006-01"
+	yearEntryLayout  = "2006"
+	dayEntryHint     = "YYYY-MM-DD"
+	shortDayLayout   = "Jan 2"
+	longDayLayout    = "Jan 2, 2006"
 )
 
 // shortDay names a day in as little as still says it.
@@ -769,6 +916,15 @@ func shortDay(t time.Time) string {
 	}
 
 	return t.Format(shortDayLayout)
+}
+
+// dayValue is a day as a term is written with it, "" for an end left open.
+func dayValue(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+
+	return t.Format(dayEntryLayout)
 }
 
 // searchSpanPresets are the runs of days worth a chip: what a reader means by a
@@ -793,12 +949,11 @@ func presetSpan(days int) span {
 	return span{after: today.AddDate(0, 0, -(days - 1))}
 }
 
-// dateDrawer is what the date chip opens: the two ends typed out, and the runs
-// worth not typing. Unlike the author drawer it stays open after a choice — a
-// range is two answers, and a preset is as often the start of narrowing one as
-// the end of it.
+// dateDrawer is the drawer's date body: the two ends typed out, and the runs
+// worth not typing. It reports a span rather than writing the field itself — the
+// dialog owns the text, and two writers of one string is two readings of it.
 type dateDrawer struct {
-	slot *fyne.Container
+	body *fyne.Container
 
 	after, before *dateField
 	presets       []*searchChip
@@ -823,16 +978,30 @@ func newDateDrawer(onChange func(span), onCancel func()) *dateDrawer {
 	}
 
 	gap := theme.Sizes.IslandChipGap
-	w.slot = drawerSlot(VBoxNoSpacing(
+	w.body = VBoxNoSpacing(
 		HBoxNoSpacing(w.after.content, HorizontalSpacer(gap), w.before.content),
 		VerticalSpacer(gap),
-		NewFlow(islandInnerWidth(), gap, chips...),
-	))
+		NewFlow(searchDrawerWidth(), gap, chips...),
+	)
 
 	return w
 }
 
-// commit reports the span the fields now hold. Driven from the fields own
+// fill seeds the panel from the field, so a span typed as terms and one picked
+// here are the same two boxes. Before is the first instant dropped, so the box
+// says the day before it — which is the day `before:` named.
+func (w *dateDrawer) fill(terms SearchTerms) {
+	held := span{after: terms.After}
+	if !terms.Before.IsZero() {
+		held.before = terms.Before.AddDate(0, 0, -1)
+	}
+
+	w.after.setDay(held.after)
+	w.before.setDay(held.before)
+	w.mark(held)
+}
+
+// commit reports the span the fields now hold. Driven from the fields' own
 // parsing, which stays silent while a date is half-typed: a request per keystroke
 // of a full date would be nine requests for days nobody named.
 func (w *dateDrawer) commit() {
@@ -851,19 +1020,6 @@ func (w *dateDrawer) pickPreset(days int) {
 	w.after.setDay(chosen.after)
 	w.before.setDay(chosen.before)
 	w.set(chosen)
-}
-
-// clear empties both ends and says so, which is what the chip's own way out is.
-func (w *dateDrawer) clear() {
-	w.reset()
-	w.onChange(w.span)
-}
-
-// reset is that silently, for a caller putting several things back at once.
-func (w *dateDrawer) reset() {
-	w.after.setDay(time.Time{})
-	w.before.setDay(time.Time{})
-	w.mark(span{})
 }
 
 func (w *dateDrawer) set(chosen span) {
@@ -938,8 +1094,8 @@ func (f *dateField) take(day time.Time) bool {
 	return true
 }
 
-// setDay writes the box from a preset. Silent: the drawer is reporting the whole
-// span itself and must not be re-entered once per field.
+// setDay writes the box from a preset or from the field. Silent: the drawer is
+// reporting the whole span itself and must not be re-entered once per box.
 func (f *dateField) setDay(day time.Time) {
 	f.day = day
 
@@ -1113,6 +1269,21 @@ func (c *searchChip) paint() {
 		c.label.Color = tinted
 		c.label.Refresh()
 	}
+}
+
+// termChip is that chip carrying the term it writes, for the run above the
+// field. A chip with no value stands for a *kind* of answer rather than a
+// condition — which person, which days — and opens the drawer instead of
+// toggling.
+type termChip struct {
+	*searchChip
+
+	key   SearchKey
+	value string
+}
+
+func newTermChip(res fyne.Resource, label string, key SearchKey, value string) *termChip {
+	return &termChip{searchChip: newSearchChip(res, label, nil), key: key, value: value}
 }
 
 // pickChip is that chip carrying the number it stands for, for a run where one

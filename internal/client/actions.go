@@ -613,6 +613,32 @@ func (c *Client) SearchMessages(channelID, query string, sort domain.MessageSort
 	return c.search(channelID, sort, params)
 }
 
+// ScanMessages is a page of the channel's history read *as* a search: what the
+// caller wants is not a word but a property of the message — an image, an author,
+// a reaction — and `DataMessageSearch` takes none of those. So a query with no
+// text is answered by reading the messages, which only the history route will
+// hand over in bulk.
+//
+// The parameters are SearchMessages' own so a caller can walk either source with
+// one loop, and cursor and span meet the same way: pageFrom sends whichever is
+// tighter. Relevance ranks nothing here — there is no query to be relevant to —
+// so it walks backwards like Newest.
+func (c *Client) ScanMessages(channelID string, sort domain.MessageSort, limit int,
+	after, before time.Time, cursor string) ([]*domain.Message, error) {
+
+	params := revoltgo.ChannelSearchParams{
+		Limit:  limit,
+		After:  boundaryID(after),
+		Before: boundaryID(before),
+	}
+	if sort == domain.SortRelevance {
+		sort = domain.SortNewest
+	}
+	pageFrom(&params, sort, cursor)
+
+	return c.scan(channelID, sort, params)
+}
+
 // pageFrom tightens a request onto the page after cursor, which is the result
 // the caller already holds furthest along the order it asked for. Which end
 // moves is that order's: a newest-first answer walks backwards through before,
@@ -692,6 +718,36 @@ func (c *Client) search(channelID string, sort domain.MessageSort, params revolt
 		slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
 	case domain.SortOldest:
 		slices.SortFunc(messages, oldestFirst)
+	}
+
+	return messages, nil
+}
+
+// scan is that request against the history route instead, for a search with no
+// words in it. Deliberately not messagePage: that claims c.fetching for the
+// channel, and a scan is many requests in a row against the one channel the
+// reader is also scrolling — every page after the first would answer ErrBusy, or
+// take the claim away from the scroll that wanted it. Like search it comes from a
+// keystroke, and like search it writes nothing two answers could interleave in.
+func (c *Client) scan(channelID string, sort domain.MessageSort, params revoltgo.ChannelSearchParams) ([]*domain.Message, error) {
+	session := c.session.Load()
+	if session == nil {
+		return nil, ErrNoSession
+	}
+	page := params.ChannelMessagesParams
+	page.Sort = wireSort(sort)
+	page.IncludeUsers = true
+
+	answer, err := session.ChannelMessages(channelID, page)
+	if err != nil {
+		return nil, err
+	}
+
+	messages := toMessages(answer.Messages)
+	if sort == domain.SortOldest {
+		slices.SortFunc(messages, oldestFirst)
+	} else {
+		slices.SortFunc(messages, func(a, b *domain.Message) int { return oldestFirst(b, a) })
 	}
 
 	return messages, nil

@@ -9,15 +9,15 @@ import (
 	"unicode/utf8"
 )
 
-// emojiIDLen is the exact length of a custom emoji's ULID.
-const emojiIDLen = 26
+// idLen is the exact length of a Revolt ID, every one of them being a ULID.
+const idLen = 26
 
-// IsEmojiID reports whether s is a custom emoji's ULID rather than a literal
-// emoji. Revolt carries both in one field and says nothing about which, so the
-// value decides. Only the exact length will do — a range would read a two-letter
-// flag as an ID.
-func IsEmojiID(s string) bool {
-	if len(s) != emojiIDLen {
+// IsID reports whether s is shaped like one. Only the exact length will do,
+// wherever this is asked: the callers are all telling an ID from something else
+// carried in the same field, and a range would read a two-letter flag or a short
+// handle as one.
+func IsID(s string) bool {
+	if len(s) != idLen {
 		return false
 	}
 
@@ -32,6 +32,11 @@ func IsEmojiID(s string) bool {
 
 	return true
 }
+
+// IsEmojiID reports whether a reaction's emoji is a custom one's ID rather than a
+// literal emoji. Revolt carries both in one field and says nothing about which,
+// so the value decides.
+func IsEmojiID(s string) bool { return IsID(s) }
 
 // Truncate shortens s to at most limit runes, replacing the tail with "..."
 // when it was cut.

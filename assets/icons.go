@@ -325,6 +325,7 @@ var (
 var (
 	SearchAttachmentIcon = searchIcon("search-attachment.svg")
 	SearchImageIcon      = searchIcon("search-image.svg")
+	SearchVideoIcon      = searchIcon("search-video.svg")
 	SearchLinkIcon       = searchIcon("search-link.svg")
 	SearchReactionIcon   = searchIcon("search-reaction.svg")
 	SearchJumpIcon       = searchIcon("search-jump.svg")

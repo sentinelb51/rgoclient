@@ -293,6 +293,16 @@ type Behaviour struct {
 	DeletedHoldStepMS int `json:"deleted_hold_step_ms"`
 	DeletedHoldCapMS  int `json:"deleted_hold_cap_ms"`
 
+	/* Search */
+
+	// SearchScanPages is how many requests one search may spend looking. Revolt's
+	// route filters on words alone, so everything else — who wrote it, what it
+	// carries — is answered by reading messages back and keeping the ones that
+	// match; a narrow question can therefore cost several pages of a hundred
+	// before it has a screenful. This is the ceiling on that, per press, and the
+	// island offers to spend it again rather than searching forever unasked.
+	SearchScanPages int `json:"search_scan_pages"`
+
 	/* Timing */
 
 	AuthorFetchDelayMS int `json:"author_fetch_delay_ms"`
@@ -881,6 +891,11 @@ func Default() Settings {
 			// short enough that a marked message is not mistaken for one still there.
 			// The step keeps a run of half a dozen inside the cap, and the cap is what
 			// no row stands longer than.
+			// Eight hundred messages read back for one press, which finds the
+			// pictures in an ordinary channel's last few weeks and stops well short
+			// of walking a busy one's whole history unasked.
+			SearchScanPages: 8,
+
 			DeletedHoldMS:     5000,
 			DeletedHoldStepMS: 500,
 			DeletedHoldCapMS:  8000,
@@ -1207,6 +1222,7 @@ func (s *Settings) sanitise() {
 	floor(&s.Behaviour.HistoryPageSize, 1)
 	floor(&s.Behaviour.MountedCap, s.Behaviour.InitialMountCount)
 	floor(&s.Behaviour.MessageOverscan, 0)
+	floor(&s.Behaviour.SearchScanPages, 1)
 	floor(&s.Behaviour.DeletedHoldMS, 0)
 	floor(&s.Behaviour.DeletedHoldStepMS, 0)
 	floor(&s.Behaviour.DeletedHoldCapMS, s.Behaviour.DeletedHoldMS)

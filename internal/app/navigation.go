@@ -256,10 +256,12 @@ func (a *App) buildChannelList() fyne.CanvasObject {
 	title := container.NewBorder(nil, nil, nil,
 		ui.HBoxNoSpacing(a.groupAdd, a.serverCog), a.serverHeader)
 
-	// The pinned group sits outside that padding and above the scroll: full column
-	// width, which is what says it is not one of the rows below, and it does not
-	// scroll away from what it leads to.
-	header := ui.VBoxNoSpacing(container.NewPadded(title), a.channelTop)
+	// The pinned group sits above the scroll rather than in it, so it does not
+	// scroll away from what it leads to — but inside the same side padding, or its
+	// rows stand six pixels left of every row below them in the one column. What
+	// says it is not one of those is the divider under it.
+	header := ui.VBoxNoSpacing(container.NewPadded(title),
+		container.NewBorder(nil, nil, ui.HorizontalSpacer(pad), ui.HorizontalSpacer(pad), a.channelTop))
 
 	a.channelColumn = container.NewBorder(header, nil, nil, nil, scroll)
 

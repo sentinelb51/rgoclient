@@ -800,10 +800,11 @@ func (s *store) Channel(channelID string) (domain.Channel, bool) {
 
 	switch out.Kind {
 	case domain.ChannelSavedMessages:
+		// No picture: the row it becomes is led by the notepad glyph, and the only
+		// avatar Revolt has for this channel is the account's own — which draws the
+		// reader's face against notes they wrote to themselves.
 		out.Name = "Saved Notes"
-		if self := state.Self(); self != nil {
-			out.AvatarURL = self.AvatarURL(avatarSize)
-		}
+		out.AvatarURL = ""
 	case domain.ChannelDM:
 		out.Name = "Direct Message"
 		if user := state.User(recipientID(state, channel)); user != nil {

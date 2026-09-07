@@ -397,7 +397,8 @@ func (w *ChannelWidget) CreateRenderer() fyne.WidgetRenderer {
 	// the row still says once nobody is composing, where the mark comes and goes.
 	// Hidden it costs no width, so a row with neither is the row as it was.
 	w.content = container.NewBorder(nil, nil,
-		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading),
+		container.NewHBox(indicators, HorizontalSpacer(theme.Sizes.ChannelLeftPadding), w.leading,
+			HorizontalSpacer(theme.Sizes.ChannelLeadingGap)),
 		HBoxNoSpacing(
 			container.NewCenter(w.typingMark),
 			HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
@@ -977,18 +978,12 @@ func drawIndicator(expanded bool) fyne.CanvasObject {
 	return container.NewCenter(container.NewGridWrap(fyne.NewSize(size, size), container.NewWithoutLayout(lines...)))
 }
 
-// avatarLed reports whether a row is led by a picture rather than a glyph, which
-// is also what makes it the taller card. Every conversation but Saved Notes,
-// whose picture would be this account's own avatar standing in for a notepad.
-func avatarLed(kind domain.ChannelKind) bool {
-	return kind.IsConversation() && kind != domain.ChannelSavedMessages
-}
-
-// channelRowHeight is how tall a row is drawn, which is decided by the same thing
-// that decides what leads it: a conversation is a card led by a picture, and a
-// channel a line led by a glyph.
+// channelRowHeight is how tall a row is drawn: a conversation is a card, and a
+// server channel a line. Saved Notes is a card like the rest of the column even
+// though a notepad leads it rather than a face — it is drawn among them, and one
+// short row in a column of cards is what a misalignment looks like.
 func channelRowHeight(kind domain.ChannelKind) float32 {
-	if avatarLed(kind) {
+	if kind.IsConversation() {
 		return theme.Sizes.ConversationItemHeight
 	}
 
@@ -996,9 +991,16 @@ func channelRowHeight(kind domain.ChannelKind) float32 {
 }
 
 // channelLeading is what precedes a channel's name in its row: a conversation's
-// avatar, or the type glyph. Centred, the row being taller than either.
+// picture, or the type glyph. Centred, the row being taller than either. Saved
+// Notes is the conversation with no picture — Revolt offers the account's own
+// avatar, which draws the reader against notes they wrote to themselves — so it
+// wears the notepad on a disc and keeps the column one width all the way down.
 func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
-	if avatarLed(channel.Kind) {
+	if channel.Kind == domain.ChannelSavedMessages {
+		return conversationLead(NotesIcon())
+	}
+
+	if channel.Kind.IsConversation() {
 		side := theme.Sizes.ConversationAvatarSize
 		avatar := circularAvatar(deps.Images, channel.AvatarURL, fyne.NewSize(side, side))
 
@@ -1010,6 +1012,19 @@ func channelLeading(deps Deps, channel domain.Channel) fyne.CanvasObject {
 	}
 
 	return ChannelGlyph(channel.Kind)
+}
+
+// conversationLead is the disc a conversation with no picture is led by, in the
+// column every other row fills with a face: Saved Notes, and the friends row
+// above it. The mark alone would be two thirds the width and none of the weight,
+// which in a column of faces reads as a row that has failed to load rather than
+// one that has no picture to draw.
+func conversationLead(glyph fyne.CanvasObject) fyne.CanvasObject {
+	side := theme.Sizes.ConversationAvatarSize
+	disc := canvas.NewCircle(theme.Colors.ConversationGlyphBg)
+
+	return container.NewCenter(container.NewGridWrap(fyne.NewSize(side, side),
+		container.NewStack(disc, container.NewCenter(glyph))))
 }
 
 // channelIcon is a server channel's own picture standing where its glyph would.

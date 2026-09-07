@@ -88,6 +88,7 @@ var Colors = struct {
 	VideoScrim color.Color
 
 	AvatarPlaceholder   color.Color
+	ConversationGlyphBg color.Color
 	UnreadIndicator     color.Color
 	MentionIndicator    color.Color
 	MentionBadgeBg      color.Color
@@ -457,10 +458,16 @@ var Colors = struct {
 	// An attachment is outlined at rest, so hovering one lightens its edge rather
 	// than drawing it: a hover border a shade off the outline it replaces would
 	// read as nothing happening at all.
-	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},    // #2B3142
-	VideoScrim:            color.RGBA{R: 8, G: 9, B: 12, A: 176},      // near-black wash
-	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255},   // muted blue
-	UnreadIndicator:       color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
+	AttachmentHoverBorder: color.RGBA{R: 43, G: 49, B: 66, A: 255},  // #2B3142
+	VideoScrim:            color.RGBA{R: 8, G: 9, B: 12, A: 176},    // near-black wash
+	AvatarPlaceholder:     color.RGBA{R: 60, G: 72, B: 110, A: 255}, // muted blue
+
+	// The disc a conversation with no picture is led by — Saved Notes, the friends
+	// row. Flat and grey where a picture that has not arrived is the blue above, so
+	// nothing here reads as a face still loading.
+	ConversationGlyphBg: color.RGBA{R: 58, G: 66, B: 86, A: 255}, // #3A4256
+
+	UnreadIndicator: color.RGBA{R: 231, G: 233, B: 239, A: 255}, // #E7E9EF
 
 	// A mention takes over the marker the unread bar draws in rather than standing
 	// beside it — every mention is unread, so a row wearing both would be saying one
@@ -744,6 +751,10 @@ var Sizes = struct {
 	UnreadIndicatorWidth  float32
 	SelectionMarkerWidth  float32
 	ChannelLabelSize      float32
+	// The gap between a row's leading slot - its avatar or type glyph - and the
+	// name beside it. Fyne's own padding sits either side of it, so the space the
+	// reader sees is this plus twice that.
+	ChannelLeadingGap float32
 
 	// The count a channel row carries at its trailing end. Height is fixed so the
 	// pill is the same shape at one digit and at three, the width following the
@@ -1218,11 +1229,6 @@ var Sizes = struct {
 	FriendsPageWidth   float32
 	FriendsPagePadding float32
 
-	// FriendsFilterWidth is the box in the header's trailing edge. Fixed rather
-	// than filling: the header is a title and this, and a field taking the whole
-	// remainder of a maximised window reads as the page's subject.
-	FriendsFilterWidth float32
-
 	FriendsRowHeight    float32
 	FriendsCardPaddingH float32
 	FriendsCardPaddingV float32
@@ -1398,6 +1404,7 @@ var Sizes = struct {
 	UnreadIndicatorWidth:  1,
 	SelectionMarkerWidth:  3,
 	ChannelLabelSize:      14,
+	ChannelLeadingGap:     4,
 
 	MentionBadgeHeight:   16,
 	MentionBadgeMinSize:  16,
@@ -1860,7 +1867,6 @@ var Sizes = struct {
 
 	FriendsPageWidth:   620,
 	FriendsPagePadding: 20,
-	FriendsFilterWidth: 220,
 
 	FriendsRowHeight:    56,
 	FriendsCardPaddingH: 14,

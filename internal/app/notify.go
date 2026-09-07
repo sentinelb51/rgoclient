@@ -261,11 +261,13 @@ func (a *App) acceptFriend(userID, name string) {
 
 // removeFriend covers unfriending, declining and withdrawing alike: Revolt spends
 // one route on all three, and which it is depends on where the relationship
-// stood, which the button that raised it has already read.
-func (a *App) removeFriend(userID, name string) {
+// stood, which the button that raised it has already read. So does the receipt:
+// one route is not one *event*, and a withdrawn request reported as a friendship
+// ended says something that never happened.
+func (a *App) removeFriend(userID, name, receipt string) {
 	a.reportAction(
 		func() error { return a.client.RemoveFriend(userID) },
-		"remove friend "+userID, "Could not update your relationship with %s.", "%s is no longer a friend.", name,
+		"remove friend "+userID, "Could not update your relationship with %s.", receipt, name,
 	)
 }
 
@@ -363,7 +365,7 @@ func (a *App) confirmRemoveFriend(userID, name string) {
 		Action: "Remove",
 		Tone:   ui.ToneDanger,
 		OnConfirm: func() {
-			a.removeFriend(userID, name)
+			a.removeFriend(userID, name, "%s is no longer a friend.")
 		},
 	})
 }

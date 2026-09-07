@@ -312,7 +312,8 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		// declined request can be sent again.
 		return []ui.ProfileButton{
 			act("Accept request", ui.ProfileActionAccept, false, func() { a.acceptFriend(userID, name) }),
-			act("Ignore request", ui.ProfileActionDecline, false, func() { a.removeFriend(userID, name) }),
+			act("Ignore request", ui.ProfileActionDecline, false,
+				func() { a.removeFriend(userID, name, "%s's friend request was ignored.") }),
 		}
 
 	case domain.RelationshipOutgoing:
@@ -320,7 +321,8 @@ func (a *App) relationshipButtons(profile domain.Profile, done func()) []ui.Prof
 		// read as one that had never been asked.
 		return []ui.ProfileButton{
 			{Label: "Request sent"},
-			act("Cancel request", ui.ProfileActionDecline, false, func() { a.removeFriend(userID, name) }),
+			act("Cancel request", ui.ProfileActionDecline, false,
+				func() { a.removeFriend(userID, name, "Your friend request to %s was cancelled.") }),
 		}
 
 	case domain.RelationshipBlocked:

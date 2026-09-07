@@ -88,17 +88,20 @@ func (w *FriendsRow) SetState(selected, pending bool) {
 func (w *FriendsRow) CreateRenderer() fyne.WidgetRenderer {
 	w.selectionIndicator.SetMinSize(fyne.NewSize(theme.Sizes.SelectionMarkerWidth, 0))
 	w.pendingBar.SetMinSize(fyne.NewSize(theme.Sizes.UnreadIndicatorWidth, 0))
-	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ChannelItemHeight))
+	w.background.SetMinSize(fyne.NewSize(0, theme.Sizes.ConversationItemHeight))
 	w.refreshAppearance()
 
-	// The marker slot, the padding and the glyph are the channel row's, so the two
-	// line up despite being different widgets — both indicators sharing the one slot
-	// there and here, the narrower wrapped so it stays at its own width.
+	// The marker slot, the padding, the lead, the gap after it and the height are
+	// a conversation row's, so the two line up despite being different widgets —
+	// both indicators sharing the one slot there and here, the narrower wrapped so
+	// it stays at its own width. It heads the same column, and a row an eighth
+	// shorter than the ones under it is the first thing the eye finds.
 	indicators := container.NewStack(w.selectionIndicator, container.NewHBox(w.pendingBar))
 	leading := container.NewHBox(
 		indicators,
 		HorizontalSpacer(theme.Sizes.ChannelLeftPadding),
-		GroupIcon(),
+		conversationLead(GroupIcon()),
+		HorizontalSpacer(theme.Sizes.ChannelLeadingGap),
 	)
 	content := container.NewBorder(nil, nil, leading, nil, NewEllipsisText(w.label))
 
@@ -212,10 +215,15 @@ type FriendsPage struct {
 	// not put back a card the filter had taken away.
 	filter string
 
-	/* Asking somebody new */
+	/* Finding somebody */
 
-	handle *askEntry
+	// field is the page's one input and both of the things it is for: what is
+	// typed narrows the list, and where it is a whole handle the button beside it
+	// sends a request to somebody the list does not have. askRow is kept for the
+	// relayout that button appearing needs.
+	field  *friendsField
 	ask    *Button
+	askRow *fyne.Container
 }
 
 var _ fyne.Widget = (*FriendsPage)(nil)
@@ -238,10 +246,10 @@ func NewFriendsPage(deps Deps, onUser func(userID string, anchor fyne.CanvasObje
 	body := NewPlainVScroll(
 		friendsCentred(NewInset(p.list, 0, padding, padding, padding)))
 
-	// The ask stands between the header and the list rather than in it: the list is
-	// replaced wholesale on every refill, and presence alone refills it — a field
-	// rebuilt under somebody typing would lose what they had typed.
-	p.content = NewFillColumn(2, p.buildHeader(), p.buildAsk(onAsk), body)
+	// The search bar stands between the header and the list rather than in it: the
+	// list is replaced wholesale on every refill, and presence alone refills it — a
+	// field rebuilt under somebody typing would lose what they had typed.
+	p.content = NewFillColumn(2, p.buildHeader(), p.buildSearch(onAsk), body)
 	p.ExtendBaseWidget(p)
 	p.Hide()
 
@@ -255,41 +263,36 @@ func (p *FriendsPage) CreateRenderer() fyne.WidgetRenderer {
 // buildHeader is the row over the list, built as the message header is: the same
 // padding, the same bold label and the same kind of glyph in front of it, so
 // swapping one view for the other moves nothing along the top of the window.
-// The filter rides in the header's trailing edge rather than in the list: the
-// list is replaced wholesale on every refill, and presence alone refills it — a
-// field rebuilt under somebody typing would lose what they had typed, which is
-// the same reason the ask row stands where it does.
+// Nothing else stands in it: the one field this page has is the bar under it,
+// which is where the page's own column starts.
 func (p *FriendsPage) buildHeader() fyne.CanvasObject {
 	title := widget.NewLabelWithStyle("Friends", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 
-	filter, _ := newFilterField("Filter by name", func(query string) {
-		p.filter = strings.ToLower(strings.TrimSpace(query))
-		p.redraw()
-	})
-
-	return container.NewPadded(
-		container.NewBorder(nil, nil, container.NewHBox(GroupIcon(), title),
-			NewFixedWidthContainer(theme.Sizes.FriendsFilterWidth, filter)))
+	return container.NewPadded(container.NewHBox(GroupIcon(), title))
 }
 
-// buildAsk is the row that reaches somebody the client has never drawn. Every
-// other way to a person is a surface they appear on — a message, a member row —
-// so without this an account you were simply told the name of cannot be reached
-// at all. The placeholder spells the shape Revolt matches on: it looks accounts
-// up by the name *and* the discriminator and guesses at neither, so a bare name
-// finds nobody.
+// buildSearch is the page's one field, and both of the things a reader comes to
+// this page with somebody in mind for: narrowing the list to them, and reaching
+// them when they are not in it. They are one question typed once — a name finds
+// the rows carrying it, and a whole handle finds the row *or*, where there is
+// none, offers to send a request — so they are one control rather than two boxes
+// asking for the same string. Every other way to a person is a surface they
+// appear on, and a stranger appears on none.
+//
+// The button stands only while what is typed is a name and a discriminator,
+// which is the shape Revolt looks accounts up by: it matches on both and guesses
+// at neither, so a bare name is a filter and nothing else.
 //
 // It stands in the column the list is in rather than in the header: it is one of
-// the things this page is for, not a way to look at it. One surface, not a field
-// on a card — the button is seated *inside* the field's trailing edge, the two
-// being one control: type a handle, send it. A box in a box is what two of them
-// looked like.
-func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) fyne.CanvasObject {
+// the things this page is for, not a way to look at it. The button is seated
+// *inside* the field's trailing edge, the two being one control; a box in a box
+// is what two of them looked like.
+func (p *FriendsPage) buildSearch(onAsk func(handle string, done func(sent bool))) fyne.CanvasObject {
 	field := canvas.NewRectangle(theme.Colors.ComposerBg)
 	field.CornerRadius = theme.Sizes.FriendsAskRadius
 	Outline(field)
 
-	p.handle = &askEntry{onFocus: func(focused bool) {
+	p.field = &friendsField{onFocus: func(focused bool) {
 		edge := theme.Colors.Outline
 		if focused {
 			edge = ToneInfo.Color()
@@ -298,15 +301,26 @@ func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) 
 		field.StrokeColor = edge
 		field.Refresh()
 	}}
-	p.handle.ExtendBaseWidget(p.handle)
-	p.handle.PlaceHolder = "name#0000"
+	p.field.ExtendBaseWidget(p.field)
+	p.field.PlaceHolder = "Search by name, or add by name#0000"
+
+	p.field.OnChanged = func(text string) {
+		p.filter = strings.ToLower(friendsQuery(text))
+		p.offerAsk(looksLikeHandle(text))
+		p.redraw()
+	}
 
 	// Tap rather than the action: it is the only path that reads the disabled state,
-	// so Enter cannot send a second request while the first is out.
-	p.handle.OnSubmitted = func(string) { p.ask.Tap() }
+	// so Enter cannot send a second request while the first is out. Nothing is sent
+	// by a filter being submitted, the button standing only where there is a handle.
+	p.field.OnSubmitted = func(string) {
+		if p.ask.Visible() {
+			p.ask.Tap()
+		}
+	}
 
 	p.ask = NewWeightedButton("Add friend", ButtonPrimary, func() {
-		handle := strings.TrimSpace(p.handle.Text)
+		handle := strings.TrimSpace(p.field.Text)
 		if handle == "" {
 			return
 		}
@@ -314,11 +328,12 @@ func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) 
 		p.ask.Disable()
 		onAsk(handle, func(sent bool) {
 			if sent {
-				p.handle.SetText("")
+				p.field.SetText("")
 			}
 			p.ask.Enable()
 		})
 	})
+	p.ask.Hide()
 
 	gap := theme.Sizes.FriendsGap
 	inset := theme.Sizes.FriendsAskInset
@@ -326,43 +341,91 @@ func (p *FriendsPage) buildAsk(onAsk func(handle string, done func(sent bool))) 
 
 	// The mark starts where a card's picture does, so the bar and the rows under it
 	// share one left edge.
-	mark := newScaledIcon(tintedIcon(assets.SystemAddedIcon, theme.Colors.IslandHintText),
+	mark := newScaledIcon(tintedIcon(assets.SearchIcon, theme.Colors.IslandHintText),
 		theme.Sizes.FriendsAskGlyph)
 
-	row := NewFillRow(2,
+	p.askRow = NewFillRow(2,
 		container.NewCenter(mark),
 		HorizontalSpacer(gap),
-		vcenter(WithCaret(p.handle)),
+		vcenter(WithCaret(p.field)),
 		NewInset(p.ask, inset, inset, gap, 0),
 	)
 
 	bar := NewFixedHeightContainer(theme.Sizes.FriendsAskHeight,
 		container.NewStack(field,
-			NewInset(row, 0, 0, theme.Sizes.FriendsCardPaddingH, inset)))
+			NewInset(p.askRow, 0, 0, theme.Sizes.FriendsCardPaddingH, inset)))
 
 	// The gap below is the one between sections: the first heading is as far from
 	// the bar as it would be from the section before it.
 	return friendsCentred(NewInset(bar, padding, theme.Sizes.FriendsGroupGap, padding, padding))
 }
 
-// askEntry is the handle field, extended only to report the caret. The bar has no
+// offerAsk puts the send button up or takes it down. noSpacingLayout lays out the
+// visible children only, and hiding one does not re-run a layout — so the slot it
+// vacates is reclaimed by hand, which is what gives the field the whole bar back
+// while what is in it is a filter.
+func (p *FriendsPage) offerAsk(offer bool) {
+	if p.ask == nil || offer == p.ask.Visible() {
+		return
+	}
+
+	if offer {
+		p.ask.Show()
+	} else {
+		p.ask.Hide()
+	}
+
+	Relayout(p.askRow)
+}
+
+// friendsQuery is what is typed, ready to compare: trimmed, and with the "@" the
+// client draws in front of a handle dropped, so one copied out of the client and
+// pasted back still finds the row it came from.
+func friendsQuery(text string) string {
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "@"))
+}
+
+// looksLikeHandle reports whether what is typed is a name and a discriminator,
+// which is the only shape the lookup takes. It decides whether the button is
+// offered and nothing else — the client cleans the handle it is given and answers
+// for anything this lets through.
+func looksLikeHandle(text string) bool {
+	name, discriminator, split := strings.Cut(friendsQuery(text), "#")
+
+	return split && name != "" && discriminator != ""
+}
+
+// friendsField is that field, extended to report the caret and to empty on
+// Escape as every other list-narrowing field in the client does. The bar has no
 // focus edge of its own — WithCaret makes Fyne's input border transparent, which
 // is what stops every entry in the client drawing a box inside the one it is
 // already in — so the surface around it lights instead.
-type askEntry struct {
+type friendsField struct {
 	widget.Entry
 
 	onFocus func(focused bool)
 }
 
-func (e *askEntry) FocusGained() {
+func (e *friendsField) FocusGained() {
 	e.Entry.FocusGained()
 	e.onFocus(true)
 }
 
-func (e *askEntry) FocusLost() {
+func (e *friendsField) FocusLost() {
 	e.Entry.FocusLost()
 	e.onFocus(false)
+}
+
+// TypedKey empties the field on Escape, but only while there is something to
+// empty: past that the key means what it means everywhere else in the client.
+func (e *friendsField) TypedKey(key *fyne.KeyEvent) {
+	if key.Name == fyne.KeyEscape && e.Text != "" {
+		e.SetText("")
+
+		return
+	}
+
+	e.Entry.TypedKey(key)
 }
 
 // SetSections replaces the whole list, dropping the sections nobody is in. Call
@@ -425,6 +488,11 @@ func (p *FriendsPage) redraw() {
 
 	switch {
 	case len(rows) > 0:
+	case looksLikeHandle(p.filter):
+		// The field is holding a whole handle and nothing on the page carries it, so
+		// the button beside it is the answer — say so, rather than reporting a search
+		// that failed next to the thing that would succeed.
+		rows = []fyne.CanvasObject{p.note("Nobody here by that handle. Add friend sends them a request.")}
 	case p.filter != "":
 		rows = []fyne.CanvasObject{p.note("Nobody here matches that.")}
 	default:
@@ -561,7 +629,7 @@ func (h *friendsHeader) fill(colour color.Color) {
 // an island of its own rather than a bare line, so a page with nothing to say is
 // still the page rather than a sentence floating on the background.
 func (p *FriendsPage) empty() fyne.CanvasObject {
-	return p.note("Nobody yet. Open somebody's profile to ask them to be friends.")
+	return p.note("Nobody yet. Type somebody's handle above to ask them to be friends.")
 }
 
 // note is one sentence on a card of its own, standing where the list would be.

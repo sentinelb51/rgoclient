@@ -32,8 +32,16 @@ import (
 // messages do, so its column is whatever is left between the sidebars, and the
 // line shortens rather than wrapping.
 const (
-	incomingDetail = "Declining is not final — they can ask again."
-	outgoingDetail = "Withdrawing one is not something they are told."
+	incomingDetail = "Ignoring one is not final — they can ask again."
+	outgoingDetail = "Cancelling one is not something they are told."
+)
+
+// The two request sections are named for who sent them rather than for which way
+// they are travelling: incoming and outgoing are the same word to a reader who
+// has not decided yet which of the two lists they are looking at.
+const (
+	incomingTitle = "Requests you received"
+	outgoingTitle = "Requests you sent"
 )
 
 // showFriendsPage puts the friends list where the messages go. The channel is
@@ -110,8 +118,8 @@ func (a *App) refreshFriends() {
 	// and their friends — what the reader shuts is remembered for as long as the
 	// page lives.
 	a.friendsPage.SetSections([]ui.FriendSection{
-		{Title: "Incoming requests", Detail: incomingDetail, Entries: sections.incoming},
-		{Title: "Sent requests", Detail: outgoingDetail, Entries: sections.outgoing},
+		{Title: incomingTitle, Detail: incomingDetail, Entries: sections.incoming},
+		{Title: outgoingTitle, Detail: outgoingDetail, Entries: sections.outgoing},
 		{Title: "Friends", Entries: sections.friends},
 		{Title: "Blocked", Entries: sections.blocked, Folded: true},
 	})

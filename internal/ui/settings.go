@@ -86,6 +86,11 @@ type SettingsHooks struct {
 	InputDevices  func() []AudioDevice
 	OutputDevices func() []AudioDevice
 
+	// ShareAudio is whether this machine can capture what it is playing, which
+	// is the whole of what decides if the Sound group under Screen sharing is
+	// drawn. A plain value rather than a func: it cannot change under a run.
+	ShareAudio bool
+
 	// VoiceNodes is the media servers the instance offers, crossing as a value the
 	// way an AudioDevice does. A plain read of what the controller fetched once
 	// when the session landed — never a request, so the index pass may call it.

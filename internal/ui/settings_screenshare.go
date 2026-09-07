@@ -2,6 +2,7 @@ package ui
 
 import (
 	"fmt"
+	"strconv"
 
 	"fyne.io/fyne/v2"
 
@@ -74,14 +75,17 @@ func (p *SettingsPage) screenshareSection() []settingsGroup {
 				},
 				func(s *config.Settings, picked string) { s.Screenshare.Latency = picked }),
 			p.optionRow("Codec",
-				"Prefer AV1 sends it when the graphics card can encode it, at about "+
-					"a third less bandwidth than H.264, and falls back to H.264 "+
-					"automatically where it can't. H.264 forces that fallback always, "+
-					"for viewers on older clients and servers that do not take AV1.",
+				"Best available sends AV1 or H.265 when the graphics card can encode "+
+					"it and the server takes it, at a third or more less bandwidth than "+
+					"H.264, and falls back to H.264 otherwise. H.264 forces that "+
+					"fallback for viewers on older clients and servers; H.264 baseline "+
+					"is the same for the oldest decoders of all, at about half again "+
+					"the bandwidth.",
 				settings.Codec,
 				[]settingsOption{
-					{Label: "Prefer AV1", Value: config.ShareCodecAuto},
+					{Label: "Best available", Value: config.ShareCodecAuto},
 					{Label: "H.264", Value: config.ShareCodecH264},
+					{Label: "H.264 baseline", Value: config.ShareCodecH264Baseline},
 				},
 				func(s *config.Settings, picked string) { s.Screenshare.Codec = picked }),
 			p.bandwidthRow(settings.Bandwidth),
@@ -119,7 +123,68 @@ func (p *SettingsPage) screenshareSection() []settingsGroup {
 				},
 				func(s *config.Settings, picked string) { s.Screenshare.Keyframes = picked }),
 		),
+		p.soundGroup(settings),
 	)
+}
+
+// soundGroup is what a share sends beside its picture. Empty on a machine that
+// cannot capture what it is playing, which the controller answers for.
+func (p *SettingsPage) soundGroup(settings config.Screenshare) settingsGroup {
+	if !p.hooks.ShareAudio {
+		return settingsGroup{}
+	}
+
+	return p.group("Sound",
+		"Sharing a window sends only that window's sound. Sharing a whole screen "+
+			"sends everything the machine is playing, including your notifications.",
+		p.toggleRow("Share sound",
+			"Sends what you are sharing along with the picture. People watching hear "+
+				"it in stereo, and can set your share's volume separately from your "+
+				"microphone.",
+			settings.Audio,
+			func(s *config.Settings, on bool) { s.Screenshare.Audio = on }),
+		p.optionRow("Sample rate",
+			"How much of the sound is captured. 48 kHz keeps all of it; the lower "+
+				"rates drop the highest frequencies and use less of your upload.",
+			strconv.Itoa(settings.AudioRate),
+			[]settingsOption{
+				{Label: "48 kHz", Value: "48000"},
+				{Label: "24 kHz", Value: "24000"},
+				{Label: "16 kHz", Value: "16000"},
+			},
+			func(s *config.Settings, picked string) {
+				s.Screenshare.AudioRate = settingNumber(picked, 48000)
+			}),
+		p.optionRow("Bit depth",
+			"How each sample is captured before it is encoded. This does not change "+
+				"what people hear \u2014 it only changes how the sound reaches the encoder "+
+				"on this machine.",
+			strconv.Itoa(settings.AudioBitDepth),
+			[]settingsOption{
+				{Label: "16-bit", Value: "16"},
+				{Label: "32-bit float", Value: "32"},
+			},
+			func(s *config.Settings, picked string) {
+				s.Screenshare.AudioBitDepth = settingNumber(picked, 16)
+			}),
+		p.numberRow("Sound bitrate",
+			"How much of your upload the sound may use. Well under what the picture "+
+				"costs at any setting, and the default is past the point where more "+
+				"makes a difference.",
+			settings.AudioBitrate, config.ShareAudioBitrateMin, config.ShareAudioBitrateMax, "kbit/s",
+			func(s *config.Settings, v int) { s.Screenshare.AudioBitrate = v }),
+	)
+}
+
+// settingNumber is what an option row costs a numeric setting: the row speaks
+// in strings, being the one control every choice in a section is drawn with.
+func settingNumber(picked string, fallback int) int {
+	v, err := strconv.Atoi(picked)
+	if err != nil {
+		return fallback
+	}
+
+	return v
 }
 
 // bandwidthRow is the Bandwidth option, written out rather than taken from

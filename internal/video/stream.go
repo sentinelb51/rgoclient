@@ -116,7 +116,12 @@ type LiveConfig struct {
 // frame at the start code opening the next, a whole frame of delay on a
 // live stream. The string reaches a command line, so it is matched exactly
 // rather than trusted.
-var liveFormats = map[string]bool{"ivf": true}
+//
+// H.265 is the one exception, the IVF demuxer mapping no fourcc to it: it
+// arrives as raw Annex-B with an access unit delimiter written after every
+// unit, which is the NAL the parser closes a unit on, so the frame is still
+// closed as it lands — voice.ShareHEVC and video.hevcAUD say how.
+var liveFormats = map[string]bool{"ivf": true, "hevc": true}
 
 // LiveFrames starts a child decoding a live byte stream written to its
 // stdin into raw RGBA frames — the player's exact-byte contract with no file

@@ -105,6 +105,7 @@ func (a *App) resetSessionState() {
 	a.pendingReplies = nil
 	a.uncached = make(map[string]*domain.Message)
 	a.fetchedReplies = make(map[string]bool)
+	a.shareRefused.reset()
 
 	// The page guard is released here rather than by the worker holding it: a page
 	// still in flight is now stale and skips its own cleanup, and a flag left set

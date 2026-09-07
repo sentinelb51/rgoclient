@@ -140,6 +140,7 @@ func (s *nullSink) Write(string, []int16) {}
 func (s *nullSink) Remove(string)         {}
 func (s *nullSink) Reset()                {}
 func (s *nullSink) Open(string)           {}
+func (s *nullSink) OpenStereo(string)     {}
 func (s *nullSink) Wake() <-chan struct{} { return s.wake }
 func (s *nullSink) Want(string) int       { return 960 }
 
@@ -415,8 +416,11 @@ func TestLiveScreenshare(t *testing.T) {
 		clockArgs = append(clockArgs, w, h)
 	}
 	settings := config.Default().Screenshare
-	if os.Getenv("RGO_SHARE_CODEC") == "h264" {
+	switch os.Getenv("RGO_SHARE_CODEC") {
+	case "h264":
 		settings.Codec = config.ShareCodecH264
+	case "h264-baseline":
+		settings.Codec = config.ShareCodecH264Baseline
 	}
 
 	tools, ok := video.Discover()
@@ -551,35 +555,45 @@ func TestLiveScreenshare(t *testing.T) {
 	width, height := fitShareBox(source.Width, source.Height, shareFallbackLimits)
 	startShare := func() *sendingShare {
 		t.Helper()
-		enc, ok := tools.ShareEncoder(captureCodec(settings.Codec))
-		if !ok {
+		baseline := settings.Codec == config.ShareCodecH264Baseline
+		order := shareCodecOrder(settings.Codec)
+		if os.Getenv("RGO_SHARE_CODEC") == "hevc" {
+			order = []video.ShareCodec{video.ShareHEVC} // the tier no setting can force alone
+		}
+		var enc video.ShareEncoding
+		for _, codec := range order {
+			if found, ok := tools.ShareEncoder(codec); ok {
+				enc = found
+				break
+			}
+		}
+		if enc.Name == "" {
 			t.Fatalf("no encoder")
 		}
+		bitrate := shareBitrate(width, height, fps, enc.Codec, baseline, settings)
 		stream, err := tools.CaptureShare(video.CaptureConfig{
 			Source: source, Width: width, Height: height, FPS: fps,
-			Bitrate:         shareBitrate(width, height, fps, enc.AV1, settings),
+			Bitrate:         bitrate,
 			KeyframeSeconds: shareKeyframeSeconds(settings.Keyframes),
-			Codec:           captureCodec(settings.Codec),
+			Codec:           enc.Codec,
 			Speed:           captureSpeed(settings.EncoderSpeed),
 			Latency:         captureLatency(settings.Latency),
 			Rate:            captureRate(settings.RateControl),
+			Baseline:        baseline,
 		})
 		if err != nil {
 			t.Fatalf("CaptureShare: %v", err)
 		}
-		sending := &sendingShare{stream: stream, tee: video.NewShareTee(stream, enc.AV1, width, height), av1: enc.AV1,
-			encoder: enc.Name, width: width, height: height}
-		codec := voice.SendShareH264
-		if enc.AV1 {
-			codec = voice.SendShareAV1
-		}
+		sending := &sendingShare{stream: stream, tee: video.NewShareTee(stream, enc.Codec, width, height), codec: enc.Codec,
+			encoder: enc.Name, width: width, height: height, done: make(chan struct{})}
+		codec := sendShareCodec(enc.Codec, baseline)
 		began := time.Now()
 		if err := senderCall.StartShare(sending.tee, codec, width, height, fps); err != nil {
 			sending.halt()
 			t.Fatalf("StartShare: %v", err)
 		}
 		t.Logf("sharing %dx%d@%d as %s via %s (%d kbit/s); publish took %.0f ms",
-			width, height, fps, codec, enc.Name, shareBitrate(width, height, fps, enc.AV1, settings)/1000,
+			width, height, fps, codec, enc.Name, bitrate/1000,
 			float64(time.Since(began).Microseconds())/1000)
 
 		return sending
@@ -630,7 +644,11 @@ func TestLiveScreenshare(t *testing.T) {
 	time.Sleep(5 * time.Second)
 
 	preview := newWatchRun("preview")
-	in, err := preview.openStream(tools, voice.ShareIVF, sending.width, sending.height)
+	previewFormat := voice.ShareIVF
+	if sending.codec == video.ShareHEVC {
+		previewFormat = voice.ShareHEVC
+	}
+	in, err := preview.openStream(tools, previewFormat, sending.width, sending.height)
 	if err != nil {
 		t.Fatalf("preview: %v", err)
 	}
@@ -693,7 +711,11 @@ func TestLiveScreenshare(t *testing.T) {
 	unwatch(run)
 	run.report(t, fps)
 
-	// 6. Sender's own stream dying (the window closing): ShareStopped.
+	// 6. Sender's own stream dying (the window closing): ShareStopped. The
+	// capture child exits about half a second after its window is destroyed
+	// (measured 2026-09, both graphs). A clock window left behind by an
+	// earlier run is the one way this fails: the source is picked by title,
+	// so a stale RGO-CLOCK is what gets shared and it never dies.
 	began = time.Now()
 	_ = clock.Process.Kill()
 	select {

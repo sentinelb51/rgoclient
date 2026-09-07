@@ -643,10 +643,13 @@ type Screenshare struct {
 	// the same bitrate and holds what viewers see up to a second behind.
 	Latency string `json:"latency"`
 
-	// Codec is which codec family a share goes out in. ShareCodecAuto takes
-	// AV1 where the graphics card encodes it — the same picture for around
-	// two thirds of the bandwidth — and H.264 otherwise; ShareCodecH264
-	// forces the fallback, for viewers whose clients cannot take AV1.
+	// Codec is which codec a share goes out in. ShareCodecAuto walks the
+	// codecs best first — AV1, then H.265, each where the graphics card
+	// encodes it and the room takes it, then H.264 — and the two H.264
+	// values force the floor for viewers whose clients take nothing newer:
+	// ShareCodecH264 in the Main profile every current decoder takes, and
+	// ShareCodecH264Baseline in the constrained baseline profile the oldest
+	// do, at about half again the bandwidth.
 	Codec string `json:"codec"`
 
 	// Bandwidth cuts the automatic bitrate budget a share's size and frame
@@ -675,6 +678,30 @@ type Screenshare struct {
 	// capped VBR the bandwidth between them is small — see
 	// app.shareKeyframeSeconds for what it was measured at.
 	Keyframes string `json:"keyframes"`
+
+	// Audio sends what the shared program is playing as a second track beside
+	// the picture. Sharing a window sends that window's own sound and nothing
+	// else — not a notification arriving over it — where sharing a monitor
+	// sends the whole machine's mix, the two being what the source itself
+	// resolves to. Windows only; every other platform leaves the row out.
+	Audio bool `json:"audio"`
+
+	// AudioRate is what that sound is captured and encoded at. Only rates Opus
+	// carries natively are on offer (audio.LoopbackRates), which is what keeps
+	// a resampler out of the path altogether — 44.1 kHz is absent for exactly
+	// that reason. 48000 unless a slow uplink is worth a narrower band.
+	AudioRate int `json:"audio_rate"`
+
+	// AudioBitDepth is what the audio engine is asked to deliver: 16 for signed
+	// PCM or 32 for float. It changes the capture and nothing beyond it — Opus
+	// is the wire either way — so it is a shorter or longer path to the same
+	// encoder rather than a quality dial a listener hears.
+	AudioBitDepth int `json:"audio_bit_depth"`
+
+	// AudioBitrate is the Opus ceiling in kbit/s. Music rather than speech:
+	// the default is where stereo Opus stops being what anybody notices, and a
+	// share is already spending megabits on the picture.
+	AudioBitrate int `json:"audio_bitrate"`
 }
 
 // System is what the client does with the machine rather than with Revolt:
@@ -800,10 +827,11 @@ const (
 	ShareLatencyBuffered = "buffered"
 )
 
-// Which codec family a share goes out in.
+// Which codec a share goes out in.
 const (
-	ShareCodecAuto = "auto"
-	ShareCodecH264 = "h264"
+	ShareCodecAuto         = "auto"
+	ShareCodecH264         = "h264"
+	ShareCodecH264Baseline = "h264-baseline"
 )
 
 // How much of the automatic bitrate budget a share may spend. Custom is the one
@@ -832,6 +860,13 @@ const (
 
 // How often a share resends the whole picture.
 const (
+	// The Opus ceiling a share's sound may be set to, in kbit/s. The floor is
+	// where stereo music starts being audibly compressed rather than where
+	// Opus stops working; the ceiling is past the point more bits change
+	// anything at 48 kHz stereo.
+	ShareAudioBitrateMin = 32
+	ShareAudioBitrateMax = 320
+
 	ShareKeyframesFrequent = "frequent"
 	ShareKeyframesStandard = "standard"
 	ShareKeyframesSparse   = "sparse"
@@ -1006,7 +1041,8 @@ func Default() Settings {
 		// and reacted to; the buffered mode is for showing rather than telling.
 		Screenshare: Screenshare{EncoderSpeed: ShareSpeedQuality, Latency: ShareLatencyLowest,
 			Codec: ShareCodecAuto, Bandwidth: ShareBandwidthAuto, Bitrate: 4000,
-			RateControl: ShareRateVariable, Keyframes: ShareKeyframesStandard},
+			RateControl: ShareRateVariable, Keyframes: ShareKeyframesStandard,
+			Audio: true, AudioRate: 48000, AudioBitDepth: 16, AudioBitrate: 128},
 
 		Cache: Cache{
 			ImageDiskMiB:       512,
@@ -1245,7 +1281,7 @@ func (s *Settings) sanitise() {
 		s.Screenshare.Latency = ShareLatencyLowest
 	}
 	switch s.Screenshare.Codec {
-	case ShareCodecAuto, ShareCodecH264:
+	case ShareCodecAuto, ShareCodecH264, ShareCodecH264Baseline:
 	default:
 		s.Screenshare.Codec = ShareCodecAuto
 	}
@@ -1265,6 +1301,21 @@ func (s *Settings) sanitise() {
 	default:
 		s.Screenshare.Keyframes = ShareKeyframesStandard
 	}
+
+	// A rate Opus does not carry natively would put a resampler back in a path
+	// built to have none, so an unknown one is the default rather than an
+	// argument the capture would refuse.
+	switch s.Screenshare.AudioRate {
+	case 48000, 24000, 16000, 12000, 8000:
+	default:
+		s.Screenshare.AudioRate = 48000
+	}
+	switch s.Screenshare.AudioBitDepth {
+	case 16, 32:
+	default:
+		s.Screenshare.AudioBitDepth = 16
+	}
+	s.Screenshare.AudioBitrate = clamp(s.Screenshare.AudioBitrate, ShareAudioBitrateMin, ShareAudioBitrateMax)
 
 	floor(&s.Notifications.LifetimeSeconds, 1)
 	floor(&s.Notifications.MaxStacked, 1)

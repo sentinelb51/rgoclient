@@ -26,7 +26,8 @@ import "math"
 // — music, a shared video, a client with DTX switched off — ever gets here.
 
 const (
-	// The lag search, in samples at 48 kHz. 2 ms is a 500 Hz fundamental and
+	// The lag search, in samples of one channel at 48 kHz — a stereo lane scales
+	// every one of these by its channel count. 2 ms is a 500 Hz fundamental and
 	// 10 ms a 100 Hz one, which spans a speaking voice; the top of it is also
 	// what keeps a merge inside a single 20 ms frame, since removing two periods
 	// from 960 samples needs the lag under half of them. A frame therefore never
@@ -68,7 +69,7 @@ const scaleLimit = 0.25
 // filler pops none. Occupancy follows the length of what was written, which is
 // the same accounting a plain frame gets.
 func (l *lane) retime(pcm []int16, drift int) []int16 {
-	if len(pcm) < stretchable {
+	if len(pcm) < stretchable*l.channels {
 		return pcm
 	}
 
@@ -78,7 +79,7 @@ func (l *lane) retime(pcm []int16, drift int) []int16 {
 		return pcm
 	}
 
-	lag := bestLag(pcm)
+	lag := bestLag(pcm, l.channels)
 	if lag == 0 {
 		return pcm
 	}
@@ -105,17 +106,23 @@ func (l *lane) retime(pcm []int16, drift int) []int16 {
 // bestLag is the offset at which the end of pcm most resembles itself, which
 // for voiced speech is one pitch period and for anything else is whatever
 // splices most quietly. Zero when there is nothing to go on.
-func bestLag(pcm []int16) int {
+// channels is what makes the search frame-aligned on a stereo lane: every
+// window below is that many samples wide and the lag steps by it, so a
+// candidate always compares like with like and the period that comes back is a
+// whole number of frames — which is the whole reason compress and expand can
+// stay the plain sample arithmetic they are.
+func bestLag(pcm []int16, channels int) int {
 	n := len(pcm)
-	if n < stretchable {
+	if n < stretchable*channels {
 		return 0
 	}
 
-	tail := pcm[n-matchWindow:]
+	window := matchWindow * channels
+	tail := pcm[n-window:]
 
 	best, score := 0, 0.0
-	for lag := minLag; lag <= maxLag; lag++ {
-		at := pcm[n-matchWindow-lag : n-lag]
+	for lag := minLag * channels; lag <= maxLag*channels; lag += channels {
+		at := pcm[n-window-lag : n-lag]
 
 		var dot, energy float64
 		for i, s := range at {

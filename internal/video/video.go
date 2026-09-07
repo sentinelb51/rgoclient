@@ -55,9 +55,11 @@ const (
 	decodeThreads = "2"
 
 	// PCMRate and PCMChannels are the shape of the audio stream — exactly
-	// what the client's mixer lanes take.
+	// what the client's mixer lanes take. Stereo and interleaved: the lane a
+	// player writes to is opened stereo, a film's own image being something to
+	// carry rather than to fold down and pan back out.
 	PCMRate     = 48000
-	PCMChannels = 1
+	PCMChannels = 2
 )
 
 /* Discovery */

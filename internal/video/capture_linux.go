@@ -153,7 +153,7 @@ func windowName(conn *xgb.Conn, win xproto.Window, utf8Name, utf8String xproto.A
 // offset, a window is the drawable itself. An occluded window captures
 // whatever X holds for it — garbage without a compositor — which is every X11
 // capturer's limit, stated in the picker rather than fixed here.
-func grabArgs(_ string, cfg CaptureConfig) (grab, error) {
+func grabArgs(_ string, cfg CaptureConfig, _ shareEncoder) (grab, error) {
 	display := os.Getenv("DISPLAY")
 	if display == "" {
 		display = ":0"
@@ -184,6 +184,9 @@ func grabArgs(_ string, cfg CaptureConfig) (grab, error) {
 // platform has, so there is nothing to have fallen back *from*.
 func captureFallback(_ string, _ []CaptureSource) bool { return false }
 
+// probeDirect has nothing to probe: x11grab answers with processor frames.
+func probeDirect(string, shareEncoder) {}
+
 // captureAttrs has nothing to set on Linux; the priority lands in
 // hardenCapture, the process already running.
 func captureAttrs(cmd *exec.Cmd) {}
@@ -201,3 +204,14 @@ func hardenCapture(cmd *exec.Cmd) func() {
 
 	return nil
 }
+
+// sourceProcess would be the window's _NET_WM_PID property, and is not read:
+// nothing on this platform captures per-process audio yet — a PulseAudio or
+// PipeWire monitor is the whole sink, not one client of it — so the answer
+// would have no caller. Zero is the whole machine.
+func sourceProcess(string) uint32 { return 0 }
+
+// wakeSource has nothing to do here: an X11 window is never offered as
+// minimised — CaptureSource.Minimised is Windows' alone — and un-iconifying
+// somebody else's window is the window manager's business, not a grabber's.
+func wakeSource(CaptureSource) {}

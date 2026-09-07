@@ -101,7 +101,7 @@ func (c *Call) callbacks() *lksdk.RoomCallback {
 					return
 				}
 
-				c.subscribe(track, audioLane(pub, rp.Identity()))
+				c.subscribe(track, audioLane(pub, rp.Identity()), shareAudioSource(pub))
 			},
 
 			OnTrackUnsubscribed: func(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
@@ -188,6 +188,12 @@ type lane struct {
 	// cannot close a lane a re-subscribe has since replaced.
 	track *webrtc.TrackRemote
 
+	// channels is 1 for a microphone and 2 for a screenshare's sound. Every
+	// length on this lane — the decode buffer, the scratch, the silence written
+	// for a deafened or quiet frame, and the stretcher's whole search — is
+	// counted in samples, so all of them are this times a frame.
+	channels int
+
 	// deepPLC is what this decoder was last told, so the setting is pushed on
 	// change rather than on every frame. Touched only by the filler.
 	deepPLC bool
@@ -242,12 +248,22 @@ type opusDecodeIn interface {
 // Splitting reading from playing is the whole point of a jitter buffer. Decoding
 // on the reader would play packets at the rate the network delivers them, which
 // is the rate that has jitter in it.
-func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
+// stereo says this track is a screenshare's sound rather than a microphone,
+// which is the one thing that arrives with an image of its own. The decoder is
+// built for two channels either way in that case: libopus renders a mono packet
+// into both of them, so a sender that switched to mono mid-share is decoded
+// correctly rather than at half speed.
+func (c *Call) subscribe(track *webrtc.TrackRemote, userID string, stereo bool) {
 	if userID == "" {
 		return
 	}
 
-	decoder, err := gopus.NewDecoder(sampleRate, channels)
+	laneChannels := channels
+	if stereo {
+		laneChannels = shareChannels
+	}
+
+	decoder, err := gopus.NewDecoder(sampleRate, laneChannels)
 	if err != nil {
 		log.Printf("voice: opus decoder for %s: %v", userID, err)
 		return
@@ -258,10 +274,11 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 
 	l := &lane{
 		buffer: buffer, decoder: decoder, track: track, jitter: profile,
-		scratch: make([]int16, 0, frameSize+maxLag),
+		channels: laneChannels,
+		scratch:  make([]int16, 0, (frameSize+maxLag)*laneChannels),
 	}
 	if into, ok := any(decoder).(opusDecodeIn); ok {
-		l.into, l.pcm = into, make([]int16, frameSize)
+		l.into, l.pcm = into, make([]int16, frameSize*laneChannels)
 	}
 
 	c.mu.Lock()
@@ -272,7 +289,11 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string) {
 	// The speakers only ask for audio for a lane they can see, so the lane is
 	// opened here rather than by the first frame that arrives — otherwise the
 	// first frame is waiting on a wake that is waiting on the first frame.
-	c.sink.Open(userID)
+	if stereo {
+		c.sink.OpenStereo(userID)
+	} else {
+		c.sink.Open(userID)
+	}
 
 	go c.readTrack(track, buffer, userID)
 }
@@ -345,7 +366,8 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 // lane keeps the same geometry it has when audio is flowing — the jitter
 // buffer's cursor then advances at exactly playout rate, and undeafening resumes
 // at the room's present instead of at whatever was buffered when it stopped.
-var silence [frameSize]int16
+// Sized for the widest lane; a mono one takes the front of it.
+var silence [frameSize * shareChannels]int16
 
 // lossInterval is how often the encoder is retold what the connection is losing.
 // Once a second — FEC is a running average's business, not a per-packet one.
@@ -421,14 +443,14 @@ func (c *Call) fillLanes() {
 
 			// A deafened call decodes nothing, but still moves the cursor.
 			if deafened {
-				c.sink.Write(userID, silence[:])
+				c.sink.Write(userID, silence[:frameSize*l.channels])
 				continue
 			}
 
 			if dtxPacket(payload) {
 				l.quiet++
 				if l.quiet > quietAfter {
-					c.sink.Write(userID, silence[:])
+					c.sink.Write(userID, silence[:frameSize*l.channels])
 					continue
 				}
 			} else {

@@ -53,6 +53,7 @@ import (
 	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 
+	"RGOClient/internal/audio"
 	"RGOClient/internal/config"
 	"RGOClient/internal/domain"
 	"RGOClient/internal/ui"
@@ -119,10 +120,9 @@ type shareView struct {
 	// different size or codec. fps is measured off arrivals rather than
 	// asked for: nothing on the wire carries the sender's chosen rate, and a
 	// self preview's own target can run ahead of what the encoder actually
-	// keeps up with. fpsFrames/fpsMarkAt belong to the pump goroutine alone.
-	stats     *shareStats
-	fpsFrames int
-	fpsMarkAt time.Time
+	// keeps up with. rate belongs to the pump goroutine alone.
+	stats *shareStats
+	rate  shareRate
 
 	// The pump and the painter meet in a latest-wins mailbox so neither ever
 	// waits on the other: the pump always drains the decoder — a frame held
@@ -481,18 +481,21 @@ func (a *App) startSelfPreview(v *shareView) {
 	width, height := shareDecodeSize(sending.width, sending.height)
 	epoch := a.epoch
 
-	tag := "H.264"
-	if sending.av1 {
-		tag = "AV1"
-	}
 	// Parenthesised rather than "AV1 · NVENC": a middot reads as two peer
 	// facts, which for a moment made the codec look like a choice between
 	// two things, when the encoder is only naming what is encoding it.
-	v.codecTag = tag + " (" + sending.encoder + ")"
+	v.codecTag = sending.codec.String() + " (" + sending.encoder + ")"
+
+	// What the tee hands a preview is what a watch would be handed: IVF for
+	// AV1 and H.264, raw Annex-B behind a delimiter for H.265.
+	format := voice.ShareIVF
+	if sending.codec == video.ShareHEVC {
+		format = voice.ShareHEVC
+	}
 
 	a.background(func() error {
 		stream, in, err := a.videoTools.LiveFrames(video.LiveConfig{
-			Format: string(voice.ShareIVF), Width: width, Height: height,
+			Format: string(format), Width: width, Height: height,
 		})
 		if err != nil {
 			return err
@@ -606,6 +609,156 @@ func newShareStats() *shareStats {
 	return &shareStats{container: container.NewStack(bg, inset), text: text}
 }
 
+// shareRate measures the pill's fps clause: the arrival times of the last
+// shareRateWindow of frames, so the answer is a span between two frames the
+// pump actually saw. Counting arrivals inside a wall-clock second instead —
+// which this was — reads a steady stream as anything but. Two reasons, and
+// the second is the one that shows:
+//
+//   - The count quantises to whole frames, so jitter moving one arrival
+//     across the boundary is a whole fps at 30 and reads 28..32 on a stream
+//     measured at 30.01.
+//   - A burst lands entirely inside one second. The tee hands a preview up
+//     to shareTeeQueue frames at once when it catches up from a stalled
+//     paint, and a watch's remux delivers whatever the network held back —
+//     both of which a box count reports as a rate nothing ever ran at.
+//
+// Both endpoints being arrivals is what fixes it: a burst adds frames to the
+// numerator and the span they are spread over to the denominator.
+type shareRate struct {
+	at   [shareRateSamples]time.Time
+	head int
+	n    int
+
+	first time.Time // the first arrival, which settle is counted from
+	mean  float64   // the window's answer, smoothed
+	post  time.Time // when the card was last written to
+	shown float64   // the figure standing on it
+}
+
+const (
+	// shareRateWindow is how much history the rate is measured over. The
+	// error is the jitter on the two arrivals bounding it against the span
+	// between them, so the window divides it down — but a long one also
+	// holds a watch's opening catch-up (below) for as long as it lasts, so
+	// two seconds and a mean over the top beats four and none.
+	shareRateWindow = 2 * time.Second
+
+	// shareRateSettle is the least history worth an answer. The card opens
+	// with resolution and codec and grows by one clause once there is one.
+	shareRateSettle = 1500 * time.Millisecond
+
+	// shareRateAgree is how closely the window has to agree with its own
+	// newest half before the first figure is drawn. **A watch opens by
+	// catching up**: the room delivers what it had buffered on subscribe and
+	// the pump drains it as fast as it arrives, which is right — a held
+	// frame is latency nothing takes back — and is not a frame rate. Measured
+	// on a 60 fps share it is one second of about 106 fps, which the old
+	// counter drew as 106. While any of it is still in the window the two
+	// halves are far apart, so nothing is said until they are not.
+	shareRateAgree = 0.03
+
+	// shareRatePost is the least gap between two *changes* of the figure. A
+	// held reading costs nothing, so this throttles redraws rather than the
+	// measurement.
+	shareRatePost = 500 * time.Millisecond
+
+	// shareRateSmooth is the time constant of the running mean the window's
+	// own answer is taken through. What the window leaves is the jitter on
+	// the two arrivals bounding it, and both of those are a different frame
+	// every time, so it is noise around a rate that is genuinely steady —
+	// which a mean removes and a wider window only halves.
+	shareRateSmooth = 1500 * time.Millisecond
+
+	// shareRateHold is how far the mean must move off the figure on the card
+	// before it is redrawn: the half a frame plain rounding takes anyway,
+	// plus a little. Small on purpose — the mean is steady, so the band is
+	// there to stop a boundary flickering rather than to hold a swing, and a
+	// wide one would pin the card to a first reading taken before the window
+	// had filled.
+	shareRateHold = 0.6
+
+	// shareRateSamples holds shareRateWindow at twice the fastest rate the
+	// picker offers. Filling early only shortens the window, which costs
+	// accuracy rather than correctness.
+	shareRateSamples = 512
+)
+
+// add files an arrival and answers the rate to draw, when there is one worth
+// drawing and it is not what is drawn already. Pump goroutine only.
+func (r *shareRate) add(now time.Time) (float64, bool) {
+	if r.n == 0 {
+		r.first = now
+	}
+
+	r.at[r.head] = now
+	r.head = (r.head + 1) % len(r.at)
+	if r.n < len(r.at) {
+		r.n++
+	}
+
+	// Two samples are kept whatever their age: a stream slower than the
+	// window still has a rate, and it is the one worth saying.
+	for r.n > 2 && now.Sub(r.oldest()) > shareRateWindow {
+		r.n--
+	}
+
+	if r.n < 2 || now.Sub(r.first) < shareRateSettle {
+		return 0, false
+	}
+
+	span := now.Sub(r.oldest())
+	if span <= 0 {
+		return 0, false
+	}
+	rate := float64(r.n-1) / span.Seconds()
+
+	// Nothing is measured, not merely nothing drawn, while the window is
+	// catching up: a mean fed the burst climbs and is then seen decaying
+	// towards the truth, which is the same wrong number said slowly. The
+	// figure holds instead, which is the honest answer — the stream's rate
+	// is what it was, and what is arriving too fast is the backlog.
+	if !r.steady(now, rate) {
+		return 0, false
+	}
+
+	if r.mean == 0 {
+		r.mean = rate
+	} else {
+		// The gap since the previous arrival, which is the one behind the
+		// slot just written.
+		gap := now.Sub(r.at[(r.head+len(r.at)-2)%len(r.at)])
+		r.mean += (1 - math.Exp(-gap.Seconds()/shareRateSmooth.Seconds())) * (rate - r.mean)
+	}
+	if r.shown > 0 && (math.Abs(r.mean-r.shown) < shareRateHold || now.Sub(r.post) < shareRatePost) {
+		return 0, false
+	}
+	r.post, r.shown = now, math.Round(r.mean)
+
+	return r.mean, true
+}
+
+// steady reports whether the window's newest half measures what the whole of
+// it does — the test for the opening catch-up having left it, since a burst
+// sits at the old end and nothing else in a share moves the two apart.
+func (r *shareRate) steady(now time.Time, rate float64) bool {
+	half := r.n / 2
+	if half < 2 {
+		return false
+	}
+
+	span := now.Sub(r.at[(r.head+len(r.at)-1-half)%len(r.at)])
+	if span <= 0 {
+		return false
+	}
+
+	return math.Abs(float64(half)/span.Seconds()-rate) <= rate*shareRateAgree
+}
+
+func (r *shareRate) oldest() time.Time {
+	return r.at[((r.head-r.n)%len(r.at)+len(r.at))%len(r.at)]
+}
+
 func (s *shareStats) setRes(text string)   { s.res = text; s.join() }
 func (s *shareStats) setFPS(text string)   { s.fps = text; s.join() }
 func (s *shareStats) setCodec(text string) { s.codec = text; s.join() }
@@ -645,8 +798,7 @@ func (v *shareView) armMailbox() {
 		v.free <- make([]byte, v.width*v.height*4)
 	}
 
-	v.fpsFrames = 0
-	v.fpsMarkAt = time.Now()
+	v.rate = shareRate{}
 }
 
 // pumpShareFrames reads frames as they come — no wall clock: the sender
@@ -664,11 +816,7 @@ func (a *App) pumpShareFrames(v *shareView, epoch uint64) {
 			return
 		}
 
-		v.fpsFrames++
-		if elapsed := time.Since(v.fpsMarkAt); elapsed >= time.Second {
-			fps := float64(v.fpsFrames) / elapsed.Seconds()
-			v.fpsFrames = 0
-			v.fpsMarkAt = time.Now()
+		if fps, ok := v.rate.add(time.Now()); ok {
 			a.doOnUI(func() { a.setShareFPS(v, epoch, fps) }, false)
 		}
 
@@ -715,8 +863,8 @@ func (a *App) paintShareFrame(v *shareView, epoch uint64) {
 	v.view.Refresh()
 }
 
-// setShareFPS is the stats card's FPS clause: the pump's own arrival rate,
-// measured over the last second — nothing on the wire carries what the
+// setShareFPS is the stats card's FPS clause: the pump's own arrival rate
+// (shareRate) — nothing on the wire carries what the
 // sender's encoder was asked for. v.stats is nil while the picture is not
 // mounted (showConnecting, showEnded), the same guard v.frame answers to
 // above. UI thread.
@@ -770,6 +918,20 @@ func shareDecodeSize(width, height int) (int, int) {
 
 /* Sending: what this account puts on screen elsewhere */
 
+const (
+	// shareStallAfter is how long a share may send nothing before the reader
+	// is told. A still window is not this: the capture child fills to a
+	// constant rate, so even a screen nobody touches keeps producing frames —
+	// what stops entirely is a grabber with no picture at all. Five seconds
+	// is longer than any keyframe interval on offer, so a share that is
+	// merely slow is never called frozen.
+	shareStallAfter = 5 * time.Second
+
+	// shareStallPoll is how often that is asked, which is cheap enough to be
+	// a round number: one atomic load a second for as long as a share runs.
+	shareStallPoll = time.Second
+)
+
 // sendingShare is this end's own running share: the capture child and what it
 // was started with. The child's stdout, framed by the tee, *is* the published
 // track's source, so there is no pump here — voice's write loop drains it as
@@ -780,20 +942,28 @@ type sendingShare struct {
 	choice ui.ShareChoice
 
 	// tee is what the track actually reads: the child's stdout, with a copy
-	// of each frame available to a local preview. av1 says what those bytes
-	// are — which demuxer that preview forces — and encoder which encoder
-	// writes them, for that preview's title. width and height are the box
-	// the child was started at, which is what that preview decodes into.
+	// of each frame available to a local preview. codec says what those
+	// bytes are — which demuxer that preview forces — and encoder which
+	// encoder writes them, for that preview's title. width and height are
+	// the box the child was started at, which is what that preview decodes
+	// into.
 	tee           *video.ShareTee
-	av1           bool
+	codec         video.ShareCodec
 	encoder       string
 	width, height int
 
+	// source is what the child was pointed at, kept for the one thing worth
+	// saying about a share after it has started: which window has stopped
+	// drawing when nothing is being sent.
+	source video.CaptureSource
+
 	// stopped orders the two ends of a teardown: the controller killing the
 	// child, and the write loop noticing the pipe die. Whoever is second does
-	// nothing.
+	// nothing. done is that same teardown as something to select on, for the
+	// stall watch.
 	mu      sync.Mutex
 	stopped bool
+	done    chan struct{}
 }
 
 // halt kills the capture child, idempotently and from any goroutine. The
@@ -807,6 +977,7 @@ func (s *sendingShare) halt() bool {
 	s.mu.Unlock()
 
 	if first {
+		close(s.done)
 		_ = s.tee.Close()
 	}
 
@@ -873,9 +1044,21 @@ func (a *App) startSharing() {
 		// picker warns with, and the probes behind it are the ones the share
 		// would otherwise have paid for anyway. The encoder probe rides the
 		// same worker for the same reason — answered before anything is
-		// picked, so starting a share never waits on it.
+		// picked, so starting a share never waits on it — and goes *first*:
+		// on Windows an encoder that takes Graphics Capture's texture
+		// answers the capture question on the way past, so the fallback
+		// check behind it costs nothing. Only the codec a share would open
+		// with is probed; the ones a refusal would fall back to are probed
+		// if and when it does.
+		for _, codec := range shareCodecOrder(config.Current().Screenshare.Codec) {
+			if a.shareRefused.has(codec) {
+				continue
+			}
+			if _, ok := tools.ShareEncoder(codec); ok {
+				break
+			}
+		}
 		fallback = tools.CaptureFallback(found)
-		tools.ShareEncoder(captureCodec(config.Current().Screenshare.Codec))
 
 		return nil
 	}, func(err error) {
@@ -931,31 +1114,24 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 	tools := a.videoTools
 	epoch, gen := a.epoch, a.callGen
 
-	// One attempt at one codec preference: the capture child, the tee around
-	// its stdout and the publish. refused marks a share the room turned away
-	// at the publish — the one failure worth a second attempt at the fallback
-	// codec, every other being an answer that does not change with it.
-	attempt := func(codec video.CaptureCodec) (sending *sendingShare, refused bool, err error) {
-		enc, ok := tools.ShareEncoder(codec)
-		if !ok {
-			// The other half of what used to be one "No encoder": ffmpeg is
-			// here and none of the encoders this client probes for answered,
-			// which is a different thing to fix from not having ffmpeg at all.
-			return nil, false, errors.New("no encoder this client can use: the ffmpeg on this machine carries neither a hardware encoder nor libx264")
-		}
-
+	// One attempt at one codec: the capture child, the tee around its stdout
+	// and the publish. refused marks a share the room turned away at the
+	// publish — the one failure worth the next codec down, every other being
+	// an answer that does not change with it.
+	attempt := func(enc video.ShareEncoding, baseline bool) (sending *sendingShare, refused bool, err error) {
 		settings := config.Current().Screenshare
 		stream, err := tools.CaptureShare(video.CaptureConfig{
 			Source:          source,
 			Width:           width,
 			Height:          height,
 			FPS:             choice.FPS,
-			Bitrate:         shareBitrate(width, height, choice.FPS, enc.AV1, settings),
+			Bitrate:         shareBitrate(width, height, choice.FPS, enc.Codec, baseline, settings),
 			KeyframeSeconds: shareKeyframeSeconds(settings.Keyframes),
-			Codec:           codec,
+			Codec:           enc.Codec,
 			Speed:           captureSpeed(settings.EncoderSpeed),
 			Latency:         captureLatency(settings.Latency),
 			Rate:            captureRate(settings.RateControl),
+			Baseline:        baseline,
 		})
 		if err != nil {
 			return nil, false, err
@@ -963,24 +1139,21 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 
 		sending = &sendingShare{
 			stream: stream, choice: choice,
-			tee: video.NewShareTee(stream, enc.AV1, width, height), av1: enc.AV1, encoder: enc.Name,
+			tee: video.NewShareTee(stream, enc.Codec, width, height), codec: enc.Codec, encoder: enc.Name,
 			width: width, height: height,
+			source: source, done: make(chan struct{}),
 		}
 
 		// The declared size is what every viewer draws a window from and what
 		// the server measures its limits against, so it is the box the child
 		// was actually started at rather than the source's own. The rate is
 		// passed for the same reason it is asked for at all — see StartShare.
-		sendCodec := voice.SendShareH264
-		if enc.AV1 {
-			sendCodec = voice.SendShareAV1
-		}
-		if err := call.StartShare(sending.tee, sendCodec, width, height, choice.FPS); err != nil {
+		if err := call.StartShare(sending.tee, sendShareCodec(enc.Codec, baseline), width, height, choice.FPS); err != nil {
 			sending.halt()
 
 			// Only the room's own refusal is worth another encoder: the rest
 			// (no call, no permission, a stream that died being published)
-			// answer the same way at either codec.
+			// answer the same way at any codec.
 			return nil, errors.Is(err, voice.ErrShareRefused), err
 		}
 
@@ -988,30 +1161,152 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 	}
 
 	a.background(func() error {
-		codec := captureCodec(config.Current().Screenshare.Codec)
+		setting := config.Current().Screenshare.Codec
+		baseline := setting == config.ShareCodecH264Baseline
 
-		sending, refused, err := attempt(codec)
-		if refused && codec == video.CaptureCodecAuto {
-			// The GPU offering AV1 does not make the room take it — an
-			// instance whose LiveKit has the codec off answers the publish
-			// with a refusal — so one refusal falls back to H.264 before
-			// anything is reported.
-			if enc, ok := tools.ShareEncoder(codec); ok && enc.AV1 {
-				log.Printf("app: AV1 share refused (%v); retrying as H.264", err)
-				sending, _, err = attempt(video.CaptureCodecH264)
+		// Best first, skipping what this machine cannot encode and what the
+		// room has already refused this session. The GPU offering a codec
+		// does not make the room take it — an instance whose LiveKit has it
+		// off refuses the publish — so a refusal is remembered and the next
+		// codec down is tried before anything is reported.
+		var lastErr error
+		for _, codec := range shareCodecOrder(setting) {
+			if a.shareRefused.has(codec) {
+				continue
 			}
+			enc, ok := tools.ShareEncoder(codec)
+			if !ok {
+				continue
+			}
+
+			sending, refused, err := attempt(enc, baseline)
+			if err == nil {
+				// The sound is started after the picture and can never take
+				// it down: a room that will not take a second track, or a
+				// machine that will not give up its loopback, is a share
+				// without sound rather than no share.
+				a.startShareAudio(call, source)
+
+				a.doOnUI(func() { a.installShare(sending, epoch, gen, call) }, false)
+
+				return nil
+			}
+			if !refused {
+				return err
+			}
+			log.Printf("app: %s share refused (%v); trying the next codec", codec, err)
+			a.shareRefused.mark(codec)
+			lastErr = err
 		}
-		if err != nil {
-			return err
+		if lastErr != nil {
+			return lastErr
 		}
 
-		a.doOnUI(func() { a.installShare(sending, epoch, gen, call) }, false)
-
-		return nil
+		// The other half of what used to be one "No encoder": ffmpeg is here
+		// and none of the encoders this client probes for answered, which is
+		// a different thing to fix from not having ffmpeg at all.
+		return errors.New("no encoder this client can use: the ffmpeg on this machine carries neither a hardware encoder nor libx264")
 	}, func(err error) {
 		a.failShare(fmt.Sprintf("%v", err))
 	})
 }
+
+// refusedCodecs is the run's memory of which codecs the room would not take
+// a share in — a refusal costs a publish and a bind wait, and the answer
+// does not change while the room is the same one. Guarded because the
+// share's worker marks and reads it; cleared with the session, another
+// instance being another LiveKit.
+type refusedCodecs struct {
+	mu  sync.Mutex
+	set map[video.ShareCodec]bool
+}
+
+func (r *refusedCodecs) has(codec video.ShareCodec) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.set[codec]
+}
+
+func (r *refusedCodecs) mark(codec video.ShareCodec) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.set == nil {
+		r.set = map[video.ShareCodec]bool{}
+	}
+	r.set[codec] = true
+}
+
+func (r *refusedCodecs) reset() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.set = nil
+}
+
+// startShareAudio publishes what the shared program is playing, beside the
+// picture that has just gone up. Off the UI thread, inside the same worker the
+// capture was started on, because the publish negotiates.
+//
+// Which process is captured is the *source's* answer, not a decision here: a
+// window resolves to its own process tree and a monitor to nothing, which the
+// capture reads as the whole machine's mix. That is exactly the split a reader
+// means by sharing one or the other.
+func (a *App) startShareAudio(call *voice.Call, source video.CaptureSource) {
+	settings := config.Current().Screenshare
+	if !settings.Audio {
+		return
+	}
+
+	format := audio.LoopbackFormat{
+		SampleRate: settings.AudioRate,
+		Channels:   shareAudioChannels,
+		BitDepth:   settings.AudioBitDepth,
+	}
+
+	pid := source.ProcessID()
+
+	sound, err := audio.OpenLoopback(audio.LoopbackConfig{ProcessID: pid, Format: format})
+	if err != nil {
+		a.reportShareAudio(err)
+
+		return
+	}
+
+	// What was asked for and what opened can differ — see audio.OpenLoopback —
+	// and the encoder has to be built for what arrived. Logged because the one
+	// failure this whole path has had was a format nobody could see.
+	got := sound.Format()
+	log.Printf("app: share audio: %s, pid %d", got, pid)
+
+	if err := call.StartShareAudio(sound, got.SampleRate, got.Channels,
+		settings.AudioBitrate*1000); err != nil {
+		sound.Close()
+		a.reportShareAudio(err)
+	}
+}
+
+// reportShareAudio says the picture is going out without sound, which is worth
+// one line rather than a failed share. A platform with no loopback at all is
+// the one case that is not news: the row offering it is not drawn there.
+func (a *App) reportShareAudio(err error) {
+	if errors.Is(err, audio.ErrNoLoopback) {
+		return
+	}
+
+	log.Printf("app: share audio: %v", err)
+
+	a.doOnUI(func() {
+		a.notifyTitled(ui.ToneWarning, "Sharing without sound",
+			"The screen is being shared, but its sound could not be captured.")
+	}, false)
+}
+
+// shareAudioChannels is what a share's sound is captured and sent in. Stereo,
+// always: a game's or a track's image is most of what makes it sound like the
+// sender's machine, and the lane it lands in at the far end is stereo to match.
+const shareAudioChannels = 2
 
 // installShare is the start's last step, back on the UI thread — the
 // installCall arrangement: a share that connected into a session or a call
@@ -1031,8 +1326,63 @@ func (a *App) installShare(sending *sendingShare, epoch, gen uint64, call *voice
 	a.shareDialog = nil
 	a.closeOverlay()
 
+	go a.watchShareStall(sending, epoch)
+
 	config.RememberShare(sending.choice.Source, sending.choice.Height, sending.choice.FPS)
 	a.syncCallIsland()
+}
+
+// watchShareStall tells the reader when their share stops sending, which
+// nothing else can: the publication is up, the encoder is alive, the picture
+// every viewer has is simply the last one. It is the ordinary end of sharing a
+// game — Windows minimises a fullscreen window the moment it loses the
+// foreground, and a windowed game that keeps its handle often stops drawing
+// anyway — and the sender is by definition looking at the game rather than at
+// their own preview when it happens.
+//
+// Once per stall, re-armed when frames come back: a share left frozen for an
+// hour is one notice, not sixty.
+func (a *App) watchShareStall(sending *sendingShare, epoch uint64) {
+	ticker := time.NewTicker(shareStallPoll)
+	defer ticker.Stop()
+
+	told := false
+	for {
+		select {
+		case <-sending.done:
+			return
+		case <-ticker.C:
+		}
+
+		if stalled := sending.tee.Idle() >= shareStallAfter; stalled != told {
+			told = stalled
+			if stalled {
+				a.doOnUI(func() { a.reportShareStall(sending, epoch) }, false)
+			}
+		}
+	}
+}
+
+// reportShareStall is that notice, on the UI thread and only while this is
+// still the share running: a stall found as the session was being replaced is
+// nothing to say.
+func (a *App) reportShareStall(sending *sendingShare, epoch uint64) {
+	if a.stale(epoch) || a.sending != sending {
+		return
+	}
+
+	seconds := int(shareStallAfter / time.Second)
+	if sending.source.Kind != video.CaptureWindow {
+		a.notifyTitled(ui.ToneWarning, "Share frozen",
+			"The screen has sent nothing for %d seconds.", seconds)
+		return
+	}
+
+	a.notifyTitled(ui.ToneWarning, "Share frozen",
+		"%s has sent nothing for %d seconds. A minimised window has no picture to "+
+			"capture, and many games stop drawing while another window is in front — "+
+			"one set to borderless windowed keeps sending.",
+		sending.source.Title, seconds)
 }
 
 // failShare reports a refusal into the picker where it is still up, and as a
@@ -1086,6 +1436,12 @@ func (a *App) onShareStopped() {
 	a.closeSelfPreview()
 	a.sending = nil
 
+	// The child's own last words, which are the only account of why a capture
+	// stopped on its own — a window closed, a filter that refused the source.
+	if tail := sending.stream.Stderr(); tail != "" {
+		log.Printf("app: the capture child ended: %s", tail)
+	}
+
 	go sending.halt()
 	a.syncCallIsland()
 	a.notifyTitled(ui.ToneWarning, "Sharing ended", "Your screen is no longer being shared.")
@@ -1100,11 +1456,17 @@ const (
 	// does not move.
 	shareBitsPerPixel = 0.1
 
-	// shareAV1BitrateScale is AV1's discount on that budget: the same picture
-	// costs roughly two thirds of the bits, and the gain is taken as
-	// bandwidth rather than as extra quality — which is what the codec is
-	// for here, a share's ceiling being somebody's uplink.
-	shareAV1BitrateScale = 0.7
+	// Each codec's discount on that budget, the gain taken as bandwidth
+	// rather than as extra quality — which is what a better codec is for
+	// here, a share's ceiling being somebody's uplink. All three are set
+	// from the *smaller* of the codec's two gains, so the picture never
+	// comes out worse than baseline H.264 would have at the whole budget:
+	// on screen content (docs/performance.md) AV1 needs half the bits,
+	// H.265 about seven tenths and Main-profile H.264 about two thirds;
+	// on natural video the published figures are nearer the numbers here.
+	shareAV1BitrateScale  = 0.7
+	shareHEVCBitrateScale = 0.8
+	shareMainBitrateScale = 0.9
 )
 
 // shareCaptureNote is the one line the picker gets to say about what capture
@@ -1243,21 +1605,27 @@ func evenDown(v int) int {
 }
 
 // shareBitrate is what a share asks the encoder for: the automatic budget
-// its size and frame rate earn, AV1's discount, then the Bandwidth setting's
-// cut — bounded in video so a 60 fps full-screen share does not try to fill
-// somebody's whole uplink.
+// its size and frame rate earn, the codec's discount, then the Bandwidth
+// setting's cut — bounded in video so a 60 fps full-screen share does not
+// try to fill somebody's whole uplink.
 //
-// A custom bandwidth is none of that: a number somebody typed is the answer, and
-// AV1's discount is not applied to it either — the codec is chosen after this and
-// a ceiling that moved with it would not be the ceiling that was asked for.
-func shareBitrate(width, height, fps int, av1 bool, settings config.Screenshare) int {
+// A custom bandwidth is none of that: a number somebody typed is the answer,
+// and the codec's discount is not applied to it either — the codec is chosen
+// after this and a ceiling that moved with it would not be the ceiling that
+// was asked for.
+func shareBitrate(width, height, fps int, codec video.ShareCodec, baseline bool, settings config.Screenshare) int {
 	if settings.Bandwidth == config.ShareBandwidthCustom {
 		return settings.Bitrate * 1000
 	}
 
 	rate := float64(width) * float64(height) * float64(fps) * shareBitsPerPixel
-	if av1 {
+	switch {
+	case codec == video.ShareAV1:
 		rate *= shareAV1BitrateScale
+	case codec == video.ShareHEVC:
+		rate *= shareHEVCBitrateScale
+	case !baseline:
+		rate *= shareMainBitrateScale
 	}
 
 	switch settings.Bandwidth {
@@ -1325,13 +1693,31 @@ func captureRate(setting string) video.CaptureRate {
 	return video.CaptureVariable
 }
 
-// captureCodec is the third dial: the codec preference as video's own value.
-func captureCodec(setting string) video.CaptureCodec {
-	if setting == config.ShareCodecH264 {
-		return video.CaptureCodecH264
+// shareCodecOrder is the third dial: the codecs a share may go out in, best
+// first, as the setting reads. Auto walks all three; either H.264 value is
+// H.264 alone, the profile being sendShareCodec's half of the answer.
+func shareCodecOrder(setting string) []video.ShareCodec {
+	if setting == config.ShareCodecH264 || setting == config.ShareCodecH264Baseline {
+		return []video.ShareCodec{video.ShareH264}
 	}
 
-	return video.CaptureCodecAuto
+	return video.ShareCodecs[:]
+}
+
+// sendShareCodec is the codec as the room is told it — which for H.264 says
+// the profile too, the SDP carrying it beside the bitstream.
+func sendShareCodec(codec video.ShareCodec, baseline bool) voice.ShareSendCodec {
+	switch codec {
+	case video.ShareAV1:
+		return voice.SendShareAV1
+	case video.ShareHEVC:
+		return voice.SendShareHEVC
+	}
+	if baseline {
+		return voice.SendShareH264Baseline
+	}
+
+	return voice.SendShareH264
 }
 
 // toShareSources converts what the video package enumerated into what a
@@ -1347,6 +1733,7 @@ func toShareSources(sources []video.CaptureSource) []ui.ShareSource {
 		out = append(out, ui.ShareSource{
 			ID: shareSourceKey(source), Kind: kind, Title: source.Title,
 			Width: source.Width, Height: source.Height,
+			Minimised: source.Minimised,
 		})
 	}
 

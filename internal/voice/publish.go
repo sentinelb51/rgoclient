@@ -30,6 +30,12 @@ const (
 	// is what the encoder and every buffer here are sized by.
 	sdpChannels = 2
 
+	// shareChannels is what a screenshare's own sound carries, and the one place
+	// the declaration above is the truth rather than a formality: a game's or a
+	// track's stereo image is most of what makes it sound like the sender's
+	// machine, so it is the one thing this client sends and receives in two.
+	shareChannels = 2
+
 	// defaultBitrate is a voice bitrate rather than a music one. Opus at 32 kbps
 	// mono is transparent for speech, and the headroom is worth more spent on FEC.
 	defaultBitrate = 32000

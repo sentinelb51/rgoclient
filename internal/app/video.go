@@ -543,14 +543,18 @@ func (a *App) pumpVideoSound(p *videoPlayback) {
 		}
 
 		for {
-			want := sink.VideoWant()
+			// Whole frames only, both ways. The lane is stereo and interleaved, so
+			// a half pair written once puts every later sample in the wrong ear for
+			// the rest of the video — and ReadPCM can answer with an odd sample at
+			// the very end of a stream.
+			want := sink.VideoWant() &^ 1
 			if want <= 0 {
 				break
 			}
 
 			got, err := p.sound.ReadPCM(buf[:min(want, len(buf))])
-			if got > 0 {
-				sink.WriteVideo(buf[:got])
+			if got > 1 {
+				sink.WriteVideo(buf[:got&^1])
 			}
 			if err != nil {
 				return

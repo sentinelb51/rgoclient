@@ -172,6 +172,9 @@ func (s *measuringSink) Write(userID string, pcm []int16) {
 	s.samples[userID] += len(pcm)
 }
 
+// OpenStereo is Open: this harness measures arrival, not layout.
+func (s *measuringSink) OpenStereo(userID string) { s.Open(userID) }
+
 func (s *measuringSink) Open(userID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

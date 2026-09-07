@@ -411,6 +411,10 @@ func (a *App) settingsHooks() ui.SettingsHooks {
 		Version: a.info.Version,
 		Build:   a.info.Build,
 
+		// Whether this machine can capture what it is playing, which is what
+		// decides if the share's Sound group is drawn at all.
+		ShareAudio: audio.LoopbackAvailable(),
+
 		VoiceNodes:        a.voiceNodeList,
 		InputDevices:      a.inputDevices,
 		OutputDevices:     a.outputDevices,

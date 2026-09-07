@@ -47,7 +47,13 @@ func (s *Sink) Write(userID string, pcm []int16) {
 // Open starts a participant's lane, and is the only thing that does: the
 // speakers only ask for audio for a lane they can see, and a lane nothing but
 // Open can create is a lane no late write can resurrect.
-func (s *Sink) Open(userID string) { s.lane(userID) }
+func (s *Sink) Open(userID string) { s.lane(userID, false) }
+
+// OpenStereo starts a lane whose writer supplies interleaved pairs: a
+// screenshare's own sound, or a video's. It is the same lane in every other
+// respect — Want, Write and Remove are counted in samples either way — and the
+// depth it is kept at is the same span of time, twice the samples.
+func (s *Sink) OpenStereo(userID string) { s.lane(userID, true) }
 
 // echoLane is what the microphone test's own lane is filed under. Not a ULID, so
 // it can never be somebody's, and unexported so the identifier never leaves this
@@ -76,15 +82,17 @@ func (s *Sink) StopEcho() { s.Remove(echoLane) }
 const videoLane = "\x00video"
 
 // StartVideo opens the video player's lane; the decoder tops it up against
-// VideoWant on the speakers' wake, exactly as a participant's is.
-func (s *Sink) StartVideo() { s.Open(videoLane) }
+// VideoWant on the speakers' wake, exactly as a participant's is. Stereo: a
+// film carries its own image, and summing it to one sample to have it panned
+// back out is a mix nobody asked for.
+func (s *Sink) StartVideo() { s.OpenStereo(videoLane) }
 
 // StopVideo closes it, dropping whatever it had buffered — a stopped video
 // should not play out a tail.
 func (s *Sink) StopVideo() { s.Remove(videoLane) }
 
-// WriteVideo hands the player's decoded audio to the speakers: 48 kHz mono,
-// signed 16-bit, like every lane.
+// WriteVideo hands the player's decoded audio to the speakers: 48 kHz stereo,
+// interleaved, signed 16-bit.
 func (s *Sink) WriteVideo(pcm []int16) { s.Write(videoLane, pcm) }
 
 // VideoWant is Want for the player's lane.
@@ -118,7 +126,7 @@ func (s *Sink) Want(userID string) int {
 		return 0
 	}
 
-	return max(0, laneTarget-l.pcm.Len())
+	return max(0, laneTarget*l.channels()-l.pcm.Len())
 }
 
 // find is lane without the side effect: a lookup that does not open one.
@@ -233,7 +241,7 @@ func (s *Sink) gain(userID string) float32 {
 // lanes drops the ones past the end rather than growing: maxLanes is well past
 // any call this client will be in, and an array the callback can walk without a
 // lock is worth more than the last few.
-func (s *Sink) lane(userID string) *lane {
+func (s *Sink) lane(userID string, stereo bool) *lane {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -259,7 +267,8 @@ func (s *Sink) lane(userID string) *lane {
 		l.gain.Store(floatBits(s.gain(userID)))
 		l.lim.env = 0
 		l.level = newLeveller()
-		l.person = userID != echoLane && userID != videoLane
+		l.stereo = stereo
+		l.person = !stereo && userID != echoLane
 		l.active.Store(true)
 
 		s.byOne[userID] = i

@@ -427,6 +427,11 @@ type App struct {
 	sending       *sendingShare
 	shareStarting bool
 
+	// shareRefused is which codecs this session's room has turned a share
+	// away in, so the next share skips straight to what it took rather than
+	// paying the refusal again. See refusedCodecs.
+	shareRefused refusedCodecs
+
 	// shareDialog is the picker while it is up, kept so a refused start is
 	// reported into the card it came from rather than as a notice over it.
 	shareDialog *ui.ShareDialog

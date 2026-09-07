@@ -35,6 +35,7 @@ import (
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/sentinelb51/gopus"
 )
 
 /* The surface */
@@ -53,6 +54,13 @@ const (
 	// stream is a frame of delay for nothing. The timebase is 1/90000, so the
 	// RTP timestamp is the pts.
 	ShareIVF ShareCodec = "ivf"
+
+	// ShareHEVC is H.265 as raw Annex-B, the one codec the IVF demuxer
+	// refuses a fourcc for. It avoids the frame of delay another way: every
+	// access unit is followed by the *next* unit's access unit delimiter,
+	// which is the NAL the parser closes a unit on, sent ahead of the frame
+	// it belongs to. Measured at 5 fps: 5.6 ms held against 207 without it.
+	ShareHEVC ShareCodec = "hevc"
 )
 
 // ShareOpen is the watcher's half of a watch: called once, from the call's
@@ -620,8 +628,9 @@ func shareDimensions(pub *lksdk.RemoteTrackPublication) (int, int) {
 // told, the codec's reader-facing name and the depacketizer that reassembles
 // it. AV1 rides the IVF muxer like the VP codecs: the depacketizer emits
 // temporal units in the low-overhead bitstream, which is exactly what an IVF
-// frame holds. Not ok is a codec this client cannot remux — H.265, should a
-// browser ever send one.
+// frame holds. H.265's depacketizer emits Annex-B the way H.264's does, and
+// goes out raw with a delimiter behind every unit — see ShareHEVC. Not ok is
+// a codec this client cannot remux.
 func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, string, shareMux, func() rtp.Depacketizer, bool) {
 	mime := track.Codec().MimeType
 	switch {
@@ -633,6 +642,8 @@ func shareCodec(track *webrtc.TrackRemote, width, height int) (ShareCodec, strin
 		return ShareIVF, "AV1", newIVFMux("AV01", width, height), func() rtp.Depacketizer { return &codecs.AV1Depacketizer{} }, true
 	case strings.EqualFold(mime, webrtc.MimeTypeH264):
 		return ShareIVF, "H.264", newIVFMux("H264", width, height), func() rtp.Depacketizer { return &codecs.H264Packet{} }, true
+	case strings.EqualFold(mime, webrtc.MimeTypeH265):
+		return ShareHEVC, "H.265", &annexBMux{}, func() rtp.Depacketizer { return &codecs.H265Depacketizer{} }, true
 	}
 
 	return "", "", nil, nil, false
@@ -723,6 +734,37 @@ func (m *ivfMux) writeHeader(out io.Writer) error {
 	return err
 }
 
+// annexBMux writes H.265 as it came off the depacketizer — Annex-B, which is
+// what the raw demuxer reads — with one access unit delimiter after every
+// unit. The delimiter opens the *next* unit, so the parser closes this one
+// the moment it lands instead of at the next frame's first slice; a
+// delimiter is optional in Annex-B and a unit may open with one, so the
+// stream stays legal. Gated like the IVF muxer: nothing goes out before a
+// keyframe carrying its own parameter sets, which is what the PLI demands.
+type annexBMux struct {
+	started bool
+}
+
+// hevcAUD is the delimiter: NAL type 35, pic_type "any", the trailing bit.
+// A copy of video.hevcAUD by construction — voice imports only domain.
+var hevcAUD = []byte{0, 0, 0, 1, 0x46, 0x01, 0x50}
+
+func (m *annexBMux) write(out io.Writer, sample *media.Sample) error {
+	if !m.started {
+		if !h265KeyframeStarts(sample.Data) {
+			return nil
+		}
+		m.started = true
+	}
+
+	if _, err := out.Write(sample.Data); err != nil {
+		return err
+	}
+	_, err := out.Write(hevcAUD)
+
+	return err
+}
+
 // vp8KeyframeStarts reads the one bit VP8 puts first: the frame tag's P bit,
 // zero for a keyframe.
 func vp8KeyframeStarts(frame []byte) bool {
@@ -778,6 +820,28 @@ func av1SequenceHeaderIn(unit []byte) bool {
 // own put them just ahead of the IDR — a stream entered at the IDR alone
 // would be one the decoder has no parameters for.
 func h264KeyframeStarts(frame []byte) bool {
+	return annexBHas(frame, func(header byte) bool {
+		kind := header & 0x1F
+
+		return kind == 5 || kind == 7
+	})
+}
+
+// h265KeyframeStarts is the same scan in H.265's numbering: the type is six
+// bits from the top of the first header byte, a keyframe is any of the IRAP
+// range (16-23: BLA, IDR and CRA), and the VPS (32) or SPS (33) count for
+// the reason the H.264 SPS does.
+func h265KeyframeStarts(frame []byte) bool {
+	return annexBHas(frame, func(header byte) bool {
+		kind := (header >> 1) & 0x3F
+
+		return (kind >= 16 && kind <= 23) || kind == 32 || kind == 33
+	})
+}
+
+// annexBHas walks the start codes and asks want about the first header byte
+// of each NAL unit behind one.
+func annexBHas(frame []byte, want func(header byte) bool) bool {
 	for i := 0; i+3 < len(frame); i++ {
 		if frame[i] != 0 || frame[i+1] != 0 {
 			continue
@@ -789,7 +853,7 @@ func h264KeyframeStarts(frame []byte) bool {
 		if j+1 >= len(frame) || frame[j] != 1 {
 			continue
 		}
-		if kind := frame[j+1] & 0x1F; kind == 5 || kind == 7 {
+		if want(frame[j+1]) {
 			return true
 		}
 		i = j
@@ -812,22 +876,60 @@ func clampUint16(v int) uint16 {
 /* Sending */
 
 // ShareSendCodec names what an outbound share's bytes are, which is what the
-// track is published as: H.264 as bare Annex-B, or AV1 in IVF — the two
-// shapes lksdk's reader track eats directly.
+// track is published as: AV1 temporal units, or H.265 and H.264 access units
+// in Annex-B — the shapes lksdk's packetisers eat. H.264 comes in two,
+// because the profile is in the SDP as well as in the bitstream: Main is
+// the efficient one (CABAC, measured at about two thirds of the bits for the
+// same picture on screen content — docs/performance.md) and every current
+// decoder takes it; constrained Baseline is what the oldest do.
 type ShareSendCodec string
 
 const (
-	SendShareH264 ShareSendCodec = "h264"
-	SendShareAV1  ShareSendCodec = "av1"
+	SendShareAV1          ShareSendCodec = "av1"
+	SendShareHEVC         ShareSendCodec = "hevc"
+	SendShareH264         ShareSendCodec = "h264"
+	SendShareH264Baseline ShareSendCodec = "h264-baseline"
 )
 
 // mime is the codec as the room negotiates it.
 func (c ShareSendCodec) mime() string {
-	if c == SendShareAV1 {
+	switch c {
+	case SendShareAV1:
 		return webrtc.MimeTypeAV1
+	case SendShareHEVC:
+		return webrtc.MimeTypeH265
 	}
 
 	return webrtc.MimeTypeH264
+}
+
+// fmtp is the SDP line the codec is declared with. H.264 names its profile —
+// pion registers Main and constrained Baseline among its defaults, and the
+// packetisation mode every WebRTC stack uses — where AV1 and H.265 are
+// declared bare, which is how pion registers them. Level 3.1 is what every
+// browser offers and, with asymmetry allowed, advisory.
+func (c ShareSendCodec) fmtp() string {
+	switch c {
+	case SendShareH264:
+		return "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=4d001f"
+	case SendShareH264Baseline:
+		return "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+	}
+
+	return ""
+}
+
+// keyframeStarts reports whether a frame is one a decoder can enter the
+// stream at, in this codec's terms.
+func (c ShareSendCodec) keyframeStarts(frame []byte) bool {
+	switch c {
+	case SendShareAV1:
+		return av1SequenceHeaderIn(frame)
+	case SendShareHEVC:
+		return h265KeyframeStarts(frame)
+	}
+
+	return h264KeyframeStarts(frame)
 }
 
 // ErrShareRefused is the room turning a share away at the publish — the one
@@ -922,7 +1024,7 @@ func (c *Call) StartShare(src ShareSource, codec ShareSendCodec, width, height, 
 	}
 
 	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
-		MimeType: codec.mime(), ClockRate: videoClockRate,
+		MimeType: codec.mime(), ClockRate: videoClockRate, SDPFmtpLine: codec.fmtp(),
 	})
 	if err != nil {
 		release()
@@ -967,7 +1069,49 @@ func (c *Call) StartShare(src ShareSource, codec ShareSendCodec, width, height, 
 		return errors.New("the stream ended as it was being published")
 	}
 
+	// A codec the room will not take is not an error from PublishTrack: the
+	// server answers the publish with whatever codec it *did* file — or the
+	// negotiation that follows leaves the track unbound, WriteSample a silent
+	// no-op for the life of the share. Both are read here, so the caller can
+	// try the next codec down: the recorded codec first, which costs nothing,
+	// then the bind, which lands within a round trip of the publish on a room
+	// that took the codec and never on one that did not.
+	if err := c.awaitShareBind(pub, codec, bound); err != nil {
+		c.mu.Lock()
+		out.stopped = true
+		if c.outShare == out {
+			c.outShare = nil
+		}
+		c.mu.Unlock()
+		_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
+
+		return fmt.Errorf("%w: %w", ErrShareRefused, err)
+	}
+
 	return nil
+}
+
+// shareBindWait is how long a published share may take to bind before the
+// room is taken to have refused its codec. A bind follows the publish by one
+// offer/answer round trip on the signalling socket, so this is generous; a
+// codec the room lacks never binds at all.
+const shareBindWait = 5 * time.Second
+
+// awaitShareBind is the two refusal checks StartShare makes after a publish:
+// the codec the server recorded against the publication, and the bind.
+func (c *Call) awaitShareBind(pub *lksdk.LocalTrackPublication, codec ShareSendCodec, bound <-chan struct{}) error {
+	if mime := pub.MimeType(); mime != "" && !strings.EqualFold(mime, codec.mime()) {
+		return fmt.Errorf("the room filed the share as %s rather than %s", mime, codec.mime())
+	}
+
+	select {
+	case <-bound:
+		return nil
+	case <-c.done:
+		return errors.New("the call ended")
+	case <-time.After(shareBindWait):
+		return fmt.Errorf("the room did not negotiate %s", codec.mime())
+	}
 }
 
 // pumpShareSend is an outbound share's write loop, and it paces nothing: the
@@ -1009,11 +1153,7 @@ func (c *Call) pumpShareSend(out *outboundShare, track *lksdk.LocalTrack,
 		}
 
 		if !started {
-			if codec == SendShareAV1 {
-				if !av1SequenceHeaderIn(data) {
-					continue
-				}
-			} else if !h264KeyframeStarts(data) {
+			if !codec.keyframeStarts(data) {
 				continue
 			}
 			started = true
@@ -1052,6 +1192,11 @@ func (c *Call) StopShare() {
 		_ = c.room.LocalParticipant.UnpublishTrack(sid)
 	}
 	_ = out.src.Close()
+
+	// The sound is a track of its own but not a share of its own: the picture
+	// stopping is the share ending, and sound with no picture is not a thing
+	// this client offers.
+	c.StopShareAudio()
 }
 
 // settleShareSend is the write loop ending — EOF from the encoder, the call
@@ -1119,4 +1264,332 @@ func tokenAllowsScreen(token string) bool {
 	}
 
 	return slices.Contains(claims.Video.CanPublishSources, "screen_share")
+}
+
+/* Share audio */
+
+// ShareAudioSource is the sound a share sends beside its picture: interleaved
+// signed 16-bit at the rate and channel count StartShareAudio is told, one
+// 20 ms frame per Read, blocking until there is one. Declared structurally so
+// voice never imports audio — the PCMSource arrangement again, and
+// audio.Loopback is what app hands in.
+//
+// Read must answer on the cadence of a clock rather than of the material: a
+// program rendering nothing produces no packets at all, and a source that
+// simply blocked there would stall the encoder where it should send silence.
+type ShareAudioSource interface {
+	Read(pcm []int16) (int, error)
+	Close()
+}
+
+// shareAudio is this end's own share-audio publication: the source, the track
+// it feeds and the encoder between them. stopped marks one being taken down on
+// purpose, for the write loop that may notice the end first. Guarded by the
+// call's mu, like outboundShare.
+type shareAudio struct {
+	src   ShareAudioSource
+	track *lksdk.LocalTrack
+	pub   *lksdk.LocalTrackPublication
+
+	encoder *gopus.Encoder
+	into    opusEncodeIn
+	packet  []byte
+
+	// frame is one Read's worth in samples, channels included, and framePer the
+	// per-channel count Opus is asked for — the one gopus counts a frame in.
+	frame    int
+	framePer int
+
+	stopped bool
+
+	// done ends the write loop, and closeOnce is what lets every path that can
+	// end one — a refused publish, a deliberate stop, the call going down —
+	// close it without the second of them panicking.
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+// end stops the write loop. Idempotent, like shareWatch.end.
+func (sa *shareAudio) end() { sa.closeOnce.Do(func() { close(sa.done) }) }
+
+// shareAudioFmtp declares the stereo the encoder actually sends.
+//
+// The microphone's line is pion's default registration verbatim because mono
+// against stereo is the `stereo=` parameter and its default of 0 is the truth
+// there. Here it is not: this track carries two real channels, and a receiver
+// taking the default would allocate one and fold the image down. The extra
+// parameters cannot cost the match — pion compares the keys two sides *share* —
+// but a mismatch would be silent, Bind never firing and the track never being
+// sent, which is why the write loop says so out loud rather than waiting
+// forever.
+const shareAudioFmtp = "minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1"
+
+// shareAudioBitrate is what a screenshare's sound is worth if nothing says
+// otherwise. Music rather than speech: 128 kbps stereo is about where Opus
+// stops being the thing anybody notices, and a share is already spending
+// megabits on the picture.
+const shareAudioBitrate = 128000
+
+// bindWarning is how long the write loop waits for the track to bind before
+// saying that it has not. Past any real negotiation, and short enough that a
+// codec the room would not take is reported while the share is still on screen
+// rather than never.
+const bindWarning = 10 * time.Second
+
+// StartShareAudio publishes the machine's own sound as a second track beside
+// the share's picture, at rate and channels — which must be what src answers
+// in — and bitrate bits per second.
+//
+// It blocks for the publish negotiation, so it belongs on a worker. One at a
+// time, and the source is closed by whatever ends it. Independent of the
+// picture on purpose: they are separate tracks to the room, so the sound can be
+// refused or fail without taking the share down with it.
+func (c *Call) StartShareAudio(src ShareAudioSource, rate, channels, bitrate int) error {
+	if src == nil {
+		return errors.New("no sound to publish")
+	}
+	if !c.canShare {
+		return errors.New("the server does not allow publishing a screenshare here")
+	}
+	if c.room == nil {
+		return errors.New("no call to share into")
+	}
+
+	// Opus is told the rate it is actually fed. Every rate audio offers is one it
+	// encodes natively, so nothing resamples and the frame is 20 ms of whatever
+	// was asked for.
+	encoder, err := gopus.NewEncoder(rate, channels, gopus.Audio)
+	if err != nil {
+		return fmt.Errorf("share audio encoder: %w", err)
+	}
+
+	if bitrate <= 0 {
+		bitrate = shareAudioBitrate
+	}
+	encoder.SetBitrate(bitrate)
+	encoder.SetVbr(true)
+
+	// DTX on and FEC off, the opposite of the microphone and for the same
+	// reason: this is music. True digital silence — a game paused, a video
+	// stopped — is worth not sending, and in-band FEC is SILK's, which Opus has
+	// left for CELT at any bitrate a share runs at.
+	if tuning, ok := any(encoder).(opusTuning); ok {
+		_ = tuning.SetDTX(true)
+		_ = tuning.SetInBandFEC(false)
+	}
+
+	sa := &shareAudio{
+		src:      src,
+		encoder:  encoder,
+		frame:    rate / 50 * channels,
+		framePer: rate / 50,
+		done:     make(chan struct{}),
+	}
+	if into, ok := any(encoder).(opusEncodeIn); ok {
+		sa.into, sa.packet = into, make([]byte, maxPacket)
+	}
+
+	c.mu.Lock()
+	if c.outShareAudio != nil {
+		c.mu.Unlock()
+
+		return errors.New("already sharing sound")
+	}
+	c.outShareAudio = sa
+	c.mu.Unlock()
+
+	// The write loop is started before the publish, so releasing has to end it:
+	// a track that never binds would otherwise leave it parked on the bind wait
+	// for the rest of the process.
+	release := func() {
+		c.mu.Lock()
+		if c.outShareAudio == sa {
+			c.outShareAudio = nil
+		}
+		c.mu.Unlock()
+
+		sa.end()
+	}
+
+	// The clock rate is Opus's declared 48 kHz whatever the encoder is fed:
+	// RFC 7587 fixes the RTP clock, and a lower capture rate is a narrower band
+	// inside the same timebase rather than a slower one.
+	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{
+		MimeType:    webrtc.MimeTypeOpus,
+		ClockRate:   sampleRate,
+		Channels:    sdpChannels,
+		SDPFmtpLine: shareAudioFmtp,
+	})
+	if err != nil {
+		release()
+
+		return fmt.Errorf("share audio track: %w", err)
+	}
+
+	bound := make(chan struct{})
+	var once sync.Once
+	track.OnBind(func() { once.Do(func() { close(bound) }) })
+	go c.pumpShareAudio(sa, track, bound)
+
+	pub, err := c.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+		Name:   "screenshare audio",
+		Source: livekit.TrackSource_SCREEN_SHARE_AUDIO,
+	})
+	if err != nil {
+		release()
+
+		return fmt.Errorf("publish the share's sound: %w: %w", ErrShareRefused, err)
+	}
+
+	c.mu.Lock()
+	sa.track, sa.pub = track, pub
+	stopped := sa.stopped
+	c.mu.Unlock()
+
+	// A stop that beat the publish found no publication to retire, so the track
+	// published a moment later is retired here.
+	if stopped {
+		_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
+
+		return errors.New("the sound was stopped as it was being published")
+	}
+
+	return nil
+}
+
+// pumpShareAudio is the share audio write loop. The capture paces it: Read
+// blocks for a frame's worth and answers with silence rather than nothing when
+// the machine is quiet, so this wakes fifty times a second either way and the
+// track never stalls.
+//
+// Unlike the picture's loop it drops nothing it cannot send yet. Audio is a
+// continuous stream and a hole in it is heard, where a dropped frame of video
+// is not seen; it waits for the bind instead, and says so when the bind is what
+// never comes.
+func (c *Call) pumpShareAudio(sa *shareAudio, track *lksdk.LocalTrack, bound <-chan struct{}) {
+	defer c.settleShareAudio(sa)
+
+	warn := time.NewTimer(bindWarning)
+	defer warn.Stop()
+
+	select {
+	case <-bound:
+	case <-sa.done:
+		return
+	case <-warn.C:
+		// An unbound track is a codec the room would not take, which for Opus
+		// means the fmtp or the channel count — the one failure here that is
+		// otherwise perfectly silent.
+		log.Print("voice: share audio track has not bound; the room may have refused the codec")
+
+		select {
+		case <-bound:
+		case <-sa.done:
+			return
+		}
+	}
+
+	pcm := make([]int16, sa.frame)
+
+	for {
+		select {
+		case <-sa.done:
+			return
+		default:
+		}
+
+		n, err := sa.src.Read(pcm)
+		if err != nil {
+			return // the capture ended; the picture is not this loop's to stop
+		}
+		if n < sa.frame {
+			continue
+		}
+
+		encoded, err := sa.encodeFrame(pcm)
+		if err != nil {
+			log.Printf("voice: encode share audio: %v", err)
+
+			continue
+		}
+
+		if err := track.WriteSample(media.Sample{
+			Data:     encoded,
+			Duration: frameMillis * time.Millisecond,
+		}, nil); err != nil {
+			select {
+			case <-sa.done:
+				return
+			default:
+			}
+
+			log.Printf("voice: publish share audio: %v", err)
+		}
+	}
+}
+
+// encodeFrame turns one frame into a packet, into the loop's own buffer where
+// the binding offers that. The answer aliases sa.packet and is good only until
+// the next frame, WriteSample having consumed it by then.
+func (sa *shareAudio) encodeFrame(pcm []int16) ([]byte, error) {
+	if sa.into == nil {
+		return sa.encoder.Encode(pcm, sa.framePer, maxPacket)
+	}
+
+	n, err := sa.into.EncodeIn(pcm, sa.framePer, sa.packet)
+	if err != nil {
+		return nil, err
+	}
+
+	return sa.packet[:n], nil
+}
+
+// StopShareAudio takes this end's share audio down on purpose. Safe with none
+// running and safe to call twice.
+func (c *Call) StopShareAudio() {
+	c.mu.Lock()
+	sa := c.outShareAudio
+	var sid string
+	if sa != nil {
+		sa.stopped = true
+		c.outShareAudio = nil
+		if sa.pub != nil {
+			sid = sa.pub.SID()
+		}
+	}
+	c.mu.Unlock()
+
+	if sa == nil {
+		return
+	}
+
+	sa.end()
+
+	if sid != "" {
+		_ = c.room.LocalParticipant.UnpublishTrack(sid)
+	}
+	sa.src.Close()
+}
+
+// settleShareAudio is the write loop ending on its own — the capture died, or
+// the track stopped taking writes. An end nobody asked for retires the
+// publication; one that was asked for has already done it.
+func (c *Call) settleShareAudio(sa *shareAudio) {
+	c.mu.Lock()
+	current := c.outShareAudio == sa
+	stopped := sa.stopped
+	if current {
+		c.outShareAudio = nil
+	}
+	pub := sa.pub
+	c.mu.Unlock()
+
+	if !current || stopped {
+		return
+	}
+
+	sa.src.Close()
+	if pub != nil {
+		_ = c.room.LocalParticipant.UnpublishTrack(pub.SID())
+	}
 }

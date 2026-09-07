@@ -116,6 +116,9 @@ func (s *countingSink) Write(userID string, pcm []int16) {
 	s.held[userID] += len(pcm)
 }
 
+// OpenStereo is Open: this harness counts frames, not channels.
+func (s *countingSink) OpenStereo(userID string) { s.Open(userID) }
+
 func (s *countingSink) Open(userID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

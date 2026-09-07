@@ -90,6 +90,12 @@ type PCMSink interface {
 	// begins asking for one.
 	Open(userID string)
 
+	// OpenStereo is Open for a lane whose writes are interleaved pairs — a
+	// screenshare's own sound, which carries an image the sender mixed and this
+	// end has no business folding down. Want and Write stay in samples, so the
+	// only difference to the filler is that a frame is twice as many of them.
+	OpenStereo(userID string)
+
 	// Wake fires when the speakers have consumed a period and want more. It is the
 	// clock the whole receive path is paced by: decoding on a timer of its own
 	// drifts against the device, and a lane then either backs up — latency nothing
@@ -259,6 +265,12 @@ type Call struct {
 	// Guarded by mu. canShare is the join token's word on whether one may be
 	// published at all — written once at Join, read-only after.
 	outShare *outboundShare
+
+	// outShareAudio is the sound published beside it, nil while none runs, and
+	// independent of outShare on purpose: they are two tracks to the room, so a
+	// share can carry no sound and the sound can fail without stopping a picture.
+	outShareAudio *shareAudio
+
 	canShare bool
 
 	// lanesGen is bumped inside the same critical section as every write to
@@ -638,10 +650,19 @@ func (c *Call) teardown() {
 		out.stopped = true
 		c.outShare = nil
 	}
+	audio := c.outShareAudio
+	if audio != nil {
+		audio.stopped = true
+		c.outShareAudio = nil
+	}
 	c.mu.Unlock()
 
 	if out != nil {
 		_ = out.src.Close()
+	}
+	if audio != nil {
+		audio.end()
+		audio.src.Close()
 	}
 
 	if c.room != nil {

@@ -83,6 +83,23 @@ type lane struct {
 	// is one known thing: the echo test exists to report what is being sent, and a
 	// video's own mix is not this client's to normalise or to move.
 	person bool
+
+	// stereo says the ring holds interleaved pairs rather than one sample per
+	// frame. It is what a source that arrived with an image of its own is opened
+	// as — a screenshare, a video — and never a microphone, so it also settles
+	// both treatments above: there is nothing to place that is not already
+	// placed, and normalising a game's mix is not this client's to do.
+	stereo bool
+}
+
+// channels is how many samples one device frame costs this lane, which is what
+// every depth here is counted in.
+func (l *lane) channels() int {
+	if l.stereo {
+		return channelCount
+	}
+
+	return 1
 }
 
 // How much a lane holds. laneTarget is the depth the writer is asked to keep it
@@ -95,6 +112,11 @@ type lane struct {
 // supplies what was asked for — so a lane past laneBacklog means a producer
 // running on a clock of its own, which is the failure this whole arrangement
 // exists to remove.
+//
+// All three are counted in samples of a *mono* lane, which is one device frame;
+// a stereo lane scales them by lane.channels(). laneDepth alone does not, and
+// does not need to: the ring rounds up to 32768, which is still 341 ms of
+// interleaved pairs and so comfortably past a stereo backlog.
 const (
 	laneTarget  = sampleRate * 40 / 1000
 	laneDepth   = sampleRate * 400 / 1000
@@ -148,7 +170,7 @@ type mixer struct {
 	voices     [maxVoices]mixVoice
 	clock      uint64
 	acc        [chunkFrames * channelCount]int32
-	pull       [chunkFrames]int16
+	pull       [chunkFrames * channelCount]int16
 	lanesDrawn bool // whether this period found a lane open
 }
 
@@ -326,9 +348,11 @@ func (m *mixer) mixVoices(acc []int32) {
 	}
 }
 
-// mixLanes adds every remote participant. A lane is mono and the device is
-// stereo, so one sample lands in both ears — either ear at the same size, or at
-// the pair of sizes that puts the lane somewhere between them.
+// mixLanes adds every remote participant. A mono lane meets a stereo device, so
+// one sample lands in both ears — either ear at the same size, or at the pair of
+// sizes that puts the lane somewhere between them. A stereo lane already is a
+// pair and is summed as it stands: what it carries was mixed by whoever sent it,
+// and moving or normalising that is exactly what it must not have done to it.
 //
 // A lane with nothing waiting contributes silence rather than stretching what it
 // had: a call whose sender has stopped should go quiet, not buzz.
@@ -350,12 +374,19 @@ func (m *mixer) mixLanes(acc []int32, frames int) {
 
 		// A lane the sender has run ahead of is caught up by dropping. Playing the
 		// backlog out would hold every later frame behind it.
-		if over := l.pcm.Len() - laneBacklog; over > 0 {
+		if over := l.pcm.Len() - laneBacklog*l.channels(); over > 0 {
 			l.pcm.Discard(over)
 		}
 
-		n := l.pcm.PopAll(m.pull[:frames])
+		n := l.pcm.PopAll(m.pull[:frames*l.channels()])
 		if n == 0 {
+			continue
+		}
+
+		gain := bitsFloat(l.gain.Load()) * master
+
+		if l.stereo {
+			l.addStereo(acc, m.pull[:n], gain)
 			continue
 		}
 
@@ -370,7 +401,6 @@ func (m *mixer) mixLanes(acc []int32, frames int) {
 		// enough to justify, and next() is what walks the gain to it.
 		l.level.retarget(levelling && l.person, m.pull[:n])
 
-		gain := bitsFloat(l.gain.Load()) * master
 		for j := range n {
 			v := float32(m.pull[j]) * l.level.next() * gain
 			if g := l.lim.gain(v); g != 1 {
@@ -383,7 +413,36 @@ func (m *mixer) mixLanes(acc []int32, frames int) {
 	}
 }
 
+// addStereo sums an interleaved lane. The limiter is *linked* — one gain from
+// the louder of the pair, applied to both — because a limiter run down each
+// channel separately turns a loud moment on one side into the image sliding to
+// the other, which is the one artefact a stereo lane exists to avoid.
+func (l *lane) addStereo(acc []int32, pcm []int16, gain float32) {
+	for j := 0; j+1 < len(pcm); j += channelCount {
+		left := float32(pcm[j]) * gain
+		right := float32(pcm[j+1]) * gain
+
+		if g := l.lim.gain(max(abs32(left), abs32(right))); g != 1 {
+			left *= g
+			right *= g
+		}
+
+		acc[j] += int32(left)
+		acc[j+1] += int32(right)
+	}
+}
+
 /* Small maths, kept together so the render path reads as arithmetic */
+
+// abs32 is math.Abs without the float64 round trip the render path would
+// otherwise pay per sample.
+func abs32(v float32) float32 {
+	if v < 0 {
+		return -v
+	}
+
+	return v
+}
 
 // clampSample folds the accumulator back into the device's format. int16's range
 // is asymmetric, so the two ends are not one expression.

@@ -43,6 +43,11 @@ type ShareSource struct {
 	Title string
 
 	Width, Height int
+
+	// Minimised is a window that is off the screen just now, which the row
+	// says so that a size it does not currently have is not read as wrong.
+	// Picking one is allowed: the controller brings it back.
+	Minimised bool
 }
 
 // ShareChoice is the card's answer. Source is the ID of the picked entry,
@@ -319,8 +324,11 @@ func newShareSourceRow(source ShareSource, onPick func(string)) *shareSourceRow 
 	w.onTap = func() { onPick(source.ID) }
 
 	title := newText(source.Title, theme.Colors.TextPrimary, 0)
-	size := newText(fmt.Sprintf("%d × %d", source.Width, source.Height),
-		theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
+	measure := fmt.Sprintf("%d × %d", source.Width, source.Height)
+	if source.Minimised {
+		measure += " · minimised — sharing restores it"
+	}
+	size := newText(measure, theme.Colors.TimestampText, theme.Sizes.FriendsHandleSize)
 	lines := VBoxNoSpacing(NewEllipsisText(title), NewEllipsisText(size))
 
 	gap := theme.Sizes.FriendsGap

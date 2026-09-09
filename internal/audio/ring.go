@@ -73,8 +73,15 @@ func (r *ring[T]) PushAll(items []T) int {
 	free := uint64(len(r.buf)) - (write - r.read.Load())
 
 	n := min(uint64(len(items)), free)
-	for i := uint64(0); i < n; i++ {
-		r.buf[(write+i)&r.mask] = items[i]
+
+	// At most two straight copies, split where the ring wraps: a masked index
+	// per element defeats bounds-check elimination and keeps memmove out.
+	at := write & r.mask
+	if tail := uint64(len(r.buf)) - at; n <= tail {
+		copy(r.buf[at:at+n], items[:n])
+	} else {
+		copy(r.buf[at:], items[:tail])
+		copy(r.buf[:n-tail], items[tail:n])
 	}
 	r.write.Store(write + n)
 
@@ -102,8 +109,13 @@ func (r *ring[T]) PopAll(out []T) int {
 	read := r.read.Load()
 
 	n := min(uint64(len(out)), r.write.Load()-read)
-	for i := uint64(0); i < n; i++ {
-		out[i] = r.buf[(read+i)&r.mask]
+
+	at := read & r.mask
+	if tail := uint64(len(r.buf)) - at; n <= tail {
+		copy(out[:n], r.buf[at:at+n])
+	} else {
+		copy(out[:tail], r.buf[at:])
+		copy(out[tail:n], r.buf[:n-tail])
 	}
 	r.read.Store(read + n)
 

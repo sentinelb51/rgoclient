@@ -398,9 +398,9 @@ dependency DAG and the client's contract; this file is the wire-level notes.
   every category is `ServerEditDataRemoveCategories`, not an empty array. The
   edit returns as a `ServerUpdate` carrying the whole structure, which
   `State.updateServer` files — `PartialServer.Categories` is handled.
-- **`Session.WS` is nilable and unguarded.** `ChannelBeginTyping`/`ChannelEndTyping`
+- **`Session.Socket()` is nil either side of a connection.** `ChannelBeginTyping`/`ChannelEndTyping`
   are websocket writes rather than requests — no rate limiter, nothing to wait
-  for — but they reach `s.WS.WriteMessage` without a check, and `WS` is nil until
+  for — but they reach the socket's `WriteMessage` without a check, and it is nil until
   `Open` builds it and stale after `Close`. `Client.BeginTyping`/`EndTyping`
   therefore test it alongside the session. Also note `EventChannelStopTyping`
   *embeds* `EventChannelStartTyping` rather than aliasing it: the fields are

@@ -92,8 +92,8 @@ func (s *fakeStore) Channel(channelID string) (domain.Channel, bool) {
 	return channel, ok
 }
 
-func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
-
+func (s *fakeStore) ChannelName(channelID string) string { return s.channels[channelID].Name }
+
 func (s *fakeStore) ChannelServerID(channelID string) string { return s.channels[channelID].ServerID }
 
 func (s *fakeStore) MemberIdentity(serverID, userID string) (string, string, bool) {

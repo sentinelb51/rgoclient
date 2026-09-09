@@ -161,7 +161,7 @@ is three of these.
 
 ### Context discipline
 
-The tree is ~1.2 MB of Go and the largest files are 50 KB each, so what gets
+The tree is ~3 MB of Go with its tests and the largest files are 70-90 KB each, so what gets
 read *is* the budget.
 
 - **Use the `rgo-explore` agent to locate code** (`.claude/agents/`) rather than

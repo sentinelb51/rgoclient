@@ -49,20 +49,52 @@ reverted mid-refactor; `session.go`, `auth.go`, `group.go`, `endpoints.go`,
 
 | Item | What |
 |---|---|
-| A1-5 | `Session.selfbot` written from the gateway, read on every REST call → `atomic.Bool`. The `Selfbot()` accessor already exists and `http.go` already calls it; only the field and its three writes remain |
+| ~~A1-5~~ | **Done** (2026-09-09). `Session.selfbot` is an `atomic.Bool` |
 | A1-9b | `SessionEdit` decodes the response into the **request** type. json/v2 ignores unknown members, so this fails *silently* — a zero-valued struct, no error |
 | A1-9c | `UserFlags` decodes `{"flags":n}` into a bare `int`. Fails *loudly*, every call |
 | A1-9d | `GroupCreate` decodes a group Channel into `*Group`; return `*Channel` and delete `Group` (exported signature change) |
 | A2-15 | MFA login (ticket / allowed_methods / mfa_ticket) + `Session.AddFriend`. `LoginParams` already carries the ticket field from wave 1 — read it before adding another. rgoclient's `internal/client/auth.go` + `auth_test.go` are shapes a real server accepted |
-| A2-17b | Six `log.Fatalf` in `AddHandler` registration → `panic`. A library must never `os.Exit` |
+| ~~A2-17b~~ | **Done** (2026-09-09). `handlerName` panics |
 | A2-14b | State side of the `UserRelationship` default handler landed in wave 1; its registration line in `session.go` did not. The verbatim block is in the scratchpad's `revoltgo-wave1-report.md` |
 | A3-20d | `mutualConnection` scans every server and channel per DM permission check. Needs a `userID → set[serverID]` index beside the member cache. **Attempted and reverted** — the agent's partial `stateMembers` reshape broke `permissions.go` |
 | A3-21 | ~50 unused `URL*` constants in `endpoints.go` → `// Deprecated:` (exported, so marked not deleted). Count each by grep; do not trust the number |
 | A3-19 | `//msgp:ignore` the REST-only params/response types and regenerate. Regeneration is verified reproducible, so this is mechanical — currently ~25k generated lines for a codec only the gateway uses |
 | A3-22 | Tests: golden frames for `eventTypeFromMSGP` at 15/16/17 map entries, a `-race` State test, ratelimiter bucket-key and eviction, `APIError` shape. CI already runs `go test -race ./...` and passes vacuously |
-| — | ~20 `log.Printf`/`log.Println` left in `session.go`, `auth.go`, `endpoints.go`, `revoltgo.go`, `file.go` → `logf`. `revoltgo.go`'s are an update check that prints to the program log unasked |
-| — | `session.go:528` writes `s.WS` unsynchronised while other goroutines read it (`session.go:424`, `:541`, rgoclient `actions.go:386,395`). A real data race, found during the pass, not in the original audit |
+| ~~—~~ | **Done** (2026-09-09). Every diagnostic goes through `logf`; the update check is silent until `SetLogger` |
+| ~~—~~ | **Done** (2026-09-09). `Session.WS` is gone: the socket is an `atomic.Pointer` behind `Session.Socket()`, and rgoclient's two typing guards read that |
 | — | `SyncSettings` set/fetch asymmetry: `/set` sends `map[string]string` with the timestamp as a `?timestamp=` query parameter; `/fetch` answers the `(int64, string)` tuple. `http.go` now models fetch correctly; `session.go` still sends the fetch shape both ways |
+
+## Second pass (2026-09-09)
+
+A sweep of every package for allocation and repeated work, after the first
+pass. The tree was already tight — no `sort.Slice`, no `regexp`, no `[]rune`
+on a hot path, the audio callback allocation-free and asserted so — and what
+was left is below, applied:
+
+- `ui/message.go` `SetFollowedByGroup` ended in `w.Refresh()`, re-uploading the
+  row's avatar and every attachment on each live message that landed under a
+  mounted row; it is `Relayout(w.content)`, as `RefreshRelativeTime` already was.
+- `ui/markdown.go` `bodyRenderer.Objects()` built its slice per call — and the
+  Fyne Label renderer under it builds *its* list per call too — on every paint
+  and hit test of every mounted body. Composed once in `CreateRenderer`.
+- `voice/share.go` `readShare` still went through `track.ReadRTP()`, an MTU
+  buffer and a packet struct per RTP packet of a 12 Mbps share. It reads into
+  `sharePacket`s the assembler pools, released one packet late because pion's
+  AV1 depacketizer aliases an unfinished fragment into the payload it came in.
+- `audio/ring.go` `PushAll`/`PopAll` copy in one or two `copy` calls rather
+  than a masked index per element; `audio/mix.go` voices read their sound as
+  `[]int16` through one `unsafe.Slice` view instead of decoding bytes per sample.
+- `app/members.go` `recipientMembers` folds a name once rather than per
+  comparison; `markdown/parser.go` presizes the two slices it grew by appending.
+- revoltgo: the four items struck out above, and `routeKey` builds its bucket
+  key in one sized `strings.Builder` rather than `Split`/`Join`.
+
+Looked at and not taken: `navigation.go` rebuilding category headers per
+channel event (small count, rare event); `subscribe.go` `applySpeakers`'s two
+small allocations per speaker report (a shared scratch would need lksdk's
+callback to be single-threaded, which is not promised); `store.go`
+`memberColour` re-parsing a role colour per row (a cache keyed on role would
+need a `RolesChanged` invalidation for a hex triple's worth of saving).
 
 ## rgoclient — not done
 

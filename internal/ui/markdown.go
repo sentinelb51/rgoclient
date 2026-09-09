@@ -196,12 +196,22 @@ func (t *bodyText) CreateRenderer() fyne.WidgetRenderer {
 	// be found. Its own ExtendBaseWidget call is a no-op: the base already points here.
 	renderer := t.Label.CreateRenderer()
 
-	catcher := newSelectionCatcher(renderer.Objects(), t.onMenu)
+	inner := renderer.Objects()
+	catcher := newSelectionCatcher(inner, t.onMenu)
 	if catcher == nil {
 		return renderer
 	}
 
-	return &bodyRenderer{WidgetRenderer: renderer, catcher: catcher}
+	// Composed once: the Label's renderer builds its list afresh on every call
+	// from two objects it creates in CreateRenderer and never replaces, and the
+	// driver asks for it on every paint and hit test of every mounted body —
+	// which made this two allocations per row per frame. Only Selectable moves
+	// the set, and a body is selectable before it mounts and stays so.
+	return &bodyRenderer{
+		WidgetRenderer: renderer,
+		catcher:        catcher,
+		objects:        append(inner, catcher),
+	}
 }
 
 // bodyRenderer is the Label's renderer with the catcher laid over it, last
@@ -209,6 +219,7 @@ func (t *bodyText) CreateRenderer() fyne.WidgetRenderer {
 type bodyRenderer struct {
 	fyne.WidgetRenderer
 	catcher *selectionCatcher
+	objects []fyne.CanvasObject
 }
 
 func (r *bodyRenderer) Layout(size fyne.Size) {
@@ -217,10 +228,7 @@ func (r *bodyRenderer) Layout(size fyne.Size) {
 }
 
 func (r *bodyRenderer) Objects() []fyne.CanvasObject {
-	inner := r.WidgetRenderer.Objects()
-	objects := make([]fyne.CanvasObject, 0, len(inner)+1)
-
-	return append(append(objects, inner...), r.catcher)
+	return r.objects
 }
 
 // selectionCatcher covers a Label's selection overlay, answering right-clicks

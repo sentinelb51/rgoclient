@@ -46,8 +46,8 @@ type playCmd struct {
 // mixVoice is one ringing notification sound. Owned by the render callback and
 // touched nowhere else.
 type mixVoice struct {
-	data  []byte
-	pos   int
+	data  []int16 // the sound's bytes viewed as its samples, taken once at claim
+	pos   int     // in samples
 	gain  float32
 	group uint16
 	age   uint64 // when it started, so the oldest can be identified
@@ -251,7 +251,7 @@ func (m *mixer) start() {
 		m.clock++
 
 		v := &m.voices[slot]
-		v.data = cmd.data
+		v.data = asSamples(cmd.data)
 		v.pos = 0
 		v.gain = cmd.gain
 		v.group = cmd.group
@@ -334,15 +334,13 @@ func (m *mixer) mixVoices(acc []int32) {
 			continue
 		}
 
-		n := min(len(acc), (len(v.data)-v.pos)/2)
-		for j := range n {
-			at := v.pos + j*2
-			sample := int16(uint16(v.data[at]) | uint16(v.data[at+1])<<8)
+		n := min(len(acc), len(v.data)-v.pos)
+		for j, sample := range v.data[v.pos : v.pos+n] {
 			acc[j] += int32(float32(sample) * v.gain)
 		}
-		v.pos += n * 2
+		v.pos += n
 
-		if v.pos+1 >= len(v.data) {
+		if v.pos >= len(v.data) {
 			v.data = nil
 		}
 	}
@@ -755,6 +753,13 @@ func bitsFloat(v uint32) float32 { return *(*float32)(unsafe.Pointer(&v)) }
 // rather than a copy and must not outlive the callback.
 func asFloats(buf []byte) []float32 {
 	return unsafe.Slice((*float32)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/4)
+}
+
+// asSamples views a decoded sound's bytes as the signed 16-bit samples
+// decode.go wrote them as — the same little-endian assumption asFloats makes —
+// so a voice reads one index per sample rather than two loads and a shift.
+func asSamples(buf []byte) []int16 {
+	return unsafe.Slice((*int16)(unsafe.Pointer(unsafe.SliceData(buf))), len(buf)/2)
 }
 
 // floatToSample converts one normalised sample to the device's own format,

@@ -405,11 +405,11 @@ func (c *Client) AckServer(serverID string) error {
 // limiter, nothing to wait for.
 //
 // The socket is the second guard: a session is published before its websocket
-// opens and closing one leaves the field stale, so Session.WS is nil either side
+// opens and closing one leaves it stale, so Session.Socket() is nil either side
 // of a login and revoltgo writes through it without looking.
 func (c *Client) BeginTyping(channelID string) error {
 	session := c.session.Load()
-	if session == nil || session.WS == nil {
+	if session == nil || session.Socket() == nil {
 		return ErrNoSession
 	}
 
@@ -418,7 +418,7 @@ func (c *Client) BeginTyping(channelID string) error {
 
 func (c *Client) EndTyping(channelID string) error {
 	session := c.session.Load()
-	if session == nil || session.WS == nil {
+	if session == nil || session.Socket() == nil {
 		return ErrNoSession
 	}
 

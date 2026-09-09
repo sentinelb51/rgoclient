@@ -7,7 +7,6 @@ package video
 // one does.
 
 import (
-	"encoding/binary"
 	"fmt"
 	"io"
 	"os"
@@ -16,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unsafe"
 )
 
 // FrameConfig is one playback pipe's shape. Width, Height and FPS are the
@@ -279,10 +279,12 @@ func (s *Stream) ReadPCM(buf []int16) (int, error) {
 	raw := s.pcm[:len(buf)*2]
 	n, err := io.ReadFull(s.out, raw)
 
+	// ffmpeg was asked for s16le and this client only ever runs little-endian,
+	// so the bytes already are the samples: one memmove rather than a bounds-
+	// checked assembly per sample, fifty times a second per playing video. The
+	// same view mix.go and the loopback take of a device buffer.
 	samples := n / 2
-	for i := 0; i < samples; i++ {
-		buf[i] = int16(binary.LittleEndian.Uint16(raw[i*2:]))
-	}
+	copy(buf[:samples], unsafe.Slice((*int16)(unsafe.Pointer(unsafe.SliceData(raw))), samples))
 	if err == io.ErrUnexpectedEOF {
 		err = io.EOF
 	}

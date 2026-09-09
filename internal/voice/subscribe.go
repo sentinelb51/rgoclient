@@ -10,6 +10,7 @@ import (
 
 	"github.com/livekit/protocol/livekit"
 	lksdk "github.com/livekit/server-sdk-go/v2"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/sentinelb51/gopus"
 )
@@ -305,9 +306,21 @@ func (c *Call) subscribe(track *webrtc.TrackRemote, userID string, stereo bool) 
 // reader tunes: it is the resolution of the exit check, not a media setting.
 const readTimeout = time.Second
 
+// readMTU sizes the buffer one RTP packet is read into. A datagram off the wire
+// cannot be wider, and reading into a buffer of our own is what keeps the
+// receive path free of a per-packet allocation: ReadRTP mints an MTU-sized
+// buffer and a packet struct for every frame of every talker.
+const readMTU = 1500
+
 // readTrack moves RTP from the track into the jitter buffer and does nothing
 // else. It ends when the track does, which is what closes the player after it.
 func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string) {
+	// Both reused across the loop: pion's Unmarshal writes into the header's
+	// existing slices where they are big enough, and the payload it hands back
+	// is a slice of buf, which the jitter buffer copies out of.
+	buf := make([]byte, readMTU)
+	var packet rtp.Packet
+
 	for {
 		select {
 		case <-c.done:
@@ -319,7 +332,7 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 		// read after it.
 		_ = track.SetReadDeadline(time.Now().Add(readTimeout))
 
-		packet, _, err := track.ReadRTP()
+		n, _, err := track.Read(buf)
 		if err != nil {
 			// An expiry is silence, not failure — DTX and a muted publisher both
 			// make long gaps ordinary — so it goes back round rather than closing
@@ -348,17 +361,17 @@ func (c *Call) readTrack(track *webrtc.TrackRemote, buffer Jitter, userID string
 			return
 		}
 
+		if err := packet.Unmarshal(buf[:n]); err != nil {
+			continue // a malformed datagram is one lost frame, not a dead lane
+		}
+
 		if len(packet.Payload) == 0 {
 			continue
 		}
 
-		// The payload is pion's buffer and is reused, so the jitter buffer gets a
-		// copy. This is the one allocation per packet in the receive path and it
-		// buys the buffer the right to hold what it was given.
-		payload := make([]byte, len(packet.Payload))
-		copy(payload, packet.Payload)
-
-		buffer.Push(packet.SequenceNumber, packet.Timestamp, payload)
+		// The payload is a slice of buf, which the next read overwrites; the
+		// jitter buffer copies into storage of its own.
+		buffer.Push(packet.SequenceNumber, packet.Timestamp, packet.Payload)
 	}
 }
 

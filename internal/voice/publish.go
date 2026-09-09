@@ -56,6 +56,18 @@ const (
 	silentLevel   = 127
 )
 
+// speakingWrite and silentWrite are the two write options a frame is ever sent
+// under, built once. The level is passed by pointer, so building the pair per
+// frame put the level and the options on the heap fifty times a second for the
+// whole of a call; lksdk reads them synchronously and retains neither.
+var (
+	speakingWrite = &lksdk.SampleWriteOptions{AudioLevel: ptr(uint8(speakingLevel))}
+	silentWrite   = &lksdk.SampleWriteOptions{AudioLevel: ptr(uint8(silentLevel))}
+)
+
+// ptr is the address of a value, for an API that takes an optional by pointer.
+func ptr[T any](v T) *T { return &v }
+
 // opusTuning is what a libopus binding has to offer for the loss tolerance this
 // client wants. Upstream layeh.com/gopus does not have these; sentinelb51/gopus
 // does, and the assertion lights them up without this package knowing which is
@@ -348,15 +360,15 @@ func (p *publisher) run(call *Call) {
 			continue
 		}
 
-		level := uint8(silentLevel)
+		opts := silentWrite
 		if voiced {
-			level = speakingLevel
+			opts = speakingWrite
 		}
 
 		if err := p.track.WriteSample(media.Sample{
 			Data:     encoded,
 			Duration: frameMillis * time.Millisecond,
-		}, &lksdk.SampleWriteOptions{AudioLevel: &level}); err != nil {
+		}, opts); err != nil {
 			select {
 			case <-p.done:
 				return

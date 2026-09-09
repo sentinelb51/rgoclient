@@ -1,7 +1,5 @@
 package voice
 
-import "math"
-
 // Time-scaling one decoded frame, so a buffer sitting off its depth can be
 // brought back without anybody hearing the correction.
 //
@@ -120,26 +118,52 @@ func bestLag(pcm []int16, channels int) int {
 	window := matchWindow * channels
 	tail := pcm[n-window:]
 
+	// The candidate's energy is a window sliding one step left per lag, so it is
+	// carried rather than recomputed: what enters at the left and what leaves at
+	// the right is one step's worth either way. That halves the work before any
+	// of the rest of it, and both sums stay integer — a squared int16 summed over
+	// the window peaks near 2.6e11, which is nothing to an int64 and is exact,
+	// where the float64 form paid a convert per sample for less precision.
+	first := minLag * channels
+	at := pcm[n-window-first : n-first]
+
+	var energy int64
+	for _, s := range at {
+		energy += int64(s) * int64(s)
+	}
+
 	best, score := 0, 0.0
-	for lag := minLag * channels; lag <= maxLag*channels; lag += channels {
+	for lag := first; lag <= maxLag*channels; lag += channels {
 		at := pcm[n-window-lag : n-lag]
+		with := tail[:len(at)] // one bounds check for the loop rather than per sample
 
-		var dot, energy float64
+		var dot int64
 		for i, s := range at {
-			v := float64(s)
-			dot += v * float64(tail[i])
-			energy += v * v
+			dot += int64(s) * int64(with[i])
 		}
 
-		if dot <= 0 || energy == 0 {
-			continue
+		if dot > 0 && energy > 0 {
+			// The tail's own energy is the same for every candidate, so it is left
+			// out of the normalisation: what is being ranked is shape, and dividing
+			// every candidate by one constant cannot reorder them. Squaring both
+			// sides of dot/sqrt(energy) is the same order without the root.
+			if ranked := float64(dot) * float64(dot) / float64(energy); ranked > score {
+				best, score = lag, ranked
+			}
 		}
 
-		// The tail's own energy is the same for every candidate, so it is left out
-		// of the normalisation: what is being ranked is shape, and dividing every
-		// candidate by one constant cannot reorder them.
-		if at := dot / math.Sqrt(energy); at > score {
-			best, score = lag, at
+		// Slide to the next candidate: the window moves left by one step, so one
+		// step enters at its head and one leaves at its tail.
+		next := lag + channels
+		if next > maxLag*channels {
+			break
+		}
+
+		for _, s := range pcm[n-window-next : n-window-lag] {
+			energy += int64(s) * int64(s)
+		}
+		for _, s := range pcm[n-next : n-lag] {
+			energy -= int64(s) * int64(s)
 		}
 	}
 
@@ -193,7 +217,8 @@ func expand(pcm []int16, into []int16, lag int) []int16 {
 // in the middle of every seam. A convex combination of two int16s is one too,
 // so nothing here can clip.
 func blend(from, to int16, i, n int) int16 {
-	w := float64(i) / float64(n)
-
-	return int16(float64(from)*(1-w) + float64(to)*w)
+	// Integer: the widest term is 32767*960, so the sum of the two is nowhere
+	// near an int32's range, and this replaces a divide and four converts per
+	// sample of every seam.
+	return int16((int32(from)*int32(n-i) + int32(to)*int32(i)) / int32(n))
 }

@@ -36,6 +36,12 @@ type settingsHit struct {
 	group   string
 	label   string
 
+	// fold is label lowered once, where the hit is filed. The index is built
+	// twice over every section and never changes after, so folding it per hit
+	// per keystroke was the one list that had not taken MentionCandidate's
+	// trick — the same one that keeps a 2000-member server cheap.
+	fold string
+
 	// field is the theme entry an Advanced result draws its own control from.
 	// Those rows are built from a name and nothing else, so the search *is* the
 	// filter the Advanced lists used to carry a field of their own for: a size or
@@ -47,6 +53,11 @@ type settingsHit struct {
 	// advanced marks a hit only advanced mode reveals, so a basic-mode search
 	// never offers somewhere that will not be there on arrival.
 	advanced bool
+}
+
+// newHit files one, folding its label for the search.
+func newHit(section SettingsSection, group, label string) settingsHit {
+	return settingsHit{section: section, group: group, label: label, fold: strings.ToLower(label)}
 }
 
 // hitKey is a hit's identity across the two index passes.
@@ -77,7 +88,7 @@ func newIndexRow(label string) *indexRow {
 // nothing.
 func (p *SettingsPage) recordGroup(caption string, rows []fyne.CanvasObject) settingsGroup {
 	if caption != "" {
-		p.index = append(p.index, settingsHit{section: p.section, group: caption, label: caption})
+		p.index = append(p.index, newHit(p.section, caption, caption))
 	}
 
 	for _, row := range rows {
@@ -86,7 +97,7 @@ func (p *SettingsPage) recordGroup(caption string, rows []fyne.CanvasObject) set
 			continue // a separator, or a note: nothing anybody searches for
 		}
 
-		p.index = append(p.index, settingsHit{section: p.section, group: caption, label: stub.label})
+		p.index = append(p.index, newHit(p.section, caption, stub.label))
 	}
 
 	return settingsGroup{caption: caption}
@@ -95,16 +106,12 @@ func (p *SettingsPage) recordGroup(caption string, rows []fyne.CanvasObject) set
 // recordFields files one of the Advanced lists. Those rows are a line of table
 // each, so they are indexed from the table rather than built and walked.
 func (p *SettingsPage) recordFields(caption string, fields []string, colour bool) settingsGroup {
-	p.index = append(p.index, settingsHit{section: p.section, group: caption, label: caption})
+	p.index = append(p.index, newHit(p.section, caption, caption))
 
 	for _, field := range fields {
-		p.index = append(p.index, settingsHit{
-			section: p.section,
-			group:   caption,
-			label:   field,
-			field:   field,
-			color:   colour,
-		})
+		hit := newHit(p.section, caption, field)
+		hit.field, hit.color = field, colour
+		p.index = append(p.index, hit)
 	}
 
 	return settingsGroup{caption: caption}
@@ -239,12 +246,12 @@ func (p *SettingsPage) clearQuery() {
 func (p *SettingsPage) matches() ([]settingsHit, int) {
 	query := strings.ToLower(p.query)
 
-	var found []settingsHit
+	found := make([]settingsHit, 0, settingsResultLimit)
 	for _, hit := range p.searchHits() {
 		if hit.advanced && !p.advanced {
 			continue
 		}
-		if !strings.Contains(strings.ToLower(hit.label), query) {
+		if !strings.Contains(hit.fold, query) {
 			continue
 		}
 

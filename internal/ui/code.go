@@ -310,7 +310,8 @@ func codeStringEnd(text string, i int) int {
 	quote := text[i]
 
 	// Python's triple quote, the one multi-line literal common enough to matter.
-	if fence := strings.Repeat(string(quote), 3); strings.HasPrefix(text[i:], fence) {
+	if i+2 < len(text) && text[i+1] == quote && text[i+2] == quote {
+		fence := text[i : i+3]
 		if end := strings.Index(text[i+3:], fence); end >= 0 {
 			return i + 3 + end + 3
 		}

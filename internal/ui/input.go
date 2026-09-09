@@ -507,10 +507,11 @@ func composerMinSize(e *widget.Entry, rows *wrapMeter) fyne.Size {
 // disagree — no other API reports it, the provider being unexported. Memoised per
 // (text, width) because MinSize runs on every layout pass.
 type wrapMeter struct {
-	mirror *widget.RichText
-	text   string
-	width  float32
-	rows   int
+	mirror  *widget.RichText
+	segment *widget.TextSegment
+	text    string
+	width   float32
+	rows    int
 }
 
 // measure returns the rows e's text occupies at the width e was last laid out at.
@@ -528,10 +529,15 @@ func (m *wrapMeter) measure(e *widget.Entry) int {
 	if m.mirror == nil {
 		m.mirror = widget.NewRichText()
 		m.mirror.Wrapping = fyne.TextWrapWord
+
+		// The segment and the slice holding it are built with the mirror and
+		// written into: this runs on every layout pass while somebody types.
+		m.segment = &widget.TextSegment{}
+		m.mirror.Segments = []widget.RichTextSegment{m.segment}
 	}
 
 	// Height only bounds truncation, which word wrapping does not do.
-	m.mirror.Segments = []widget.RichTextSegment{&widget.TextSegment{Text: text}}
+	m.segment.Text = text
 	m.mirror.Resize(fyne.NewSize(width, wrapMeterHeight))
 	m.mirror.Refresh()
 

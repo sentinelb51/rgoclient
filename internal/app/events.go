@@ -748,10 +748,17 @@ func (a *App) onUserRemoved(event client.UserRemoved) {
 	// A conversation that went takes its mentions with it. Nothing can open one
 	// again, so a mention left inside would light the inbox for a channel that has
 	// no row — the same reason the order below is pruned.
+	// Collected and then cleared: clearMentions repaints the whole rail, so
+	// removing k channels inside the range repainted it k times.
+	var gone []string
 	for channelID := range a.mentions {
 		if _, ok := a.store.Channel(channelID); !ok {
-			a.clearMentions(channelID)
+			gone = append(gone, channelID)
 		}
+	}
+
+	for _, channelID := range gone {
+		a.clearMentions(channelID)
 	}
 
 	a.dmChannels = slices.DeleteFunc(a.dmChannels, func(channelID string) bool {

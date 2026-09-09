@@ -1207,7 +1207,7 @@ func (a *App) beginShare(sources []video.CaptureSource, choice ui.ShareChoice) {
 		// a different thing to fix from not having ffmpeg at all.
 		return errors.New("no encoder this client can use: the ffmpeg on this machine carries neither a hardware encoder nor libx264")
 	}, func(err error) {
-		a.failShare(fmt.Sprintf("%v", err))
+		a.failShare(err.Error())
 	})
 }
 

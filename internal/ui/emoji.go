@@ -482,10 +482,15 @@ func (p *emojiPicker) fill(query string) {
 	var rows, icons []fyne.CanvasObject
 	p.blocks, p.railButtons = p.blocks[:0], p.railButtons[:0]
 
-	for i, section := range p.sections {
+	// Both loops take a pointer: an emojiEntry is four strings and a fold, and
+	// a set that runs to thousands is walked on every keystroke to read one
+	// field of it. The member model's MemberEntry made the same choice.
+	for i := range p.sections {
+		section := &p.sections[i]
 		cells := make([]fyne.CanvasObject, 0, min(len(section.entries), emojiPickerLimit-drawn))
 
-		for _, entry := range section.entries {
+		for j := range section.entries {
+			entry := &section.entries[j]
 			if drawn == emojiPickerLimit {
 				break
 			}

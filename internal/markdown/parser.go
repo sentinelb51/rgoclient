@@ -339,7 +339,9 @@ func classify(line string) lineInfo {
 func parseBlocks(lines []string, depth int) []Block {
 	info := classifyLines(lines)
 
-	var blocks []Block
+	// A block is at least a line, so the line count bounds the answer; the cap
+	// keeps a pasted wall of text from reserving for one block per line.
+	blocks := make([]Block, 0, min(len(lines), 8))
 
 	for i := 0; i < len(lines); {
 		var block Block
@@ -652,7 +654,9 @@ func scanInline(s string, depth int) []Inline {
 		return []Inline{&Text{Text: s}}
 	}
 
-	p := inlineScanner{src: s}
+	// Four covers a line of prose around one span or two, which is most bodies,
+	// without a second and third growth on the way there.
+	p := inlineScanner{src: s, out: make([]Inline, 0, 4)}
 
 	for i := 0; i < len(s); {
 		if !inlineSpecial[s[i]] {

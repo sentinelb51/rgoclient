@@ -740,15 +740,31 @@ func recipientMembers(store domain.Store, channel domain.Channel) []domain.Membe
 		})
 	}
 
-	slices.SortFunc(members, func(x, y domain.Member) int {
-		if by := strings.Compare(strings.ToLower(x.Name), strings.ToLower(y.Name)); by != 0 {
+	// Folded once per member rather than once per comparison, the way
+	// Store.Members sorts: a name is lower-cased n log n times otherwise, and
+	// every one with a capital in it is an allocation.
+	type keyed struct {
+		fold, id string
+		at       int
+	}
+	keys := make([]keyed, len(members))
+	for i, member := range members {
+		keys[i] = keyed{fold: strings.ToLower(member.Name), id: member.UserID, at: i}
+	}
+	slices.SortFunc(keys, func(x, y keyed) int {
+		if by := strings.Compare(x.fold, y.fold); by != 0 {
 			return by
 		}
 
-		return strings.Compare(x.UserID, y.UserID)
+		return strings.Compare(x.id, y.id)
 	})
 
-	return members
+	sorted := make([]domain.Member, len(members))
+	for i, key := range keys {
+		sorted[i] = members[key.at]
+	}
+
+	return sorted
 }
 
 // setMentionCandidates hands the picker a list somebody else has already

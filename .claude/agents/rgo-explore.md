@@ -32,9 +32,12 @@ signature and the line range rather than the body — the caller will read it.
 - **`sources/openapi-spec-0.15.1.json` is 374 KB. Grep it, never Read it.** One
   read of that file is most of a context window. If a question is about wire
   shape, grep for the route or field name and report the matching lines.
-- Largest sources are `internal/ui/widgets.go`, `input.go`, `message.go` and
-  `internal/app/messages.go`, all around 50 KB. Grep with `-C` before reaching
-  for Read on any of them.
+- Largest sources are `internal/ui/theme/theme.go`, `widgets.go`, `settings_server.go`,
+  `input.go` and `message.go` (70-90 KB each), and `internal/app/messages.go`,
+  `voice.go` and `screenshare.go` (60 KB). Grep with `-C` before reaching for
+  Read on any of them.
+
+
 - The dependency graph is a strict DAG: `domain`, `markdown`, `config` are
   leaves; `client` is the only package importing `revoltgo`; `app` sits on top.
   Use it to narrow where a thing can possibly live before searching everywhere.

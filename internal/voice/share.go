@@ -450,8 +450,19 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 		// how the loop looks at done, not a failure.
 		_ = track.SetReadDeadline(time.Now().Add(readTimeout))
 
-		packet, _, err := track.ReadRTP()
+		// Read into a packet of the assembler's own rather than through ReadRTP,
+		// which mints an MTU buffer and a packet struct per call — at a share's
+		// packet rate, twenty times a talker's, that was the receive path's one
+		// remaining per-packet allocation. The assembler hands it back once
+		// nothing can still point into it.
+		packet := assembler.acquire()
+		n, _, err := track.Read(packet.buf[:])
+		if err == nil {
+			err = packet.Unmarshal(packet.buf[:n])
+		}
 		if err != nil {
+			assembler.release(packet)
+
 			var timeout net.Error
 			if errors.As(err, &timeout) && timeout.Timeout() {
 				continue
@@ -504,11 +515,19 @@ type frameAssembler struct {
 	newDepacketizer func() rtp.Depacketizer
 	depacketizer    rtp.Depacketizer
 
-	buffer [1 << 16]*rtp.Packet
+	buffer [1 << 16]*sharePacket
 	head   uint16    // the next sequence number to consume
 	newest uint16    // the highest filed
 	primed bool      // head is set
 	gapAt  time.Time // when head was first found missing; zero while it is not
+
+	// free is the packets not filed anywhere, and held the one consumed last:
+	// pion's AV1 depacketizer keeps an unfinished fragment as a slice of the
+	// payload it arrived in until the next packet completes it, so the packet
+	// just consumed is the one something may still point into, and it goes
+	// back a packet late.
+	free []*sharePacket
+	held *sharePacket
 
 	frame     []byte
 	timestamp uint32
@@ -517,22 +536,61 @@ type frameAssembler struct {
 	dropped   int  // frames dropped since takeDropped
 }
 
+// sharePacket is one RTP packet and the bytes it was read into. Unmarshal
+// points the payload into buf and reuses the header's own slices, so a packet
+// costs nothing after its first use.
+type sharePacket struct {
+	rtp.Packet
+	buf [readMTU]byte
+}
+
 func newFrameAssembler(newDepacketizer func() rtp.Depacketizer) *frameAssembler {
 	return &frameAssembler{newDepacketizer: newDepacketizer, depacketizer: newDepacketizer()}
 }
 
+// acquire hands out a packet to read into: a freed one, or a new one while the
+// reorder window is still growing.
+func (a *frameAssembler) acquire() *sharePacket {
+	if n := len(a.free); n > 0 {
+		p := a.free[n-1]
+		a.free = a.free[:n-1]
+
+		return p
+	}
+
+	return &sharePacket{}
+}
+
+// release takes a packet back once nothing points into it.
+func (a *frameAssembler) release(p *sharePacket) {
+	a.free = append(a.free, p)
+}
+
+// retire is release for a consumed packet, one packet late — see held.
+func (a *frameAssembler) retire(p *sharePacket) {
+	if a.held != nil {
+		a.release(a.held)
+	}
+	a.held = p
+}
+
 // push files one packet and consumes everything now in order, emit taking
 // each frame that completes. The frame handed to emit is reused afterwards.
-func (a *frameAssembler) push(p *rtp.Packet, now time.Time, emit func(frame []byte, timestamp uint32)) {
+// The packet is the assembler's from here, whichever way it goes.
+func (a *frameAssembler) push(p *sharePacket, now time.Time, emit func(frame []byte, timestamp uint32)) {
 	if !a.primed {
 		a.head, a.newest, a.primed = p.SequenceNumber, p.SequenceNumber, true
 	} else {
 		if int16(p.SequenceNumber-a.head) < 0 {
+			a.release(p)
 			return // consumed or given up on: a retransmission that came too late
 		}
 		if int16(p.SequenceNumber-a.newest) > 0 {
 			a.newest = p.SequenceNumber
 		}
+	}
+	if dup := a.buffer[p.SequenceNumber]; dup != nil {
+		a.release(dup)
 	}
 	a.buffer[p.SequenceNumber] = p
 
@@ -563,13 +621,14 @@ func (a *frameAssembler) push(p *rtp.Packet, now time.Time, emit func(frame []by
 		a.head++
 		a.gapAt = time.Time{}
 		a.consume(next, emit)
+		a.retire(next)
 	}
 }
 
 // consume is one packet in order. A new timestamp is a new frame, which
 // closes the one open whether or not its marker was seen — a sender that
 // sets none still delimits by time.
-func (a *frameAssembler) consume(p *rtp.Packet, emit func([]byte, uint32)) {
+func (a *frameAssembler) consume(p *sharePacket, emit func([]byte, uint32)) {
 	if a.have && p.Timestamp != a.timestamp {
 		a.finish(emit)
 	}

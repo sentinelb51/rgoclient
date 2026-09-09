@@ -392,6 +392,25 @@ of size:
   message was considered and rejected: it buys back microseconds per remount
   and costs held ASTs plus invalidation on every edit.
 
+### The body renderer composed once (2026-09)
+
+`bodyRenderer.Objects()` built its slice per call, and Fyne's own Label
+renderer builds the two-element list under it per call too — asked on every
+paint and hit test of every mounted body. Composed once in `CreateRenderer`,
+`internal/app`'s virtual benchmarks (`-pgo=off`, shared 4-core runner, times
+within noise):
+
+| | before | after |
+|---|---|---|
+| `WheelTick` 50 mounted | 168 allocs / 4.2 KB | 80 allocs / 0.7 KB |
+| `WheelTick` 250 mounted | 710 allocs / 15.7 KB | 605 allocs / 11.7 KB |
+| `FrameWalk` 50 mounted | 1038 allocs / 9.3 KB | 1008 allocs / 8.1 KB |
+| `AppendLive` | 1810 allocs / 32.0 KB | 1786 allocs / 31.4 KB |
+
+`SetFollowedByGroup` ending in `Relayout` rather than `w.Refresh()` is in the
+`AppendLive` row; what it saves is texture re-uploads, which the benchmark
+under the software driver does not count.
+
 ## What a screenshare costs (2026-08)
 
 Measured on an i7-13700HX. Two things about the send half were worth a number
@@ -519,6 +538,15 @@ rather than an assumption:
   writer goroutine measures the drop path rather than the work. The real cost
   of watching your own share is the second ffmpeg child decoding it and the
   paint, which is the receive path's cost, not the tee's.
+- **The watch reads into its own packets** (2026-09). `readShare` went
+  through `track.ReadRTP()`, which mints an MTU buffer and a packet struct per
+  call — at 12 Mbps that is ~1,100 packets a second, twenty times a talker's,
+  and the receive path's last per-packet allocation once the audio reader had
+  stopped. The assembler owns a free list of `sharePacket`s (a header and a
+  1500-byte buffer), read into in place and filed by sequence. One goes back
+  a packet *late*: pion's AV1 depacketizer keeps an unfinished OBU as a slice
+  of the payload it arrived in until the next packet completes it. The list
+  grows to the reorder depth actually seen and no further.
 - **A share's latency is a queueing property, not an encoding one** —
   reported as a ~5 s glass-to-glass delay every viewer saw while the
   self-preview was instant. The encoder's own contribution at the default
@@ -1044,6 +1072,11 @@ Four active lanes, one 1024-frame chunk — 21.3 ms of audio — on a 13700HX:
 **0.004 % of a core for the pair**, at four lanes. The measurement includes the
 ring push that feeds it, so the absolute figures overstate the mix itself and
 only the delta is honest.
+
+That push moves in one or two `copy` calls since 2026-09 rather than a masked
+store per element. `TestBenchMixer` read 42.8 µs against 44.5-54.2 before at 20
+lanes and 101-107 against 118-136 at 50, on a shared runner whose run-to-run
+noise is about that wide — read it as no slower, not as a number.
 
 What keeps it there is that neither is per-sample work of its own. Placement
 replaces one `int32` conversion with two multiplies. Levelling measures once a

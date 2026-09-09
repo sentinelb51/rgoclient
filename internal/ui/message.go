@@ -272,7 +272,12 @@ func (w *MessageWidget) NamesAny(userIDs []string) bool {
 func (w *MessageWidget) SetFollowedByGroup(followed bool) {
 	w.bottomSpacer.SetMinSize(fyne.NewSize(0, w.verticalPad(followed)))
 	w.bottomSpacer.Refresh()
-	w.Refresh()
+
+	// Relayout, not w.Refresh(): this runs on every live message that lands
+	// under a mounted row, and the whole-row walk re-uploaded the avatar and
+	// every attachment to move a margin. The column re-measures the row from
+	// the spacer's new minimum on the next pass, as RefreshRelativeTime relies on.
+	Relayout(w.content)
 }
 
 // RefreshAuthor re-resolves the name, role colour and avatar in place, for an

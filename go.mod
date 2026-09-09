@@ -140,4 +140,8 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.8
+// A pseudo-version rather than a tag: rgo.9 is the thirteenth patch, on the
+// fork's main at ce6e3b3, and nothing here needs it to be named to build. Flip
+// it back to the convention the moment the tag exists --
+// `go mod edit -replace fyne.io/fyne/v2=github.com/sentinelb51/rgoclient-fyne/v2@v2.8.0-rgo.9 && go mod tidy`.
+replace fyne.io/fyne/v2 => github.com/sentinelb51/rgoclient-fyne/v2 v2.8.0-rgo.8.0.20260909062621-ce6e3b381f2f

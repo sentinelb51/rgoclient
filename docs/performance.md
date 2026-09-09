@@ -255,7 +255,7 @@ Ranked by return.
 ## Taken by patching Fyne
 
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) is v2.8.0 with
-twelve patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
+thirteen patches; its `PATCHES.md` is the list and `update-fyne.sh` carries them
 onto a new version. The frame rate and vsync landed
 together on purpose — raising the ceiling while the driver still blocks in
 `SwapBuffers` changes nothing — and both are settings under Performance. The

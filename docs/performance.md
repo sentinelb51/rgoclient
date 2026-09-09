@@ -669,7 +669,13 @@ regenerates it and reports the difference either side.
 It is the largest single lever left that needs no fork, and most of what it buys
 is not the inlining itself but what the inlining lets escape analysis see: a
 value that escaped through a call the compiler would not inline stops escaping
-once it does. Measured on this tree, five runs of 500 iterations each, median:
+once it does.
+
+**A profile applies to the main package it sits beside**, so `go test
+./internal/app` does *not* pick it up — the test binary is its own main package
+with no profile of its own. The numbers below are that test binary built with
+`-pgo=<the profile>` against `-pgo=off`, which is the same compiler decision the
+client's own build makes; five runs of 500 iterations each, median:
 
 | | without | with | allocations |
 | --- | ---: | ---: | ---: |
@@ -686,6 +692,13 @@ delta says. What it costs is compile time, and only for the packages in the
 profile's call graph — the cgo dependencies, which are most of a cold build, are
 untouched. A cold `go build ./cmd/rgoclient` measured **282 → 294 s** here,
 which is 4% of a build CI already pays five minutes for.
+
+What the rest of this pass bought, separately from the profile: `origin/main`
+against this tree with the thirteenth patch in, three interleaved runs of 400
+iterations each, median — a wheel tick over 250 mounted rows **429 → 340 µs**,
+over 50 **226 → 181 µs**, a live message **367 → 299 µs**, a page of history
+**738 → 664 µs**, a channel open **1.32 → 1.28 ms**. The profile is on top of
+that.
 
 The profile is deliberately *not* taken over the two footprint benchmarks: they
 call `runtime.GC` to measure a live heap, and a forced collection is 84% of any

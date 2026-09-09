@@ -282,7 +282,12 @@ func (p *groupPicker) picked() []string {
 // Nobody picked says nothing rather than "0 selected": the list underneath
 // already says so.
 func (p *groupPicker) recount() int {
-	n := len(p.picked())
+	n := 0
+	for _, row := range p.rows {
+		if row.chosen {
+			n++
+		}
+	}
 
 	text := ""
 	if n > 0 {

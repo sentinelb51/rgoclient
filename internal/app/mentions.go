@@ -202,8 +202,8 @@ func (a *App) mentionCount(channelID string) int { return len(a.mentions[channel
 // in the home view by definition.
 func (a *App) mentionedServers() (marked map[string]bool, home bool) {
 	marked = make(map[string]bool, len(a.mentions))
-	for channelID := range a.mentions {
-		if len(a.mentions[channelID]) == 0 {
+	for channelID, ids := range a.mentions {
+		if len(ids) == 0 {
 			continue
 		}
 		if serverID := a.store.ChannelServerID(channelID); serverID != "" {

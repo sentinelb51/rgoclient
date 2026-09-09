@@ -203,6 +203,26 @@ were drawn and discarded). Everywhere else it is `noGate{}`, always ready.
   that resolves, then resolves again, and it was one level up from where it had
   already been fixed.
 
+- **A folded name is folded once, wherever a keystroke filters a list.** The
+  member sidebar's `MentionCandidate.nameKey` was the pattern; the settings
+  search index (`ui.settingsHit.fold`) and the friends/group pickers
+  (`ui.containsFold`) are the two lists that had not taken it. Lowering the
+  *haystack* per row per keystroke allocates on every non-ASCII name, and the
+  settings index is hundreds of immutable rows built twice over every section.
+- **A prefix is a slice of the string, not a string built from its runes.**
+  `ui.AccentText.build` measured `string(runes[:i])` per letter of every
+  gradient-coloured name — O(n^2) bytes, and a fresh entry in Fyne's
+  measure cache per prefix that nothing ever reads back. `util.Truncate` was
+  the same shape: a `[]rune` of the whole body to reach a prefix of it.
+- **The message cache builds the answer rather than trimming to it.** At the
+  per-channel cap, `Append` grew the slice to twice the cap and then copied the
+  answer out of the middle — 12 KB allocated and 8 KB copied per message at the
+  default 500 — where sizing the result costs one 4 KB allocation. `Prepend`,
+  `Remove` and `chronological` are the same correction.
+- **The role table holds pointers.** A `domain.Role` is around a hundred bytes,
+  and `memberRoleInfo` copied one out of the map per role per member on a walk
+  that resolves thousands.
+
 <!-- B2-14: the typing indicator's repaint cost belongs here as one more bullet,
      once it has been measured. Nothing else in this file is waiting on it. -->
 
@@ -288,6 +308,17 @@ column and both in exported code rather than under `internal/`:
   so every `MinSize` re-ran the XML parse that finds the aspect. The driver asks
   every object on every dirty frame. Frame walk at 50 mounted rows
   179µs/61.3KB → **111µs/8.4KB**; at 250, 252µs/66.1KB → **187µs/13.2KB**.
+
+The **thirteenth** is a clock. `internal/cache`'s `setAlive` stamped every
+entry with `time.Now()`, and it runs on every renderer, canvas, texture and
+text-metric *lookup* — thousands of calls per frame on this tree. Every
+lifetime there is `ValidDuration` (a minute unless `FYNE_CACHE` says otherwise)
+and `Clean` already reads the clock once per paint event, so the stamp is now
+an `atomic.Int64` that `Clean` publishes: an entry carries the last frame's
+reading, which is at most a frame stale against a minute. A `time.Now()` is a
+vDSO read on Linux and a QPC read on Windows; an atomic load is neither.
+Measured at 3.2% of the client's CPU before, and gone after — a wheel tick over
+250 mounted rows went **~437 → ~355 µs**, a channel open **~1.40 → ~1.20 ms**.
 
 What that costs: a Fyne bump is now a rebase in the fork rather than a bare
 `go get`, and anything read out of `internal/` here has to be read out of the
@@ -628,6 +659,55 @@ delimiter, 207.5 ms without** (min 2.1 / max 9.9 against 5.4 / 370.4).
 the sender's own preview 45–46 either way — the codec makes no difference
 to latency, which was the point of the framing above.
 
+## Built with a profile (2026-09)
+
+`cmd/rgoclient/default.pgo` is a CPU profile of `internal/app`'s virtual
+benchmarks, and `go build` uses it by name — `-pgo=auto` has been the default
+since Go 1.21, so nothing in the workflows names it. `scripts/update-pgo.sh`
+regenerates it and reports the difference either side.
+
+It is the largest single lever left that needs no fork, and most of what it buys
+is not the inlining itself but what the inlining lets escape analysis see: a
+value that escaped through a call the compiler would not inline stops escaping
+once it does.
+
+**A profile applies to the main package it sits beside**, so `go test
+./internal/app` does *not* pick it up — the test binary is its own main package
+with no profile of its own. The numbers below are that test binary built with
+`-pgo=<the profile>` against `-pgo=off`, which is the same compiler decision the
+client's own build makes; five runs of 500 iterations each, median:
+
+| | without | with | allocations |
+| --- | ---: | ---: | ---: |
+| open a channel | 1.36 ms | 1.14 ms | 3,979 → 3,437 |
+| wheel tick, 250 mounted | 361 µs | 329 µs | 710 → **270** |
+| wheel tick, 50 mounted | 177 µs | 166 µs | 168 → 120 |
+| a live message | 346 µs | 287 µs | 1,599 → **233** |
+| a page of history | 1.08 ms | 1.04 ms | 1,877 → 1,324 |
+
+The allocation column is the one that matters more than the times: with the
+garbage collector taking around a third of this profile's samples, a wheel tick
+that allocates 270 objects instead of 710 is paying less than the wall-clock
+delta says. What it costs is compile time, and only for the packages in the
+profile's call graph — the cgo dependencies, which are most of a cold build, are
+untouched. A cold `go build ./cmd/rgoclient` measured **282 → 294 s** here,
+which is 4% of a build CI already pays five minutes for.
+
+What the rest of this pass bought, separately from the profile: `origin/main`
+against this tree with the thirteenth patch in, three interleaved runs of 400
+iterations each, median — a wheel tick over 250 mounted rows **429 → 340 µs**,
+over 50 **226 → 181 µs**, a live message **367 → 299 µs**, a page of history
+**738 → 664 µs**, a channel open **1.32 → 1.28 ms**. The profile is on top of
+that.
+
+The profile is deliberately *not* taken over the two footprint benchmarks: they
+call `runtime.GC` to measure a live heap, and a forced collection is 84% of any
+profile that includes one. It is also collected under `-pgo=off`, so it
+describes the client as written rather than the client the last profile already
+reshaped. A stale profile is not a correctness risk — it guides inlining and
+devirtualisation and nothing else — so regenerate it when the hot path moves
+rather than on a schedule.
+
 ## Still needs more than a patch
 
 - **Independent flip and MPO.** Not reachable from a WGL context at all: DWM's
@@ -851,6 +931,10 @@ from; run it before and after touching the column. Beyond that:
   each carries a pprof label, so one reads as the action that started it.
 - The thing worth watching during a scroll is **mounted object count**, not FPS.
   Traversal is what grows; fill rate is bounded by the viewport already.
+- **Benchmark against `-pgo=off` when the question is "did this change help".**
+  A default build is compiled with `cmd/rgoclient/default.pgo`, which was taken
+  over these same benchmarks, so a comparison that leaves it in is partly
+  measuring how well the old profile still describes the new code.
 
 ## The audio callback
 

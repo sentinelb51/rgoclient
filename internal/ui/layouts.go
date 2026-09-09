@@ -164,7 +164,10 @@ func (l *wrapColumnLayout) Layout(objects []fyne.CanvasObject, size fyne.Size) {
 			continue
 		}
 
-		child.Resize(fyne.NewSize(size.Width, child.MinSize().Height))
+		// The first resize is only for the width — it is what makes a text row
+		// re-wrap — so it keeps the height it has. Measuring at the old width
+		// for a height thrown away one line later re-wrapped every body twice.
+		child.Resize(fyne.NewSize(size.Width, child.Size().Height))
 
 		height := child.MinSize().Height
 		child.Resize(fyne.NewSize(size.Width, height))

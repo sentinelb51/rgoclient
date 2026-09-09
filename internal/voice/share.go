@@ -420,6 +420,23 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 
 	assembler := newFrameAssembler(depacketizer)
 
+	// The frame sink is built once rather than per packet: a closure capturing
+	// its error by reference is two heap allocations, and a keyframe alone is
+	// thirty-odd packets. The error is sticky, which the loop already assumed —
+	// it returns on the first one. Neither muxer retains the sample.
+	var (
+		writeErr error
+		sample   media.Sample
+	)
+	emit := func(frame []byte, timestamp uint32) {
+		if writeErr != nil {
+			return
+		}
+
+		sample.Data, sample.PacketTimestamp = frame, timestamp
+		writeErr = mux.write(out, &sample)
+	}
+
 	for {
 		select {
 		case <-w.done:
@@ -447,13 +464,7 @@ func (c *Call) readShare(track *webrtc.TrackRemote, pub *lksdk.RemoteTrackPublic
 		}
 
 		now := time.Now()
-		var writeErr error
-		assembler.push(packet, now, func(frame []byte, timestamp uint32) {
-			if writeErr != nil {
-				return
-			}
-			writeErr = mux.write(out, &media.Sample{Data: frame, PacketTimestamp: timestamp})
-		})
+		assembler.push(packet, now, emit)
 
 		// A frame lost to the network is one everything after it references,
 		// so a keyframe is demanded — throttled: a burst of holes is one

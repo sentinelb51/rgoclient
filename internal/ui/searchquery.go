@@ -414,7 +414,7 @@ func readSearchToken(raw string, start, end int) searchToken {
 func splitValues(value string) []string {
 	var values []string
 
-	for _, part := range strings.Split(value, ",") {
+	for part := range strings.SplitSeq(value, ",") {
 		if part = strings.TrimSpace(part); part != "" {
 			values = append(values, part)
 		}

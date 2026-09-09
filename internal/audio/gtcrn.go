@@ -170,16 +170,28 @@ func (g *gtcrnStage) process(frame []float32) float32 {
 	const alpha = float32(1 / (gtcrnGainTime * sampleRate))
 	smooth := g.smooth
 	delayed := g.delay[:FrameSamples]
+	band := g.band[:FrameSamples] // sliced beside the others, so one bounds check
 	gains := g.gains[:gtcrnFrame]
-	for i := range frame {
-		target := gains[i/3]
-		smooth += (target - smooth) * alpha
-		if d := target - smooth; d < 1e-6 && d > -1e-6 {
-			// Landed: a one-pole left to itself tails off into denormals,
-			// which cost a hundred times a normal multiply.
-			smooth = target
+
+	// The gain is one model bin per three output samples, so the run of three is
+	// the loop rather than a divide inside it — and every slice the body touches
+	// has been sliced to the same length above, which is what lets the bounds
+	// checks fall out of a loop that runs on every capture frame.
+	for j, target := range gains {
+		at := j * 3
+		if at+3 > len(frame) {
+			break
 		}
-		frame[i] += smooth * (delayed[i] - g.band[i])
+
+		for i := at; i < at+3; i++ {
+			smooth += (target - smooth) * alpha
+			if d := target - smooth; d < 1e-6 && d > -1e-6 {
+				// Landed: a one-pole left to itself tails off into denormals,
+				// which cost a hundred times a normal multiply.
+				smooth = target
+			}
+			frame[i] += smooth * (delayed[i] - band[i])
+		}
 	}
 	g.smooth = smooth
 
@@ -192,8 +204,16 @@ func (g *gtcrnStage) process(frame []float32) float32 {
 	return kept
 }
 
+// fill writes v across x. Doubling rather than a store loop: the compiler
+// recognises the memclr idiom only for the zero value, so a run is spread by
+// copy instead.
 func fill(x []float32, v float32) {
-	for i := range x {
-		x[i] = v
+	if len(x) == 0 {
+		return
+	}
+
+	x[0] = v
+	for n := 1; n < len(x); n *= 2 {
+		copy(x[n:], x[:n])
 	}
 }

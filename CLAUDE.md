@@ -179,7 +179,9 @@ Names say most of it; only the non-obvious placements are annotated.
 
 ```
 cmd/rgoclient/main.go    app ID, fyneDo flag, config.Load + theme.Apply before the
-                         first widget. version/build are -X link-time vars
+                         first widget. version/build are -X link-time vars.
+                         default.pgo beside it is the profile go build compiles
+                         against — -pgo=auto is the default, so nothing names it
 assets/                  at the root because go:embed can't reach above its own file
   fonts.go icons.go      Montserrat cuts; the marks. Stroked outlines but for the
                          two call handsets, which are solid; either way one colour,
@@ -501,7 +503,9 @@ packaging/linux/         the .desktop entry and the install.sh filing it, the
                          release tarball; nothing is signed, so this is as far as
                          packaging goes — see docs/known-gaps.md
 
-scripts/                 update-deps.sh — every module *except* Fyne and the
+scripts/                 update-pgo.sh — re-takes cmd/rgoclient/default.pgo over
+                         internal/app's virtual benchmarks and reports the cost
+                         either side. update-deps.sh — every module *except* Fyne and the
                          versions its go.mod pins, which is why it is not a
                          `go get -u`. update-rnnoise.sh — the denoiser, whose
                          upstream is autotools and fetches its model at
@@ -923,6 +927,12 @@ nothing and fails on every deliberate change.
 ## Build / check
 
 `go build ./...`, `go vet ./...`, `go test ./...`, `gofmt -l internal cmd assets`.
+
+Builds are **profile-guided**: `cmd/rgoclient/default.pgo` is picked up by name,
+so a plain `go build` uses it. When benchmarking a change, pass `-pgo=off` on
+both sides — the shipped profile was taken over those same benchmarks, so
+leaving it in measures the profile as much as the change. See
+`docs/performance.md`.
 
 Fyne is **patched**, and the patched copy is a repository of its own —
 [`rgoclient-fyne`](https://github.com/sentinelb51/rgoclient-fyne) — reached by a

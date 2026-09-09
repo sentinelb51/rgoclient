@@ -1,7 +1,6 @@
 package ui
 
 import (
-	"hash/fnv"
 	"image"
 	"image/color"
 	"math"
@@ -871,12 +870,47 @@ func matchesFilter(query string, fields ...string) bool {
 	}
 
 	for _, field := range fields {
-		if strings.Contains(strings.ToLower(field), query) {
+		if containsFold(field, query) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// containsFold reports whether haystack contains needle, which is already
+// folded. It walks rather than lowering a copy: ToLower on a name with any
+// non-ASCII rune allocates unconditionally, once per row per keystroke.
+func containsFold(haystack, needle string) bool {
+	if len(needle) > len(haystack) {
+		return false
+	}
+
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if equalFoldAt(haystack[i:], needle) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// equalFoldAt reports whether haystack begins with the folded needle.
+func equalFoldAt(haystack, needle string) bool {
+	for i := range len(needle) {
+		c := haystack[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+
+		if c != needle[i] {
+			// Only a non-ASCII byte can still match after the cheap fold, and
+			// only a rune-aware compare can say so.
+			return strings.EqualFold(haystack[:len(needle)], needle)
+		}
+	}
+
+	return true
 }
 
 // IconButton is a flat, icon-only button used for the per-message quick actions
@@ -1432,10 +1466,20 @@ func imageCacheID(imageURL string) string {
 // apart: an Autumn ID is alphanumerics and "_-", so no ID can spell one of these
 // and no URL can be filed under an ID it does not own.
 func urlCacheID(imageURL string) string {
-	sum := fnv.New64a()
-	sum.Write([]byte(imageURL))
+	// FNV-1a by hand: hash.Hash64 is an interface, so the state escapes and the
+	// []byte(url) cannot be elided through the call. Two allocations per tile.
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
 
-	return "~" + strconv.FormatUint(sum.Sum64(), 16)
+	sum := uint64(offset64)
+	for i := range len(imageURL) {
+		sum ^= uint64(imageURL[i])
+		sum *= prime64
+	}
+
+	return "~" + strconv.FormatUint(sum, 16)
 }
 
 // fileCacheID is imageCacheID for a file that says where it is served from. A
@@ -2067,24 +2111,32 @@ func (t *AccentText) build() {
 		return
 	}
 
-	runes := []rune(t.text)
-	t.layout.offsets = make([]float32, len(runes))
-	for i := range runes {
-		t.layout.offsets[i] = fyne.MeasureText(string(runes[:i]), t.size, t.style).Width
+	// Each prefix is a slice of the name rather than a string built from a
+	// []rune of it: string(runes[:i]) minted a fresh string per letter — O(n^2)
+	// bytes — and a fresh entry in Fyne's measure cache that nothing reuses.
+	count := utf8.RuneCountInString(t.text)
+	t.layout.offsets = make([]float32, count)
+	for i, at := 0, 0; at < len(t.text); i++ {
+		t.layout.offsets[i] = fyne.MeasureText(t.text[:at], t.size, t.style).Width
+
+		_, width := utf8.DecodeRuneInString(t.text[at:])
+		at += width
 	}
 
 	centre := func(i int) float32 {
 		end := t.layout.size.Width
-		if i+1 < len(runes) {
+		if i+1 < count {
 			end = t.layout.offsets[i+1]
 		}
 
 		return (t.layout.offsets[i] + end) / 2
 	}
-	span := centre(len(runes)-1) - centre(0)
+	span := centre(count-1) - centre(0)
 
-	objects := make([]fyne.CanvasObject, len(runes))
-	for i, r := range runes {
+	objects := make([]fyne.CanvasObject, count)
+	i := -1
+	for _, r := range t.text {
+		i++
 		at := 0.5 // one glyph has no run to spread over, so it takes the middle
 		if span > 0 {
 			at = float64((centre(i) - centre(0)) / span)

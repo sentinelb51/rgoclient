@@ -59,7 +59,20 @@ func renderDocument(deps Deps, doc *markdown.Document, onMenu func(*fyne.PointEv
 func PreviewText(store domain.Store, content string) string {
 	flat := markdown.DocumentTextNamed(markdown.Parse(content), store.EmojiName)
 
-	return strings.Join(strings.Fields(flat), " ")
+	// FieldsSeq rather than Fields: the slice of words exists only to be joined
+	// back up, and a card is built for every message a panel lists.
+	var out strings.Builder
+	out.Grow(len(flat))
+
+	for word := range strings.FieldsSeq(flat) {
+		if out.Len() > 0 {
+			out.WriteByte(' ')
+		}
+
+		out.WriteString(word)
+	}
+
+	return out.String()
 }
 
 // hasCodeBlock reports whether a fenced block stands on its own in the body. One

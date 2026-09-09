@@ -410,6 +410,7 @@ func (a *App) deleteSelected(channelID string, ids []string) {
 type removeHold struct {
 	channelID string
 	ids       []string
+	held      map[string]bool // ids as a set; a sweep arrives an event at a time
 	queued    time.Time
 	timer     *time.Timer
 }
@@ -439,14 +440,15 @@ func (a *App) holdRemoval(channelID string, messageIDs []string) bool {
 		hold = nil
 	}
 	if hold == nil {
-		hold = &removeHold{channelID: channelID, queued: time.Now()}
+		hold = &removeHold{channelID: channelID, held: make(map[string]bool), queued: time.Now()}
 	}
 
 	for _, id := range messageIDs {
-		if slices.Contains(hold.ids, id) {
+		if hold.held[id] {
 			continue
 		}
 
+		hold.held[id] = true
 		hold.ids = append(hold.ids, id)
 		a.messages.SetDeleted(id, true)
 	}

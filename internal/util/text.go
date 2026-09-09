@@ -46,12 +46,29 @@ func Truncate(s string, limit int) string {
 		return s
 	}
 
-	r := []rune(s)
-	if limit <= 3 {
-		return string(r[:limit])
+	keep := limit
+	if keep > 3 {
+		keep -= 3
 	}
 
-	return string(r[:limit-3]) + "..."
+	// Walking to the cut point indexes the string rather than expanding it: a
+	// []rune of the whole body costs four bytes a rune to reach a prefix of it.
+	cut := len(s)
+	for i, count := 0, 0; i < len(s); count++ {
+		if count == keep {
+			cut = i
+			break
+		}
+
+		_, width := utf8.DecodeRuneInString(s[i:])
+		i += width
+	}
+
+	if limit <= 3 {
+		return s[:cut]
+	}
+
+	return s[:cut] + "..."
 }
 
 // invitePathPrefix is what a host has to put in front of a code to announce one.

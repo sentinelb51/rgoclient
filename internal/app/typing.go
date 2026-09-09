@@ -274,8 +274,15 @@ func (a *App) resolveTypists(channelID string, limit int, wantAvatars bool) (nam
 			continue
 		}
 
+		// The room test first: past it nothing needs the name, and resolving one
+		// takes the client's lock twice for a typist that is only counted.
+		if len(names) == room {
+			hidden++
+			continue
+		}
+
 		name, avatarURL := a.typistIdentity(userID)
-		if name == "" || len(names) == room {
+		if name == "" {
 			hidden++
 			continue
 		}

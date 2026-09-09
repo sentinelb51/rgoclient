@@ -269,6 +269,10 @@ const (
 	minDepth     = 2
 	initialDepth = 3
 	maxDepth     = 24 // 480 ms, well past the deepest profile
+
+	// maxPayload is the widest RTP payload a slot can hold, which is the read
+	// MTU: a payload is what is left of one datagram after its header.
+	maxPayload = 1500
 )
 
 // How the depth moves. Deepening is immediate: the lateness calling for it has
@@ -302,11 +306,19 @@ const stallBudget = 25
 type adaptiveJitter struct {
 	mu sync.Mutex
 
-	// slots is indexed by sequence number modulo its length, so a packet's place
+	// store is indexed by sequence number modulo its length, so a packet's place
 	// is arithmetic rather than a search. Sized well past maxDepth so a burst of
 	// early packets is held rather than dropped.
-	slots  [64][]byte
-	filled [64]bool
+	//
+	// The bytes are the buffer's own: a reader hands in the transport's buffer,
+	// which is reused, and Push copies into the slot rather than the reader
+	// allocating a copy for every packet of every talker. A popped payload is
+	// therefore an alias, valid until the same slot is written again — 64 slots
+	// at 50 packets a second is 1.28 s, against a consumer that decodes the
+	// frame before it asks for the next one.
+	store   [64][maxPayload]byte
+	slotLen [64]int
+	filled  [64]bool
 
 	next    uint16 // the sequence to play next
 	started bool
@@ -381,15 +393,22 @@ func (j *adaptiveJitter) Push(sequence uint16, timestamp uint32, payload []byte)
 	// One further ahead than the ring can hold means the cursor is stuck — the
 	// stream jumped, or a long gap was never played through. Restart on it rather
 	// than dropping everything until it wraps.
-	if int(uint16(sequence-j.next)) >= len(j.slots) {
+	if int(uint16(sequence-j.next)) >= len(j.store) {
 		j.reset(sequence)
 	}
 
-	at := int(sequence) % len(j.slots)
+	// A payload wider than a slot cannot happen — a payload is what is left of
+	// one datagram — and truncating one would decode as noise rather than as
+	// loss, so it is dropped as the lost frame it would otherwise become.
+	if len(payload) > maxPayload {
+		return
+	}
+
+	at := int(sequence) % len(j.store)
 	if !j.filled[at] {
 		j.held++
 	}
-	j.slots[at] = payload
+	j.slotLen[at] = copy(j.store[at][:], payload)
 	j.filled[at] = true
 }
 
@@ -427,7 +446,9 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 	if j.held < j.depth && j.headQuiet() && j.stalls < stallBudget {
 		j.stalls++
 
-		return j.slots[int(j.next)%len(j.slots)], nil, true
+		at := int(j.next) % len(j.store)
+
+		return j.store[at][:j.slotLen[at]], nil, true
 	}
 
 	// Nothing else is corrected here. A talker who never leaves a gap is put back
@@ -443,10 +464,10 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 		j.stalls = 0
 	}
 
-	at := int(j.next) % len(j.slots)
+	at := int(j.next) % len(j.store)
 
-	payload, arrived := j.slots[at], j.filled[at]
-	j.slots[at], j.filled[at] = nil, false
+	payload, arrived := j.store[at][:j.slotLen[at]], j.filled[at]
+	j.slotLen[at], j.filled[at] = 0, false
 	if arrived {
 		j.held--
 	}
@@ -465,8 +486,8 @@ func (j *adaptiveJitter) Pop() ([]byte, []byte, bool) {
 
 	// The successor, if it is already here: Opus hid a copy of this frame in it.
 	var next []byte
-	if after := int(j.next) % len(j.slots); j.filled[after] {
-		next = j.slots[after]
+	if after := int(j.next) % len(j.store); j.filled[after] {
+		next = j.store[after][:j.slotLen[after]]
 	}
 
 	j.rollLoss()
@@ -513,21 +534,21 @@ func (j *adaptiveJitter) Drift() int {
 
 // headQuiet is whether the packet about to play is Opus's comfort noise.
 func (j *adaptiveJitter) headQuiet() bool {
-	at := int(j.next) % len(j.slots)
+	at := int(j.next) % len(j.store)
 
-	return j.filled[at] && dtxPacket(j.slots[at])
+	return j.filled[at] && dtxPacket(j.store[at][:j.slotLen[at]])
 }
 
 // skipHead drops the packet at the cursor and takes back the 20 ms of delay it
 // was holding. It arrived, so it counts as arrived: what happened to it was this
 // buffer's decision and not the network's.
 func (j *adaptiveJitter) skipHead() {
-	at := int(j.next) % len(j.slots)
+	at := int(j.next) % len(j.store)
 	if !j.filled[at] {
 		return
 	}
 
-	j.slots[at], j.filled[at] = nil, false
+	j.slotLen[at], j.filled[at] = 0, false
 	j.held--
 	j.next++
 
@@ -619,7 +640,7 @@ func (j *adaptiveJitter) rollLoss() {
 // reset moves the cursor to a sequence the stream has actually reached, dropping
 // what was held for the old one.
 func (j *adaptiveJitter) reset(sequence uint16) {
-	clear(j.slots[:])
+	clear(j.slotLen[:])
 	clear(j.filled[:])
 	j.held = 0
 

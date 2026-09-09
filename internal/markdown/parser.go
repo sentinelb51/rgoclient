@@ -169,7 +169,7 @@ func (f *flatten) blocks(blocks []Block) {
 		case *CodeBlock:
 			// The only text kept verbatim by the parser, so the only place a newline
 			// can reach a preview — a canvas.Text draws one as a missing glyph.
-			f.b.WriteString(strings.ReplaceAll(v.Text, "\n", " "))
+			writeFlattened(&f.b, v.Text)
 		case *List:
 			for i, item := range v.Items {
 				if i > 0 {
@@ -231,7 +231,27 @@ func (f *flatten) emoji(emojiID string) {
 		return
 	}
 
-	f.b.WriteString(":" + name + ":")
+	f.b.WriteByte(':')
+	f.b.WriteString(name)
+	f.b.WriteByte(':')
+}
+
+// writeFlattened writes text with its newlines as spaces. A preview is one line,
+// and ReplaceAll would copy the whole block — which for a code fence is every
+// byte of it — to hand the builder bytes it was about to receive anyway.
+func writeFlattened(b *strings.Builder, text string) {
+	for {
+		at := strings.IndexByte(text, '\n')
+		if at < 0 {
+			b.WriteString(text)
+
+			return
+		}
+
+		b.WriteString(text[:at])
+		b.WriteByte(' ')
+		text = text[at+1:]
+	}
 }
 
 /* Blocks */
@@ -386,26 +406,33 @@ func parseFence(lines []string, i int) (Block, int) {
 		return &CodeBlock{Text: info[:end]}, i + 1
 	}
 
-	var body []string
-
 	// A language is one token. Anything else is a first line the author meant, and
 	// naming it the language would silently swallow it.
-	language := strings.TrimSpace(info)
+	language, lead := strings.TrimSpace(info), ""
 	if strings.ContainsAny(language, " \t") {
-		body = append(body, info)
-		language = ""
+		lead, language = info, ""
 	}
 
-	j := i + 1
-	for ; j < len(lines); j++ {
-		if strings.HasPrefix(lines[j], "```") {
-			j++ // consume the closing fence
+	// The body is a run of lines already sitting next to each other, so it is
+	// joined out of that run rather than collected into a slice first.
+	end := i + 1
+	for ; end < len(lines); end++ {
+		if strings.HasPrefix(lines[end], "```") {
 			break
 		}
-		body = append(body, lines[j])
 	}
 
-	return &CodeBlock{Language: language, Text: strings.Join(body, "\n")}, j
+	body := strings.Join(lines[i+1:end], "\n")
+	if lead != "" {
+		body = lead + "\n" + body
+	}
+
+	j := end
+	if j < len(lines) {
+		j++ // consume the closing fence
+	}
+
+	return &CodeBlock{Language: language, Text: body}, j
 }
 
 // quoteMaxDepth is how deep quotes may nest before the markers are left as text.
@@ -438,7 +465,8 @@ func parseQuote(lines []string, info []lineInfo, i, depth int) (Block, int) {
 	}
 
 	if whole {
-		body := append([]string{strings.TrimPrefix(line[3:], " ")}, lines[i+1:]...)
+		body := make([]string, 0, len(lines)-i)
+		body = append(append(body, strings.TrimPrefix(line[3:], " ")), lines[i+1:]...)
 		return &Blockquote{Blocks: parseBlocks(body, depth+1)}, end
 	}
 

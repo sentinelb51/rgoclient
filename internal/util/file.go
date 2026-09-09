@@ -1,7 +1,7 @@
 package util
 
 import (
-	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -15,16 +15,25 @@ func FormatFileSize(bytes int) string {
 		gb = mb * 1024
 	)
 
+	// strconv rather than fmt: a Sprintf boxes its operand into a []any and
+	// re-parses the verb, which is most of the cost of a row that draws one.
 	switch {
 	case bytes >= gb:
-		return fmt.Sprintf("%.2f GB", float64(bytes)/gb)
+		return scaled(float64(bytes)/gb, " GB")
 	case bytes >= mb:
-		return fmt.Sprintf("%.2f MB", float64(bytes)/mb)
+		return scaled(float64(bytes)/mb, " MB")
 	case bytes >= kb:
-		return fmt.Sprintf("%.2f KB", float64(bytes)/kb)
+		return scaled(float64(bytes)/kb, " KB")
 	default:
-		return fmt.Sprintf("%d B", bytes)
+		return strconv.Itoa(bytes) + " B"
 	}
+}
+
+// scaled renders a size to two decimals in the given unit.
+func scaled(value float64, unit string) string {
+	var buf [24]byte
+
+	return string(append(strconv.AppendFloat(buf[:0], value, 'f', 2, 64), unit...))
 }
 
 /* Attachment URLs */

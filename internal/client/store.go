@@ -680,7 +680,10 @@ func toRole(id string, role *revoltgo.ServerRole) domain.Role {
 //
 // A nil table answers every lookup as "not known", which is what a server State
 // has not published to us resolves to — so nothing reading one needs a nil check.
-type roleTable map[string]domain.Role
+// The values are pointers because a domain.Role is four strings, a colour
+// interface, two permission words and a rank -- around a hundred bytes, copied
+// out of the bucket per role per member on a walk that resolves thousands.
+type roleTable map[string]*domain.Role
 
 // newRoleTable converts every role a server has published, for a walk that will
 // read them per member. Built before the walk, never from inside one: revoltgo's
@@ -693,7 +696,8 @@ func newRoleTable(server *revoltgo.Server) roleTable {
 	table := make(roleTable, len(server.Roles))
 	for id, role := range server.Roles {
 		if role != nil {
-			table[id] = toRole(id, role)
+			resolved := toRole(id, role)
+			table[id] = &resolved
 		}
 	}
 
@@ -712,7 +716,8 @@ func newHeldRoleTable(server *revoltgo.Server, roleIDs []string) roleTable {
 	table := make(roleTable, len(roleIDs))
 	for _, id := range roleIDs {
 		if role := server.Roles[id]; role != nil {
-			table[id] = toRole(id, role)
+			resolved := toRole(id, role)
+			table[id] = &resolved
 		}
 	}
 
@@ -728,26 +733,35 @@ func newHeldRoleTable(server *revoltgo.Server, roleIDs []string) roleTable {
 // The two are independent: the most senior *coloured* role need not be the most
 // senior *hoisted* one.
 func memberRoleInfo(roles roleTable, roleIDs []string) (color.Color, string) {
-	var coloured, hoisted domain.Role
-	var haveColour, haveHoist bool
+	var coloured, hoisted *domain.Role
 
 	for _, id := range roleIDs {
-		role, ok := roles[id]
-		if !ok {
+		role := roles[id]
+		if role == nil {
 			continue
 		}
 
 		// ColorText is what the role carries, Color what parsed out of it: a value
 		// no stop could be read from still claims the name, and draws in the default.
-		if role.ColorText != "" && (!haveColour || role.Rank < coloured.Rank) {
-			coloured, haveColour = role, true
+		if role.ColorText != "" && (coloured == nil || role.Rank < coloured.Rank) {
+			coloured = role
 		}
-		if role.Hoist && (!haveHoist || role.Rank < hoisted.Rank) {
-			hoisted, haveHoist = role, true
+		if role.Hoist && (hoisted == nil || role.Rank < hoisted.Rank) {
+			hoisted = role
 		}
 	}
 
-	return coloured.Color, hoisted.ID
+	var fill color.Color
+	if coloured != nil {
+		fill = coloured.Color
+	}
+
+	var section string
+	if hoisted != nil {
+		section = hoisted.ID
+	}
+
+	return fill, section
 }
 
 /* Channels and servers */

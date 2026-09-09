@@ -33,7 +33,7 @@ func NewMessageCache(maxMessages, maxChannels int) *MessageCache {
 		byChannel:   make(map[string][]*domain.Message),
 		depleted:    make(map[string]bool),
 		recency:     newLRU(),
-		maxMessages: maxMessages,
+		maxMessages: max(maxMessages, 1),
 		maxChannels: maxChannels,
 	}
 }
@@ -104,10 +104,24 @@ func (c *MessageCache) Prepend(channelID string, page []*domain.Message) []*doma
 
 	older := chronological(page)
 
-	c.byChannel[channelID] = c.trimmed(slices.Concat(older, c.byChannel[channelID]))
+	c.byChannel[channelID] = c.joined(older, c.byChannel[channelID])
 	c.touch(channelID)
 
 	return older
+}
+
+// joined builds older followed by newer, capped at maxMessages by dropping the
+// oldest overflow. Sized to the answer: concatenating and then trimming
+// allocated the whole join and then copied most of it out again.
+func (c *MessageCache) joined(older, newer []*domain.Message) []*domain.Message {
+	keep := min(len(older)+len(newer), c.maxMessages)
+	out := make([]*domain.Message, 0, keep)
+
+	if drop := len(older) + len(newer) - keep; drop < len(older) {
+		return append(append(out, older[drop:]...), newer...)
+	}
+
+	return append(out, newer[len(newer)-keep:]...)
 }
 
 // Append adds a newly received message to the end of a channel, trimming the
@@ -117,12 +131,26 @@ func (c *MessageCache) Append(channelID string, message *domain.Message) *domain
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	existing := c.byChannel[channelID]
+
 	var prev *domain.Message
-	if existing := c.byChannel[channelID]; len(existing) > 0 {
+	if len(existing) > 0 {
 		prev = existing[len(existing)-1]
 	}
 
-	c.byChannel[channelID] = c.trimmed(append(c.byChannel[channelID], message))
+	// Under the cap the append writes past the published length, which a reader
+	// holding an earlier slice never looks at. At the cap it cannot: appending
+	// and then trimming grew the slice to twice the cap and copied the answer
+	// out of it, so the answer is built directly instead.
+	if len(existing) < c.maxMessages {
+		c.byChannel[channelID] = append(existing, message)
+	} else {
+		next := make([]*domain.Message, c.maxMessages)
+		copy(next, existing[len(existing)-c.maxMessages+1:])
+		next[c.maxMessages-1] = message
+		c.byChannel[channelID] = next
+	}
+
 	c.touch(channelID)
 
 	return prev
@@ -153,7 +181,9 @@ func (c *MessageCache) Remove(channelID, messageID string) bool {
 		return false
 	}
 
-	c.byChannel[channelID] = slices.Delete(slices.Clone(messages), i, i+1)
+	without := make([]*domain.Message, 0, len(messages)-1)
+	c.byChannel[channelID] = append(append(without, messages[:i]...), messages[i+1:]...)
+
 	return true
 }
 
@@ -236,8 +266,10 @@ func (c *MessageCache) Clear() {
 // chronological reverses an API page (newest first) into a new oldest-first
 // slice, leaving the input untouched.
 func chronological(page []*domain.Message) []*domain.Message {
-	messages := slices.Clone(page)
-	slices.Reverse(messages)
+	messages := make([]*domain.Message, len(page))
+	for i := range page {
+		messages[i] = page[len(page)-1-i]
+	}
 
 	return messages
 }
